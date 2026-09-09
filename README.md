@@ -45,8 +45,7 @@ Public defaults and command definitions live in `devenv.nix`. The package input 
 From the project directory inside `devenv shell`, store these values in your desktop keyring. Each command prompts for its value, so the credential does not appear in the command or shell history:
 
 ```bash
-secretspec set BLOCKSTREAM_CLIENT_ID --provider keyring --profile default
-secretspec set BLOCKSTREAM_CLIENT_SECRET --provider keyring --profile default
+liquid-secrets-setup blockstream
 ```
 
 Run API commands using `liquid-live`. It retrieves the values when the process starts and provides the environment variables the Python client already expects. The public `secretspec.toml` contains names and descriptions only. On Linux, keyring storage requires a running Secret Service implementation such as GNOME Keyring or KWallet. The [development guide](docs/development.md) also covers an ignored local `.env` file loaded at runtime. The Python application itself does not read `.env` files.
@@ -134,7 +133,7 @@ Prefer outpoint labels when attribution applies to a particular payment. Address
 Create or choose a Miro board and obtain an access token with **`boards:read` and `boards:write`** scopes and access to that board. Follow [Miro's REST API quickstart](https://developers.miro.com/docs/rest-api-build-your-first-hello-world-app). Keep the token locally. If it expires, replace it and rerun sync; this program does not refresh Miro tokens automatically.
 
 ```bash
-secretspec set MIRO_ACCESS_TOKEN --provider keyring --profile default
+liquid-secrets-setup miro
 
 liquid-trace miro-sync \
   --case ./cases/theft-liquid --run RUN_ID \

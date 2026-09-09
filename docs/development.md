@@ -26,6 +26,7 @@ Use a current devenv release with its bundled `secretspec` command. `devenv.yaml
 | --- | --- |
 | `liquid-trace ...` | Calls the CLI using the existing process environment. Does not access a secret provider. |
 | `liquid-live ...` | Resolves project credentials through SecretSpec, then calls the same CLI. |
+| `liquid-secrets-setup [all\|blockstream\|miro]` | Prompts for selected credentials and stores them in the configured provider; defaults to all three. |
 | `liquid-demo` | Creates a synthetic one-hop run under `demo-case/`; no paid requests or credentials. |
 | `liquid-test` | Runs the offline test suite. |
 
@@ -68,7 +69,15 @@ Only use that file for nonsecret settings. Ignoring a Nix file in Git does not p
 
 ## Store secrets in your keyring
 
-Inside the project shell, run these one time and enter each credential at the prompt:
+Inside the project shell, run the setup helper and enter each credential at the prompt:
+
+```bash
+liquid-secrets-setup
+```
+
+Use `liquid-secrets-setup blockstream` or `liquid-secrets-setup miro` to configure one service. It always selects this project's manifest, configured provider, and `default` profile. Setting an existing entry replaces its value; rerun the relevant command when rotating a credential. No API requests are made by setup.
+
+The equivalent individual commands, also useful when updating just one value, are:
 
 ```bash
 secretspec set BLOCKSTREAM_CLIENT_ID --provider keyring --profile default
@@ -77,6 +86,48 @@ secretspec set MIRO_ACCESS_TOKEN --provider keyring --profile default
 ```
 
 The [keyring provider](https://secretspec.dev/providers/keyring/) uses the operating system's credential store. Linux needs a running, unlocked Secret Service such as GNOME Keyring or KWallet. This repository does not modify your NixOS login or keyring services.
+
+### NixOS with Hyprland
+
+GNOME Keyring supplies the background Secret Service. **Seahorse**, shown as **Passwords and Keys**, is an optional graphical manager for that keyring. It can list entries, unlock collections and remove old credentials. SecretSpec stores and retrieves values through the service, so you do not need to enter the same values manually in Seahorse. You can use these GNOME components while keeping Hyprland as your desktop.
+
+If KWallet, KeePassXC, or another application already supplies your Secret Service, use that existing provider. To inspect an active provider without reading stored values:
+
+```bash
+busctl --user status org.freedesktop.secrets
+```
+
+A missing active owner can also mean that an installed service has not started yet. Avoid starting competing Secret Service providers for the same session.
+
+For a GNOME Keyring setup, add these settings to your **NixOS system configuration**, where `pkgs` is available:
+
+```nix
+services.gnome.gnome-keyring.enable = true;
+environment.systemPackages = [ pkgs.seahorse ];
+```
+
+Merge the package into your existing package list rather than defining that attribute twice in one file. Apply your normal flake-based `nixos-rebuild switch` command, then log completely out and back in using your password. This system configuration belongs outside the project's `devenv.nix`: the keyring service and login integration need to persist beyond a project shell.
+
+On NixOS 26.05, the GNOME Keyring module configures login PAM; greetd also enables its keyring PAM integration by default when the service is enabled, and SDDM uses the login PAM stack. Do not add guessed PAM entries for a display manager you do not use. Custom login configuration, autologin, fingerprint-only login, and mismatched keyring/login passwords can require additional setup or manual unlocking. Sources: [GNOME Keyring module](https://github.com/NixOS/nixpkgs/blob/nixos-26.05/nixos/modules/services/desktops/gnome/gnome-keyring.nix), [greetd module](https://github.com/NixOS/nixpkgs/blob/nixos-26.05/nixos/modules/services/display-managers/greetd.nix), [SDDM module](https://github.com/NixOS/nixpkgs/blob/nixos-26.05/nixos/modules/services/display-managers/sddm.nix), [GNOME PAM behavior](https://wiki.gnome.org/Projects%282f%29GnomeKeyring%282f%29Pam.html).
+
+Open Seahorse with `seahorse`. Unlock the **Login** keyring. If no password keyring exists, create a password-protected one and set it as the default. For automatic login unlocking, use a Login keyring whose password matches your login password. See GNOME's [keyring creation](https://help.gnome.org/seahorse/keyring-create.html) and [unlocking](https://help.gnome.org/seahorse/keyring-unlock.html) instructions.
+
+Return to the project and provision the credentials:
+
+```bash
+git pull
+devenv shell
+liquid-secrets-setup
+```
+
+For a report that does not print the stored values:
+
+```bash
+secretspec --file "$LIQUID_TRACER_ROOT/secretspec.toml" check \
+  --provider "$LIQUID_SECRET_PROVIDER" --profile default --explain
+```
+
+Confirm that each credential you intend to use is resolved. An optional missing entry does not cause this check to fail. This checks local secret resolution, not whether Blockstream or Miro accepts the credential.
 
 ```bash
 liquid-live trace --case "$LIQUID_CASE_DIR" --seed 'LIQUID_TXID:0' --hops 3
