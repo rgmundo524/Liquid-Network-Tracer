@@ -13,3 +13,5 @@
 No paid Blockstream requests, case transactions, service swaps, or live Miro board writes were performed. Live API integration remains to be validated using local credentials and real case seeds.
 
 Known Miro limits: shapes with frame/group-relative coordinates must be moved to the canvas before sync; avoid concurrent content/style editing during preflight and updates. Existing geometry is never patched. New-batch placement accounts for mapped shapes, not unrelated board items.
+
+The devenv configuration declares Python 3.12, an explicit nixpkgs revision, and runtime SecretSpec launchers. YAML/TOML parsing, empty credential templates, extracted launcher shell syntax, argument quoting, working-directory preservation, offline CLI execution, and Git ignore rules were checked locally. The Python suite still passes all 49 tests. Nix/devenv are not installed in the implementation environment, so a full `devenv shell` build and real SecretSpec/keyring access have not been executed here. Run `devenv test` on a Nix machine to validate shell evaluation and the test suite together.

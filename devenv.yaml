@@ -1,0 +1,9 @@
+# yaml-language-server: $schema=https://devenv.sh/devenv.schema.json
+inputs:
+  nixpkgs:
+    # Explicit revision keeps the package input fixed even before the first
+    # devenv.lock is generated. Update intentionally with the environment.
+    url: github:cachix/devenv-nixpkgs/256551e45f6303e142ab4a98be1bf243feb77dc0
+
+# Secret values are loaded by liquid-live at runtime. No evaluation-time
+# SecretSpec integration or credentials are needed to enter the shell.

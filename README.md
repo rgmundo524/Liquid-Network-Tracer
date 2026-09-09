@@ -8,11 +8,12 @@ It follows **exact output spends**, preserves confidential quantities as unknown
 
 ## Start with the offline demo
 
-Clone the project and enter its directory. No Python dependencies need to be installed:
+Clone the project and enter its devenv shell. Install [devenv](https://devenv.sh/getting-started/) first if needed. The shell provides Python 3.12 and project commands; no pip install or credentials are needed for the demo:
 
 ```bash
 git clone https://github.com/rgmundo524/Liquid-Network-Tracer.git
 cd Liquid-Network-Tracer
+devenv shell
 ```
 
 ```bash
@@ -35,18 +36,20 @@ This preview makes no network calls, needs no token, and writes no state. `DEMO_
 
 If needed, add `--offline-preview` to `trace` or `export` to also save an HTML inspector and SVG. These are optional inspection files; normal runs use Miro for visual review.
 
-For optional installation in a virtual environment, use `python3 -m pip install -e .`; the equivalent command is then `liquid-trace`.
+Inside the shell, `liquid-demo` runs the same synthetic trace. `liquid-trace` is the normal CLI; `liquid-live` loads credentials at runtime before calling it. `liquid-test` runs the offline suite. Outside devenv, Python 3.11+ still works with `python3 -m liquid_tracer`; optional installation is `python3 -m pip install -e .`.
+
+Public defaults and command definitions live in `devenv.nix`. The package input is pinned in `devenv.yaml`; commit the generated `devenv.lock` after the first successful shell build. See [development and secrets](docs/development.md) for local overrides, keyring setup and the optional `.env` provider.
 
 ## Configure the paid Blockstream API
 
-Set these two environment variables **on your machine**:
+From the project directory inside `devenv shell`, store these values in your desktop keyring. Each command prompts for its value, so the credential does not appear in the command or shell history:
 
 ```bash
-export BLOCKSTREAM_CLIENT_ID='YOUR_CLIENT_ID'
-export BLOCKSTREAM_CLIENT_SECRET='YOUR_CLIENT_SECRET'
+secretspec set BLOCKSTREAM_CLIENT_ID --provider keyring --profile default
+secretspec set BLOCKSTREAM_CLIENT_SECRET --provider keyring --profile default
 ```
 
-Use your local secret manager or environment loader if preferred. Do not commit credentials. The program does not automatically load `.env` files.
+Run API commands using `liquid-live`. It retrieves the values when the process starts and provides the environment variables the Python client already expects. The public `secretspec.toml` contains names and descriptions only. On Linux, keyring storage requires a running Secret Service implementation such as GNOME Keyring or KWallet. The [development guide](docs/development.md) also covers an ignored local `.env` file loaded at runtime. The Python application itself does not read `.env` files.
 
 The default base is `https://enterprise.blockstream.info/liquid/api`. The client exchanges your credentials for a bearer token and refreshes it before expiry. These settings follow [Blockstream's authentication documentation](https://help.blockstream.com/blockstream-explorer-api/use-explorer-api/make-a-rest-api-request-with-your-api-keys). No credentials were supplied or used while developing this project.
 
@@ -62,7 +65,7 @@ YOUR_64_CHARACTER_LIQUID_TXID:0
 An outpoint is a transaction hash plus a zero-based output index. Seed only the relevant outputs. Seeding every output of a funding transaction would also include its unrelated recipients and change.
 
 ```bash
-python3 -m liquid_tracer trace \
+liquid-live trace \
   --case ./cases/theft-liquid \
   --seeds-file case-seeds.txt \
   --hops 3 \
@@ -89,7 +92,7 @@ GET requests are spaced by `--min-interval`, default 0.25 seconds. Transient ser
 Use the run ID printed by the prior command:
 
 ```bash
-python3 -m liquid_tracer trace \
+liquid-live trace \
   --case ./cases/theft-liquid \
   --resume PRIOR_RUN_ID \
   --additional-hops 3
@@ -131,13 +134,13 @@ Prefer outpoint labels when attribution applies to a particular payment. Address
 Create or choose a Miro board and obtain an access token with **`boards:read` and `boards:write`** scopes and access to that board. Follow [Miro's REST API quickstart](https://developers.miro.com/docs/rest-api-build-your-first-hello-world-app). Keep the token locally. If it expires, replace it and rerun sync; this program does not refresh Miro tokens automatically.
 
 ```bash
-export MIRO_ACCESS_TOKEN='YOUR_MIRO_ACCESS_TOKEN'
+secretspec set MIRO_ACCESS_TOKEN --provider keyring --profile default
 
-python3 -m liquid_tracer miro-sync \
+liquid-trace miro-sync \
   --case ./cases/theft-liquid --run RUN_ID \
   --board 'https://miro.com/app/board/YOUR_BOARD_ID/' --dry-run
 
-python3 -m liquid_tracer miro-sync \
+liquid-live miro-sync \
   --case ./cases/theft-liquid --run RUN_ID \
   --board 'https://miro.com/app/board/YOUR_BOARD_ID/'
 ```
@@ -158,7 +161,7 @@ Keep **`case.json` and the entire `miro/` directory** with the case. Losing or r
 To trace and sync in one command:
 
 ```bash
-python3 -m liquid_tracer trace \
+liquid-live trace \
   --case ./cases/theft-liquid --resume PRIOR_RUN_ID --additional-hops 3 \
   --miro-board 'https://miro.com/app/board/YOUR_BOARD_ID/'
 ```
