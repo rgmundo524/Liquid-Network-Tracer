@@ -88,11 +88,20 @@ Public defaults and command definitions live in `devenv.nix`. The package input 
 
 ## Configure the paid Blockstream API
 
-The project defaults to the SecretSpec `protonpass` provider and `development` profile. Have the official `pass-cli` installed and signed in, then run this helper inside `devenv shell` to store the Blockstream credentials in Proton Pass. It prompts for each value, so credentials do not appear in the command or shell history:
+The project defaults to the SecretSpec `protonpass` provider and `development` profile. Devenv supplies SecretSpec 0.19.1 and Proton Pass CLI 2.3.2 from the existing pinned package input. The launchers use these exact executables, avoiding an older system SecretSpec that calls the removed `pass-cli test` command. Sign in with `pass-cli login` if needed, then use this helper inside `devenv shell` to store the Blockstream credentials. It prompts for each value, so credentials do not appear in the command or shell history:
 
 ```bash
 liquid-secrets-setup blockstream
 ```
+
+If your credentials are already saved, verify the local tool versions and credential delivery without displaying their values:
+
+```bash
+liquid-toolchain-check
+liquid-secrets-check
+```
+
+The first command checks executable versions and support for `pass-cli info` without accessing a vault. The second resolves the project secrets through SecretSpec and reports whether the two Blockstream values reached Python. Use `liquid-secrets-check --service miro` for the Miro token, or `--service all` for all three values. Missing values return a nonzero exit status. These checks do not contact Blockstream or Miro; live API authentication is a separate check.
 
 The interface retrieves these credentials when you select a live trace. For direct API commands, use `liquid-live`; it retrieves the values from the same provider and profile when the process starts and provides the environment variables the Python client already expects. The public `secretspec.toml` contains names and descriptions only. If the credentials are already stored for this project in Proton Pass's `development` profile, skip setup. The [development guide](docs/development.md) covers CLI compatibility and alternative providers. The Python application itself does not read `.env` files.
 

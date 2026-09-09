@@ -30,7 +30,7 @@ devenv shell -- liquid-trace menu
 devenv test
 ```
 
-Use a current devenv release with its bundled `secretspec` command. `devenv.yaml` fixes the nixpkgs input to an explicit revision. The first build generates `devenv.lock`; commit it after a successful build. No lockfile has been fabricated without a Nix evaluation. To upgrade the pinned package input, deliberately change its revision and run `devenv update`, then `devenv test`.
+Use a current devenv release. The project supplies its own pinned SecretSpec and Proton Pass CLI packages instead of relying on an inherited system or bundled SecretSpec. `devenv.yaml` fixes the nixpkgs input to an explicit revision. The first build generates `devenv.lock`; commit it after a successful build. To upgrade the pinned package input, deliberately change its revision and run `devenv update`, then `devenv test`.
 
 | Command | Behavior |
 | --- | --- |
@@ -38,6 +38,8 @@ Use a current devenv release with its bundled `secretspec` command. `devenv.yaml
 | `liquid-trace SUBCOMMAND ...` | Runs an explicit command using the existing process environment. |
 | `liquid-live SUBCOMMAND ...` | Resolves project credentials through SecretSpec, then runs an explicit command. |
 | `liquid-secrets-setup [all\|blockstream\|miro]` | Prompts for selected credentials and stores them in the configured provider; defaults to all three. |
+| `liquid-toolchain-check` | Reports the pinned SecretSpec/Proton CLI versions and checks support for `info`, without accessing a vault. |
+| `liquid-secrets-check [--service blockstream\|miro\|all]` | Loads project secrets and reports presence only; defaults to Blockstream. No Blockstream or Miro calls. |
 | `liquid-demo` | Creates a fresh synthetic one-hop run under `LIQUID_DEMO_CASE_DIR`; no paid requests or credentials. |
 | `liquid-demo-preview [--board URL_OR_ID]` | Locally previews the latest demo run for the selected or saved board. |
 | `liquid-demo-sync [--board URL_OR_ID]` | Loads credentials through SecretSpec and syncs the latest demo run to the selected or saved board. |
@@ -125,9 +127,20 @@ Direct `trace`, `export`, and `miro-sync` commands still accept an existing `LIQ
 
 ## Store secrets in Proton Pass
 
-Install the official Proton Pass CLI (`pass-cli`) and sign in with `pass-cli login` if you have not already done so. The project's Python environment does not install or authenticate that CLI. With the default provider, SecretSpec uses note items in the `secretspec` vault; ensure that vault exists in Proton Pass. See the [Proton Pass provider setup](https://secretspec.dev/providers/protonpass/).
+Devenv provides SecretSpec **0.19.1** and Proton Pass CLI **2.3.2** from the project's pinned nixpkgs input. `LIQUID_SECRETSPEC_BIN` points the project launchers and TUI at that exact SecretSpec binary. `SECRETSPEC_PROTONPASS_CLI_PATH` tells the provider to use the matching pinned `pass-cli`. Both settings are declared in the main `devenv.nix`; no shell assignments or Home Manager changes are required for this project. Outside devenv, install compatible versions yourself. Sign in locally with `pass-cli login` if you have not already done so. With the default provider, SecretSpec uses note items in the `secretspec` vault; ensure that vault exists in Proton Pass. See the [Proton Pass provider setup](https://secretspec.dev/providers/protonpass/).
 
-Check compatibility when updating the tools: `pass-cli` 2.2.4 removed a command used by older SecretSpec releases, so that CLI version and later need SecretSpec 0.19 or newer for the session-check fix. Keep a tested pair of versions; see the provider's [compatibility notes](https://secretspec.dev/providers/protonpass/#pass-cli-compatibility).
+`pass-cli` 2.2.4 removed `test`; SecretSpec 0.18 and earlier still invoke it. SecretSpec 0.19 and later try `info` first, fixing the reported `unrecognized subcommand 'test'` failure. The environment rejects SecretSpec versions older than 0.19. See the provider's [compatibility notes](https://secretspec.dev/providers/protonpass/#pass-cli-compatibility).
+
+After pulling environment changes, leave the old shell and re-enter `devenv shell`. Check the tools, then credential delivery:
+
+```bash
+liquid-toolchain-check
+liquid-secrets-check
+```
+
+The first command needs no login. The second contacts the secret provider and reports `present` or `MISSING` for each requested value, without printing values. It defaults to the two Blockstream credentials; `--service miro` checks the Miro token, and `--service all` checks all three. A missing value causes exit status 1. This verifies delivery to the application, not acceptance by Blockstream or Miro. It also avoids the indentation problems of pasting a multiline Python probe into a shell.
+
+`devenv test` runs the toolchain check and offline suite without vault access. GitHub Actions runs this through the actual Nix environment as well as running the Python/TUI suite separately. Neither job uses real credentials.
 
 Inside the project shell, run the setup helper and enter each credential at the prompt:
 

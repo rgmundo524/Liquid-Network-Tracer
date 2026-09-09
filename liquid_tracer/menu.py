@@ -37,7 +37,8 @@ def _environment():
 def _command(arguments, live=False):
     command = [sys.executable, "-m", "liquid_tracer", *arguments]
     if live:
-        command = ["secretspec", "--file", str(_project() / "secretspec.toml"), "run",
+        executable = os.environ.get("LIQUID_SECRETSPEC_BIN") or "secretspec"
+        command = [executable, "--file", str(_project() / "secretspec.toml"), "run",
                    "--provider", os.environ.get("LIQUID_SECRET_PROVIDER") or "protonpass",
                    "--profile", os.environ.get("LIQUID_SECRET_PROFILE") or "development",
                    "--", *command]

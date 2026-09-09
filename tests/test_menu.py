@@ -30,6 +30,13 @@ class MenuCommandTests(unittest.TestCase):
                              sys.executable, "-m", "liquid_tracer", *arguments])
             self.assertEqual(_command(arguments), [sys.executable, "-m", "liquid_tracer", *arguments])
 
+    def test_live_command_uses_pinned_executable_over_host_path(self):
+        arguments = ["credentials-check"]
+        pinned = "/nix/store/example-secretspec-0.19.1/bin/secretspec"
+        with patch.dict(os.environ, {"LIQUID_SECRETSPEC_BIN": pinned, "PATH": "/old/host/bin"}, clear=True):
+            self.assertEqual(_command(arguments, live=True)[0], pinned)
+            self.assertEqual(_command(arguments)[0], sys.executable)
+
     def test_seed_entry_accepts_multiline_and_comma_forms(self):
         first, second = "a" * 64 + ":0", "b" * 64 + ":12"
         self.assertEqual(_seed_values(first + ",\n" + second + " " + first.upper()), [first, second])
@@ -53,6 +60,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.temp.name) / "investigations with spaces"
         self.environment = patch.dict(os.environ, {"LIQUID_TRACER_ROOT": str(PROJECT),
             "LIQUID_SECRET_PROVIDER": "protonpass", "LIQUID_SECRET_PROFILE": "development",
+            "LIQUID_SECRETSPEC_BIN": "/nix/store/test-secretspec/bin/secretspec",
             "LIQUID_CASE_DIR": "/unrelated/environment/case", "LIQUID_MIRO_BOARD": "UNRELATED="})
         self.environment.start()
         self.addCleanup(self.environment.stop)
@@ -190,7 +198,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 await self.click(app, pilot, "#submit")
                 process.assert_called_once()
                 command = process.call_args.args[0]
-                self.assertEqual(command[0], "secretspec")
+                self.assertEqual(command[0], "/nix/store/test-secretspec/bin/secretspec")
                 self.assertEqual(command[command.index("--profile") + 1], "development")
                 self.assertEqual(command[command.index("--case") + 1], str(case))
                 self.assertNotIn("--miro-board", command)

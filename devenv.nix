@@ -1,4 +1,7 @@
-{ config, pkgs, ... }:
+{ config, lib, pkgs, ... }:
+
+assert lib.assertMsg (lib.versionAtLeast pkgs.secretspec.version "0.19")
+  "The Proton Pass provider requires SecretSpec 0.19 or newer with current pass-cli releases.";
 
 {
   languages.python = {
@@ -6,7 +9,9 @@
     package = pkgs.python312.withPackages (python: [ python.textual ]);
   };
 
-  packages = [ pkgs.git ];
+  # Both tools come from the same pinned input; do not inherit an older
+  # SecretSpec from the host or devenv's own bundled commands.
+  packages = [ pkgs.git pkgs.secretspec pkgs.proton-pass-cli ];
 
   # Only public configuration belongs in env. Secret values are resolved by
   # liquid-live at process startup, never interpolated into a Nix expression.
@@ -17,6 +22,8 @@
     LIQUID_DEMO_CASE_DIR = "${config.devenv.root}/demo-case";
     LIQUID_SECRET_PROVIDER = "protonpass";
     LIQUID_SECRET_PROFILE = "development";
+    LIQUID_SECRETSPEC_BIN = "${pkgs.secretspec}/bin/secretspec";
+    SECRETSPEC_PROTONPASS_CLI_PATH = "${pkgs.proton-pass-cli}/bin/pass-cli";
   };
 
   # SecretSpec's runtime dotenv provider is supported as an alternative to
@@ -35,7 +42,7 @@
   scripts.liquid-live = {
     description = "Load API credentials at runtime, then run liquid-trace";
     exec = ''
-      exec secretspec --file "$LIQUID_TRACER_ROOT/secretspec.toml" run \
+      exec "$LIQUID_SECRETSPEC_BIN" --file "$LIQUID_TRACER_ROOT/secretspec.toml" run \
         --provider "$LIQUID_SECRET_PROVIDER" --profile "$LIQUID_SECRET_PROFILE" \
         -- liquid-trace "$@"
     '';
@@ -66,10 +73,27 @@
       esac
       printf 'Provider: %s; profile: %s\n' "$LIQUID_SECRET_PROVIDER" "$LIQUID_SECRET_PROFILE"
       for credential_name in "''${credential_names[@]}"; do
-        secretspec --file "$LIQUID_TRACER_ROOT/secretspec.toml" set "$credential_name" \
+        "$LIQUID_SECRETSPEC_BIN" --file "$LIQUID_TRACER_ROOT/secretspec.toml" set "$credential_name" \
           --provider "$LIQUID_SECRET_PROVIDER" --profile "$LIQUID_SECRET_PROFILE"
       done
       printf '%s\n' 'Credentials saved. Use liquid-live for authenticated commands.'
+    '';
+  };
+
+  scripts.liquid-secrets-check = {
+    description = "Check credential delivery through SecretSpec without displaying values or calling an explorer";
+    exec = ''
+      exec liquid-live credentials-check "$@"
+    '';
+  };
+
+  scripts.liquid-toolchain-check = {
+    description = "Check the pinned secret tools without accessing a vault or network service";
+    exec = ''
+      set -euo pipefail
+      "$LIQUID_SECRETSPEC_BIN" --version
+      "$SECRETSPEC_PROTONPASS_CLI_PATH" --version
+      "$SECRETSPEC_PROTONPASS_CLI_PATH" info --help > /dev/null
     '';
   };
 
@@ -110,6 +134,7 @@
   };
 
   enterTest = ''
+    liquid-toolchain-check
     liquid-test
   '';
 }

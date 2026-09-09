@@ -20,3 +20,12 @@ jobs:
           .venv/bin/python -m pip install '.[tui]'
       - name: Run offline tracing and Textual interface tests
         run: .venv/bin/python -m unittest discover -s tests -v
+
+  devenv:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - name: Evaluate the project environment and check its pinned tools
+        run: nix run github:NixOS/nixpkgs/c8f90650c15282fa8656a041bfbbd2403997a9a7#devenv -- test

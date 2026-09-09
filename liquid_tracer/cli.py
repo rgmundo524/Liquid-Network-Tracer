@@ -22,6 +22,9 @@ def parser():
     commands = root.add_subparsers(dest="command", required=True)
     menu = commands.add_parser("menu", help="Open the interactive investigation menu")
     menu.add_argument("--investigations-dir", type=Path, help="Directory containing saved investigations")
+    credentials = commands.add_parser("credentials-check", help="Check injected credential presence without contacting services")
+    credentials.add_argument("--service", choices=["blockstream", "miro", "all"], default="blockstream",
+                             help="Service credentials to check (default: blockstream)")
     run = commands.add_parser("trace", help="Start or extend a bounded run")
     run.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                      help="Case directory (default: LIQUID_CASE_DIR)")
@@ -72,6 +75,21 @@ def parser():
     group.add_argument("--item-id")
     group.add_argument("--absent", action="store_true", help="You verified that the pending item is absent")
     return root
+
+
+def check_credentials(service):
+    """Report presence only; credential retrieval and authentication are separate."""
+    names = []
+    if service in ("blockstream", "all"):
+        names.extend(("BLOCKSTREAM_CLIENT_ID", "BLOCKSTREAM_CLIENT_SECRET"))
+    if service in ("miro", "all"):
+        names.append("MIRO_ACCESS_TOKEN")
+    missing = False
+    for name in names:
+        present = bool(os.environ.get(name))
+        print(name + ": " + ("present" if present else "MISSING"))
+        missing |= not present
+    return int(missing)
 
 
 def run_path(case, run_id):
@@ -286,6 +304,8 @@ def main(argv=None):
             from .menu import run_menu
             return run_menu()
         args = parser().parse_args(argv)
+        if args.command == "credentials-check":
+            return check_credentials(args.service)
         if args.command == "menu":
             from .menu import run_menu
             return run_menu(args.investigations_dir)
