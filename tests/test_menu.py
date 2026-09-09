@@ -66,8 +66,16 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.environment.stop)
 
     async def click(self, app, pilot, selector):
-        app.screen.query_one(selector).scroll_visible(immediate=True)
+        from textual.widgets import Button
+        button = app.screen.query_one(selector, Button)
+        button.scroll_visible(immediate=True)
         await pilot.pause()
+        # Textual ignores clicks during its timed press effect. Waiting for
+        # CPU idle alone does not wait for this timer after a previous click.
+        if button.has_class("-active"):
+            await pilot.pause(button.active_effect_duration)
+            await pilot.pause()
+            self.assertFalse(button.has_class("-active"))
         await pilot.click(selector)
         await pilot.pause()
 

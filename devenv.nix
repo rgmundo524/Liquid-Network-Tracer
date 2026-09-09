@@ -1,8 +1,5 @@
 { config, lib, pkgs, ... }:
 
-assert lib.assertMsg (lib.versionAtLeast pkgs.secretspec.version "0.19")
-  "The Proton Pass provider requires SecretSpec 0.19 or newer with current pass-cli releases.";
-
 {
   languages.python = {
     enable = true;
@@ -11,7 +8,10 @@ assert lib.assertMsg (lib.versionAtLeast pkgs.secretspec.version "0.19")
 
   # Both tools come from the same pinned input; do not inherit an older
   # SecretSpec from the host or devenv's own bundled commands.
-  packages = [ pkgs.git pkgs.secretspec pkgs.proton-pass-cli ];
+  packages =
+    assert lib.assertMsg (lib.versionAtLeast pkgs.secretspec.version "0.19")
+      "The Proton Pass provider requires SecretSpec 0.19 or newer with current pass-cli releases.";
+    [ pkgs.git pkgs.secretspec pkgs.proton-pass-cli ];
 
   # Only public configuration belongs in env. Secret values are resolved by
   # liquid-live at process startup, never interpolated into a Nix expression.

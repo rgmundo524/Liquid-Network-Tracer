@@ -10,7 +10,7 @@ It follows **exact output spends**, preserves confidential quantities as unknown
 
 The project has **one main `devenv.nix`** for Python, commands, and environment defaults. SecretSpec retrieves API credentials from Proton Pass when a selected action needs them. Investigation names, board IDs, and run history are saved as case data; you do not need another Nix file or shell variables for each investigation.
 
-Clone the project and enter its devenv shell. Install [devenv](https://devenv.sh/getting-started/) first if needed:
+The bundled Proton Pass CLI supports Linux on x86_64 or ARM64 and macOS on Apple Silicon. Clone the project and enter its devenv shell. Install [devenv](https://devenv.sh/getting-started/) first if needed:
 
 ```bash
 git clone https://github.com/rgmundo524/Liquid-Network-Tracer.git
