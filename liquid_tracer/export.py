@@ -184,6 +184,13 @@ def export_run(store, state, destination, merge_addresses=False, offline_preview
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
     save_json(destination / "trace.json", state)
+    save_json(destination / "investigation.json", {
+        "run_id": state["run_id"], "parent_run": state.get("parent_run"),
+        "case_id": state["case_id"],
+        "name": state.get("investigation", {}).get("name"),
+        "miro_board": state.get("investigation", {}).get("miro_board"),
+        "note": "Board selection recorded at trace time. Subsequent publication details are in the case's miro/reports directory.",
+    })
     graph = build_graph(state, merge_addresses)
     save_json(destination / "graph.json", graph)
     if offline_preview:

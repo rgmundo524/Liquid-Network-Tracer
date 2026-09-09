@@ -3,7 +3,7 @@
 {
   languages.python = {
     enable = true;
-    package = pkgs.python312;
+    package = pkgs.python312.withPackages (python: [ python.textual ]);
   };
 
   packages = [ pkgs.git ];
@@ -12,11 +12,9 @@
   # liquid-live at process startup, never interpolated into a Nix expression.
   env = {
     LIQUID_TRACER_ROOT = config.devenv.root;
+    LIQUID_INVESTIGATIONS_DIR = "${config.devenv.root}/cases";
     LIQUID_CASE_DIR = "${config.devenv.root}/cases/current";
     LIQUID_DEMO_CASE_DIR = "${config.devenv.root}/demo-case";
-    # Set board URLs once in devenv.local.nix. Keep test and case boards separate.
-    LIQUID_MIRO_BOARD = "";
-    LIQUID_DEMO_MIRO_BOARD = "";
     LIQUID_SECRET_PROVIDER = "protonpass";
     LIQUID_SECRET_PROFILE = "development";
   };
@@ -89,26 +87,17 @@
   scripts.liquid-demo-preview = {
     description = "Preview the latest saved demo run for the configured test board";
     exec = ''
-      if [ -z "$LIQUID_DEMO_MIRO_BOARD" ]; then
-        printf '%s\n' 'Set env.LIQUID_DEMO_MIRO_BOARD in devenv.local.nix, then reopen the shell.' >&2
-        exit 2
-      fi
       exec liquid-trace miro-sync \
         --case "$LIQUID_DEMO_CASE_DIR" --run latest \
-        --board "$LIQUID_DEMO_MIRO_BOARD" --dry-run "$@"
+        --dry-run "$@"
     '';
   };
 
   scripts.liquid-demo-sync = {
     description = "Sync the latest saved demo run to the configured test board";
     exec = ''
-      if [ -z "$LIQUID_DEMO_MIRO_BOARD" ]; then
-        printf '%s\n' 'Set env.LIQUID_DEMO_MIRO_BOARD in devenv.local.nix, then reopen the shell.' >&2
-        exit 2
-      fi
       exec liquid-live miro-sync \
-        --case "$LIQUID_DEMO_CASE_DIR" --run latest \
-        --board "$LIQUID_DEMO_MIRO_BOARD" "$@"
+        --case "$LIQUID_DEMO_CASE_DIR" --run latest "$@"
     '';
   };
 

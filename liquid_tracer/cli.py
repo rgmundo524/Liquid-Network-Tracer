@@ -5,21 +5,23 @@ import os
 import sys
 import uuid
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from .api import ENTERPRISE, Esplora, Limits
 from .common import TraceError, digest, load_labels, parse_outpoint, read_json, save_json
 from .export import export_run
-from .miro import publish, resolve, sync
+from .investigations import read_case, update_case
+from .miro import _namespace, publish, resolve, sync, validate_plan
 from .store import Store
 from .trace import new_state, trace
 
 
 def parser():
     case_default = os.environ.get("LIQUID_CASE_DIR") or None
-    board_default = os.environ.get("LIQUID_MIRO_BOARD") or None
     root = argparse.ArgumentParser(description="Bounded Liquid UTXO reachability with saved evidence and Miro export")
     commands = root.add_subparsers(dest="command", required=True)
+    menu = commands.add_parser("menu", help="Open the interactive investigation menu")
+    menu.add_argument("--investigations-dir", type=Path, help="Directory containing saved investigations")
     run = commands.add_parser("trace", help="Start or extend a bounded run")
     run.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                      help="Case directory (default: LIQUID_CASE_DIR)")
@@ -55,8 +57,7 @@ def parser():
     update.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                         help="Case directory (default: LIQUID_CASE_DIR)")
     update.add_argument("--run", default="latest", help="Saved run ID (default: latest)")
-    update.add_argument("--board", default=board_default, required=board_default is None,
-                        help="Miro board URL or board ID (default: LIQUID_MIRO_BOARD)")
+    update.add_argument("--board", help="Miro board URL or ID (default: saved case board, then LIQUID_MIRO_BOARD, or a prompt)")
     update.add_argument("--plan", type=Path, help="Use a regenerated miro-plan.json for this run")
     update.add_argument("--dry-run", action="store_true", help="Preview local new/mapped counts without network access or writes")
     update.add_argument("--max-new-items", type=int, default=750)
@@ -129,6 +130,8 @@ def verify_export(directory):
 
 
 def board_id(value):
+    if not isinstance(value, str):
+        raise TraceError("Invalid Miro board ID")
     value = value.strip()
     if "://" in value:
         parsed = urlsplit(value)
@@ -157,20 +160,44 @@ def case_identity(case):
         return identity
 
 
-def sync_run(case, run_id, board, max_new_items=750, dry_run=False, plan_path=None):
+def resolve_board(metadata, explicit=None):
+    """Choose a board without writing settings or consulting a credential provider."""
+    value = explicit if explicit is not None else metadata.get("miro_board") or os.environ.get("LIQUID_MIRO_BOARD")
+    if value is None or (explicit is None and value == ""):
+        if not sys.stdin.isatty():
+            raise TraceError("No Miro board is saved for this case; supply --board with a board URL or ID, or configure the board in the investigation menu")
+        print("Miro board URL or ID: ", end="", file=sys.stderr, flush=True)
+        try:
+            value = input()
+        except EOFError:
+            raise TraceError("No Miro board was provided; supply --board with a board URL or ID") from None
+    return board_id(value)
+
+
+def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_path=None):
     run_id = resolve_latest(case, run_id)
-    target = board_id(board)
     default_plan = run_path(case, run_id) / "miro-plan.json"
     verify_export((plan_path or default_plan).parent)
     plan = read_json(plan_path or default_plan)
+    validate_plan(plan)
+    namespace = _namespace(plan)
     if plan.get("run_id") != run_id:
         raise TraceError("Miro plan does not match the selected run")
-    identity = read_json(case / "case.json")["case_id"]
-    if plan.get("namespace", {}).get("case_id") != identity:
+    metadata = read_case(case)
+    if namespace["case_id"] != metadata["case_id"]:
         raise TraceError("Saved plan has no matching case identity; regenerate it with export or create a continuation")
+    if not isinstance(max_new_items, int) or max_new_items < 0:
+        raise TraceError("--max-new-items must be a nonnegative integer")
+    target = resolve_board(metadata, board)
     state_path = case / "miro" / (digest(target.encode())[:24] + ".json")
-    result = sync(plan, target, state_path, max_items=max_new_items, dry_run=dry_run)
-    report = {**result, "run_id": run_id, "state_file": str(state_path.resolve())}
+    # Validate the mapping, lineage, and item budget locally before saving a selection.
+    result = sync(plan, target, state_path, max_items=max_new_items, dry_run=True)
+    if not dry_run:
+        update_case(case, {"miro_board": target})
+        result = sync(plan, target, state_path, max_items=max_new_items, dry_run=False)
+    report = {**result, "run_id": run_id, "board_id": target,
+              "board_url": "https://miro.com/app/board/" + quote(target, safe="") + "/",
+              "state_file": str(state_path.resolve())}
     if not dry_run:
         report_path = case / "miro" / "reports" / (run_id + "-" + uuid.uuid4().hex[:12] + ".json")
         report["report_file"] = str(report_path.resolve())
@@ -224,6 +251,9 @@ def run_trace(args):
             api = Esplora(store, "pending", limits, args.base_url, args.auth, args.fixture,
                           args.tx_cache_seconds, args.min_interval)
             state = new_state(seeds, api.base, limits, labels, parent, case_id=identity)
+            metadata = read_case(args.case)
+            state["investigation"] = {"case_id": identity, "name": metadata.get("name"),
+                                      "miro_board": args.miro_board or metadata.get("miro_board") or None}
             state["address_mode"] = "merged" if merge_addresses else "outpoint_occurrences"
             api.run_id = state["run_id"]
             destination = run_path(args.case, state["run_id"])
@@ -250,8 +280,15 @@ def run_trace(args):
 
 
 def main(argv=None):
-    args = parser().parse_args(argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
     try:
+        if not argv and sys.stdin.isatty():
+            from .menu import run_menu
+            return run_menu()
+        args = parser().parse_args(argv)
+        if args.command == "menu":
+            from .menu import run_menu
+            return run_menu(args.investigations_dir)
         if args.command == "trace":
             return run_trace(args)
         if args.command == "export":
