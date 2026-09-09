@@ -13,11 +13,12 @@
   env = {
     LIQUID_TRACER_ROOT = config.devenv.root;
     LIQUID_CASE_DIR = "${config.devenv.root}/cases/current";
-    LIQUID_SECRET_PROVIDER = "keyring";
+    LIQUID_SECRET_PROVIDER = "protonpass";
+    LIQUID_SECRET_PROFILE = "development";
   };
 
   # SecretSpec's runtime dotenv provider is supported as an alternative to
-  # keyring. Do not enable devenv's evaluation-time dotenv integration.
+  # Proton Pass. Do not enable devenv's evaluation-time dotenv integration.
   dotenv.enable = false;
   dotenv.disableHint = true;
 
@@ -33,7 +34,7 @@
     description = "Load API credentials at runtime, then run liquid-trace";
     exec = ''
       exec secretspec --file "$LIQUID_TRACER_ROOT/secretspec.toml" run \
-        --provider "$LIQUID_SECRET_PROVIDER" --profile default \
+        --provider "$LIQUID_SECRET_PROVIDER" --profile "$LIQUID_SECRET_PROFILE" \
         -- liquid-trace "$@"
     '';
   };
@@ -52,8 +53,8 @@
         miro) credential_names=(MIRO_ACCESS_TOKEN) ;;
         -h|--help)
           printf '%s\n' 'Usage: liquid-secrets-setup [all|blockstream|miro]' \
-            'Prompts for values using the configured provider and default profile.' \
-            'Setting an existing entry replaces its value. No API requests are made.'
+            'Prompts for values using the configured provider and profile.' \
+            'Setting an existing entry replaces its value. No Blockstream or Miro requests are made.'
           exit 0
           ;;
         *)
@@ -61,10 +62,10 @@
           exit 2
           ;;
       esac
-      printf 'Provider: %s; profile: default\n' "$LIQUID_SECRET_PROVIDER"
+      printf 'Provider: %s; profile: %s\n' "$LIQUID_SECRET_PROVIDER" "$LIQUID_SECRET_PROFILE"
       for credential_name in "''${credential_names[@]}"; do
         secretspec --file "$LIQUID_TRACER_ROOT/secretspec.toml" set "$credential_name" \
-          --provider "$LIQUID_SECRET_PROVIDER" --profile default
+          --provider "$LIQUID_SECRET_PROVIDER" --profile "$LIQUID_SECRET_PROFILE"
       done
       printf '%s\n' 'Credentials saved. Use liquid-live for authenticated commands.'
     '';

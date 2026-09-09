@@ -38,17 +38,17 @@ If needed, add `--offline-preview` to `trace` or `export` to also save an HTML i
 
 Inside the shell, `liquid-demo` runs the same synthetic trace. `liquid-trace` is the normal CLI; `liquid-live` loads credentials at runtime before calling it. `liquid-test` runs the offline suite. Outside devenv, Python 3.11+ still works with `python3 -m liquid_tracer`; optional installation is `python3 -m pip install -e .`.
 
-Public defaults and command definitions live in `devenv.nix`. The package input is pinned in `devenv.yaml`; commit the generated `devenv.lock` after the first successful shell build. See [development and secrets](docs/development.md) for local overrides, keyring setup and the optional `.env` provider.
+Public defaults and command definitions live in `devenv.nix`. The package input is pinned in `devenv.yaml`; commit the generated `devenv.lock` after the first successful shell build. See [development and secrets](docs/development.md) for Proton Pass setup, profile overrides, and optional keyring or `.env` storage.
 
 ## Configure the paid Blockstream API
 
-From the project directory inside `devenv shell`, store these values in your desktop keyring. Each command prompts for its value, so the credential does not appear in the command or shell history:
+The project defaults to the SecretSpec `protonpass` provider and `development` profile. Have the official `pass-cli` installed and signed in, then run this helper inside `devenv shell` to store the Blockstream credentials in Proton Pass. It prompts for each value, so credentials do not appear in the command or shell history:
 
 ```bash
 liquid-secrets-setup blockstream
 ```
 
-Run API commands using `liquid-live`. It retrieves the values when the process starts and provides the environment variables the Python client already expects. The public `secretspec.toml` contains names and descriptions only. On Linux, keyring storage requires a running Secret Service implementation such as GNOME Keyring or KWallet. The [development guide](docs/development.md) also covers an ignored local `.env` file loaded at runtime. The Python application itself does not read `.env` files.
+Run API commands using `liquid-live`. It retrieves the values from the same provider and profile when the process starts and provides the environment variables the Python client already expects. The public `secretspec.toml` contains names and descriptions only. If the credentials are already stored for this project in Proton Pass's `development` profile, skip setup. The [development guide](docs/development.md) covers CLI compatibility and alternative providers. The Python application itself does not read `.env` files.
 
 The default base is `https://enterprise.blockstream.info/liquid/api`. The client exchanges your credentials for a bearer token and refreshes it before expiry. These settings follow [Blockstream's authentication documentation](https://help.blockstream.com/blockstream-explorer-api/use-explorer-api/make-a-rest-api-request-with-your-api-keys). No credentials were supplied or used while developing this project.
 
@@ -130,7 +130,7 @@ Prefer outpoint labels when attribution applies to a particular payment. Address
 
 ## Keep one editable Miro graph up to date
 
-Create or choose a Miro board and obtain an access token with **`boards:read` and `boards:write`** scopes and access to that board. Follow [Miro's REST API quickstart](https://developers.miro.com/docs/rest-api-build-your-first-hello-world-app). Keep the token locally. If it expires, replace it and rerun sync; this program does not refresh Miro tokens automatically.
+Create or choose a Miro board and obtain an access token with **`boards:read` and `boards:write`** scopes and access to that board. Follow [Miro's REST API quickstart](https://developers.miro.com/docs/rest-api-build-your-first-hello-world-app). Store the token with the setup helper. If it expires, replace it and rerun sync; this program does not refresh Miro tokens automatically.
 
 ```bash
 liquid-secrets-setup miro

@@ -40,7 +40,8 @@ The committed defaults are:
 env = {
   LIQUID_TRACER_ROOT = config.devenv.root;
   LIQUID_CASE_DIR = "${config.devenv.root}/cases/current";
-  LIQUID_SECRET_PROVIDER = "keyring";
+  LIQUID_SECRET_PROVIDER = "protonpass";
+  LIQUID_SECRET_PROFILE = "development";
 };
 ```
 
@@ -67,7 +68,11 @@ liquid-live trace --case "$LIQUID_CASE_DIR" --seed 'LIQUID_TXID:0' --hops 3
 
 Only use that file for nonsecret settings. Ignoring a Nix file in Git does not prevent evaluated secret strings from entering generated Nix artifacts.
 
-## Store secrets in your keyring
+## Store secrets in Proton Pass
+
+Install the official Proton Pass CLI (`pass-cli`) and sign in with `pass-cli login` if you have not already done so. The project's Python environment does not install or authenticate that CLI. With the default provider, SecretSpec uses note items in the `secretspec` vault; ensure that vault exists in Proton Pass. See the [Proton Pass provider setup](https://secretspec.dev/providers/protonpass/).
+
+Check compatibility when updating the tools: `pass-cli` 2.2.4 removed a command used by older SecretSpec releases, so that CLI version and later need SecretSpec 0.19 or newer for the session-check fix. Keep a tested pair of versions; see the provider's [compatibility notes](https://secretspec.dev/providers/protonpass/#pass-cli-compatibility).
 
 Inside the project shell, run the setup helper and enter each credential at the prompt:
 
@@ -75,15 +80,44 @@ Inside the project shell, run the setup helper and enter each credential at the 
 liquid-secrets-setup
 ```
 
-Use `liquid-secrets-setup blockstream` or `liquid-secrets-setup miro` to configure one service. It always selects this project's manifest, configured provider, and `default` profile. Setting an existing entry replaces its value; rerun the relevant command when rotating a credential. No API requests are made by setup.
+Use `liquid-secrets-setup blockstream` or `liquid-secrets-setup miro` to configure one service. Both the setup helper and `liquid-live` explicitly select this project's manifest, `LIQUID_SECRET_PROVIDER`, and `LIQUID_SECRET_PROFILE`, even if your global SecretSpec defaults differ. Setting an existing entry replaces its value; rerun the relevant command when rotating a credential. Setup contacts the secret provider, but makes no Blockstream or Miro requests.
 
-The equivalent individual commands, also useful when updating just one value, are:
+If you already stored the credentials under this project's `development` profile in Proton Pass, skip setup. Selecting a provider and profile in SecretSpec's global configuration does not itself create the credentials. Changing providers or profiles does not migrate existing values; the manifest retains the `default` profile for access to earlier entries.
+
+The equivalent individual commands from the project directory, also useful when updating just one value, are:
 
 ```bash
-secretspec set BLOCKSTREAM_CLIENT_ID --provider keyring --profile default
-secretspec set BLOCKSTREAM_CLIENT_SECRET --provider keyring --profile default
-secretspec set MIRO_ACCESS_TOKEN --provider keyring --profile default
+secretspec set BLOCKSTREAM_CLIENT_ID --provider "$LIQUID_SECRET_PROVIDER" --profile "$LIQUID_SECRET_PROFILE"
+secretspec set BLOCKSTREAM_CLIENT_SECRET --provider "$LIQUID_SECRET_PROVIDER" --profile "$LIQUID_SECRET_PROFILE"
+secretspec set MIRO_ACCESS_TOKEN --provider "$LIQUID_SECRET_PROVIDER" --profile "$LIQUID_SECRET_PROFILE"
 ```
+
+For a report that does not print the stored values:
+
+```bash
+secretspec --file "$LIQUID_TRACER_ROOT/secretspec.toml" check \
+  --provider "$LIQUID_SECRET_PROVIDER" --profile "$LIQUID_SECRET_PROFILE"
+```
+
+Confirm that each credential you intend to use is resolved. An optional missing entry does not cause this check to fail. This checks secret resolution, not whether Blockstream or Miro accepts the credential.
+
+```bash
+liquid-live trace --case "$LIQUID_CASE_DIR" --seed 'LIQUID_TXID:0' --hops 3
+liquid-live miro-sync --case "$LIQUID_CASE_DIR" --run RUN_ID --board 'MIRO_BOARD_URL'
+```
+
+The manifest marks credentials optional because different commands need different services. The existing application checks Blockstream credentials for authenticated tracing and the Miro token for live sync. Set only the services you use. Secret values are provided to the child process environment and are not added to the interactive parent shell. They remain readable by the process that needs them; environment variables are a delivery mechanism, not encrypted storage.
+
+## Optional desktop keyring storage
+
+To use existing keyring entries in the earlier `default` profile, override both settings when entering the shell:
+
+```bash
+devenv -O env.LIQUID_SECRET_PROVIDER:string keyring \
+  -O env.LIQUID_SECRET_PROFILE:string default shell
+```
+
+Use `liquid-live` normally in that shell. To store new keyring entries in `development` instead, override only the provider and run `liquid-secrets-setup`.
 
 The [keyring provider](https://secretspec.dev/providers/keyring/) uses the operating system's credential store. Linux needs a running, unlocked Secret Service such as GNOME Keyring or KWallet. This repository does not modify your NixOS login or keyring services.
 
@@ -112,29 +146,13 @@ On NixOS 26.05, the GNOME Keyring module configures login PAM; greetd also enabl
 
 Open Seahorse with `seahorse`. Unlock the **Login** keyring. If no password keyring exists, create a password-protected one and set it as the default. For automatic login unlocking, use a Login keyring whose password matches your login password. See GNOME's [keyring creation](https://help.gnome.org/seahorse/keyring-create.html) and [unlocking](https://help.gnome.org/seahorse/keyring-unlock.html) instructions.
 
-Return to the project and provision the credentials:
+Return to the project and enter a shell with the keyring provider to provision credentials:
 
 ```bash
 git pull
-devenv shell
+devenv -O env.LIQUID_SECRET_PROVIDER:string keyring shell
 liquid-secrets-setup
 ```
-
-For a report that does not print the stored values:
-
-```bash
-secretspec --file "$LIQUID_TRACER_ROOT/secretspec.toml" check \
-  --provider "$LIQUID_SECRET_PROVIDER" --profile default --explain
-```
-
-Confirm that each credential you intend to use is resolved. An optional missing entry does not cause this check to fail. This checks local secret resolution, not whether Blockstream or Miro accepts the credential.
-
-```bash
-liquid-live trace --case "$LIQUID_CASE_DIR" --seed 'LIQUID_TXID:0' --hops 3
-liquid-live miro-sync --case "$LIQUID_CASE_DIR" --run RUN_ID --board 'MIRO_BOARD_URL'
-```
-
-The manifest marks credentials optional because different commands need different services. The existing application checks Blockstream credentials for authenticated tracing and the Miro token for live sync. Set only the services you use. Secret values are provided to the child process environment and are not added to the interactive parent shell. They remain readable by the process that needs them; environment variables are a delivery mechanism, not encrypted storage.
 
 ## Optional local `.env` storage
 
@@ -160,12 +178,12 @@ Then use `liquid-live` normally. [SecretSpec's dotenv provider](https://secretsp
 | --- | --- | --- |
 | `devenv.nix`, `devenv.yaml`, `devenv.lock` | Yes | Environment setup, package pins and nonsecret defaults. |
 | `secretspec.toml`, `.env.example` | Yes, with no secret values | Names, descriptions and setup templates. |
-| OS keyring or password manager | No secret values in Git | Local secret storage; can also support a team's sharing workflow. |
+| OS keyring or password manager | No secret values in Git | Separate secret storage, local or cloud depending on provider. |
 | Local `.env` | No | Simple plaintext storage for one development machine. |
 | CI/deployment secret store | No secret values in code | Supplies credentials to the job or service that needs them. |
 
 For CI, GitHub Actions secrets can supply environment variables directly and run the Python CLI; `liquid-trace` also accepts them inside devenv. The offline test suite needs no GitHub secrets. See [GitHub's secrets documentation](https://docs.github.com/en/actions/security-for-github-actions/security-guides/using-secrets-in-github-actions).
 
-Other SecretSpec providers can replace keyring by setting the nonsecret `LIQUID_SECRET_PROVIDER` value. Avoid placing values in `env.MIRO_ACCESS_TOKEN`, reading secret files with `builtins.readFile`, or passing credentials as `devenv -O` arguments. The supported pattern follows [devenv's runtime SecretSpec guidance](https://devenv.sh/integrations/secretspec/).
+Other SecretSpec providers can replace Proton Pass by setting the nonsecret `LIQUID_SECRET_PROVIDER` value. Set `LIQUID_SECRET_PROFILE` to select another declared profile. Avoid placing values in `env.MIRO_ACCESS_TOKEN`, reading secret files with `builtins.readFile`, or passing credentials as `devenv -O` arguments. The supported pattern follows [devenv's runtime SecretSpec guidance](https://devenv.sh/integrations/secretspec/).
 
 `.gitignore` prevents ordinary additions of matching untracked files; it is not encryption and does not untrack files already committed. If a credential is ever committed, revoke/rotate it. Removing the current file alone does not remove it from Git history.
