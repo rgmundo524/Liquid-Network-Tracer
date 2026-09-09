@@ -17,26 +17,48 @@ devenv shell
 ```
 
 ```bash
-python3 -m liquid_tracer trace \
-  --case ./demo-case \
-  --fixture examples/demo-api.json \
-  --seeds-file examples/demo-seeds.txt \
-  --hops 1
+liquid-demo
 ```
 
-The command prints its run ID and output directory. Inspect `nodes.csv`, `edges.csv`, `frontier.csv`, and `RUN.md`. All demo hashes and addresses are synthetic. Preview the number of Miro objects using the printed run ID:
+The command prints its run ID and output directory. Inspect `nodes.csv`, `edges.csv`, `frontier.csv`, and `RUN.md`. All demo hashes and addresses are synthetic. The case records its latest saved run, so you do not need to copy its ID into a shell variable.
+
+To try Miro, create an empty test board in the team where you authorized the app. Save its URL once in the ignored `devenv.local.nix` at the repository root:
+
+```nix
+{ lib, ... }:
+{
+  env.LIQUID_DEMO_MIRO_BOARD = lib.mkForce "https://miro.com/app/board/YOUR_DEMO_BOARD_ID/";
+}
+```
+
+Re-enter `devenv shell` after editing the file. Preview the latest demo run:
 
 ```bash
-python3 -m liquid_tracer miro-sync \
-  --case ./demo-case --run RUN_ID \
-  --board DEMO_BOARD --dry-run
+liquid-demo-preview
 ```
 
-This preview makes no network calls, needs no token, and writes no state. `DEMO_BOARD` is only a placeholder. It cannot detect remote manual edits or deleted items; live sync performs that preflight. Extend the demo using `trace --case ./demo-case --fixture examples/demo-api.json --resume RUN_ID --additional-hops 2`. The full demo ends in a **synthetic peg-out request**, not an actual Bitcoin payout or Avalanche transaction.
+This preview makes no network calls, needs no token, and writes no state. It cannot detect remote manual edits or deleted items; live sync performs that preflight. With your Miro access token stored through SecretSpec, create the demo graph:
+
+```bash
+liquid-demo-sync
+```
+
+Both helpers use the saved demo board and case directory every time. To extend the same demo after review:
+
+```bash
+liquid-trace trace \
+  --case "$LIQUID_DEMO_CASE_DIR" \
+  --fixture "$LIQUID_TRACER_ROOT/examples/demo-api.json" \
+  --resume latest --additional-hops 1
+liquid-demo-preview
+liquid-demo-sync
+```
+
+`liquid-demo` starts a fresh independent run each time. After publishing the first demo, use continuation as shown above to extend its graph; a new independent run cannot replace an existing board's lineage. The full demo ends in a **synthetic peg-out request**, not an actual Bitcoin payout or Avalanche transaction.
 
 If needed, add `--offline-preview` to `trace` or `export` to also save an HTML inspector and SVG. These are optional inspection files; normal runs use Miro for visual review.
 
-Inside the shell, `liquid-demo` runs the same synthetic trace. `liquid-trace` is the normal CLI; `liquid-live` loads credentials at runtime before calling it. `liquid-test` runs the offline suite. Outside devenv, Python 3.11+ still works with `python3 -m liquid_tracer`; optional installation is `python3 -m pip install -e .`.
+Inside the shell, `liquid-trace` is the normal CLI; `liquid-live` loads credentials at runtime before calling it. `liquid-test` runs the offline suite. Outside devenv, Python 3.11+ still works with `python3 -m liquid_tracer`; supply `--case` explicitly when no `LIQUID_CASE_DIR` is configured. Optional installation is `python3 -m pip install -e .`.
 
 Public defaults and command definitions live in `devenv.nix`. The package input is pinned in `devenv.yaml`; commit the generated `devenv.lock` after the first successful shell build. See [development and secrets](docs/development.md) for Proton Pass setup, profile overrides, and optional keyring or `.env` storage.
 
@@ -54,7 +76,34 @@ The default base is `https://enterprise.blockstream.info/liquid/api`. The client
 
 ## Trace a case
 
-Create `case-seeds.txt` with **one exact Liquid outpoint per line**:
+Set the live case directory and its board once in the same `devenv.local.nix`, then re-enter the shell. Keep the demo and live boards separate:
+
+```nix
+{ lib, config, ... }:
+{
+  env = {
+    LIQUID_CASE_DIR = lib.mkForce "${config.devenv.root}/cases/theft-liquid";
+    LIQUID_MIRO_BOARD = lib.mkForce "https://miro.com/app/board/YOUR_CASE_BOARD_ID/";
+    LIQUID_DEMO_MIRO_BOARD = lib.mkForce "https://miro.com/app/board/YOUR_DEMO_BOARD_ID/";
+  };
+}
+```
+
+These are persistent public settings; credential values remain in Proton Pass. The CLI uses the configured case directory when `--case` is omitted. An explicit argument always overrides the environment default.
+
+For a first live trial, select **one exact Liquid outpoint** and use small budgets:
+
+```bash
+liquid-live trace \
+  --seed 'YOUR_64_CHARACTER_LIQUID_TXID:0' \
+  --hops 1 \
+  --max-transactions 20 \
+  --max-outpoints 100 \
+  --max-requests 30 \
+  --max-seconds 60
+```
+
+For multiple seeds, create `case-seeds.txt` with one outpoint per line:
 
 ```text
 # Replace the placeholder with a real Liquid transaction hash.
@@ -63,43 +112,37 @@ YOUR_64_CHARACTER_LIQUID_TXID:0
 
 An outpoint is a transaction hash plus a zero-based output index. Seed only the relevant outputs. Seeding every output of a funding transaction would also include its unrelated recipients and change.
 
-```bash
-liquid-live trace \
-  --case ./cases/theft-liquid \
-  --seeds-file case-seeds.txt \
-  --hops 3 \
-  --max-transactions 250 \
-  --max-outpoints 2000 \
-  --max-requests 600 \
-  --max-seconds 300
-```
-
-You can repeat `--seed 'TXID:VOUT'` instead of using a file. A Bitcoin deposit into Liquid must first be linked to its Liquid transaction/output; a Bitcoin txid alone is not a Liquid seed. This version intentionally does not expand complete address histories.
+Replace `--seed ...` with `--seeds-file case-seeds.txt`, or repeat `--seed 'TXID:VOUT'`. A Bitcoin deposit into Liquid must first be linked to its Liquid transaction/output; a Bitcoin txid alone is not a Liquid seed. This version intentionally does not expand complete address histories.
 
 | Limit | Meaning |
 | --- | --- |
-| `--hops 3` | Seed outputs are hop 0; follow at most three spending transactions from them. |
-| `--max-transactions 250` | At most 250 newly added transactions this run, including seed funding transactions. |
-| `--max-outpoints 2000` | At most 2,000 output examinations this run, including terminal outputs. |
-| `--max-requests 600` | At most 600 HTTP attempts, including token requests and retries. This is **not a count of Blockstream credits**. |
-| `--max-seconds 300` | Stops traversal and bounds HTTP timeouts. Checkpoint/export filesystem work can finish afterward. |
+| `--hops 1` | Seed outputs are hop 0; follow at most one spending transaction from them. |
+| `--max-transactions 20` | At most 20 newly added transactions this run, including seed funding transactions. |
+| `--max-outpoints 100` | At most 100 output examinations this run, including terminal outputs. |
+| `--max-requests 30` | At most 30 HTTP attempts, including token requests and retries. This is **not a count of Blockstream credits**. |
+| `--max-seconds 60` | Stops traversal and bounds HTTP timeouts. Checkpoint/export filesystem work can finish afterward. |
 
 GET requests are spaced by `--min-interval`, default 0.25 seconds. Transient server errors retry at most three times, subject to the same budget. One outspends response serves all outputs of its transaction within a run.
 
 ## Continue after review
 
-Use the run ID printed by the prior command:
+Continue the configured case's latest saved run:
 
 ```bash
 liquid-live trace \
-  --case ./cases/theft-liquid \
-  --resume PRIOR_RUN_ID \
-  --additional-hops 3
+  --resume latest \
+  --additional-hops 1 \
+  --max-transactions 20 \
+  --max-outpoints 100 \
+  --max-requests 30 \
+  --max-seconds 60
 ```
 
-This creates a **new** run, preserves the parent, increases the absolute hop ceiling from 3 to 6, and reconsiders its unfinished branches. Request, time, transaction and output budgets reset for each run. The snapshot and graph are cumulative.
+This creates a **new** run, preserves the parent, increases the first trial's absolute hop ceiling from 1 to 2, and reconsiders its unfinished branches. Request, time, transaction and output budgets reset for each run. The snapshot and graph are cumulative.
 
-To finish a run stopped by its request budget without increasing depth, use `--resume PRIOR_RUN_ID` without `--additional-hops`. To extend selected branches, repeat `--only 'TXID:VOUT'`. Unselected frontier entries remain documented. Any new spending transaction exposes all of its outputs as candidates, even during selective continuation.
+`latest` resolves the run ID recorded in that case's `case.json`; it does not guess from file timestamps. The pointer advances only after a run's exports are saved, including runs that paused at a limit or recorded an error. Existing cases without the pointer need an explicit `--resume RUN_ID`. For a reproducible selection of a particular snapshot, use its explicit ID instead of `latest`.
+
+To finish a run stopped by its request budget without increasing depth, use `--resume latest` without `--additional-hops`, retaining the desired budgets. To extend selected branches, repeat `--only 'TXID:VOUT'`. Unselected frontier entries remain documented. Any new spending transaction exposes all of its outputs as candidates, even during selective continuation.
 
 `frontier.csv` records why each branch stopped: hop limit, unspent at observation, unconfirmed funding/spend, analyst stop, request/time/transaction/output limit, error, or interruption. `bounded_complete` means all currently selected tasks were examined within the hop ceiling; it does not mean every branch has a known destination.
 
@@ -135,14 +178,12 @@ Create or choose a Miro board and obtain an access token with **`boards:read` an
 ```bash
 liquid-secrets-setup miro
 
-liquid-trace miro-sync \
-  --case ./cases/theft-liquid --run RUN_ID \
-  --board 'https://miro.com/app/board/YOUR_BOARD_ID/' --dry-run
+liquid-trace miro-sync --dry-run
 
-liquid-live miro-sync \
-  --case ./cases/theft-liquid --run RUN_ID \
-  --board 'https://miro.com/app/board/YOUR_BOARD_ID/'
+liquid-live miro-sync
 ```
+
+These commands use `LIQUID_CASE_DIR`, `LIQUID_MIRO_BOARD`, and the case's latest saved run. The same commands work after each continuation. Explicit `--case`, `--board`, and `--run RUN_ID` arguments override those defaults. A configured board alone does not publish anything during tracing; run sync after reviewing the exports.
 
 Use the **same case directory and board** for later runs. Sync creates native [shapes](https://developers.miro.com/reference/create-shape-item-1) and [connectors](https://developers.miro.com/reference/create-connector-1), checks existing items, and updates compatible managed fields. It does not call Blockstream. A per-board state file under `case/miro/` maps stable graph IDs to remote item IDs, and `case/miro/reports/` retains sync reports separately from immutable run exports.
 
@@ -161,8 +202,9 @@ To trace and sync in one command:
 
 ```bash
 liquid-live trace \
-  --case ./cases/theft-liquid --resume PRIOR_RUN_ID --additional-hops 3 \
-  --miro-board 'https://miro.com/app/board/YOUR_BOARD_ID/'
+  --resume latest --additional-hops 1 \
+  --max-transactions 20 --max-outpoints 100 --max-requests 30 --max-seconds 60 \
+  --miro-board "$LIQUID_MIRO_BOARD"
 ```
 
 The run and checksums are saved before Miro updates. If sync fails, its run ID and retry details are printed; use `miro-sync` on that saved run without spending more explorer requests. A partial publication retains acknowledged progress.

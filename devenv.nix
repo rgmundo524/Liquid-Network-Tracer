@@ -13,6 +13,10 @@
   env = {
     LIQUID_TRACER_ROOT = config.devenv.root;
     LIQUID_CASE_DIR = "${config.devenv.root}/cases/current";
+    LIQUID_DEMO_CASE_DIR = "${config.devenv.root}/demo-case";
+    # Set board URLs once in devenv.local.nix. Keep test and case boards separate.
+    LIQUID_MIRO_BOARD = "";
+    LIQUID_DEMO_MIRO_BOARD = "";
     LIQUID_SECRET_PROVIDER = "protonpass";
     LIQUID_SECRET_PROFILE = "development";
   };
@@ -75,10 +79,36 @@
     description = "Run a synthetic one-hop trace without loading credentials";
     exec = ''
       exec liquid-trace trace \
-        --case "$LIQUID_TRACER_ROOT/demo-case" \
+        --case "$LIQUID_DEMO_CASE_DIR" \
         --fixture "$LIQUID_TRACER_ROOT/examples/demo-api.json" \
         --seeds-file "$LIQUID_TRACER_ROOT/examples/demo-seeds.txt" \
         --hops 1 "$@"
+    '';
+  };
+
+  scripts.liquid-demo-preview = {
+    description = "Preview the latest saved demo run for the configured test board";
+    exec = ''
+      if [ -z "$LIQUID_DEMO_MIRO_BOARD" ]; then
+        printf '%s\n' 'Set env.LIQUID_DEMO_MIRO_BOARD in devenv.local.nix, then reopen the shell.' >&2
+        exit 2
+      fi
+      exec liquid-trace miro-sync \
+        --case "$LIQUID_DEMO_CASE_DIR" --run latest \
+        --board "$LIQUID_DEMO_MIRO_BOARD" --dry-run "$@"
+    '';
+  };
+
+  scripts.liquid-demo-sync = {
+    description = "Sync the latest saved demo run to the configured test board";
+    exec = ''
+      if [ -z "$LIQUID_DEMO_MIRO_BOARD" ]; then
+        printf '%s\n' 'Set env.LIQUID_DEMO_MIRO_BOARD in devenv.local.nix, then reopen the shell.' >&2
+        exit 2
+      fi
+      exec liquid-live miro-sync \
+        --case "$LIQUID_DEMO_CASE_DIR" --run latest \
+        --board "$LIQUID_DEMO_MIRO_BOARD" "$@"
     '';
   };
 

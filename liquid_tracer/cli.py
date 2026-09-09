@@ -16,13 +16,16 @@ from .trace import new_state, trace
 
 
 def parser():
+    case_default = os.environ.get("LIQUID_CASE_DIR") or None
+    board_default = os.environ.get("LIQUID_MIRO_BOARD") or None
     root = argparse.ArgumentParser(description="Bounded Liquid UTXO reachability with saved evidence and Miro export")
     commands = root.add_subparsers(dest="command", required=True)
     run = commands.add_parser("trace", help="Start or extend a bounded run")
-    run.add_argument("--case", type=Path, required=True)
+    run.add_argument("--case", type=Path, default=case_default, required=case_default is None,
+                     help="Case directory (default: LIQUID_CASE_DIR)")
     run.add_argument("--seed", action="append", default=[], help="Liquid txid:vout; may be repeated")
     run.add_argument("--seeds-file", type=Path, help="One txid:vout per line; # comments allowed")
-    run.add_argument("--resume", help="Prior run ID in this case; extends its saved frontier")
+    run.add_argument("--resume", help="Prior run ID or latest in this case; extends its saved frontier")
     run.add_argument("--only", action="append", help="Resume only these frontier outpoints; may be repeated")
     run.add_argument("--hops", type=int, help="Absolute maximum hop depth (default: 3)")
     run.add_argument("--additional-hops", type=int, help="Increase the resumed run's hop ceiling by this many")
@@ -42,15 +45,18 @@ def parser():
     run.add_argument("--miro-board", help="Sync the saved run to this Miro board URL or ID")
     run.add_argument("--max-new-items", type=int, default=750, help="Maximum new Miro shapes plus connectors")
     export = commands.add_parser("export", help="Regenerate a run export without network calls")
-    export.add_argument("--case", type=Path, required=True)
-    export.add_argument("--run", required=True)
+    export.add_argument("--case", type=Path, default=case_default, required=case_default is None,
+                        help="Case directory (default: LIQUID_CASE_DIR)")
+    export.add_argument("--run", required=True, help="Saved run ID or latest")
     export.add_argument("--out", type=Path, required=True, help="New export directory")
     export.add_argument("--merge-addresses", action="store_true", default=None)
     export.add_argument("--offline-preview", action="store_true")
     update = commands.add_parser("miro-sync", help="Add a saved run to the existing case graph, preserving manual edits")
-    update.add_argument("--case", type=Path, required=True)
-    update.add_argument("--run", required=True)
-    update.add_argument("--board", required=True, help="Miro board URL or board ID")
+    update.add_argument("--case", type=Path, default=case_default, required=case_default is None,
+                        help="Case directory (default: LIQUID_CASE_DIR)")
+    update.add_argument("--run", default="latest", help="Saved run ID (default: latest)")
+    update.add_argument("--board", default=board_default, required=board_default is None,
+                        help="Miro board URL or board ID (default: LIQUID_MIRO_BOARD)")
     update.add_argument("--plan", type=Path, help="Use a regenerated miro-plan.json for this run")
     update.add_argument("--dry-run", action="store_true", help="Preview local new/mapped counts without network access or writes")
     update.add_argument("--max-new-items", type=int, default=750)
@@ -68,9 +74,36 @@ def parser():
 
 
 def run_path(case, run_id):
-    if not run_id.isalnum() or len(run_id) != 16:
+    if not isinstance(run_id, str) or not run_id.isalnum() or len(run_id) != 16:
         raise TraceError("Invalid run ID")
     return case / "runs" / run_id
+
+
+def resolve_latest(case, run_id):
+    """Resolve the explicitly saved pointer, never directory ordering or timestamps."""
+    if run_id != "latest":
+        return run_id
+    path = case / "case.json"
+    metadata = read_json(path) if path.exists() else {}
+    if not isinstance(metadata, dict):
+        raise TraceError("Invalid case metadata; restore the original case.json")
+    selected = metadata.get("latest_run")
+    if selected is None:
+        raise TraceError("No latest run is saved for this case; use an explicit run ID or create a new run")
+    try:
+        run_path(case, selected)
+    except TraceError:
+        raise TraceError("Invalid latest_run in case.json; use an explicit run ID or restore the saved pointer") from None
+    return selected
+
+
+def save_latest(case, run_id):
+    with (case / "case.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        path = case / "case.json"
+        metadata = read_json(path)
+        metadata["latest_run"] = run_id
+        save_json(path, metadata)
 
 
 def verify_export(directory):
@@ -125,6 +158,7 @@ def case_identity(case):
 
 
 def sync_run(case, run_id, board, max_new_items=750, dry_run=False, plan_path=None):
+    run_id = resolve_latest(case, run_id)
     target = board_id(board)
     default_plan = run_path(case, run_id) / "miro-plan.json"
     verify_export((plan_path or default_plan).parent)
@@ -161,35 +195,42 @@ def run_trace(args):
         raise TraceError("--only requires --resume")
     if args.additional_hops is not None and (not args.resume or args.hops is not None or args.additional_hops < 0):
         raise TraceError("--additional-hops requires --resume, must be nonnegative, and cannot be combined with --hops")
-    if args.resume:
-        verify_export(run_path(args.case, args.resume))
-    parent = read_json(run_path(args.case, args.resume) / "trace.json") if args.resume else None
-    hops = args.hops if args.hops is not None else (parent["limits"]["max_hops"] if parent else 3)
-    if args.additional_hops is not None:
-        hops += args.additional_hops
-    if parent and hops < parent["limits"]["max_hops"]:
-        raise TraceError("Continuation cannot lower its parent's hop ceiling; start a fresh run to narrow scope")
-    limits = Limits(hops, args.max_transactions, args.max_outpoints, args.max_requests, args.max_seconds)
-    limits.validate()
-    labels = load_labels(args.labels) if args.labels else (parent["labels"] if parent else [])
-    merge_addresses = bool(args.merge_addresses or (parent and parent.get("address_mode") == "merged"))
     args.case.mkdir(parents=True, exist_ok=True)
     with (args.case / "trace.lock").open("w") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise TraceError("Another trace is running in this case") from None
+        if args.resume:
+            args.resume = resolve_latest(args.case, args.resume)
+            verify_export(run_path(args.case, args.resume))
+        parent = read_json(run_path(args.case, args.resume) / "trace.json") if args.resume else None
+        identity = case_identity(args.case)
+        if parent and parent.get("case_id", identity) != identity:
+            raise TraceError("The resumed run belongs to a different case")
+        if parent and parent.get("run_id") != args.resume:
+            raise TraceError("Saved trace does not match the selected run")
+        hops = args.hops if args.hops is not None else (parent["limits"]["max_hops"] if parent else 3)
+        if args.additional_hops is not None:
+            hops += args.additional_hops
+        if parent and hops < parent["limits"]["max_hops"]:
+            raise TraceError("Continuation cannot lower its parent's hop ceiling; start a fresh run to narrow scope")
+        limits = Limits(hops, args.max_transactions, args.max_outpoints, args.max_requests, args.max_seconds)
+        limits.validate()
+        labels = load_labels(args.labels) if args.labels else (parent["labels"] if parent else [])
+        merge_addresses = bool(args.merge_addresses or (parent and parent.get("address_mode") == "merged"))
         store = Store(args.case)
         try:
             api = Esplora(store, "pending", limits, args.base_url, args.auth, args.fixture,
                           args.tx_cache_seconds, args.min_interval)
-            state = new_state(seeds, api.base, limits, labels, parent, case_id=case_identity(args.case))
+            state = new_state(seeds, api.base, limits, labels, parent, case_id=identity)
             state["address_mode"] = "merged" if merge_addresses else "outpoint_occurrences"
             api.run_id = state["run_id"]
             destination = run_path(args.case, state["run_id"])
             only = {f"{t}:{i}" for t, i in map(parse_outpoint, args.only)} if args.only else None
             state = trace(api, state, limits, destination / "trace.json", args.include_unconfirmed, only)
             export_run(store, state, destination, merge_addresses, args.offline_preview)
+            save_latest(args.case, state["run_id"])
             summary = {"run_id": state["run_id"], "status": state["status"],
                 "stop_reason": state.get("stop_reason"), "stats": state["stats"], "errors": state["errors"],
                 "directory": str(destination.resolve())}
@@ -216,10 +257,13 @@ def main(argv=None):
         if args.command == "export":
             if args.out.exists():
                 raise TraceError("Choose a new export directory to preserve earlier evidence")
+            args.run = resolve_latest(args.case, args.run)
             verify_export(run_path(args.case, args.run))
             store = Store(args.case)
             try:
                 state = read_json(run_path(args.case, args.run) / "trace.json")
+                if state.get("run_id") != args.run:
+                    raise TraceError("Saved trace does not match the selected run")
                 identity = case_identity(args.case)
                 if state.get("case_id", identity) != identity:
                     raise TraceError("The saved run belongs to a different case")

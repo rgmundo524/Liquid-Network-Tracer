@@ -27,7 +27,9 @@ Use a current devenv release with its bundled `secretspec` command. `devenv.yaml
 | `liquid-trace ...` | Calls the CLI using the existing process environment. Does not access a secret provider. |
 | `liquid-live ...` | Resolves project credentials through SecretSpec, then calls the same CLI. |
 | `liquid-secrets-setup [all\|blockstream\|miro]` | Prompts for selected credentials and stores them in the configured provider; defaults to all three. |
-| `liquid-demo` | Creates a synthetic one-hop run under `demo-case/`; no paid requests or credentials. |
+| `liquid-demo` | Creates a fresh synthetic one-hop run under `LIQUID_DEMO_CASE_DIR`; no paid requests or credentials. |
+| `liquid-demo-preview` | Previews the latest demo run on `LIQUID_DEMO_MIRO_BOARD`; no network requests or credentials. |
+| `liquid-demo-sync` | Loads credentials through SecretSpec and syncs the latest demo run to its configured Miro board. |
 | `liquid-test` | Runs the offline test suite. |
 
 The launchers locate the source and secret declaration using `LIQUID_TRACER_ROOT`, preserving your working directory for relative case paths.
@@ -40,33 +42,86 @@ The committed defaults are:
 env = {
   LIQUID_TRACER_ROOT = config.devenv.root;
   LIQUID_CASE_DIR = "${config.devenv.root}/cases/current";
+  LIQUID_DEMO_CASE_DIR = "${config.devenv.root}/demo-case";
+  LIQUID_MIRO_BOARD = "";
+  LIQUID_DEMO_MIRO_BOARD = "";
   LIQUID_SECRET_PROVIDER = "protonpass";
   LIQUID_SECRET_PROFILE = "development";
 };
 ```
 
-Override the case directory for a shell, using your existing `-O` workflow:
+Keep personal settings in the ignored `devenv.local.nix` at the repository root. Set the case directory and board URLs once:
+
+```nix
+{ lib, config, ... }:
+{
+  env = {
+    LIQUID_CASE_DIR = lib.mkForce "${config.devenv.root}/cases/my-case";
+    LIQUID_MIRO_BOARD = lib.mkForce "https://miro.com/app/board/YOUR_CASE_BOARD_ID/";
+    LIQUID_DEMO_MIRO_BOARD = lib.mkForce "https://miro.com/app/board/YOUR_DEMO_BOARD_ID/";
+  };
+}
+```
+
+Re-enter `devenv shell` after editing this file. Its settings apply on subsequent shell entries without manually setting variables. Keep demo and case boards separate. Board URLs and case paths are configuration; API credentials stay in Proton Pass. Ignoring a Nix file in Git does not prevent evaluated secret strings from entering generated Nix artifacts.
+
+For a temporary override, your existing `-O` workflow still works:
 
 ```bash
 devenv -O env.LIQUID_CASE_DIR:string /absolute/path/to/my-case shell
 ```
 
-Then, inside that shell:
+`trace`, `export`, and `miro-sync` use `LIQUID_CASE_DIR` when `--case` is omitted. `miro-sync` uses `LIQUID_MIRO_BOARD` when `--board` is omitted and selects `--run latest` by default. Explicit CLI arguments take precedence. Outside an environment that defines these settings, supply the case path and board explicitly. A board setting does not make `trace` publish automatically; publication during tracing requires an explicit `--miro-board` argument.
+
+## Repeat the same workflow
+
+The first demo run and Miro trial use these commands inside the configured shell:
 
 ```bash
-liquid-live trace --case "$LIQUID_CASE_DIR" --seed 'LIQUID_TXID:0' --hops 3
+liquid-demo
+liquid-demo-preview
+liquid-demo-sync
 ```
 
-`LIQUID_CASE_DIR` is a convenience variable; pass it to `--case` as shown. It does not silently change explicit CLI arguments. A persistent personal override can go in ignored `devenv.local.nix`:
+Only `liquid-demo-sync` contacts Miro and retrieves credentials. To extend that demo graph, resume it instead of starting another fresh demo:
 
-```nix
-{ lib, ... }:
-{
-  env.LIQUID_CASE_DIR = lib.mkForce "/absolute/path/to/my-case";
-}
+```bash
+liquid-trace trace \
+  --case "$LIQUID_DEMO_CASE_DIR" \
+  --fixture "$LIQUID_TRACER_ROOT/examples/demo-api.json" \
+  --resume latest --additional-hops 1
+liquid-demo-preview
+liquid-demo-sync
 ```
 
-Only use that file for nonsecret settings. Ignoring a Nix file in Git does not prevent evaluated secret strings from entering generated Nix artifacts.
+Running `liquid-demo` again creates an independent root and updates the demo case's latest pointer. An already published board requires continuation of its existing lineage, so a fresh root cannot replace it. Use an explicit prior run ID if you need to return to that lineage.
+
+For a live case, start with an exact Liquid transaction output and small budgets:
+
+```bash
+liquid-live trace \
+  --seed 'LIQUID_TXID:OUTPUT_INDEX' --hops 1 \
+  --max-transactions 20 --max-outpoints 100 --max-requests 30 --max-seconds 60
+```
+
+After reviewing the run's exported files, preview and update the configured case board:
+
+```bash
+liquid-trace miro-sync --dry-run
+liquid-live miro-sync
+```
+
+For each subsequent run, continue one more hop with the same per-run budgets:
+
+```bash
+liquid-live trace \
+  --resume latest --additional-hops 1 \
+  --max-transactions 20 --max-outpoints 100 --max-requests 30 --max-seconds 60
+liquid-trace miro-sync --dry-run
+liquid-live miro-sync
+```
+
+`latest` reads the `latest_run` pointer in the configured case's `case.json`. Each new run updates that pointer after its exports finish successfully, including saved runs paused by a budget or an error. It does not depend on shell history or directory timestamps. The evidence retains the actual run ID and parent. Existing cases without a pointer require an explicit run ID; the program does not guess. Use `--run RUN_ID` for sync or export, or `--resume RUN_ID` for tracing, when you need to select a particular snapshot. `export --run latest --out NEW_DIRECTORY` also accepts the pointer.
 
 ## Store secrets in Proton Pass
 
@@ -102,8 +157,9 @@ secretspec --file "$LIQUID_TRACER_ROOT/secretspec.toml" check \
 Confirm that each credential you intend to use is resolved. An optional missing entry does not cause this check to fail. This checks secret resolution, not whether Blockstream or Miro accepts the credential.
 
 ```bash
-liquid-live trace --case "$LIQUID_CASE_DIR" --seed 'LIQUID_TXID:0' --hops 3
-liquid-live miro-sync --case "$LIQUID_CASE_DIR" --run RUN_ID --board 'MIRO_BOARD_URL'
+liquid-live trace --seed 'LIQUID_TXID:0' --hops 1 \
+  --max-transactions 20 --max-outpoints 100 --max-requests 30 --max-seconds 60
+liquid-live miro-sync
 ```
 
 The manifest marks credentials optional because different commands need different services. The existing application checks Blockstream credentials for authenticated tracing and the Miro token for live sync. Set only the services you use. Secret values are provided to the child process environment and are not added to the interactive parent shell. They remain readable by the process that needs them; environment variables are a delivery mechanism, not encrypted storage.
