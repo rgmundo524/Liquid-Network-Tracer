@@ -54,12 +54,19 @@ def make_plan(graph):
             "geometry": {"width": node["width"], "height": node["height"]},
             "style": {"fillColor": node["color"], "fillOpacity": "1", "borderColor": "#334155", "borderWidth": "2",
                       "fontSize": "12", "textAlign": "center", "textAlignVertical": "middle"}}})
+    transaction_keys = {node["id"] for node in graph["nodes"] if node["kind"] == "transaction"}
     for edge in graph["edges"]:
-        connectors.append({"key": edge["id"], "source": edge["source"], "target": edge["target"], "body": {
+        connector = {"key": edge["id"], "source": edge["source"], "target": edge["target"], "body": {
             "shape": "curved", "captions": [{"content": html.escape(edge["label"] + " · " + edge["quantity"]), "position": "50%"}],
             "style": {"startStrokeCap": "none", "endStrokeCap": "stealth", "strokeStyle": "normal",
                       "strokeColor": edge_color(edge["role"]),
-                      "strokeWidth": "2", "fontSize": "11"}}})
+                      "strokeWidth": "2", "fontSize": "11"}}}
+        if graph.get("connector_attachment") == "transaction_sides_v1":
+            connector["attachment"] = {}
+            for field, logical, side in (("startItem", "source", "right"), ("endItem", "target", "left")):
+                if edge[logical] in transaction_keys:
+                    connector["attachment"][field] = {"snapTo": side}
+        connectors.append(connector)
     if graph.get("layout"):
         # The graph supplies its actual top bound, including the optional fee row.
         top = min((node["y"] - node["height"] / 2 for node in graph["nodes"]), default=0)
@@ -72,7 +79,7 @@ def make_plan(graph):
             if name in annotations:
                 shape["body"]["position"].update({field: annotations[name][field] for field in ("x", "y")})
     plan = {"schema_version": 2 if incremental else 1, "run_id": graph["run_id"], "shapes": shapes, "connectors": connectors}
-    for key in ("layout", "fee_items", "include_fees"):
+    for key in ("layout", "fee_items", "include_fees", "connector_attachment"):
         if key in graph:
             plan[key] = copy.deepcopy(graph[key])
     if "fee_items" in graph:
@@ -127,7 +134,48 @@ def validate_plan(plan):
     for item in plan["connectors"]:
         if item.get("source") not in shape_keys or item.get("target") not in shape_keys or item["source"] == item["target"]:
             raise TraceError("Invalid Miro connector endpoints")
+    _validate_attachments(plan)
     _fee_catalog(plan)
+
+
+def _validate_attachments(plan):
+    policy = plan.get("connector_attachment")
+    if policy is not None and policy != "transaction_sides_v1":
+        raise TraceError("Unsupported Miro connector attachment policy; regenerate the export")
+    transactions = {item["key"] for item in plan["shapes"]
+                    if item["key"].startswith("tx:") and item["body"]["data"]["shape"] == "rectangle"}
+    for item in plan["connectors"]:
+        if policy is None:
+            if "attachment" in item:
+                raise TraceError("Miro connector attachment needs a declared policy; regenerate the export")
+            continue
+        expected = {field: {"snapTo": side}
+                    for field, logical, side in (("startItem", "source", "right"), ("endItem", "target", "left"))
+                    if item[logical] in transactions}
+        if item.get("attachment") != expected:
+            raise TraceError("Miro transaction connector sides disagree with their endpoints; regenerate the export")
+
+
+def _connection_body(item, source_id, target_id):
+    """Add remote IDs only at the API boundary; plans never choose remote targets.
+
+    Miro REST accepts exactly one of snapTo or position on an attachment.
+    snapTo selects the side midpoint; the address/event end stays automatic.
+    https://developers.miro.com/reference/create-connector-1
+    https://github.com/miroapp/api-clients/blob/main/packages/miro-api/model/itemConnectionCreationData.ts
+    """
+    return {field: {"id": item_id, **item.get("attachment", {}).get(field, {"snapTo": "auto"})}
+            for field, item_id in (("startItem", source_id), ("endItem", target_id))}
+
+
+def _attachment_patch(item, remote):
+    # GET commonly reports a percentage position without its snapTo setting.
+    # Even after we applied a fixed side, a manual reset to auto can coincide
+    # with that midpoint. Explicit organization reasserts ambiguous settings;
+    # ordinary sync never calls this helper or changes attachment routing.
+    return {field: {"id": remote[field]["id"], **desired}
+            for field, desired in item.get("attachment", {}).items()
+            if remote[field].get("snapTo") != desired["snapTo"]}
 
 
 def _namespace(plan):
@@ -169,7 +217,7 @@ def _load_sync_state(path, board_id, namespace):
 
 
 def _editable(body, endpoint):
-    """Only fields we may update. Geometry, parent, routing and endpoints stay untouched."""
+    """Fields ordinary sync may update. Explicit organization handles layout separately."""
     result = {}
     if endpoint == "shapes" and "content" in body.get("data", {}):
         result["data"] = {"content": copy.deepcopy(body["data"]["content"])}
@@ -631,7 +679,7 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
 
         _check_fee_removals(state, remote, removals)
         positions, shift_x = _placements(plan, state, remote, removals, reorganize)
-        updates, conflicts = [], []
+        updates, conflicts, attachment_intents = [], [], {}
         for endpoint, collection in collections:
             for item in collection:
                 key = item["key"]
@@ -649,16 +697,26 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
                     x, y = positions[key]
                     if any(float(remote[key]["position"][field]) != value for field, value in (("x", x), ("y", y))):
                         patch["position"] = {"x": x, "y": y, "origin": "center"}
+                if reorganize and endpoint == "connectors" and item.get("attachment"):
+                    patch.update(_attachment_patch(item, remote[key]))
+                    attachment_intents[key] = copy.deepcopy(item["attachment"])
                 conflicts.extend(item_conflicts)
                 updates.append((key, patch, managed, intent))
         # State changes begin only after local and remote preflight succeeds.
-        report.update({"created": 0, "updated": 0, "deleted": 0, "moved": 0,
+        report.update({"created": 0, "updated": 0, "deleted": 0, "moved": 0, "reattached": 0,
                        "conflicts": conflicts, "new_batch_offset_x": shift_x})
         changes = [{"key": key, "item_id": state["items"][key]["id"],
                     "before": copy.deepcopy(remote[key]["position"]), "after": copy.deepcopy(patch["position"])}
                    for key, patch, _, _ in updates if "position" in patch]
-        if changes:
-            snapshot = {"recorded_at": now(), "run_id": plan["run_id"], "plan_sha256": plan["sha256"], "positions": changes}
+        attachment_changes = [{"key": key, "item_id": state["items"][key]["id"],
+                               "before": {field: {name: copy.deepcopy(value) for name, value in remote[key][field].items()
+                                                  if name in ("id", "snapTo", "position")}
+                                          for field in ("startItem", "endItem") if field in patch},
+                               "after": {field: copy.deepcopy(patch[field]) for field in ("startItem", "endItem") if field in patch}}
+                              for key, patch, _, _ in updates if "startItem" in patch or "endItem" in patch]
+        if changes or attachment_changes:
+            snapshot = {"recorded_at": now(), "run_id": plan["run_id"], "plan_sha256": plan["sha256"],
+                        "positions": changes, "attachments": attachment_changes}
             state.setdefault("layout_history", []).append(snapshot)
             report["layout_snapshot"] = copy.deepcopy(snapshot)
         state["active_run_id"] = plan["run_id"]
@@ -693,7 +751,11 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
                 report["updated"] += 1
                 if "position" in patch:
                     report["moved"] += 1
+                if "startItem" in patch or "endItem" in patch:
+                    report["reattached"] += 1
             record["managed"], record["intent"] = managed, intent
+            if key in attachment_intents:
+                record.setdefault("attachments", {}).update(attachment_intents[key])
             save_json(state_path, state)
         for endpoint, collection in collections:
             for item in collection:
@@ -704,13 +766,15 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
                 if endpoint == "shapes":
                     body["position"].update(dict(zip(("x", "y"), positions[key])))
                 else:
-                    body.update({"startItem": {"id": state["items"][item["source"]]["id"], "snapTo": "auto"},
-                                 "endItem": {"id": state["items"][item["target"]]["id"], "snapTo": "auto"}})
+                    body.update(_connection_body(item, state["items"][item["source"]]["id"],
+                                                 state["items"][item["target"]]["id"]))
                 pending = {"key": key, "endpoint": endpoint, "body": body, "run_id": plan["run_id"]}
                 if key in plan.get("fee_items", {}):
                     pending["fee_proof"] = copy.deepcopy(plan["fee_items"][key])
                 if endpoint == "connectors":
                     pending.update({"source": item["source"], "target": item["target"]})
+                    if item.get("attachment"):
+                        pending["attachments"] = copy.deepcopy(item["attachment"])
                 for attempt in range(4):
                     state["pending"] = pending
                     save_json(state_path, state)
@@ -755,6 +819,8 @@ def _record_pending(pending, item_id, response=None):
               "managed": _baseline(intent, response or {}, pending["endpoint"])}
     if pending["endpoint"] == "connectors":
         record.update({"source": pending["source"], "target": pending["target"]})
+        if pending.get("attachments"):
+            record["attachments"] = copy.deepcopy(pending["attachments"])
     if "fee_proof" in pending:
         record["fee_proof"] = copy.deepcopy(pending["fee_proof"])
     return record
@@ -797,8 +863,7 @@ def publish(plan, board_id, state_path, max_items=750, token=None, transport=htt
                     continue
                 body = dict(item["body"])
                 if endpoint == "connectors":
-                    body.update({"startItem": {"id": state["items"][item["source"]], "snapTo": "auto"},
-                                 "endItem": {"id": state["items"][item["target"]], "snapTo": "auto"}})
+                    body.update(_connection_body(item, state["items"][item["source"]], state["items"][item["target"]]))
                 for attempt in range(4):
                     state["pending"] = {"key": key, "endpoint": endpoint}
                     save_json(state_path, state)

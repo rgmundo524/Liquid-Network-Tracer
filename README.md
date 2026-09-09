@@ -12,7 +12,8 @@ The graph legend uses the same palette as its nodes and connectors:
 
 | Appearance | Meaning |
 | --- | --- |
-| Blue squares | Transactions, including the starting transactions. |
+| Purple squares | Provided starting transactions, including those also reached through another starting transaction. |
+| Blue squares | Subsequent transactions outside the provided starting set. |
 | Red circles | Selected starting outputs. |
 | Yellow circles | Reachable candidate outputs. |
 | Light gray circles | Context addresses. |
@@ -20,11 +21,17 @@ The graph legend uses the same palette as its nodes and connectors:
 | Pink diamonds | Fees, unspendable outputs, or peg-out requests. |
 | Dark teal / gray arrows | Traced UTXO links / context connections. |
 
-Where circle roles overlap, attribution takes precedence over seed, then candidate, then context. This also applies when addresses are merged. Colors describe graph roles; they do not establish ownership or allocate stolen value. Run notes show counts of starting outputs and transactions while the full seed list stays in the saved run data.
+Starting-transaction color comes from the saved seed transaction hashes, independently of hop depth, and remains purple across continuations. Where circle roles overlap, attribution takes precedence over seed, then candidate, then context. This also applies when addresses are merged. Colors describe graph roles; they do not establish ownership or allocate stolen value. Run notes show counts of starting outputs and transactions while the full seed list stays in the saved run data.
 
-The default layout follows recorded transaction dependencies from left to right, including related transactions selected together as starting points. Inputs sit to the left of their transaction and outputs to the right, with connected items grouped into nearby rows. Separate components use separate lanes. Reused addresses remain distinct UTXO occurrences by default; merging them can introduce return edges that cannot all point right.
+The default layout follows recorded transaction dependencies from left to right, including related transactions selected together as starting points. Inputs sit to the left of their transaction and outputs to the right, with connected items grouped into nearby rows. Columns are spaced 360 units apart and rows have at least 240 units between node centers, leaving more room around 160-unit nodes. Separate components use separate lanes. Reused addresses remain distinct UTXO occurrences by default; merging them can introduce return edges that cannot all point right.
+
+Transaction connectors attach to fixed sides: inputs enter the left and outputs leave the right, including outputs connected to the fee row. These attachment sides remain the same when a related address is moved above, below, or behind the transaction. New connectors use this convention automatically. Choose **Organize Miro graph** to apply it to existing connectors; normal sync preserves their existing attachment choices.
 
 **Include transaction fee flows** is a checkbox in investigation settings and the defaults for new investigations. It starts unchecked. When included, fees appear in a horizontal row above the main flow, ordered by available chain chronology with deterministic tie handling. Excluding fees changes the graph only: fee amounts, events, and API observations remain in the evidence exports.
+
+The pink diamonds identify special outputs. **PEG-OUT REQUEST** records Esplora's parsed withdrawal instruction to the parent chain. On Liquid mainnet, a normal L-BTC peg-out burns L-BTC and requests a Bitcoin payout to the encoded destination. The tracer has not matched or confirmed that separate Bitcoin payout, and the label does not identify an Avalanche bridge. See [Blockstream's peg-out explanation](https://help.blockstream.com/liquid-network/faqs/what-is-a-liquid-peg-out) and the [Esplora transaction fields](https://github.com/blockstream/esplora/blob/master/API.md#transaction-format).
+
+**UNSPENDABLE** means the recorded script is identified as `OP_RETURN`, preventing that output from being spent later. The individual output branch ends there; other spendable outputs from the transaction can still be traced. Such an output may carry data or represent a burn, but Liquid can also add zero-value unspendable outputs when constructing confidential transactions. When the amount or asset is `??`, do not infer a positive-value L-BTC burn from the diamond alone. See the [Elements blinding documentation](https://elementsproject.org/en/doc/22.0.0/rpc/wallet/blindrawtransaction/) and [null-data script explanation](https://developer.bitcoin.org/devguide/transactions.html#null-data).
 
 ## Start the program
 
@@ -263,7 +270,7 @@ A configured board alone does not publish anything during tracing; run sync afte
 
 Normal **Preview Miro** and **Sync to Miro** rebuild the current graph presentation in memory from the verified saved trace and current fee setting. This applies display changes without another Blockstream request or changes to archived run files. Live sync updates managed labels and colors while retaining manual edits and positions. Reports record the archived and rendered plan hashes and presentation version. An explicit `--plan` continues to use that verified plan as supplied.
 
-To reorganize an existing board, choose **Organize Miro graph** from the investigation menu. Review the action and confirm it to arrange the managed graph from left to right using the saved run. This explicitly changes positions; normal sync preserves your manual arrangement. Existing dimensions and manual annotations remain intact. Previous coordinates are recorded with the sync state for review. The operation considers mapped items; it cannot guarantee separation from unrelated content elsewhere on the board.
+To reorganize an existing board, choose **Organize Miro graph** from the investigation menu. Review the action and confirm it to arrange the managed graph from left to right using the saved run. This explicitly changes positions and transaction connector attachment sides; normal sync preserves your manual arrangement. Existing dimensions and manual annotations remain intact. Previous coordinates and changed connector attachments are recorded with the sync state for review. The operation considers mapped items; it cannot guarantee separation from unrelated content elsewhere on the board.
 
 The equivalent direct command is:
 
@@ -276,7 +283,7 @@ liquid-live miro-sync --case cases/theft-liquid --reorganize
 Use the **same case directory and board** for later runs. Sync creates native [shapes](https://developers.miro.com/reference/create-shape-item-1) and [connectors](https://developers.miro.com/reference/create-connector-1), checks existing items, and updates compatible managed fields. It does not call Blockstream. A per-board state file under `case/miro/` maps stable graph IDs to remote item IDs, and `case/miro/reports/` retains sync reports separately from immutable run exports.
 
 - Repeating the same run creates no duplicate acknowledged objects. A newer continuation adds new objects and a run note; already mapped circles and squares are reused.
-- Normal sync preserves existing positions and dimensions. New items from the current layout are placed relative to connected mapped items and avoid mapped shape bounds. Explicit **Organize Miro graph** changes managed positions while preserving dimensions. Legacy plans retain their original batch-placement behavior.
+- Normal sync preserves existing positions, dimensions, and connector attachment choices. New items from the current layout are placed relative to connected mapped items and avoid mapped shape bounds. Explicit **Organize Miro graph** changes managed positions and applies the current plan's transaction attachment sides while preserving dimensions. Legacy plans retain their original placement and attachment behavior.
 - Keep mapped shapes on the board canvas. Items with frame/group-relative coordinates stop sync before writes; nested layouts are not supported in this version.
 - Existing content, captions and styles are updated only where the current value still matches the program's saved baseline. Analyst edits are retained and listed as conflicts in the report. Avoid simultaneous content/style edits during a live sync: the API check and update are separate requests.
 - Excluding fees removes only generated fee connectors and diamonds identified from the saved trace. Edited fee labels, captions, or managed styles stop removal before board writes. Extra comments and unmapped connectors attached to fee diamonds are outside those checks; retain fees when these annotations need to remain attached. Enabling fees again recreates their representations. Other mapped objects are retained; an unexpectedly missing object or changed connector endpoint stops sync for inspection. Interrupted fee removals retain recovery state.

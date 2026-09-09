@@ -8,10 +8,11 @@ from .common import (LBTC, TraceError, canonical, digest, match_labels, output_k
 from .trace import TERMINAL
 from .layout import arrange, fee_date, transaction_ranks
 
-PRESENTATION_VERSION = 3
+PRESENTATION_VERSION = 4
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
+    "starting_transaction": ("Purple", "#c4b5fd"),
     "transaction": ("Blue", "#a6ccf5"),
     "address": ("Light gray", "#f5f6f8"),
     "seed": ("Red", "#f16c7f"),
@@ -29,7 +30,8 @@ def legend_lines():
     def name(key):
         return PALETTE[key][0]
     return [
-        f"{name('transaction')} squares: transactions, including starting transactions. {name('event')} diamonds: events.",
+        f"Squares: {name('starting_transaction').lower()} = provided starting transactions; {name('transaction').lower()} = subsequent hops. Starting role takes priority.",
+        f"{name('event')} diamonds: events. Transaction inputs enter on the left; outputs leave on the right.",
         f"Circles: {name('seed').lower()} = selected seed outputs; {name('candidate').lower()} = reachable candidate outputs.",
         f"Circles: {name('address').lower()} = context; {name('attributed').lower()} = analyst attribution (read confidence).",
         f"Arrows: {name('traced_edge').lower()} = traced UTXO links; {name('context_edge').lower()} = context only.",
@@ -56,6 +58,7 @@ def short(value):
 
 def build_graph(state, merge_addresses=False, include_fees=False):
     nodes, edges, fee_items = {}, [], {}
+    starting_transactions = {seed.rsplit(":", 1)[0] for seed in state["seeds"]}
     ranks, cycle_groups = transaction_ranks(state["transactions"])
     source = state["source"]
     explorer = "https://blockstream.info/" + ("liquidtestnet" if "liquidtestnet" in source else "liquid")
@@ -113,9 +116,11 @@ def build_graph(state, merge_addresses=False, include_fees=False):
     for txid, record in sorted(state["transactions"].items(), key=lambda item: (ranks[item[0]], item[0])):
         tx = record["data"]
         column = 2 * ranks[txid] + 1
+        role = "starting_transaction" if txid in starting_transactions else "transaction"
         txnode = add_node("tx:" + txid, "transaction", "TX\n" + short(txid) + "\nhop " + str(record["depth"]),
                           column, {"transaction": tx, "observation_id": record["observation_id"]},
-                          None if simulated else explorer + "/tx/" + txid)
+                          None if simulated else explorer + "/tx/" + txid, COLORS[role])
+        nodes[txnode]["role"] = role
         for index, vin in enumerate(tx["vin"]):
             key = f"{vin.get('txid', txid)}:{vin.get('vout', index)}"
             network = "bitcoin" if vin.get("is_pegin") else "liquid"
@@ -154,6 +159,7 @@ def build_graph(state, merge_addresses=False, include_fees=False):
             "run": {key: state.get(key) for key in ("run_id", "parent_run", "ancestor_runs", "seeds", "started_at", "finished_at",
                     "status", "stop_reason", "limits", "stats")},
             "address_mode": mode,
+            "connector_attachment": "transaction_sides_v1",
             "include_fees": bool(include_fees),
             "graph_options": {"include_fees": bool(include_fees)},
             "fee_items": fee_items, "layout": layout,
@@ -174,14 +180,67 @@ def write_csv(path, rows, fields):
             writer.writerow(values)
 
 
+def _svg_edge_route(start, end):
+    """Keep transaction ports fixed, including return edges and the fee row."""
+    def attachment(node, other, source):
+        x, y = node["x"], node["y"]
+        if node["kind"] == "transaction":
+            direction = 1 if source else -1
+            return (x + node["width"] / 2 * direction, y), (direction, 0)
+        dx = other["x"] - x
+        # Horizontal address/event ports keep a same-column reused circle's
+        # input on the transaction's left and its output on the right, without
+        # routing a vertical segment through that transaction's rectangle.
+        direction = (1 if dx > 0 else -1) if dx else (-1 if source else 1)
+        return (x + node["width"] / 2 * direction, y), (direction, 0)
+
+    first, outgoing = attachment(start, end, True)
+    last, incoming = attachment(end, start, False)
+    x1, y1 = first
+    x2, y2 = last
+    reach = max(60, min(220, abs(x2 - x1) * .45 + abs(y2 - y1) * .15))
+    control1 = (x1 + outgoing[0] * reach, y1 + outgoing[1] * reach)
+    control2 = (x2 + incoming[0] * reach, y2 + incoming[1] * reach)
+    if x2 < x1:
+        # Keep the first and last bends outside their transaction rectangles.
+        # One wide cubic can double back through a rectangle even though its
+        # endpoint is on the correct side. A separate cross-row segment avoids
+        # that ambiguity, including backward paths up to the fee row.
+        clearance = max(start["height"], end["height"]) / 2 + 50
+        lane_y = ((y1 + y2) / 2 if abs(y2 - y1) >= 2 * clearance
+                  else min(y1, y2) - clearance)
+        middle = ((x1 + x2) / 2, lane_y)
+        direction = 1 if control2[0] > control1[0] else -1
+        corner = min(40, abs(control2[0] - control1[0]) / 4)
+        turn1 = (control1[0] + direction * corner, lane_y)
+        turn2 = (control2[0] - direction * corner, lane_y)
+        segments = ((control1, (control1[0], lane_y), turn1),
+                    ((turn1[0] + direction * corner, lane_y),
+                     (turn2[0] - direction * corner, lane_y), turn2),
+                    ((control2[0], lane_y), control2, last))
+        label = middle
+    else:
+        segments = ((control1, control2, last),)
+        # Position the caption on the curve rather than on its chord.
+        label = ((x1 + 3 * control1[0] + 3 * control2[0] + x2) / 8,
+                 (y1 + 3 * control1[1] + 3 * control2[1] + y2) / 8)
+    path = f"M {x1} {y1} " + " ".join(
+        "C " + ", ".join(f"{x} {y}" for x, y in segment) for segment in segments)
+    return path, label, [first] + [point for segment in segments for point in segment]
+
+
 def svg_graph(graph):
     lookup = {n["id"]: n for n in graph["nodes"]}
-    node_top = min((n["y"] - n["height"] / 2 for n in lookup.values()), default=160)
-    header_top = node_top - 170
-    min_x = min(0, min((n["x"] - n["width"] / 2 for n in lookup.values()), default=0) - 30)
+    routes = [(edge, _svg_edge_route(lookup[edge["source"]], lookup[edge["target"]]))
+              for edge in graph["edges"]]
+    bounds = [(n["x"] - n["width"] / 2, n["y"] - n["height"] / 2) for n in lookup.values()]
+    bounds += [(n["x"] + n["width"] / 2, n["y"] + n["height"] / 2) for n in lookup.values()]
+    bounds += [point for _, (_, _, points) in routes for point in points]
+    header_top = min((y for _, y in bounds), default=160) - 170
+    min_x = min(0, min((x for x, _ in bounds), default=0) - 30)
     min_y = min(0, header_top - 30)
-    width = max(1100, max((n["x"] + n["width"] / 2 for n in lookup.values()), default=500) + 80) - min_x
-    height = max((n["y"] + n["height"] / 2 for n in lookup.values()), default=300) + 50 - min_y
+    width = max(1100, max((x for x, _ in bounds), default=500) + 80) - min_x
+    height = max((y for _, y in bounds), default=300) + 50 - min_y
     chunks = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{min_x} {min_y} {width} {height}" width="{width}" height="{height}">',
         '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/></marker></defs>',
         f'<rect x="{min_x}" y="{min_y}" width="{width}" height="{height}" fill="#fff"/>',
@@ -189,24 +248,12 @@ def svg_graph(graph):
         f'<text x="40" y="{header_top}" font-size="24" font-weight="bold">Liquid UTXO trace' + (' · SYNTHETIC DEMO' if graph["simulated"] else '') + '</text>']
     chunks.extend(f'<text x="40" y="{header_top + 24 + index * 18}" font-size="13">{html.escape(line)}</text>'
                   for index, line in enumerate(legend_lines()))
-    for edge in graph["edges"]:
-        start, end = lookup[edge["source"]], lookup[edge["target"]]
-        fee = graph.get("fee_items", {}).get(edge["id"], {}).get("endpoint") == "connectors"
-        vertical = fee or start["x"] == end["x"]
-        if vertical:
-            direction = 1 if end["y"] > start["y"] else -1
-            x1, y1, x2, y2 = start["x"], start["y"] + 80 * direction, end["x"], end["y"] - 80 * direction
-        else:
-            direction = 1 if end["x"] > start["x"] else -1
-            x1, y1, x2, y2 = start["x"] + 80 * direction, start["y"], end["x"] - 80 * direction, end["y"]
+    for edge, (path, (label_x, label_y), _) in routes:
         context = edge["role"].startswith("context")
         color = edge_color(edge["role"])
-        mid = (x1 + x2) / 2
-        controls = (f'{x1} {(y1+y2)/2}, {x2} {(y1+y2)/2}' if vertical
-                    else f'{mid} {y1}, {mid} {y2}')
-        chunks.append(f'<g class="edge {"context" if context else "tracked"}"><title>{html.escape(edge["outpoint"] + " | " + edge["quantity"])}</title>'
-            f'<path d="M {x1} {y1} C {controls}, {x2} {y2}" fill="none" stroke="{color}" stroke-width="2" marker-end="url(#arrow)"/>'
-            f'<text x="{mid}" y="{(y1+y2)/2-10}" text-anchor="middle" font-size="11" fill="{color}">{html.escape(edge["label"])}</text></g>')
+        chunks.append(f'<g class="edge {"context" if context else "tracked"}" data-edge-key="{html.escape(edge["id"], quote=True)}"><title>{html.escape(edge["outpoint"] + " | " + edge["quantity"])}</title>'
+            f'<path d="{path}" fill="none" stroke="{color}" stroke-width="2" marker-end="url(#arrow)"/>'
+            f'<text x="{label_x}" y="{label_y-10}" text-anchor="middle" font-size="11" fill="{color}">{html.escape(edge["label"])}</text></g>')
     for node in graph["nodes"]:
         x, y, fill = node["x"], node["y"], node["color"]
         chunks.append(f'<g class="node" data-key="{html.escape(node["id"], quote=True)}" tabindex="0" style="cursor:pointer"><title>{html.escape(json.dumps(node["details"], ensure_ascii=False))}</title>')

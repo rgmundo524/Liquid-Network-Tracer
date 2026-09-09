@@ -64,8 +64,21 @@ class LayoutTests(unittest.TestCase):
         nodes = {node["id"]: node for node in graph["nodes"]}
         for index in range(9):
             self.assertEqual(nodes["tx:" + txid(index + 1)]["x"] - nodes["tx:" + txid(index)]["x"], 2 * COLUMN_GAP)
+            self.assertGreaterEqual(nodes["tx:" + txid(index + 1)]["x"] - nodes["tx:" + txid(index)]["x"], 720)
         self.assertEqual(len({node["y"] for node in graph["nodes"]}), 1)
         self.assertEqual(len([node for node in graph["nodes"] if node["kind"] == "address"]), 11)
+
+    def test_transaction_spacing_leaves_clearance_for_ports_and_neighboring_rows(self):
+        graph = build_graph(state_from({data["txid"]: data for key, data in fixture().items()
+                                       if not key.endswith("outspends")}))
+        nodes = {node["id"]: node for node in graph["nodes"]}
+        transaction = nodes["tx:" + B]
+        for key in ("liquid:outpoint:" + A + ":0", "liquid:outpoint:" + B + ":0"):
+            neighbor = nodes[key]
+            clearance = abs(transaction["x"] - neighbor["x"]) - (transaction["width"] + neighbor["width"]) / 2
+            self.assertGreaterEqual(clearance, 200)
+        self.assertGreaterEqual(abs(nodes["liquid:outpoint:" + B + ":0"]["y"]
+                                    - nodes["liquid:outpoint:" + B + ":1"]["y"]), 240)
 
     def test_split_join_and_reused_address_have_local_neighbors_without_overlap(self):
         state = state_from({data["txid"]: data for key, data in fixture().items()

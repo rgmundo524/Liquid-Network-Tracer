@@ -29,7 +29,9 @@ A case normally keeps the same board as its graph grows. If no board is linked, 
 
 Board selection, run limits, and the **Include transaction fee flows** checkbox are saved with the case, so you do not need a board environment variable or a separate Nix file. Fees are excluded by default, including for older cases without that setting. The top-level Settings screen changes defaults for future investigations. Existing cases retain their saved settings.
 
-Choose **Organize Miro graph** to apply the current left-to-right layout to an existing board. The confirmation form explains that managed positions will change; cancelling makes no API call. Normal syncing preserves manual positions. The layout uses actual recorded transaction dependencies, groups nearby input/output nodes, and places included fees chronologically in a separate row above the flow. Repeated UTXOs are separate by default; merged address cycles can require return edges.
+Choose **Organize Miro graph** to apply the current left-to-right layout to an existing board. The confirmation form explains that managed positions and transaction connector attachment sides will change; cancelling makes no API call. Normal syncing preserves manual positions and existing connector attachments. The layout uses actual recorded transaction dependencies, groups nearby input/output nodes, and places included fees chronologically in a separate row above the flow. Repeated addresses appear as separate UTXO occurrences by default; merged address cycles can require return edges.
+
+Starting transaction squares are purple, determined by membership in the saved seed transaction set rather than hop depth. A provided transaction keeps that color even when another provided transaction leads to it. Subsequent transaction squares are blue. Horizontal columns use 360-unit spacing; rows use at least 240 units between centers. Transaction inputs attach to the left edge and outputs to the right edge, regardless of connected address positions. The same convention is used by the SVG preview and new Miro connectors.
 
 For a command without entering an interactive shell:
 
@@ -78,7 +80,9 @@ Default Miro preview/sync verifies the archived export, then rebuilds its presen
 
 Fee removal applies only to mapped generated fee connectors and diamonds. The publisher checks their managed fields before removal and saves deletion intent for recovery if interrupted. Other graph objects remain intact. Fees still appear in the full outputs, events, and raw evidence, and can be included again by changing the checkbox and syncing.
 
-The explicit reorganization action records previous positions before moving items. It changes positions using the layout while preserving current dimensions and manual annotations. Normal sync anchors new graph items near connected mapped items without relocating existing ones. Mapped items must use canvas coordinates; unrelated board content is not included in collision checks.
+The explicit reorganization action records previous positions and any changed connector attachments before updating items. It changes positions using the layout and applies fixed transaction attachment sides while preserving current dimensions and manual annotations. Normal sync anchors new graph items near connected mapped items without relocating existing ones. Mapped items must use canvas coordinates; unrelated board content is not included in collision checks.
+
+Miro can return an attachment's percentage coordinates without revealing whether its mode is automatic or fixed. **Organize Miro graph** reasserts the fixed side when the mode is unknown, including after a manual reset to automatic attachment at the same point. Repeating this explicit action can therefore repeat connector updates; it does not create duplicate objects. Ordinary sync still retains existing attachment choices.
 
 All initial UTXOs share one tracing budget and board. A continuation extends the saved seed set; it does not add new starting transactions. To trace a different starting set, create a new investigation and paste the complete comma-separated transaction list.
 

@@ -221,7 +221,8 @@ def create_app(root=None):
                                      "Saved trace evidence is unchanged.", markup=False)
                     if self.mode == "layout":
                         yield Static("Arrange the graph's managed items from left to right, keeping transaction inputs "
-                                     "and outputs nearby. This replaces their current positions. "
+                                     "and outputs nearby. This replaces their current positions and attaches "
+                                     "transaction inputs on the left and outputs on the right. "
                                      "Annotations, item content and dimensions are retained. "
                                      "You can still drag items in Miro afterward.", id="layout-notice", markup=False)
                     elif self.mode == "sync":

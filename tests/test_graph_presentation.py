@@ -1,4 +1,5 @@
 import copy
+import re
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -71,7 +72,8 @@ class GraphPresentationTests(unittest.TestCase):
         graph = build_graph(self.state)
         nodes = {node["id"]: node for node in graph["nodes"]}
         expected = {
-            "tx:" + A: "transaction",
+            "tx:" + A: "starting_transaction",
+            "tx:" + B: "transaction",
             "liquid:outpoint:" + A + ":0": "seed",
             "liquid:outpoint:" + A + ":1": "address",
             "liquid:outpoint:" + B + ":0": "candidate",
@@ -97,7 +99,8 @@ class GraphPresentationTests(unittest.TestCase):
         for color_name, _ in PALETTE.values():
             self.assertIn(color_name.lower(), legend.lower())
             self.assertIn(color_name.lower(), svg_text.lower())
-        self.assertIn("including starting transactions", legend)
+        self.assertIn("provided starting transactions", legend)
+        self.assertIn("Starting role takes priority", legend)
         self.assertIn("selected seed outputs", legend)
         self.assertIn("amount asset", legend)
         self.assertIn("?? = not publicly available", legend)
@@ -109,6 +112,96 @@ class GraphPresentationTests(unittest.TestCase):
                             for text in header_text)
         first_node_top = min(node["y"] - node["height"] / 2 for node in graph["nodes"])
         self.assertLess(header_bottom, first_node_top)
+
+    def test_provided_transaction_color_wins_over_descendant_and_hop_roles(self):
+        state = copy.deepcopy(self.state)
+        state["seeds"].extend([B + ":0", B + ":1"])
+        # B spends the original A seed and is also explicitly provided. Its
+        # recorded hop must not decide its color, even in an older saved run.
+        state["transactions"][B]["depth"] = 7
+        state["transactions"][C]["depth"] = 0
+        original = copy.deepcopy(state)
+        graph = build_graph(state)
+        nodes = {node["id"]: node for node in graph["nodes"]}
+        for key in (A, B):
+            self.assertEqual(nodes["tx:" + key]["role"], "starting_transaction")
+            self.assertEqual(nodes["tx:" + key]["color"], "#c4b5fd")
+        self.assertEqual(nodes["tx:" + C]["color"], COLORS["transaction"])
+        self.assertGreater(nodes["tx:" + B]["x"], nodes["tx:" + A]["x"])
+        self.assertEqual(state, original)
+        unselected = build_graph(self.state)
+        self.assertEqual({node["id"] for node in graph["nodes"]},
+                         {node["id"] for node in unselected["nodes"]})
+        self.assertEqual({(edge["id"], edge["source"], edge["target"]) for edge in graph["edges"]},
+                         {(edge["id"], edge["source"], edge["target"]) for edge in unselected["edges"]})
+
+    def test_continuation_keeps_provided_transaction_colors_from_original_seeds(self):
+        state = copy.deepcopy(self.state)
+        state["seeds"].append(B + ":0")
+        original = copy.deepcopy(state)
+        continuation = new_state([], state["source"], Limits(max_hops=5), [], parent=state)
+        self.assertEqual(continuation["parent_run"], state["run_id"])
+        self.assertEqual(continuation["seeds"], state["seeds"])
+        for merged in (False, True):
+            nodes = {node["id"]: node for node in build_graph(continuation, merged)["nodes"]}
+            for key in (A, B):
+                self.assertEqual(nodes["tx:" + key]["color"], COLORS["starting_transaction"])
+            self.assertEqual(nodes["tx:" + C]["color"], COLORS["transaction"])
+        self.assertEqual(state, original)
+
+    def test_svg_transaction_ports_stay_left_in_right_out_for_return_edges_and_fees(self):
+        for arrangement in ("normal", "backward", "same_column"):
+            with self.subTest(arrangement=arrangement):
+                graph = build_graph(self.state, merge_addresses=True, include_fees=True)
+                if arrangement == "backward":
+                    for node in graph["nodes"]:
+                        node["x"] = -node["x"]
+                        node["y"] = 240
+                elif arrangement == "same_column":
+                    for node in graph["nodes"]:
+                        node["x"] = 400
+                nodes = {node["id"]: node for node in graph["nodes"]}
+                svg = ET.fromstring(svg_graph(graph))
+                paths = {group.attrib["data-edge-key"]:
+                         group.find("{http://www.w3.org/2000/svg}path").attrib["d"]
+                         for group in svg.iter() if "data-edge-key" in group.attrib}
+                left, top, width, height = map(float, svg.attrib["viewBox"].split())
+                for edge in graph["edges"]:
+                    values = [float(value) for value in re.findall(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", paths[edge["id"]])]
+                    points = list(zip(values[::2], values[1::2]))
+                    start, end = nodes[edge["source"]], nodes[edge["target"]]
+                    if start["kind"] == "transaction":
+                        self.assertEqual(points[0], (start["x"] + start["width"] / 2, start["y"]))
+                        self.assertGreater(points[1][0], points[0][0])
+                        self.assertEqual(points[1][1], points[0][1])
+                    if end["kind"] == "transaction":
+                        self.assertEqual(points[-1], (end["x"] - end["width"] / 2, end["y"]))
+                        self.assertLess(points[-2][0], points[-1][0])
+                        self.assertEqual(points[-2][1], points[-1][1])
+                    # Return-edge detours must remain visible in the preview.
+                    for x, y in points:
+                        self.assertTrue(left <= x <= left + width)
+                        self.assertTrue(top <= y <= top + height)
+                    if arrangement == "normal":
+                        # Fixed endpoints alone are insufficient: a wide
+                        # return curve can still cross its own transaction.
+                        # Check the visible merged-address and fee routes.
+                        for node in (start, end):
+                            if node["kind"] != "transaction":
+                                continue
+                            for segment in range(1, len(points), 3):
+                                controls = points[segment - 1:segment + 3]
+                                for step in range(1, 20):
+                                    t = step / 20
+                                    weights = ((1 - t) ** 3, 3 * (1 - t) ** 2 * t,
+                                               3 * (1 - t) * t ** 2, t ** 3)
+                                    x, y = [sum(weight * point[axis] for weight, point in zip(weights, controls))
+                                            for axis in (0, 1)]
+                                    self.assertFalse(abs(x - node["x"]) < node["width"] / 2 - .01
+                                                     and abs(y - node["y"]) < node["height"] / 2 - .01,
+                                                     edge["id"] + " crosses its transaction")
+                if arrangement == "backward":
+                    self.assertTrue(any(path.count("C ") == 3 for path in paths.values()))
 
     def test_merged_address_role_priority_is_independent_of_visit_order(self):
         shared = "SYNTHETIC-reused-address"
