@@ -27,7 +27,9 @@ Live credentials load only after selecting **Load outputs**, with the terminal a
 
 A case normally keeps the same board as its graph grows. If no board is linked, choose **Create Miro board** from the investigation menu. Review the name, visibility (Private by default), and optional team ID, then create it. SecretSpec supplies the Miro access token only after confirmation. The returned board ID is saved with the case, and its URL appears in the menu. **Preview Miro** and **Sync to Miro** use that selection and the saved run; there is no need to repeat tracing. You can also link an existing board through **Investigation settings**.
 
-Board selection and numeric run defaults are saved with the case, so you do not need a board environment variable or a separate Nix file. The top-level Settings screen changes defaults for future investigations. Existing cases retain their saved settings.
+Board selection, run limits, and the **Include transaction fee flows** checkbox are saved with the case, so you do not need a board environment variable or a separate Nix file. Fees are excluded by default, including for older cases without that setting. The top-level Settings screen changes defaults for future investigations. Existing cases retain their saved settings.
+
+Choose **Organize Miro graph** to apply the current left-to-right layout to an existing board. The confirmation form explains that managed positions will change; cancelling makes no API call. Normal syncing preserves manual positions. The layout uses actual recorded transaction dependencies, groups nearby input/output nodes, and places included fees chronologically in a separate row above the flow. Repeated UTXOs are separate by default; merged address cycles can require return edges.
 
 For a command without entering an interactive shell:
 
@@ -46,6 +48,7 @@ Use a current devenv release. The project supplies its own pinned SecretSpec and
 | `liquid-live inspect-tx --txid HASH` | Looks up one live transaction and prints its output numbers, addresses, and available public quantities as JSON. Does not trace spends or create a case. |
 | `liquid-live inspect-txs --txids 'HASH1,HASH2'` | Looks up a batch through one API client and shared limits, returning outputs grouped by transaction. |
 | `liquid-live miro-create-board --case CASE` | Creates an empty Miro board and saves it with the investigation. Uses the case name and private visibility by default. |
+| `liquid-live miro-sync --case CASE --reorganize` | Applies the current graph layout to managed board items, retaining dimensions and manual content. |
 | `liquid-secrets-setup [all\|blockstream\|miro]` | Prompts for selected credentials and stores them in the configured provider; defaults to all three. |
 | `liquid-toolchain-check` | Reports the pinned SecretSpec/Proton CLI versions and checks support for `info`, without accessing a vault. |
 | `liquid-secrets-check [--service blockstream\|miro\|all]` | Loads project secrets and reports presence only; defaults to Blockstream. No Blockstream or Miro calls. |
@@ -58,7 +61,7 @@ The launchers locate the source and secret declaration using `LIQUID_TRACER_ROOT
 
 ## Saved investigations and settings
 
-The main environment defines `LIQUID_INVESTIGATIONS_DIR` as `${config.devenv.root}/cases`. The interface stores numeric defaults for future investigations in `cases/settings.json`. Each newly named investigation receives its own unique subdirectory.
+The main environment defines `LIQUID_INVESTIGATIONS_DIR` as `${config.devenv.root}/cases`. The interface stores run limits and fee visibility defaults for future investigations in `cases/settings.json`. Each newly named investigation receives its own unique subdirectory.
 
 | Path within an investigation | Purpose |
 | --- | --- |
@@ -71,7 +74,11 @@ The main environment defines `LIQUID_INVESTIGATIONS_DIR` as `${config.devenv.roo
 
 Run IDs are saved references, not variables you must remember or re-enter. The latest pointer advances after the exports finish successfully, including saved runs paused by a budget or an error. It does not depend on shell history or directory timestamps. A continuation preserves its parent and records a new snapshot. Settings or a new board chosen later do not rewrite completed run exports.
 
-Default Miro preview/sync verifies the archived export, then rebuilds its presentation in memory from `trace.json` using the saved address mode. It checks that the case, source, run, graph identities, and connector endpoints still match before contacting Miro. This lets an existing board receive compact labels and corrected legends from a saved run. Completed run files stay byte-for-byte unchanged; sync reports record both plan hashes and the presentation version. Explicit `--plan` uses the supplied verified export without rebuilding it.
+Default Miro preview/sync verifies the archived export, then rebuilds its presentation in memory from `trace.json` using the saved address mode and current fee setting. It checks that the case, source, run, and all non-fee graph identities and endpoints still match before contacting Miro. Only fee representations proven from the saved outputs may be added or excluded. Completed run files stay byte-for-byte unchanged; sync reports record both plan hashes, presentation version, and applied display options. Explicit `--plan` uses the supplied verified export without rebuilding it.
+
+Fee removal applies only to mapped generated fee connectors and diamonds. The publisher checks their managed fields before removal and saves deletion intent for recovery if interrupted. Other graph objects remain intact. Fees still appear in the full outputs, events, and raw evidence, and can be included again by changing the checkbox and syncing.
+
+The explicit reorganization action records previous positions before moving items. It changes positions using the layout while preserving current dimensions and manual annotations. Normal sync anchors new graph items near connected mapped items without relocating existing ones. Mapped items must use canvas coordinates; unrelated board content is not included in collision checks.
 
 All initial UTXOs share one tracing budget and board. A continuation extends the saved seed set; it does not add new starting transactions. To trace a different starting set, create a new investigation and paste the complete comma-separated transaction list.
 
@@ -92,6 +99,8 @@ liquid-live trace --case cases/theft-liquid \
   --seed 'LIQUID_TXID:OUTPUT_INDEX' --hops 1 \
   --max-transactions 20 --max-outpoints 100 --max-requests 30 --max-seconds 60
 ```
+
+`trace`, `export`, and `miro-sync` accept `--include-fees` and `--exclude-fees`. These are presentation overrides; the underlying trace and fee evidence are unchanged. Without a flag, the case's `run_defaults.include_fees` applies, defaulting to `false`. A verified explicit `--plan` cannot be combined with a fee override; regenerate an export when a different selection is needed.
 
 Create and save a board, then preview and sync the latest run:
 

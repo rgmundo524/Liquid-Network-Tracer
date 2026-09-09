@@ -11,9 +11,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from liquid_tracer.common import TraceError, read_json
+from liquid_tracer.common import TraceError, read_json, save_json
 from liquid_tracer.investigations import (DEFAULTS, create_investigation, list_investigations,
-                                         load_settings, read_case, update_case)
+                                         load_settings, read_case, save_settings, update_case)
 from liquid_tracer.menu import _command, _lookup_reports, _seed_values, create_app, run_menu
 
 
@@ -442,18 +442,25 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("UNRELATED=", commands[1])
 
     async def test_global_and_case_settings_are_saved_without_remote_actions(self):
-        from textual.widgets import Input
+        from textual.widgets import Checkbox, Input, Static
         app = create_app(self.root)
         with patch("liquid_tracer.menu.subprocess.run", side_effect=AssertionError("Settings are local")):
             async with app.run_test(size=(110, 55)) as pilot:
                 await self.click(app, pilot, "#settings")
                 app.screen.query_one("#hops", Input).value = "3"
                 app.screen.query_one("#max_requests", Input).value = "12"
+                self.assertFalse(app.screen.query_one("#include-fees", Checkbox).value)
+                app.screen.query_one("#include-fees", Checkbox).value = True
                 await self.click(app, pilot, "#submit")
                 self.assertEqual(load_settings(self.root)["hops"], 3)
+                self.assertIs(load_settings(self.root)["include_fees"], True)
                 case = await self.new_demo(app, pilot)
                 self.assertEqual(read_case(case)["run_defaults"]["max_requests"], 12)
+                self.assertIs(read_case(case)["run_defaults"]["include_fees"], True)
+                self.assertIn("Transaction fee flows: included", str(app.screen.query_one("#case-summary", Static).render()))
                 await self.click(app, pilot, "#case-settings")
+                self.assertTrue(app.screen.query_one("#include-fees", Checkbox).value)
+                app.screen.query_one("#include-fees", Checkbox).value = False
                 app.screen.query_one("#case-name", Input).value = "Renamed investigation"
                 app.screen.query_one("#board", Input).value = "https://miro.com/app/board/UPDATED%3D/"
                 app.screen.query_one("#max_requests", Input).value = "8"
@@ -462,7 +469,118 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(saved["name"], "Renamed investigation")
                 self.assertEqual(saved["miro_board"], "UPDATED=")
                 self.assertEqual(saved["run_defaults"]["max_requests"], 8)
+                self.assertIs(saved["run_defaults"]["include_fees"], False)
+                self.assertIn("Transaction fee flows: hidden", str(app.screen.query_one("#case-summary", Static).render()))
                 self.assertEqual(load_settings(self.root)["max_requests"], 12)
+                self.assertIs(load_settings(self.root)["include_fees"], True)
+
+        restarted = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run") as process:
+            async with restarted.run_test(size=(110, 55)) as pilot:
+                await self.click(restarted, pilot, "#continue")
+                await pilot.press("enter")
+                await pilot.pause()
+                await self.click(restarted, pilot, "#case-settings")
+                self.assertFalse(restarted.screen.query_one("#include-fees", Checkbox).value)
+                process.assert_not_called()
+
+    async def test_new_case_fee_checkbox_and_legacy_settings_ignore_later_global_defaults(self):
+        from textual.widgets import Checkbox, Input, Static
+        case = create_investigation(self.root, "Legacy defaults")
+        metadata = read_case(case)
+        metadata["run_defaults"].pop("include_fees")
+        save_json(case / "case.json", metadata)
+        original = (case / "case.json").read_bytes()
+        save_settings(self.root, {"include_fees": True, "hops": 9})
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run") as process:
+            async with app.run_test(size=(110, 55)) as pilot:
+                await self.click(app, pilot, "#new")
+                self.assertTrue(app.screen.query_one("#include-fees", Checkbox).value)
+                self.assertEqual(app.screen.query_one("#hops", Input).value, "9")
+                app.screen.query_one("#include-fees", Checkbox).value = False
+                await self.click(app, pilot, "#cancel")
+                await self.click(app, pilot, "#continue")
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertIn("Transaction fee flows: hidden", str(app.screen.query_one("#case-summary", Static).render()))
+                await self.click(app, pilot, "#case-settings")
+                self.assertFalse(app.screen.query_one("#include-fees", Checkbox).value)
+                self.assertEqual(app.screen.query_one("#hops", Input).value, "1")
+                app.screen.query_one("#include-fees", Checkbox).value = True
+                await self.click(app, pilot, "#cancel")
+                process.assert_not_called()
+                self.assertEqual((case / "case.json").read_bytes(), original)
+
+    async def test_organize_requires_a_saved_board_and_completed_run(self):
+        from textual.widgets import Button
+        case = create_investigation(self.root, "No run yet", board="DEMO=")
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run") as process:
+            async with app.run_test(size=(110, 55)) as pilot:
+                await self.click(app, pilot, "#continue")
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertEqual(app.screen.case, case)
+                self.assertTrue(app.screen.query_one("#layout", Button).disabled)
+                process.assert_not_called()
+
+    async def test_organize_confirmation_uses_saved_case_and_preserves_trace_evidence(self):
+        from textual.widgets import Button, Checkbox, Input, Static
+        from liquid_tracer.cli import main
+        fixture = PROJECT / "examples" / "demo-api.json"
+        case = create_investigation(self.root, "Synthetic layout", board="DEMO=", fixture=str(fixture))
+        with contextlib.redirect_stdout(io.StringIO()):
+            status = main(["trace", "--case", str(case), "--fixture", str(fixture),
+                           "--seeds-file", str(PROJECT / "examples" / "demo-seeds.txt"), "--hops", "1"])
+        self.assertEqual(status, 0)
+        before = read_case(case)
+        run_files = {p.relative_to(case): p.read_bytes() for p in (case / "runs").rglob("*") if p.is_file()}
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as process, \
+                patch.object(app, "suspend", side_effect=contextlib.nullcontext) as suspend:
+            async with app.run_test(size=(110, 55)) as pilot:
+                await self.click(app, pilot, "#continue")
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertFalse(app.screen.query_one("#layout", Button).disabled)
+                await self.click(app, pilot, "#layout")
+                self.assertEqual(app.screen.query_one("#board", Input).value, "DEMO=")
+                self.assertEqual(app.focused.id, "cancel")
+                self.assertIn("replaces their current positions", str(app.screen.query_one("#layout-notice", Static).render()))
+                self.assertIn("hidden", str(app.screen.query_one("#fee-status", Static).render()))
+                await pilot.press("enter")
+                await pilot.pause()
+                process.assert_not_called()
+                suspend.assert_not_called()
+
+                await self.click(app, pilot, "#case-settings")
+                app.screen.query_one("#include-fees", Checkbox).value = True
+                await self.click(app, pilot, "#submit")
+                await self.click(app, pilot, "#preview")
+                self.assertIn("included", str(app.screen.query_one("#fee-status", Static).render()))
+                await self.click(app, pilot, "#cancel")
+                process.assert_not_called()
+                await self.click(app, pilot, "#layout")
+                self.assertIn("included", str(app.screen.query_one("#fee-status", Static).render()))
+                await self.click(app, pilot, "#submit")
+                process.assert_called_once()
+                suspend.assert_called_once()
+                self.assertEqual(process.call_args.args[0], ["/nix/store/test-secretspec/bin/secretspec", "--file",
+                    str(PROJECT / "secretspec.toml"), "run", "--provider", "protonpass", "--profile", "development", "--",
+                    sys.executable, "-m", "liquid_tracer", "miro-sync", "--case", str(case), "--run", "latest",
+                    "--board", "DEMO=", "--max-new-items", "750", "--reorganize"])
+                for field in ("capture_output", "stdout", "stderr"):
+                    self.assertNotIn(field, process.call_args.kwargs)
+                self.assertIn("Miro graph organized", str(app.screen.query_one("#action-status", Static).render()))
+                self.assertFalse(app.busy)
+                self.assertEqual(read_case(case)["latest_run"], before["latest_run"])
+                self.assertEqual(run_files, {p.relative_to(case): p.read_bytes()
+                                            for p in (case / "runs").rglob("*") if p.is_file()})
+
+                update_case(case, {"miro_board": None})
+                app.screen.update_summary()
+                self.assertTrue(app.screen.query_one("#layout", Button).disabled)
 
     async def test_live_run_uses_secretspec_only_after_explicit_run_selection(self):
         from textual.widgets import Static

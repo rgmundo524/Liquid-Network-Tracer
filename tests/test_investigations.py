@@ -8,7 +8,7 @@ from liquid_tracer.cli import main, verify_export
 from liquid_tracer.common import TraceError, read_json, save_json
 from liquid_tracer.investigations import (
     DEFAULTS, create_investigation, list_investigations, load_settings,
-    read_case, save_settings, update_case,
+    read_case, save_settings, update_case, validate_settings,
 )
 
 
@@ -61,6 +61,44 @@ class InvestigationTests(unittest.TestCase):
         with self.assertRaises(TraceError):
             update_case(case, {"case_id": "f" * 32})
 
+    def test_fee_setting_is_boolean_and_persists_without_changing_existing_cases(self):
+        case = create_investigation(self.root, "Original defaults")
+        self.assertIs(read_case(case)["run_defaults"]["include_fees"], False)
+        original = (case / "case.json").read_bytes()
+        save_settings(self.root, {"include_fees": True})
+        self.assertIs(load_settings(self.root)["include_fees"], True)
+        self.assertEqual((case / "case.json").read_bytes(), original)
+        new_case = create_investigation(self.root, "New defaults", run_defaults=load_settings(self.root))
+        self.assertIs(read_case(new_case)["run_defaults"]["include_fees"], True)
+        update_case(case, {"run_defaults": {"include_fees": True}})
+        self.assertIs(read_case(Path(str(case)))["run_defaults"]["include_fees"], True)
+
+    def test_legacy_fee_setting_uses_false_without_writing_migration(self):
+        case = create_investigation(self.root, "Legacy case")
+        metadata = read_case(case)
+        metadata["run_defaults"].pop("include_fees")
+        save_json(case / "case.json", metadata)
+        original = (case / "case.json").read_bytes()
+        save_settings(self.root, {"include_fees": True})
+        self.assertIs(validate_settings(read_case(case)["run_defaults"])["include_fees"], False)
+        self.assertEqual((case / "case.json").read_bytes(), original)
+
+    def test_invalid_fee_booleans_and_boolean_limits_do_not_write(self):
+        case = create_investigation(self.root, "Strict settings")
+        save_settings(self.root, {})
+        original_case = (case / "case.json").read_bytes()
+        original_global = (self.root / "settings.json").read_bytes()
+        for values in ({"include_fees": 0}, {"include_fees": 1}, {"include_fees": "false"},
+                       {"include_fees": None}, {"include_fees": []}, {"hops": True},
+                       {"max_seconds": False}):
+            with self.subTest(values=values):
+                with self.assertRaises(TraceError):
+                    save_settings(self.root, values)
+                with self.assertRaises(TraceError):
+                    update_case(case, {"run_defaults": values})
+        self.assertEqual((case / "case.json").read_bytes(), original_case)
+        self.assertEqual((self.root / "settings.json").read_bytes(), original_global)
+
     def test_run_snapshots_preserve_board_history_when_case_settings_change(self):
         case = create_investigation(self.root, "Original name", board="FIRST=")
         base = ["trace", "--case", str(case), "--fixture", str(self.project / "examples/demo-api.json")]
@@ -70,7 +108,12 @@ class InvestigationTests(unittest.TestCase):
         first_dir = case / "runs" / read_case(case)["latest_run"]
         original = (first_dir / "investigation.json").read_bytes()
         self.assertEqual(read_json(first_dir / "investigation.json")["miro_board"], "FIRST=")
-        update_case(case, {"name": "Updated name", "miro_board": "SECOND="})
+        original_run = {path.relative_to(first_dir): path.read_bytes() for path in first_dir.rglob("*") if path.is_file()}
+        latest = read_case(case)["latest_run"]
+        update_case(case, {"name": "Updated name", "miro_board": "SECOND=", "run_defaults": {"include_fees": True}})
+        self.assertEqual(read_case(case)["latest_run"], latest)
+        self.assertEqual(original_run, {path.relative_to(first_dir): path.read_bytes()
+                                       for path in first_dir.rglob("*") if path.is_file()})
         with contextlib.redirect_stdout(io.StringIO()):
             status = main(base + ["--resume", "latest", "--additional-hops", "1"])
         self.assertEqual(status, 0)

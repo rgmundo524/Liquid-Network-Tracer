@@ -1,14 +1,14 @@
 import csv
 import html
 import json
-from collections import defaultdict
 from pathlib import Path
 
 from .common import (LBTC, TraceError, canonical, digest, match_labels, output_kind,
                      public_fields, save_json)
 from .trace import TERMINAL
+from .layout import arrange, fee_date, transaction_ranks
 
-PRESENTATION_VERSION = 2
+PRESENTATION_VERSION = 3
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -54,8 +54,9 @@ def short(value):
     return value if len(value) <= 20 else value[:10] + "…" + value[-7:]
 
 
-def build_graph(state, merge_addresses=False):
-    nodes, edges = {}, []
+def build_graph(state, merge_addresses=False, include_fees=False):
+    nodes, edges, fee_items = {}, [], {}
+    ranks, cycle_groups = transaction_ranks(state["transactions"])
     source = state["source"]
     explorer = "https://blockstream.info/" + ("liquidtestnet" if "liquidtestnet" in source else "liquid")
     simulated = source.startswith("fixture://")
@@ -109,9 +110,9 @@ def build_graph(state, merge_addresses=False):
         node["label"] = label + ("\n" + ", ".join(attributions) if attributions else "")
         return node_id
 
-    for txid, record in sorted(state["transactions"].items(), key=lambda item: (item[1]["depth"], item[0])):
+    for txid, record in sorted(state["transactions"].items(), key=lambda item: (ranks[item[0]], item[0])):
         tx = record["data"]
-        column = 2 * record["depth"] + 1
+        column = 2 * ranks[txid] + 1
         txnode = add_node("tx:" + txid, "transaction", "TX\n" + short(txid) + "\nhop " + str(record["depth"]),
                           column, {"transaction": tx, "observation_id": record["observation_id"]},
                           None if simulated else explorer + "/tx/" + txid)
@@ -131,23 +132,21 @@ def build_graph(state, merge_addresses=False):
                           "details": {"vin": vin, "validated_trace_link": link if traced else None}})
         for index, output in enumerate(tx["vout"]):
             key = f"{txid}:{index}"
+            if output_kind(output) == "fee":
+                fee_items["event:" + key] = {"endpoint": "shapes", "txid": txid, "vout": index}
+                fee_items["out:" + key] = {"endpoint": "connectors", "source": txnode, "target": "event:" + key}
+                if not include_fees:
+                    continue
             output_node = address(key, output, column + 1)
+            if output_kind(output) == "fee":
+                nodes[output_node]["label"] += "\n" + fee_date(tx)
             role = "seed_output" if key in state["seeds"] else ("candidate_output" if key in state["outputs"] else "context_output")
             edges.append({"id": "out:" + key, "source": txnode, "target": output_node,
                           "role": role, "outpoint": key, "label": "vout " + str(index),
                           "quantity": graph_quantity(output), "details": public_fields(output)})
 
-    columns = defaultdict(list)
-    for node in nodes.values():
-        columns[node["column"]].append(node)
-    for column, group in columns.items():
-        def priority(node):
-            if node["kind"] == "transaction" or node["color"] in (COLORS["seed"], COLORS["candidate"], COLORS["attributed"]):
-                return (0, node["id"])
-            return (1 if node["kind"] == "address" else 2, node["id"])
-        for row, node in enumerate(sorted(group, key=priority)):
-            node.update({"x": column * 390 + 130, "y": row * 245 + 240,
-                         "width": 160, "height": 160})
+    layout = arrange(nodes, edges, state["transactions"], fee_items)
+    layout["cycle_groups"] = cycle_groups
     mode = "merged" if merge_addresses else "outpoint_occurrences"
     return {"schema_version": 2, "presentation_version": PRESENTATION_VERSION,
             "run_id": state["run_id"], "simulated": simulated,
@@ -155,6 +154,9 @@ def build_graph(state, merge_addresses=False):
             "run": {key: state.get(key) for key in ("run_id", "parent_run", "ancestor_runs", "seeds", "started_at", "finished_at",
                     "status", "stop_reason", "limits", "stats")},
             "address_mode": mode,
+            "include_fees": bool(include_fees),
+            "graph_options": {"include_fees": bool(include_fees)},
+            "fee_items": fee_items, "layout": layout,
             "notice": "UTXO reachability, not allocation of stolen value. Gray arrows and light gray circles are context. "
                       "?? marks amounts or assets not available from public data. "
                       "Repeated addresses are separate outpoint occurrences by default.",
@@ -174,23 +176,36 @@ def write_csv(path, rows, fields):
 
 def svg_graph(graph):
     lookup = {n["id"]: n for n in graph["nodes"]}
-    width = max(1100, max((n["x"] for n in lookup.values()), default=500) + 160)
-    height = max((n["y"] for n in lookup.values()), default=300) + 130
-    chunks = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}">',
+    node_top = min((n["y"] - n["height"] / 2 for n in lookup.values()), default=160)
+    header_top = node_top - 170
+    min_x = min(0, min((n["x"] - n["width"] / 2 for n in lookup.values()), default=0) - 30)
+    min_y = min(0, header_top - 30)
+    width = max(1100, max((n["x"] + n["width"] / 2 for n in lookup.values()), default=500) + 80) - min_x
+    height = max((n["y"] + n["height"] / 2 for n in lookup.values()), default=300) + 50 - min_y
+    chunks = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{min_x} {min_y} {width} {height}" width="{width}" height="{height}">',
         '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/></marker></defs>',
-        f'<rect width="{width}" height="{height}" fill="#fff"/>',
+        f'<rect x="{min_x}" y="{min_y}" width="{width}" height="{height}" fill="#fff"/>',
         '<g font-family="Arial, sans-serif">',
-        '<text x="40" y="30" font-size="24" font-weight="bold">Liquid UTXO trace' + (' · SYNTHETIC DEMO' if graph["simulated"] else '') + '</text>']
-    chunks.extend(f'<text x="40" y="{54 + index * 18}" font-size="13">{html.escape(line)}</text>'
+        f'<text x="40" y="{header_top}" font-size="24" font-weight="bold">Liquid UTXO trace' + (' · SYNTHETIC DEMO' if graph["simulated"] else '') + '</text>']
+    chunks.extend(f'<text x="40" y="{header_top + 24 + index * 18}" font-size="13">{html.escape(line)}</text>'
                   for index, line in enumerate(legend_lines()))
     for edge in graph["edges"]:
         start, end = lookup[edge["source"]], lookup[edge["target"]]
-        x1, y1, x2, y2 = start["x"] + 80, start["y"], end["x"] - 80, end["y"]
+        fee = graph.get("fee_items", {}).get(edge["id"], {}).get("endpoint") == "connectors"
+        vertical = fee or start["x"] == end["x"]
+        if vertical:
+            direction = 1 if end["y"] > start["y"] else -1
+            x1, y1, x2, y2 = start["x"], start["y"] + 80 * direction, end["x"], end["y"] - 80 * direction
+        else:
+            direction = 1 if end["x"] > start["x"] else -1
+            x1, y1, x2, y2 = start["x"] + 80 * direction, start["y"], end["x"] - 80 * direction, end["y"]
         context = edge["role"].startswith("context")
         color = edge_color(edge["role"])
         mid = (x1 + x2) / 2
+        controls = (f'{x1} {(y1+y2)/2}, {x2} {(y1+y2)/2}' if vertical
+                    else f'{mid} {y1}, {mid} {y2}')
         chunks.append(f'<g class="edge {"context" if context else "tracked"}"><title>{html.escape(edge["outpoint"] + " | " + edge["quantity"])}</title>'
-            f'<path d="M {x1} {y1} C {mid} {y1}, {mid} {y2}, {x2} {y2}" fill="none" stroke="{color}" stroke-width="2" marker-end="url(#arrow)"/>'
+            f'<path d="M {x1} {y1} C {controls}, {x2} {y2}" fill="none" stroke="{color}" stroke-width="2" marker-end="url(#arrow)"/>'
             f'<text x="{mid}" y="{(y1+y2)/2-10}" text-anchor="middle" font-size="11" fill="{color}">{html.escape(edge["label"])}</text></g>')
     for node in graph["nodes"]:
         x, y, fill = node["x"], node["y"], node["color"]
@@ -240,7 +255,7 @@ def export_run(store, state, destination, merge_addresses=False, offline_preview
         "miro_board": state.get("investigation", {}).get("miro_board"),
         "note": "Board selection recorded at trace time. Subsequent publication details are in the case's miro/reports directory.",
     })
-    graph = build_graph(state, merge_addresses)
+    graph = build_graph(state, merge_addresses, state.get("graph_options", {}).get("include_fees", False))
     save_json(destination / "graph.json", graph)
     if offline_preview:
         svg = svg_graph(graph)

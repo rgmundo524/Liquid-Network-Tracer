@@ -17,6 +17,7 @@ DEFAULTS = {
     "max_requests": 30,
     "max_seconds": 60,
     "max_new_items": 750,
+    "include_fees": False,
 }
 
 
@@ -27,9 +28,13 @@ def default_root():
 
 def validate_settings(settings):
     if not isinstance(settings, dict) or set(settings) - set(DEFAULTS):
-        raise TraceError("Run settings must contain only the supported tracing limits")
+        raise TraceError("Run settings must contain only supported tracing limits and graph options")
     result = {**DEFAULTS, **settings}
     for key, value in result.items():
+        if key == "include_fees":
+            if type(value) is not bool:
+                raise TraceError("include_fees must be true or false")
+            continue
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
             raise TraceError(f"{key} must be a finite number")
         if key != "max_seconds" and not isinstance(value, int):

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .common import LBTC, TraceError, parse_outpoint, read_json
 from .investigations import (create_investigation, default_root, list_investigations,
-                             load_settings, read_case, save_settings, update_case)
+                             load_settings, read_case, save_settings, update_case, validate_settings)
 
 
 LIMIT_FIELDS = (
@@ -143,7 +143,7 @@ def create_app(root=None):
     from textual.app import App, ComposeResult
     from textual.containers import Horizontal, Vertical, VerticalScroll
     from textual.screen import Screen
-    from textual.widgets import Button, DataTable, Footer, Header, Input, Label, RichLog, Select, Static, TextArea
+    from textual.widgets import Button, Checkbox, DataTable, Footer, Header, Input, Label, RichLog, Select, Static, TextArea
     from rich.text import Text
 
     investigation_root = (Path(root) if root is not None else default_root()).expanduser().resolve()
@@ -163,12 +163,16 @@ def create_app(root=None):
             super().__init__()
             self.mode, self.case = mode, case
             self.metadata = read_case(case) if case else {}
-            self.settings = {**load_settings(investigation_root), **self.metadata.get("run_defaults", {})}
+            # Global defaults apply when a case is created. Missing settings on an
+            # older case use built-in defaults, never later global preferences.
+            self.settings = (validate_settings(self.metadata.get("run_defaults", {}))
+                             if case else load_settings(investigation_root))
 
         def compose(self) -> ComposeResult:
             titles = {"new": "New investigation", "global": "Settings", "case": "Investigation settings",
                       "run": "Continue latest run" if self.metadata.get("latest_run") else "Start first run",
-                      "preview": "Preview Miro changes", "sync": "Sync latest to Miro"}
+                      "preview": "Preview Miro changes", "sync": "Sync latest to Miro",
+                      "layout": "Organize Miro graph"}
             yield Header()
             with VerticalScroll(classes="form-panel"):
                 yield Label(titles[self.mode], classes="title")
@@ -189,11 +193,11 @@ def create_app(root=None):
                     yield Static("Replace NUMBER with an actual output number, not the word 'vout'. "
                                  "Separate multiple outputs with spaces, commas or new lines.", markup=False)
                     yield TextArea(id="seeds")
-                if self.mode in ("new", "case", "preview", "sync"):
+                if self.mode in ("new", "case", "preview", "sync", "layout"):
                     yield Label("Miro board URL or ID" + (" (optional)" if self.mode in ("new", "case") else ""))
                     yield Input(self.metadata.get("miro_board") or "", id="board")
                 if self.mode == "global":
-                    yield Static("Defaults apply to new investigations. Existing investigations retain their saved limits.", markup=False)
+                    yield Static("Defaults apply to new investigations. Existing investigations retain their saved settings.", markup=False)
                     yield Static("Credential provider: " + (os.environ.get("LIQUID_SECRET_PROVIDER") or "protonpass")
                                  + " / profile: " + (os.environ.get("LIQUID_SECRET_PROFILE") or "development"), markup=False)
                 if self.mode == "run":
@@ -202,12 +206,28 @@ def create_app(root=None):
                     if self.metadata.get("latest_run"):
                         yield Static("Adds hops to the saved run's existing ceiling. Use 0 to retry the current frontier.", markup=False)
                     yield Static("Tracing saves a new run. Miro is updated separately.", markup=False)
-                if self.mode in ("preview", "sync"):
+                if self.mode in ("new", "global", "case"):
+                    yield Checkbox("Include transaction fee flows", value=self.settings["include_fees"], id="include-fees")
+                    yield Static("Graph display only. Included fees appear in a chronological row above the graph. "
+                                 "Trace evidence always retains fee outputs.", markup=False)
+                if self.mode in ("preview", "sync", "layout"):
                     text = ("Offline preview. This does not change case settings, saved runs or the Miro board."
                             if self.mode == "preview" else "Updates the existing board and saves its ID with this investigation.")
                     yield Static(text, markup=False)
+                    yield Static("Transaction fee flows: " + ("included" if self.settings["include_fees"] else "hidden")
+                                 + ". Change this in Investigation settings.", id="fee-status", markup=False)
+                    if not self.settings["include_fees"]:
+                        yield Static("Sync checks previously generated fee items for manual edits before removing them. "
+                                     "Saved trace evidence is unchanged.", markup=False)
+                    if self.mode == "layout":
+                        yield Static("Arrange the graph's managed items from left to right, keeping transaction inputs "
+                                     "and outputs nearby. This replaces their current positions. "
+                                     "Annotations, item content and dimensions are retained. "
+                                     "You can still drag items in Miro afterward.", id="layout-notice", markup=False)
+                    elif self.mode == "sync":
+                        yield Static("Existing item positions are retained. Choose Organize Miro graph to rearrange them.", markup=False)
                 for key, label, converter, _ in LIMIT_FIELDS:
-                    if self.mode in ("preview", "sync") and key != "max_new_items":
+                    if self.mode in ("preview", "sync", "layout") and key != "max_new_items":
                         continue
                     yield Label(label)
                     yield Input(str(self.settings[key]), id=key,
@@ -216,13 +236,14 @@ def create_app(root=None):
             with Horizontal(classes="buttons form-actions"):
                 yield Button("Cancel", id="cancel")
                 labels = {"new": "Create investigation", "global": "Save defaults", "case": "Save settings",
-                          "run": "Run trace", "preview": "Preview (offline)", "sync": "Sync to Miro"}
+                          "run": "Run trace", "preview": "Preview (offline)", "sync": "Sync to Miro",
+                          "layout": "Organize graph"}
                 yield Button(labels[self.mode], id="submit", variant="primary")
             yield Footer()
 
         def on_mount(self):
             # Run and publication require a deliberate selection; Enter initially cancels.
-            if self.mode in ("run", "sync"):
+            if self.mode in ("run", "sync", "layout"):
                 self.query_one("#cancel", Button).focus()
             elif self.mode in ("new", "case"):
                 self.query_one("#case-name", Input).focus()
@@ -234,7 +255,7 @@ def create_app(root=None):
         def read_limits(self):
             settings = dict(self.settings)
             for key, label, converter, minimum in LIMIT_FIELDS:
-                if self.mode in ("preview", "sync") and key != "max_new_items":
+                if self.mode in ("preview", "sync", "layout") and key != "max_new_items":
                     continue
                 try:
                     value = converter(self.query_one("#" + key, Input).value)
@@ -244,6 +265,8 @@ def create_app(root=None):
                     qualifier = "positive number" if converter is float else f"whole number of at least {minimum}"
                     raise TraceError(label + ": enter a " + qualifier) from None
                 settings[key] = value
+            if self.mode in ("new", "global", "case"):
+                settings["include_fees"] = self.query_one("#include-fees", Checkbox).value
             return settings
 
         def on_button_pressed(self, event: Button.Pressed):
@@ -261,7 +284,7 @@ def create_app(root=None):
                 from .cli import board_id
                 settings = self.read_limits()
                 board = None
-                if self.mode in ("new", "case", "preview", "sync"):
+                if self.mode in ("new", "case", "preview", "sync", "layout"):
                     value = self.query_one("#board", Input).value.strip()
                     board = board_id(value) if value else None
                 if self.mode in ("new", "case"):
@@ -302,8 +325,10 @@ def create_app(root=None):
                                  "--max-new-items", str(settings["max_new_items"])]
                     if self.mode == "preview":
                         arguments.append("--dry-run")
+                    elif self.mode == "layout":
+                        arguments.append("--reorganize")
                     # The CLI saves a live board selection only after its local preflight.
-                    self.dismiss((arguments, self.mode == "sync"))
+                    self.dismiss((arguments, self.mode in ("sync", "layout")))
             except ACTION_ERRORS as error:
                 self.query_one("#form-error", Static).update(str(error))
 
@@ -488,6 +513,7 @@ def create_app(root=None):
                     yield Button("Sync to Miro", id="sync")
                 with Horizontal(classes="buttons"):
                     yield Button("Create Miro board", id="create-board")
+                    yield Button("Organize Miro graph", id="layout")
                 with Horizontal(classes="buttons"):
                     yield Button("Investigation settings", id="case-settings")
                     yield Button("Back", id="back")
@@ -500,12 +526,15 @@ def create_app(root=None):
                 metadata = read_case(self.case)
                 source = "Synthetic demo" if metadata.get("fixture") else "Live Liquid"
                 board = metadata.get("miro_board")
+                settings = validate_settings(metadata.get("run_defaults", {}))
                 self.query_one("#case-summary", Static).update(
                     f"{metadata.get('name') or self.case.name}\n{source}\n"
                     f"Latest run: {_status(self.case, metadata)}\n"
-                    f"Miro board: {'https://miro.com/app/board/' + board + '/' if board else 'not set'}\nDirectory: {self.case}")
+                    f"Miro board: {'https://miro.com/app/board/' + board + '/' if board else 'not set'}\n"
+                    f"Transaction fee flows: {'included' if settings['include_fees'] else 'hidden'}\nDirectory: {self.case}")
                 self.query_one("#run", Button).label = "Continue latest run" if metadata.get("latest_run") else "Start first run"
                 self.query_one("#create-board", Button).disabled = self.app.busy or bool(board)
+                self.query_one("#layout", Button).disabled = self.app.busy or not (board and metadata.get("latest_run"))
             except ACTION_ERRORS as error:
                 self.show_error(error)
 
@@ -526,7 +555,7 @@ def create_app(root=None):
                     self.app.push_screen(FormScreen("case", self.case))
                 elif action == "create-board":
                     self.app.push_screen(CreateBoardScreen(self.case), self.perform)
-                elif action in ("run", "preview", "sync"):
+                elif action in ("run", "preview", "sync", "layout"):
                     self.app.push_screen(FormScreen(action, self.case), self.perform)
                 elif action == "review":
                     self.app.push_screen(ReviewScreen(self.case))
@@ -544,6 +573,7 @@ def create_app(root=None):
                 return
             arguments, live = selection
             self.current_action = arguments[0]
+            self.reorganizing = "--reorganize" in arguments
             self.set_busy(True)
             if not live:
                 self.offline_action(arguments)
@@ -577,6 +607,9 @@ def create_app(root=None):
             if getattr(self, "current_action", None) == "miro-create-board":
                 message = ("Miro board saved. Choose Preview Miro, then Sync to Miro to add the traced graph."
                            if status == 0 else "Board creation did not complete. Check the terminal result before retrying.")
+            elif getattr(self, "reorganizing", False):
+                message = ("Miro graph organized. You can adjust item positions directly in Miro."
+                           if status == 0 else "Graph organization did not complete. Check the terminal result before retrying.")
             else:
                 message = ("Completed. Saved evidence is available under Review saved runs." if status == 0
                            else "Action did not complete successfully. Saved evidence remains available; no automatic retry.")

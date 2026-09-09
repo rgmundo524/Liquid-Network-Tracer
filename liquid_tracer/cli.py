@@ -9,13 +9,21 @@ from urllib.parse import quote, unquote, urlsplit
 
 from .api import ENTERPRISE, Esplora, Limits
 from .boards import create_board
-from .common import HEX64, TraceError, digest, load_labels, parse_outpoint, read_json, save_json
+from .common import HEX64, TraceError, digest, load_labels, output_kind, parse_outpoint, read_json, save_json
 from .export import build_graph, export_run
 from .investigations import read_case, update_case
 from .inspection import inspect_transaction, inspect_transactions, parse_transaction_hashes
 from .miro import _namespace, make_plan, publish, resolve, sync, validate_plan
 from .store import Store
 from .trace import new_state, trace
+
+
+def fee_arguments(command):
+    choices = command.add_mutually_exclusive_group()
+    choices.add_argument("--include-fees", dest="include_fees", action="store_true", default=None,
+                         help="Show transaction fee flows for this action (default: investigation setting, otherwise hidden)")
+    choices.add_argument("--exclude-fees", dest="include_fees", action="store_false",
+                         help="Hide transaction fee flows for this action; retain their evidence")
 
 
 def parser():
@@ -64,6 +72,7 @@ def parser():
     run.add_argument("--tx-cache-seconds", type=float, default=86400)
     run.add_argument("--min-interval", type=float, default=.25)
     run.add_argument("--merge-addresses", action="store_true", default=None, help="Merge circles by address; continuation otherwise inherits its parent's mode")
+    fee_arguments(run)
     run.add_argument("--offline-preview", action="store_true", help="Also save optional HTML/SVG inspection files")
     run.add_argument("--miro-board", help="Sync the saved run to this Miro board URL or ID")
     run.add_argument("--max-new-items", type=int, default=750, help="Maximum new Miro shapes plus connectors")
@@ -73,6 +82,7 @@ def parser():
     export.add_argument("--run", required=True, help="Saved run ID or latest")
     export.add_argument("--out", type=Path, required=True, help="New export directory")
     export.add_argument("--merge-addresses", action="store_true", default=None)
+    fee_arguments(export)
     export.add_argument("--offline-preview", action="store_true")
     board = commands.add_parser("miro-create-board", help="Create and save a Miro board for this investigation")
     board.add_argument("--case", type=Path, default=case_default, required=case_default is None,
@@ -88,6 +98,9 @@ def parser():
     update.add_argument("--board", help="Miro board URL or ID (default: saved case board, then LIQUID_MIRO_BOARD, or a prompt)")
     update.add_argument("--plan", type=Path, help="Use a regenerated miro-plan.json for this run")
     update.add_argument("--dry-run", action="store_true", help="Preview local new/mapped counts without network access or writes")
+    fee_arguments(update)
+    update.add_argument("--reorganize", action="store_true",
+                        help="Apply the current automatic layout to managed graph items, replacing their manual positions")
     update.add_argument("--max-new-items", type=int, default=750)
     miro = commands.add_parser("miro-publish", help="Legacy: create a separate snapshot; use miro-sync for cumulative graphs")
     miro.add_argument("--plan", type=Path, required=True)
@@ -217,8 +230,19 @@ def resolve_board(metadata, explicit=None):
     return board_id(value)
 
 
-def refresh_presentation(plan, trace_path):
-    """Render current labels from verified evidence without changing graph identity."""
+def include_fee_flows(metadata, explicit=None):
+    """Resolve a display preference without changing case settings."""
+    defaults = metadata.get("run_defaults", {})
+    if not isinstance(defaults, dict):
+        raise TraceError("Invalid investigation run defaults; restore case.json")
+    value = explicit if explicit is not None else defaults.get("include_fees", False)
+    if not isinstance(value, bool):
+        raise TraceError("include_fees must be true or false")
+    return value
+
+
+def refresh_presentation(plan, trace_path, include_fees=False):
+    """Refresh verified evidence; only proven fee items may change topology."""
     namespace = _namespace(plan)
     state = read_json(trace_path)
     if (not isinstance(state, dict) or state.get("run_id") != plan["run_id"]
@@ -226,11 +250,16 @@ def refresh_presentation(plan, trace_path):
             or state.get("source") != namespace["source"]):
         raise TraceError("Saved trace does not match the Miro plan's run, case, or API source")
     try:
-        refreshed = make_plan(build_graph(state, namespace["address_mode"] == "merged"))
+        merged = namespace["address_mode"] == "merged"
+        full_graph = build_graph(state, merged, include_fees=True)
+        full_plan = make_plan(full_graph)
+        fee_outpoints = {f"{txid}:{index}" for txid, record in state["transactions"].items()
+                         for index, output in enumerate(record["data"]["vout"])
+                         if output_kind(output) == "fee"}
     except (KeyError, TypeError, ValueError, AttributeError):
         raise TraceError("Saved trace cannot be rendered; restore the original evidence") from None
-    validate_plan(refreshed)
-    if _namespace(refreshed) != namespace or refreshed["run_id"] != plan["run_id"]:
+    validate_plan(full_plan)
+    if _namespace(full_plan) != namespace or full_plan["run_id"] != plan["run_id"]:
         raise TraceError("Presentation refresh changed the saved graph identity")
 
     def topology(value):
@@ -239,12 +268,27 @@ def refresh_presentation(plan, trace_path):
             {(item["key"], item["source"], item["target"]) for item in value["connectors"]},
         )
 
-    if topology(refreshed) != topology(plan):
+    full_topology, archived_topology = topology(full_plan), topology(plan)
+    fee_keys = ({"event:" + key for key in fee_outpoints}, {"out:" + key for key in fee_outpoints})
+    for complete, archived, keys in zip(full_topology, archived_topology, fee_keys):
+        ordinary = {item for item in complete if item[0] not in keys}
+        if ({item for item in archived if item[0] not in keys} != ordinary
+                or not {item for item in archived if item[0] in keys}.issubset(complete)):
+            raise TraceError("Presentation refresh would change saved graph topology beyond fee flows; use an explicit verified --plan or regenerate an export for review")
+    refreshed = full_plan if include_fees else make_plan(build_graph(state, merged, include_fees=False))
+    validate_plan(refreshed)
+    expected = full_topology if include_fees else tuple(
+        {item for item in values if item[0] not in keys} for values, keys in zip(full_topology, fee_keys))
+    if (_namespace(refreshed) != namespace or refreshed["run_id"] != plan["run_id"]
+            or topology(refreshed) != expected):
         raise TraceError("Presentation refresh would change saved graph topology; use an explicit verified --plan or regenerate an export for review")
     return refreshed
 
 
-def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_path=None):
+def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_path=None,
+             include_fees=None, reorganize=False):
+    if plan_path is not None and include_fees is not None:
+        raise TraceError("--plan cannot be combined with --include-fees or --exclude-fees; regenerate an export with the desired fee setting, then select its plan")
     run_id = resolve_latest(case, run_id)
     default_plan = run_path(case, run_id) / "miro-plan.json"
     verify_export((plan_path or default_plan).parent)
@@ -258,21 +302,24 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
         raise TraceError("Saved plan has no matching case identity; regenerate it with export or create a continuation")
     archived_plan_sha256 = plan["sha256"]
     if plan_path is None:
-        plan = refresh_presentation(plan, default_plan.parent / "trace.json")
+        plan = refresh_presentation(plan, default_plan.parent / "trace.json", include_fee_flows(metadata, include_fees))
     if not isinstance(max_new_items, int) or max_new_items < 0:
         raise TraceError("--max-new-items must be a nonnegative integer")
     target = resolve_board(metadata, board)
     state_path = case / "miro" / (digest(target.encode())[:24] + ".json")
     # Validate the mapping, lineage, and item budget locally before saving a selection.
-    result = sync(plan, target, state_path, max_items=max_new_items, dry_run=True)
+    options = {"reorganize": True} if reorganize else {}
+    result = sync(plan, target, state_path, max_items=max_new_items, dry_run=True, **options)
     if not dry_run:
         update_case(case, {"miro_board": target})
-        result = sync(plan, target, state_path, max_items=max_new_items, dry_run=False)
+        result = sync(plan, target, state_path, max_items=max_new_items, dry_run=False, **options)
     report = {**result, "run_id": run_id, "board_id": target,
               "board_url": "https://miro.com/app/board/" + quote(target, safe="") + "/",
               "state_file": str(state_path.resolve()),
               "plan_sha256": plan["sha256"], "archived_plan_sha256": archived_plan_sha256,
               "presentation_version": plan.get("presentation_version", 1),
+              "include_fees": plan.get("include_fees", True),
+              "reorganize": bool(reorganize),
               "presentation_refreshed": plan["sha256"] != archived_plan_sha256}
     if not dry_run:
         report_path = case / "miro" / "reports" / (run_id + "-" + uuid.uuid4().hex[:12] + ".json")
@@ -331,6 +378,8 @@ def run_trace(args):
             state["investigation"] = {"case_id": identity, "name": metadata.get("name"),
                                       "miro_board": args.miro_board or metadata.get("miro_board") or None}
             state["address_mode"] = "merged" if merge_addresses else "outpoint_occurrences"
+            state["graph_options"] = {**state.get("graph_options", {}),
+                                      "include_fees": include_fee_flows(metadata, args.include_fees)}
             api.run_id = state["run_id"]
             destination = run_path(args.case, state["run_id"])
             only = {f"{t}:{i}" for t, i in map(parse_outpoint, args.only)} if args.only else None
@@ -343,7 +392,8 @@ def run_trace(args):
             failed = state["status"] == "error"
             if args.miro_board:
                 try:
-                    summary["miro"] = sync_run(args.case, state["run_id"], args.miro_board, args.max_new_items)
+                    summary["miro"] = sync_run(args.case, state["run_id"], args.miro_board, args.max_new_items,
+                                               include_fees=state["graph_options"]["include_fees"])
                 except (TraceError, OSError, ValueError, KeyError) as error:
                     summary["miro_error"] = str(error)
                     summary["miro_retry"] = {"command": "miro-sync", "case": str(args.case.resolve()),
@@ -408,6 +458,8 @@ def main(argv=None):
                 if state.get("case_id", identity) != identity:
                     raise TraceError("The saved run belongs to a different case")
                 state["case_id"] = identity
+                state["graph_options"] = {**state.get("graph_options", {}),
+                                          "include_fees": include_fee_flows(read_case(args.case), args.include_fees)}
                 merged = bool(args.merge_addresses or state.get("address_mode") == "merged")
                 export_run(store, state, args.out, merged, args.offline_preview)
             finally:
@@ -416,7 +468,8 @@ def main(argv=None):
         elif args.command == "miro-create-board":
             print(json.dumps(create_board(args.case, args.name, args.team_id, args.visibility), indent=2))
         elif args.command == "miro-sync":
-            print(json.dumps(sync_run(args.case, args.run, args.board, args.max_new_items, args.dry_run, args.plan), indent=2))
+            print(json.dumps(sync_run(args.case, args.run, args.board, args.max_new_items, args.dry_run, args.plan,
+                                      args.include_fees, args.reorganize), indent=2))
         elif args.command == "miro-publish":
             print(json.dumps(publish(read_json(args.plan), board_id(args.board_id), args.state, args.max_items), indent=2))
         elif args.command == "miro-resolve":

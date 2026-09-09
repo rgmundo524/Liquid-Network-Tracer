@@ -4,7 +4,7 @@ A local Python program for bounded forward tracing on Liquid, per-run CSV/eviden
 
 Miro is the investigation workspace. The program retrieves blockchain data and keeps the evidence and object mapping; it can be run from your terminal without a Miro plugin. CSV files document each run. The saved graph plan supplies native Miro shapes and connectors directly through the REST API, so a generic CSV-to-graph importer is unnecessary.
 
-It follows **exact output spends**, preserves confidential quantities as unknown, saves unfinished branches, and extends them in later runs. The graph uses address circles, transaction squares, and separate diamonds for fees, unspendable outputs, and peg-out requests.
+It follows **exact output spends**, preserves confidential quantities as unknown, saves unfinished branches, and extends them in later runs. The graph uses address circles, transaction squares, and separate diamonds for unspendable outputs, peg-out requests, and optionally transaction fees.
 
 Graph captions use `vin/vout number · amount asset`. For example, `vout 0 · ?? ??` means neither amount nor asset is available in the public data; `?? L-BTC` retains an explicitly identified asset with an unavailable amount. Known amounts remain exact base-unit quantities. Other asset IDs are shortened for display and retained in full in the evidence. Address circles show the address and any analyst attribution; the creating transaction hash and exact UTXO reference remain in the saved details instead of being repeated on the circle or input caption.
 
@@ -21,6 +21,10 @@ The graph legend uses the same palette as its nodes and connectors:
 | Dark teal / gray arrows | Traced UTXO links / context connections. |
 
 Where circle roles overlap, attribution takes precedence over seed, then candidate, then context. This also applies when addresses are merged. Colors describe graph roles; they do not establish ownership or allocate stolen value. Run notes show counts of starting outputs and transactions while the full seed list stays in the saved run data.
+
+The default layout follows recorded transaction dependencies from left to right, including related transactions selected together as starting points. Inputs sit to the left of their transaction and outputs to the right, with connected items grouped into nearby rows. Separate components use separate lanes. Reused addresses remain distinct UTXO occurrences by default; merging them can introduce return edges that cannot all point right.
+
+**Include transaction fee flows** is a checkbox in investigation settings and the defaults for new investigations. It starts unchecked. When included, fees appear in a horizontal row above the main flow, ordered by available chain chronology with deterministic tie handling. Excluding fees changes the graph only: fee amounts, events, and API observations remain in the evidence exports.
 
 ## Start the program
 
@@ -43,7 +47,7 @@ In an interactive terminal, `liquid-trace` opens a Textual interface with **New 
 4. Review the saved run summary and exported file locations. If the case has no board, choose **Create Miro board**, review its name and visibility, and create it. Then choose **Preview Miro** and **Sync to Miro** to publish the saved run.
 5. Next time, launch `liquid-trace`, choose **Continue investigation**, and select the saved case. Continue its latest run with another bounded hop allowance, or review and sync what is already saved.
 
-The investigation settings let you change its name, board, and run defaults. Top-level **Settings** changes the numeric defaults used for new investigations. Existing investigations keep their own saved defaults. Creating a board saves its ID with the case and shows its URL in the investigation menu. It creates an empty board; publishing the traced graph is a separate **Sync to Miro** action. A completed run can be synced after creating or linking a board without tracing again.
+The investigation settings let you change its name, board, run limits, and fee visibility. Top-level **Settings** changes defaults for new investigations. Existing investigations keep their own saved defaults. Creating a board saves its ID with the case and shows its URL in the investigation menu. It creates an empty board; publishing the traced graph is a separate **Sync to Miro** action. A completed run can be synced after creating or linking a board without tracing again.
 
 `vout` means the output's numeric index, starting at zero. In `HASH:0`, `0` selects the first output; `HASH:1` selects the second. Do not type the literal word `vout` or a backslash before the colon. Choose the output connected to your investigation; output 0 is only an example. The picker starts with nothing selected and excludes fees, peg-outs, and unspendable outputs. Hidden amounts and assets remain unknown.
 
@@ -63,7 +67,7 @@ liquid-trace menu --investigations-dir /absolute/path/to/investigations
 
 | Location | Contents |
 | --- | --- |
-| `cases/settings.json` | Numeric defaults for new investigations. |
+| `cases/settings.json` | Run limits and fee visibility defaults for new investigations. |
 | `cases/<investigation>/case.json` | Investigation name, seeds, source, board selection, run defaults, and latest exported run ID. |
 | `cases/<investigation>/runs/<run-id>/` | A separate evidence and export directory for each run. |
 | `cases/<investigation>/miro/` | Saved mapping between graph objects and items on each Miro board. |
@@ -257,15 +261,25 @@ liquid-live miro-sync --case cases/theft-liquid
 
 A configured board alone does not publish anything during tracing; run sync after reviewing the exports.
 
-Normal **Preview Miro** and **Sync to Miro** rebuild the current graph presentation in memory from the verified saved trace. This applies label and legend improvements to existing runs without another Blockstream request or changes to archived run files. Live sync updates managed labels and colors while retaining manual edits and positions. Reports record the archived and rendered plan hashes and presentation version. An explicit `--plan` continues to use that verified plan as supplied.
+Normal **Preview Miro** and **Sync to Miro** rebuild the current graph presentation in memory from the verified saved trace and current fee setting. This applies display changes without another Blockstream request or changes to archived run files. Live sync updates managed labels and colors while retaining manual edits and positions. Reports record the archived and rendered plan hashes and presentation version. An explicit `--plan` continues to use that verified plan as supplied.
+
+To reorganize an existing board, choose **Organize Miro graph** from the investigation menu. Review the action and confirm it to arrange the managed graph from left to right using the saved run. This explicitly changes positions; normal sync preserves your manual arrangement. Existing dimensions and manual annotations remain intact. Previous coordinates are recorded with the sync state for review. The operation considers mapped items; it cannot guarantee separation from unrelated content elsewhere on the board.
+
+The equivalent direct command is:
+
+```bash
+liquid-live miro-sync --case cases/theft-liquid --reorganize
+```
+
+`trace`, `export`, and `miro-sync` accept `--include-fees` or `--exclude-fees` as an explicit display override. Otherwise they use the selected case's setting, defaulting to excluded. These flags do not alter tracing or erase fee evidence. A supplied `--plan` has its own reviewed fee selection; regenerate an export to change it instead of combining that plan with a fee override.
 
 Use the **same case directory and board** for later runs. Sync creates native [shapes](https://developers.miro.com/reference/create-shape-item-1) and [connectors](https://developers.miro.com/reference/create-connector-1), checks existing items, and updates compatible managed fields. It does not call Blockstream. A per-board state file under `case/miro/` maps stable graph IDs to remote item IDs, and `case/miro/reports/` retains sync reports separately from immutable run exports.
 
 - Repeating the same run creates no duplicate acknowledged objects. A newer continuation adds new objects and a run note; already mapped circles and squares are reused.
-- Existing positions and dimensions are never patched. New batches are placed to the right of mapped shapes. This placement does not account for unrelated board content.
+- Normal sync preserves existing positions and dimensions. New items from the current layout are placed relative to connected mapped items and avoid mapped shape bounds. Explicit **Organize Miro graph** changes managed positions while preserving dimensions. Legacy plans retain their original batch-placement behavior.
 - Keep mapped shapes on the board canvas. Items with frame/group-relative coordinates stop sync before writes; nested layouts are not supported in this version.
 - Existing content, captions and styles are updated only where the current value still matches the program's saved baseline. Analyst edits are retained and listed as conflicts in the report. Avoid simultaneous content/style edits during a live sync: the API check and update are separate requests.
-- No objects are deleted. A missing mapped object or changed connector endpoint stops sync before writes; restore it or repair the mapping after inspection.
+- Excluding fees removes only generated fee connectors and diamonds identified from the saved trace. Edited fee labels, captions, or managed styles stop removal before board writes. Extra comments and unmapped connectors attached to fee diamonds are outside those checks; retain fees when these annotations need to remain attached. Enabling fees again recreates their representations. Other mapped objects are retained; an unexpectedly missing object or changed connector endpoint stops sync for inspection. Interrupted fee removals retain recovery state.
 - A board mapping is bound to one case, API source, and address mode. After a run has been synced, extend that run (or a later descendant). Older snapshots, sibling branches and independent roots cannot overwrite newer graph classifications. You may skip intermediate unpublished runs.
 - Finish an interrupted sync before switching to another run. Resolving a pending creation alone does not finish that sync.
 - The default cap is **750 new shapes plus connectors per sync**, not total board size. Use `--max-new-items` to change it. Existing-object checks can still take time on a large graph.
