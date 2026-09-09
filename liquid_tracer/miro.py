@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .api import http
 from .common import TraceError, canonical, digest, now, read_json, save_json
+from .export import COLORS, edge_color, legend_lines
 
 
 def make_plan(graph):
@@ -19,16 +20,21 @@ def make_plan(graph):
     if not incremental:
         title += " · " + graph["run_id"]
     shapes.append({"key": "legend", "body": {"data": {"shape": "rectangle", "content":
-        "<p><strong>" + html.escape(title) + "</strong></p><p>Circles: addresses / outpoint occurrences. Squares: transactions. Diamonds: events.</p>"
-        "<p>Red: seed. Yellow: candidate. Gray: context. Green: analyst attribution (read confidence).</p><p>" + html.escape(graph["notice"]) + "</p>"},
+        "<p><strong>" + html.escape(title) + "</strong></p><p>"
+        + "<br>".join(html.escape(line) for line in legend_lines())
+        + "</p><p>" + html.escape(graph["notice"]) + "</p>"},
         "position": {"x": 700, "y": -160, "origin": "center"}, "geometry": {"width": 1300, "height": 260},
-        "style": {"fillColor": "#f5f6f8", "fontSize": "18", "textAlign": "left"}}})
+        "style": {"fillColor": COLORS["address"], "fontSize": "16", "textAlign": "left"}}})
     if incremental:
         details = graph.get("run", {})
         lines = ["Run: " + graph["run_id"]]
         for key in ("started_at", "finished_at", "status", "parent_run", "stop_reason", "max_hops", "seeds", "limits", "stats"):
             if key in details:
                 value = details[key]
+                if key == "seeds" and isinstance(value, list):
+                    transactions = {str(seed).rpartition(":")[0] for seed in value}
+                    lines.append(f"Starting outputs: {len(value)} across {len(transactions)} transactions")
+                    continue
                 lines.append(key.replace("_", " ") + ": " + (json.dumps(value, ensure_ascii=False)
                              if isinstance(value, (dict, list)) else str(value)))
         shapes.append({"key": "run:" + graph["run_id"], "body": {
@@ -50,9 +56,11 @@ def make_plan(graph):
         connectors.append({"key": edge["id"], "source": edge["source"], "target": edge["target"], "body": {
             "shape": "curved", "captions": [{"content": html.escape(edge["label"] + " · " + edge["quantity"]), "position": "50%"}],
             "style": {"startStrokeCap": "none", "endStrokeCap": "stealth", "strokeStyle": "normal",
-                      "strokeColor": "#9ca3af" if edge["role"].startswith("context") else "#155e75",
+                      "strokeColor": edge_color(edge["role"]),
                       "strokeWidth": "2", "fontSize": "11"}}})
     plan = {"schema_version": 2 if incremental else 1, "run_id": graph["run_id"], "shapes": shapes, "connectors": connectors}
+    if "presentation_version" in graph:
+        plan["presentation_version"] = graph["presentation_version"]
     if incremental:
         plan["namespace"] = copy.deepcopy(graph["namespace"])
         plan["run"] = copy.deepcopy(graph.get("run", {}))

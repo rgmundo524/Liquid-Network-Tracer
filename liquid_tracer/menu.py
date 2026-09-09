@@ -9,7 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .common import HEX64, LBTC, TraceError, parse_outpoint, read_json
+from .common import LBTC, TraceError, parse_outpoint, read_json
 from .investigations import (create_investigation, default_root, list_investigations,
                              load_settings, read_case, save_settings, update_case)
 
@@ -52,6 +52,32 @@ def _seed_values(value):
     if not values:
         raise TraceError("Provide at least one starting output as HASH:NUMBER, or use Load outputs to choose one.")
     return sorted({f"{txid}:{index}" for txid, index in map(parse_outpoint, values)})
+
+
+def _lookup_reports(report, txids):
+    """Validate the complete lookup before offering any output for selection."""
+    invalid = "Output lookup returned an invalid transaction report. No outputs were changed."
+    if not isinstance(report, dict):
+        raise TraceError(invalid)
+    reports = [report] if len(txids) == 1 else report.get("transactions")
+    if not isinstance(reports, list) or len(reports) != len(txids):
+        raise TraceError(invalid)
+    for txid, transaction in zip(txids, reports):
+        if (not isinstance(transaction, dict) or transaction.get("txid") != txid
+                or not isinstance(transaction.get("outputs"), list)):
+            raise TraceError(invalid)
+        for index, output in enumerate(transaction["outputs"]):
+            if (not isinstance(output, dict) or type(output.get("vout")) is not int
+                    or output["vout"] != index or output.get("outpoint") != f"{txid}:{index}"
+                    or type(output.get("selectable")) is not bool):
+                raise TraceError(invalid)
+            if any(output.get(field) is not None and not isinstance(output[field], str)
+                   for field in ("address", "asset", "script_type", "reason")):
+                raise TraceError(invalid)
+            value = output.get("value")
+            if value is not None and (type(value) is not int or value < 0):
+                raise TraceError(invalid)
+    return reports
 
 
 def _latest(case, metadata, verify=False):
@@ -153,10 +179,11 @@ def create_app(root=None):
                     yield Label("Data source")
                     yield Select([("Synthetic demo (offline)", "demo"), ("Live Liquid", "live")],
                                  value="demo", allow_blank=False, id="source")
-                    yield Label("Transaction hash: look up outputs before choosing where to start")
-                    yield Input(placeholder="64-character Liquid transaction hash", id="lookup-txid")
+                    yield Label("Transaction hashes separated by commas")
+                    yield Input(placeholder="64-character hash, another hash, ...", id="lookup-txid")
                     yield Button("Load outputs", id="lookup")
-                    yield Static("Lookup uses the selected data source. Live lookup retrieves one transaction through SecretSpec and Blockstream. "
+                    yield Static("Load one or more transactions, then choose their starting outputs together. "
+                                 "Live lookup uses SecretSpec and Blockstream. "
                                  "It may use API credits. It does not start a trace.", markup=False)
                     yield Label("Starting outputs: HASH:NUMBER (for example, :0 means output 0)")
                     yield Static("Replace NUMBER with an actual output number, not the word 'vout'. "
@@ -283,9 +310,11 @@ def create_app(root=None):
         def lookup_outputs(self):
             error_field = self.query_one("#form-error", Static)
             error_field.update("")
-            txid = self.query_one("#lookup-txid", Input).value.strip().lower()
-            if not HEX64.fullmatch(txid):
-                error_field.update("Enter only the 64-character transaction hash in the lookup field, without :vout.")
+            try:
+                from .inspection import parse_transaction_hashes
+                txids = parse_transaction_hashes(self.query_one("#lookup-txid", Input).value)
+            except ACTION_ERRORS as error:
+                error_field.update(str(error))
                 return
             live = self.query_one("#source", Select).value == "live"
             try:
@@ -294,7 +323,9 @@ def create_app(root=None):
                 self.app.busy = True
                 with tempfile.TemporaryDirectory(prefix="liquid-output-lookup-") as directory:
                     report_path = Path(directory) / "outputs.json"
-                    arguments = ["inspect-tx", "--txid", txid, "--output", str(report_path)]
+                    arguments = (["inspect-tx", "--txid", txids[0]] if len(txids) == 1
+                                 else ["inspect-txs", "--txids", ",".join(txids)])
+                    arguments.extend(["--output", str(report_path)])
                     if not live:
                         arguments.extend(["--fixture", str(_project() / "examples" / "demo-api.json")])
                     with self.app.suspend() if live else contextlib.nullcontext():
@@ -304,10 +335,8 @@ def create_app(root=None):
                     if result.returncode:
                         raise TraceError("Output lookup failed. Check the terminal for credential or API errors, then retry."
                                          if live else "Transaction not available in the synthetic demo, or lookup failed.")
-                    report = read_json(report_path)
-                    if not isinstance(report, dict) or report.get("txid") != txid or not isinstance(report.get("outputs"), list):
-                        raise TraceError("Output lookup returned an invalid transaction report.")
-                self.app.push_screen(OutputScreen(report), self.use_outputs)
+                    reports = _lookup_reports(read_json(report_path), txids)
+                self.app.push_screen(OutputScreen(reports), self.use_outputs)
             except KeyboardInterrupt:
                 error_field.update("Output lookup interrupted. No investigation was created.")
             except ACTION_ERRORS as error:
@@ -323,20 +352,23 @@ def create_app(root=None):
                 self.query_one("#form-error", Static).update("")
 
     class OutputScreen(BaseScreen):
-        def __init__(self, report):
+        def __init__(self, reports):
             super().__init__()
-            self.report = report
+            self.reports = reports
             self.selected = set()
-            self.outputs = {output["outpoint"]: output for output in report["outputs"]}
+            self.outputs = {output["outpoint"]: output for report in reports for output in report["outputs"]}
+            self.transactions = {output["outpoint"]: (number, report["txid"])
+                                 for number, report in enumerate(reports, start=1) for output in report["outputs"]}
 
         def compose(self) -> ComposeResult:
             yield Header()
             with Vertical(classes="panel"):
                 yield Label("Choose starting outputs", classes="title")
-                yield Static(self.report["txid"], markup=False)
+                yield Static(f"{len(self.reports)} transaction(s). Rows are grouped in the order entered.", markup=False)
                 yield Static("Enter toggles the highlighted output. Nothing is selected initially. "
                              "Using a selection replaces the starting-output field.", markup=False)
                 yield DataTable(id="outputs", cursor_type="row")
+                yield Static("", id="output-detail", markup=False)
                 yield Static("", id="output-error", markup=False)
                 with Horizontal(classes="buttons"):
                     yield Button("Cancel", id="cancel-outputs")
@@ -345,15 +377,24 @@ def create_app(root=None):
 
         def on_mount(self):
             table = self.query_one("#outputs", DataTable)
-            self.choice_column = table.add_columns("Selected", "Output", "Address", "Amount", "Asset", "Type")[0]
+            self.choice_column = table.add_columns("Selected", "Transaction", "Output", "Address", "Amount", "Asset", "Type")[0]
             for outpoint, output in self.outputs.items():
                 asset = output.get("asset")
-                table.add_row("No" if output["selectable"] else "Unavailable", str(output["vout"]),
+                number, txid = self.transactions[outpoint]
+                table.add_row("No" if output["selectable"] else "Unavailable", f"{number}: {txid[:8]}…{txid[-6:]}",
+                              str(output["vout"]),
                               Text(output.get("address") or "No address"),
-                              str(output["value"]) + " base units" if output.get("value") is not None else "Confidential / unavailable",
-                              Text("L-BTC" if asset == LBTC else asset or "Confidential / unavailable"),
-                              Text(output.get("reason") or output.get("script_type") or "Unknown"), key=outpoint)
+                              str(output["value"]) + " base units" if output.get("value") is not None else "??",
+                              Text("L-BTC" if asset == LBTC else asset or "??"),
+                              Text(output.get("reason") or output.get("script_type") or "??"), key=outpoint)
             table.focus()
+
+        def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted):
+            key = event.row_key.value
+            if key in self.outputs:
+                number, txid = self.transactions[key]
+                self.query_one("#output-detail", Static).update(
+                    f"Transaction {number}: {txid}\nOutput {self.outputs[key]['vout']}")
 
         def on_data_table_row_selected(self, event: DataTable.RowSelected):
             key = event.row_key.value

@@ -6,6 +6,22 @@ Miro is the investigation workspace. The program retrieves blockchain data and k
 
 It follows **exact output spends**, preserves confidential quantities as unknown, saves unfinished branches, and extends them in later runs. The graph uses address circles, transaction squares, and separate diamonds for fees, unspendable outputs, and peg-out requests.
 
+Graph captions use `vin/vout number · amount asset`. For example, `vout 0 · ?? ??` means neither amount nor asset is available in the public data; `?? L-BTC` retains an explicitly identified asset with an unavailable amount. Known amounts remain exact base-unit quantities. Other asset IDs are shortened for display and retained in full in the evidence. Address circles show the address and any analyst attribution; the creating transaction hash and exact UTXO reference remain in the saved details instead of being repeated on the circle or input caption.
+
+The graph legend uses the same palette as its nodes and connectors:
+
+| Appearance | Meaning |
+| --- | --- |
+| Blue squares | Transactions, including the starting transactions. |
+| Red circles | Selected starting outputs. |
+| Yellow circles | Reachable candidate outputs. |
+| Light gray circles | Context addresses. |
+| Green circles | Analyst attribution; read its confidence label. |
+| Pink diamonds | Fees, unspendable outputs, or peg-out requests. |
+| Dark teal / gray arrows | Traced UTXO links / context connections. |
+
+Where circle roles overlap, attribution takes precedence over seed, then candidate, then context. This also applies when addresses are merged. Colors describe graph roles; they do not establish ownership or allocate stolen value. Run notes show counts of starting outputs and transactions while the full seed list stays in the saved run data.
+
 ## Start the program
 
 The project has **one main `devenv.nix`** for Python, commands, and environment defaults. SecretSpec retrieves API credentials from Proton Pass when a selected action needs them. Investigation names, board IDs, and run history are saved as case data; you do not need another Nix file or shell variables for each investigation.
@@ -22,7 +38,7 @@ liquid-trace
 In an interactive terminal, `liquid-trace` opens a Textual interface with **New investigation**, **Continue investigation**, **Settings**, and **Exit**. Select actions with the keyboard or mouse. You can also launch it explicitly with `liquid-trace menu`. Opening the menu does not load credentials or call Blockstream or Miro.
 
 1. Choose **New investigation** and give it a name. The program creates a unique subdirectory under `cases/`.
-2. Select **Live Liquid** or the offline synthetic demo. For a live case, paste the bare Liquid hash into **Transaction hash** and choose **Load outputs**. Review the output numbers and addresses, use Enter to toggle the relevant rows, then choose **Use selected outputs**. This fills the starting-output field; it replaces any existing entries. Alternatively enter known outputs directly as `HASH:NUMBER`, separated by whitespace or commas. Optionally provide an existing Miro board URL or ID; you can add it later.
+2. Select **Live Liquid** or the offline synthetic demo. Paste one or more bare Liquid transaction hashes, separated by commas, into **Transaction hashes** and choose **Load outputs**. Review the outputs grouped by transaction, use Enter to toggle the relevant rows across transactions, then choose **Use selected outputs**. This fills the starting-output field; it replaces any existing entries. Alternatively enter known outputs directly as `HASH:NUMBER`, separated by whitespace or commas. Optionally provide an existing Miro board URL or ID; you can add it later.
 3. Start the first bounded run from the investigation menu. Review the hop and request limits before running it. A live trace retrieves credentials through SecretSpec; a demo trace needs none.
 4. Review the saved run summary and exported file locations. If the case has no board, choose **Create Miro board**, review its name and visibility, and create it. Then choose **Preview Miro** and **Sync to Miro** to publish the saved run.
 5. Next time, launch `liquid-trace`, choose **Continue investigation**, and select the saved case. Continue its latest run with another bounded hop allowance, or review and sync what is already saved.
@@ -31,7 +47,9 @@ The investigation settings let you change its name, board, and run defaults. Top
 
 `vout` means the output's numeric index, starting at zero. In `HASH:0`, `0` selects the first output; `HASH:1` selects the second. Do not type the literal word `vout` or a backslash before the colon. Choose the output connected to your investigation; output 0 is only an example. The picker starts with nothing selected and excludes fees, peg-outs, and unspendable outputs. Hidden amounts and assets remain unknown.
 
-**Load outputs** is a separate bounded lookup: one transaction, with at most five API attempts (including authentication/retries) and a 30-second API budget. Live lookup retrieves credentials through SecretSpec on your machine. It creates no investigation or trace and follows no subsequent spends. The selected output references are saved when you create the investigation; the later trace fetches and archives its own evidence.
+**Load outputs** accepts up to 100 distinct transaction hashes. Commas, spaces, or newlines separate hashes; duplicates are removed and the full list is validated before lookup. One credential session and API client serve the batch. The shared lookup budget defaults to five API attempts and 30 seconds per distinct transaction, including authentication and retries. For 10 transactions that means at most 50 attempts and 300 seconds across the batch. A failed lookup preserves the existing starting-output field; a partial result is not applied.
+
+Lookup creates no investigation or trace and follows no subsequent spends. The selected output references are saved when you create the investigation; the later trace fetches and archives its own evidence. Selected UTXOs from all starting transactions share one investigation, board, and set of run limits. Shared descendants are represented once. Continuing a bounded run resumes its saved branches; adding different starting transactions currently requires a new investigation.
 
 For your first trial, select the **offline demo** and use a separate empty Miro test board. Demo hashes and addresses are synthetic. Its full path ends in a synthetic peg-out request, not an actual Bitcoin payout or Avalanche transaction. You can navigate, trace the demo, and preview a Miro plan without credentials. Creating a Miro board and live sync require your access token, even for a demo investigation.
 
@@ -238,6 +256,8 @@ liquid-live miro-sync --case cases/theft-liquid
 ```
 
 A configured board alone does not publish anything during tracing; run sync after reviewing the exports.
+
+Normal **Preview Miro** and **Sync to Miro** rebuild the current graph presentation in memory from the verified saved trace. This applies label and legend improvements to existing runs without another Blockstream request or changes to archived run files. Live sync updates managed labels and colors while retaining manual edits and positions. Reports record the archived and rendered plan hashes and presentation version. An explicit `--plan` continues to use that verified plan as supplied.
 
 Use the **same case directory and board** for later runs. Sync creates native [shapes](https://developers.miro.com/reference/create-shape-item-1) and [connectors](https://developers.miro.com/reference/create-connector-1), checks existing items, and updates compatible managed fields. It does not call Blockstream. A per-board state file under `case/miro/` maps stable graph IDs to remote item IDs, and `case/miro/reports/` retains sync reports separately from immutable run exports.
 

@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import importlib.util
 import io
 import json
@@ -13,7 +14,7 @@ from unittest.mock import patch
 from liquid_tracer.common import TraceError, read_json
 from liquid_tracer.investigations import (DEFAULTS, create_investigation, list_investigations,
                                          load_settings, read_case, update_case)
-from liquid_tracer.menu import _command, _seed_values, create_app, run_menu
+from liquid_tracer.menu import _command, _lookup_reports, _seed_values, create_app, run_menu
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -59,6 +60,24 @@ class MenuCommandTests(unittest.TestCase):
             self.assertEqual(run_menu(), 2)
         make_app.assert_not_called()
         self.assertIn("interactive terminal", error.getvalue())
+
+    def test_output_reports_validate_the_entire_batch_before_selection(self):
+        txids = ["a" * 64, "b" * 64]
+        report = {"transactions": [{"txid": txid, "outputs": [
+            {"outpoint": txid + ":0", "vout": 0, "selectable": True, "value": None, "asset": None}
+        ]} for txid in txids]}
+        self.assertEqual(_lookup_reports(report, txids), report["transactions"])
+        self.assertEqual(_lookup_reports(report["transactions"][0], txids[:1]), report["transactions"][:1])
+        invalid_reports = [{"transactions": report["transactions"][:1]},
+                           {"transactions": list(reversed(report["transactions"]))}]
+        for field, value in (("outpoint", txids[0] + ":0"), ("vout", True),
+                             ("selectable", "yes"), ("value", -1), ("address", {"invalid": "address"})):
+            invalid = copy.deepcopy(report)
+            invalid["transactions"][1]["outputs"][0][field] = value
+            invalid_reports.append(invalid)
+        for invalid in invalid_reports:
+            with self.subTest(report=invalid), self.assertRaisesRegex(TraceError, "No outputs were changed"):
+                _lookup_reports(invalid, txids)
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "Install the optional [tui] extra to run Textual interaction tests")
@@ -118,11 +137,11 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(110, 55)) as pilot:
                 await self.click(app, pilot, "#new")
                 app.screen.query_one("#source", Select).value = "live"
-                for value in ("bad", "a" * 64 + ":vout", "a" * 64 + r"\:0"):
+                for value in ("bad", "a" * 64 + ":vout", "a" * 64 + r"\:0", "a" * 64 + ",bad"):
                     with self.subTest(value=value):
                         app.screen.query_one("#lookup-txid", Input).value = value
                         await self.click(app, pilot, "#lookup")
-                        self.assertIn("Enter only the 64-character transaction hash",
+                        self.assertIn("64",
                                       str(app.screen.query_one("#form-error", Static).render()))
                         self.assertFalse(app.busy)
                         self.assertFalse(self.root.exists())
@@ -246,6 +265,111 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(metadata.get("latest_run"))
                 self.assertFalse((case / "runs").exists())
                 process.assert_called_once()
+
+    async def test_ten_transaction_lookup_groups_outputs_and_saves_exact_selections(self):
+        from textual.widgets import DataTable, Input, Select, Static, TextArea
+        txids = [f"{number:064x}" for number in range(10, 20)]
+        report = {"transactions": [{"txid": txid, "outputs": [
+            {"outpoint": txid + ":0", "vout": 0, "address": "SYNTHETIC-output-" + str(number),
+             "value": None, "asset": None, "script_type": "v0_p2wpkh", "selectable": True},
+            {"outpoint": txid + ":1", "vout": 1, "address": None, "value": 100,
+             "asset": None, "script_type": "fee", "selectable": False, "reason": "fee"},
+        ]} for number, txid in enumerate(txids)]}
+        original = "f" * 64 + ":9"
+        report_paths = []
+
+        def local_report(command, **kwargs):
+            self.assertEqual(command[:9], ["/nix/store/test-secretspec/bin/secretspec", "--file",
+                str(PROJECT / "secretspec.toml"), "run", "--provider", "protonpass",
+                "--profile", "development", "--"])
+            self.assertEqual(command[9:15], [sys.executable, "-m", "liquid_tracer", "inspect-txs",
+                                           "--txids", ",".join(txids)])
+            self.assertNotIn("capture_output", kwargs)
+            self.assertNotIn("stdout", kwargs)
+            self.assertNotIn("stderr", kwargs)
+            report_path = Path(command[command.index("--output") + 1])
+            report_paths.append(report_path)
+            report_path.write_text(json.dumps(report))
+            return subprocess.CompletedProcess(command, 0)
+
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run", side_effect=local_report) as process, \
+                patch.object(app, "suspend", side_effect=contextlib.nullcontext) as suspend:
+            async with app.run_test(size=(130, 55)) as pilot:
+                await self.click(app, pilot, "#new")
+                form = app.screen
+                form.query_one("#case-name", Input).value = "Ten starting transactions"
+                form.query_one("#source", Select).value = "live"
+                form.query_one("#seeds", TextArea).text = original
+                form.query_one("#lookup-txid", Input).value = ", ".join(txids + [txids[0].upper()])
+                await self.click(app, pilot, "#lookup")
+                process.assert_called_once()
+                suspend.assert_called_once()
+                self.assertFalse(self.root.exists())
+                self.assertEqual(list(app.screen.outputs), [output["outpoint"]
+                    for transaction in report["transactions"] for output in transaction["outputs"]])
+                table = app.screen.query_one("#outputs", DataTable)
+                self.assertEqual(table.row_count, 20)
+                self.assertEqual(app.screen.selected, set())
+                self.assertEqual(table.get_row(txids[0] + ":0")[4], "??")
+                self.assertEqual(str(table.get_row(txids[0] + ":0")[5]), "??")
+                await self.toggle_output(app, pilot, 19)
+                self.assertEqual(app.screen.selected, set())
+                await self.toggle_output(app, pilot, 18)
+                self.assertIn(txids[-1], str(app.screen.query_one("#output-detail", Static).render()))
+                await self.click(app, pilot, "#cancel-outputs")
+                self.assertIs(app.screen, form)
+                self.assertEqual(form.query_one("#seeds", TextArea).text, original)
+
+                await self.click(app, pilot, "#lookup")
+                self.assertEqual(app.screen.selected, set())
+                for row in range(0, 20, 2):
+                    await self.toggle_output(app, pilot, row)
+                selected = [txid + ":0" for txid in txids]
+                self.assertEqual(app.screen.selected, set(selected))
+                await self.click(app, pilot, "#use-outputs")
+                self.assertEqual(form.query_one("#seeds", TextArea).text.splitlines(), selected)
+                self.assertFalse(self.root.exists())
+                await self.click(app, pilot, "#submit")
+                case = app.screen.case
+                self.assertEqual(read_case(case)["seeds"], selected)
+                self.assertIsNone(read_case(case).get("latest_run"))
+                self.assertFalse((case / "runs").exists())
+                self.assertEqual(process.call_count, 2)
+                self.assertEqual(suspend.call_count, 2)
+        self.assertTrue(all(not path.exists() for path in report_paths))
+
+    async def test_failed_or_incomplete_batch_lookup_keeps_existing_selection(self):
+        from textual.widgets import Input, Select, Static, TextArea
+        txids = ["a" * 64, "b" * 64]
+        report = {"transactions": [{"txid": txids[0], "outputs": [
+            {"outpoint": txids[0] + ":0", "vout": 0, "selectable": True}]}]}
+        original = "c" * 64 + ":3"
+        app = create_app(self.root)
+
+        def incomplete_report(command, **kwargs):
+            Path(command[command.index("--output") + 1]).write_text(json.dumps(report))
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("liquid_tracer.menu.subprocess.run", side_effect=incomplete_report) as process, \
+                patch.object(app, "suspend", side_effect=contextlib.nullcontext):
+            async with app.run_test(size=(110, 55)) as pilot:
+                await self.click(app, pilot, "#new")
+                form = app.screen
+                form.query_one("#source", Select).value = "live"
+                form.query_one("#lookup-txid", Input).value = ", ".join(txids)
+                form.query_one("#seeds", TextArea).text = original
+                for effect, message in ((incomplete_report, "invalid transaction report"),
+                                        (lambda command, **kwargs: subprocess.CompletedProcess(command, 1), "lookup failed"),
+                                        (KeyboardInterrupt, "interrupted")):
+                    with self.subTest(message=message):
+                        process.side_effect = effect
+                        await self.click(app, pilot, "#lookup")
+                        self.assertIs(app.screen, form)
+                        self.assertIn(message, str(form.query_one("#form-error", Static).render()))
+                        self.assertEqual(form.query_one("#seeds", TextArea).text, original)
+                        self.assertFalse(app.busy)
+                        self.assertFalse(self.root.exists())
 
     async def test_navigation_and_default_cancel_never_load_credentials(self):
         app = create_app(self.root)

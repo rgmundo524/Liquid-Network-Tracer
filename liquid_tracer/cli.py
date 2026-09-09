@@ -10,10 +10,10 @@ from urllib.parse import quote, unquote, urlsplit
 from .api import ENTERPRISE, Esplora, Limits
 from .boards import create_board
 from .common import HEX64, TraceError, digest, load_labels, parse_outpoint, read_json, save_json
-from .export import export_run
+from .export import build_graph, export_run
 from .investigations import read_case, update_case
-from .inspection import inspect_transaction
-from .miro import _namespace, publish, resolve, sync, validate_plan
+from .inspection import inspect_transaction, inspect_transactions, parse_transaction_hashes
+from .miro import _namespace, make_plan, publish, resolve, sync, validate_plan
 from .store import Store
 from .trace import new_state, trace
 
@@ -35,6 +35,14 @@ def parser():
     inspect.add_argument("--max-seconds", type=float, default=30, help="Maximum lookup duration (default: 30)")
     inspect.add_argument("--base-url", default=ENTERPRISE)
     inspect.add_argument("--auth", choices=["blockstream", "none"], default="blockstream")
+    batch = commands.add_parser("inspect-txs", help="Look up comma-separated transaction hashes before choosing seeds")
+    batch.add_argument("--txids", required=True, help="Liquid transaction hashes separated by commas")
+    batch.add_argument("--output", type=Path, help="Write the complete output report to a new file instead of stdout")
+    batch.add_argument("--fixture", type=Path, help="Offline synthetic API responses; no network calls")
+    batch.add_argument("--max-requests", type=int, help="Shared HTTP attempt limit (default: 5 per distinct transaction)")
+    batch.add_argument("--max-seconds", type=float, help="Shared lookup duration limit (default: 30 seconds per distinct transaction)")
+    batch.add_argument("--base-url", default=ENTERPRISE)
+    batch.add_argument("--auth", choices=["blockstream", "none"], default="blockstream")
     run = commands.add_parser("trace", help="Start or extend a bounded run")
     run.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                      help="Case directory (default: LIQUID_CASE_DIR)")
@@ -209,6 +217,33 @@ def resolve_board(metadata, explicit=None):
     return board_id(value)
 
 
+def refresh_presentation(plan, trace_path):
+    """Render current labels from verified evidence without changing graph identity."""
+    namespace = _namespace(plan)
+    state = read_json(trace_path)
+    if (not isinstance(state, dict) or state.get("run_id") != plan["run_id"]
+            or state.get("case_id") != namespace["case_id"]
+            or state.get("source") != namespace["source"]):
+        raise TraceError("Saved trace does not match the Miro plan's run, case, or API source")
+    try:
+        refreshed = make_plan(build_graph(state, namespace["address_mode"] == "merged"))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise TraceError("Saved trace cannot be rendered; restore the original evidence") from None
+    validate_plan(refreshed)
+    if _namespace(refreshed) != namespace or refreshed["run_id"] != plan["run_id"]:
+        raise TraceError("Presentation refresh changed the saved graph identity")
+
+    def topology(value):
+        return (
+            {(item["key"], item["body"]["data"]["shape"]) for item in value["shapes"]},
+            {(item["key"], item["source"], item["target"]) for item in value["connectors"]},
+        )
+
+    if topology(refreshed) != topology(plan):
+        raise TraceError("Presentation refresh would change saved graph topology; use an explicit verified --plan or regenerate an export for review")
+    return refreshed
+
+
 def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_path=None):
     run_id = resolve_latest(case, run_id)
     default_plan = run_path(case, run_id) / "miro-plan.json"
@@ -221,6 +256,9 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
     metadata = read_case(case)
     if namespace["case_id"] != metadata["case_id"]:
         raise TraceError("Saved plan has no matching case identity; regenerate it with export or create a continuation")
+    archived_plan_sha256 = plan["sha256"]
+    if plan_path is None:
+        plan = refresh_presentation(plan, default_plan.parent / "trace.json")
     if not isinstance(max_new_items, int) or max_new_items < 0:
         raise TraceError("--max-new-items must be a nonnegative integer")
     target = resolve_board(metadata, board)
@@ -232,7 +270,10 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
         result = sync(plan, target, state_path, max_items=max_new_items, dry_run=False)
     report = {**result, "run_id": run_id, "board_id": target,
               "board_url": "https://miro.com/app/board/" + quote(target, safe="") + "/",
-              "state_file": str(state_path.resolve())}
+              "state_file": str(state_path.resolve()),
+              "plan_sha256": plan["sha256"], "archived_plan_sha256": archived_plan_sha256,
+              "presentation_version": plan.get("presentation_version", 1),
+              "presentation_refreshed": plan["sha256"] != archived_plan_sha256}
     if not dry_run:
         report_path = case / "miro" / "reports" / (run_id + "-" + uuid.uuid4().hex[:12] + ".json")
         report["report_file"] = str(report_path.resolve())
@@ -323,18 +364,20 @@ def main(argv=None):
         args = parser().parse_args(argv)
         if args.command == "credentials-check":
             return check_credentials(args.service)
-        if args.command == "inspect-tx":
+        if args.command in ("inspect-tx", "inspect-txs"):
             # Invalid hashes go directly to inspect_transaction's validation,
             # before any filesystem checks. Preflight valid lookups before they
             # can consume API credits, then retain exclusive creation below.
-            if args.output is not None and HEX64.fullmatch(args.txid):
+            txids = parse_transaction_hashes(args.txids) if args.command == "inspect-txs" else None
+            if args.output is not None and (txids is not None or HEX64.fullmatch(args.txid)):
                 if args.output.exists() or args.output.is_symlink():
                     raise TraceError("Output report already exists; choose a new path")
                 if not args.output.parent.is_dir():
                     raise TraceError("Output report parent must be an existing directory")
-            result = inspect_transaction(args.txid, fixture=args.fixture, base_url=args.base_url,
-                                         auth=args.auth, max_requests=args.max_requests,
-                                         max_seconds=args.max_seconds)
+            inspect = inspect_transactions if txids is not None else inspect_transaction
+            result = inspect(txids if txids is not None else args.txid, fixture=args.fixture,
+                             base_url=args.base_url, auth=args.auth,
+                             max_requests=args.max_requests, max_seconds=args.max_seconds)
             if args.output is None:
                 print(json.dumps(result, indent=2))
             else:
