@@ -12,7 +12,7 @@ from liquid_tracer.cli import main
 from liquid_tracer.common import LBTC, save_json
 from liquid_tracer.inspection import inspect_transaction
 
-from fixtures import A, B, C, D, fixture
+from tests.fixtures import A, B, C, D, fixture
 
 
 class TransactionInspectionTests(unittest.TestCase):
