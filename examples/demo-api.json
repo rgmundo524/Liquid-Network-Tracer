@@ -1,0 +1,289 @@
+{
+  "/tx/a9826e2a780de5a33fd22c21b63746f4e18a1d025b353d69777763d108a276b9": {
+    "txid": "a9826e2a780de5a33fd22c21b63746f4e18a1d025b353d69777763d108a276b9",
+    "vin": [
+      {
+        "txid": "583ae9f4a887a6faa5480a989e45d10e95197fd7a26f2ab3b1a789b37953cac3",
+        "vout": 0,
+        "prevout": {
+          "scriptpubkey": "0014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "scriptpubkey_type": "v0_p2wpkh",
+          "scriptpubkey_address": "SYNTHETIC-funding-context",
+          "valuecommitment": "08abababababababababababababababababababababababababababababababab",
+          "assetcommitment": "0acdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        },
+        "is_coinbase": false,
+        "is_pegin": false
+      }
+    ],
+    "vout": [
+      {
+        "scriptpubkey": "0014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "scriptpubkey_type": "v0_p2wpkh",
+        "scriptpubkey_address": "SYNTHETIC-victim-deposit",
+        "value": 1000000,
+        "asset": "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d"
+      },
+      {
+        "scriptpubkey": "0014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "scriptpubkey_type": "v0_p2wpkh",
+        "scriptpubkey_address": "SYNTHETIC-unrelated-seed-sibling",
+        "valuecommitment": "08abababababababababababababababababababababababababababababababab",
+        "assetcommitment": "0acdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+      },
+      {
+        "scriptpubkey": "",
+        "scriptpubkey_type": "fee",
+        "asset": "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d",
+        "value": 100
+      }
+    ],
+    "status": {
+      "confirmed": true,
+      "block_height": 12345,
+      "block_time": 1700000000,
+      "block_hash": "97f4814cd4feb3e80148d581a058886896228623374bf0bc783fbf6b2e16a410"
+    },
+    "fee": 100,
+    "version": 2
+  },
+  "/tx/a9826e2a780de5a33fd22c21b63746f4e18a1d025b353d69777763d108a276b9/outspends": [
+    {
+      "spent": true,
+      "txid": "ec0b7d94da1c9692a875dfcee91fb869ea7cb5c79ffde619810b98c6098363b9",
+      "vin": 0,
+      "status": {
+        "confirmed": true,
+        "block_height": 12345,
+        "block_time": 1700000000,
+        "block_hash": "97f4814cd4feb3e80148d581a058886896228623374bf0bc783fbf6b2e16a410"
+      }
+    },
+    {
+      "spent": true,
+      "txid": "583ae9f4a887a6faa5480a989e45d10e95197fd7a26f2ab3b1a789b37953cac3",
+      "vin": 0,
+      "status": {
+        "confirmed": true,
+        "block_height": 12345,
+        "block_time": 1700000000,
+        "block_hash": "97f4814cd4feb3e80148d581a058886896228623374bf0bc783fbf6b2e16a410"
+      }
+    },
+    {
+      "spent": false
+    }
+  ],
+  "/tx/ec0b7d94da1c9692a875dfcee91fb869ea7cb5c79ffde619810b98c6098363b9": {
+    "txid": "ec0b7d94da1c9692a875dfcee91fb869ea7cb5c79ffde619810b98c6098363b9",
+    "vin": [
+      {
+        "txid": "a9826e2a780de5a33fd22c21b63746f4e18a1d025b353d69777763d108a276b9",
+        "vout": 0,
+        "prevout": {
+          "scriptpubkey": "0014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "scriptpubkey_type": "v0_p2wpkh",
+          "scriptpubkey_address": "SYNTHETIC-victim-deposit",
+          "value": 1000000,
+          "asset": "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d"
+        },
+        "is_coinbase": false,
+        "is_pegin": false
+      }
+    ],
+    "vout": [
+      {
+        "scriptpubkey": "0014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "scriptpubkey_type": "v0_p2wpkh",
+        "scriptpubkey_address": "SYNTHETIC-branch-A",
+        "valuecommitment": "08abababababababababababababababababababababababababababababababab",
+        "assetcommitment": "0acdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+      },
+      {
+        "scriptpubkey": "0014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "scriptpubkey_type": "v0_p2wpkh",
+        "scriptpubkey_address": "SYNTHETIC-branch-B",
+        "valuecommitment": "08abababababababababababababababababababababababababababababababab",
+        "assetcommitment": "0acdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+      },
+      {
+        "scriptpubkey": "",
+        "scriptpubkey_type": "fee",
+        "asset": "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d",
+        "value": 100
+      }
+    ],
+    "status": {
+      "confirmed": true,
+      "block_height": 12345,
+      "block_time": 1700000000,
+      "block_hash": "97f4814cd4feb3e80148d581a058886896228623374bf0bc783fbf6b2e16a410"
+    },
+    "fee": 100,
+    "version": 2
+  },
+  "/tx/ec0b7d94da1c9692a875dfcee91fb869ea7cb5c79ffde619810b98c6098363b9/outspends": [
+    {
+      "spent": true,
+      "txid": "9b47bab7adfc891ad232e8580238927cd3a6c3d1f7eb7ac33a022611f05e4f29",
+      "vin": 0,
+      "status": {
+        "confirmed": true,
+        "block_height": 12345,
+        "block_time": 1700000000,
+        "block_hash": "97f4814cd4feb3e80148d581a058886896228623374bf0bc783fbf6b2e16a410"
+      }
+    },
+    {
+      "spent": true,
+      "txid": "9b47bab7adfc891ad232e8580238927cd3a6c3d1f7eb7ac33a022611f05e4f29",
+      "vin": 1,
+      "status": {
+        "confirmed": true,
+        "block_height": 12345,
+        "block_time": 1700000000,
+        "block_hash": "97f4814cd4feb3e80148d581a058886896228623374bf0bc783fbf6b2e16a410"
+      }
+    },
+    {
+      "spent": false
+    }
+  ],
+  "/tx/9b47bab7adfc891ad232e8580238927cd3a6c3d1f7eb7ac33a022611f05e4f29": {
+    "txid": "9b47bab7adfc891ad232e8580238927cd3a6c3d1f7eb7ac33a022611f05e4f29",
+    "vin": [
+      {
+        "txid": "ec0b7d94da1c9692a875dfcee91fb869ea7cb5c79ffde619810b98c6098363b9",
+        "vout": 0,
+        "prevout": {
+          "scriptpubkey": "0014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "scriptpubkey_type": "v0_p2wpkh",
+          "scriptpubkey_address": "SYNTHETIC-branch-A",
+          "valuecommitment": "08abababababababababababababababababababababababababababababababab",
+          "assetcommitment": "0acdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        },
+        "is_coinbase": false,
+        "is_pegin": false
+      },
+      {
+        "txid": "ec0b7d94da1c9692a875dfcee91fb869ea7cb5c79ffde619810b98c6098363b9",
+        "vout": 1,
+        "prevout": {
+          "scriptpubkey": "0014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "scriptpubkey_type": "v0_p2wpkh",
+          "scriptpubkey_address": "SYNTHETIC-branch-B",
+          "valuecommitment": "08abababababababababababababababababababababababababababababababab",
+          "assetcommitment": "0acdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        },
+        "is_coinbase": false,
+        "is_pegin": false
+      },
+      {
+        "txid": "583ae9f4a887a6faa5480a989e45d10e95197fd7a26f2ab3b1a789b37953cac3",
+        "vout": 1,
+        "prevout": {
+          "scriptpubkey": "0014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "scriptpubkey_type": "v0_p2wpkh",
+          "scriptpubkey_address": "SYNTHETIC-external-coinput",
+          "valuecommitment": "08abababababababababababababababababababababababababababababababab",
+          "assetcommitment": "0acdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        },
+        "is_coinbase": false,
+        "is_pegin": false
+      }
+    ],
+    "vout": [
+      {
+        "scriptpubkey": "0014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "scriptpubkey_type": "v0_p2wpkh",
+        "scriptpubkey_address": "SYNTHETIC-branch-A",
+        "valuecommitment": "08abababababababababababababababababababababababababababababababab",
+        "assetcommitment": "0acdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+      },
+      {
+        "scriptpubkey": "6a04deadbeef",
+        "scriptpubkey_type": "op_return",
+        "value": 0,
+        "asset": "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d"
+      },
+      {
+        "scriptpubkey": "",
+        "scriptpubkey_type": "fee",
+        "asset": "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d",
+        "value": 100
+      }
+    ],
+    "status": {
+      "confirmed": true,
+      "block_height": 12345,
+      "block_time": 1700000000,
+      "block_hash": "97f4814cd4feb3e80148d581a058886896228623374bf0bc783fbf6b2e16a410"
+    },
+    "fee": 100,
+    "version": 2
+  },
+  "/tx/9b47bab7adfc891ad232e8580238927cd3a6c3d1f7eb7ac33a022611f05e4f29/outspends": [
+    {
+      "spent": true,
+      "txid": "ee6ebd9530e28edb805c50ae99f1e79dceefa596d396ead72d5befc977b7327f",
+      "vin": 0,
+      "status": {
+        "confirmed": true,
+        "block_height": 12345,
+        "block_time": 1700000000,
+        "block_hash": "97f4814cd4feb3e80148d581a058886896228623374bf0bc783fbf6b2e16a410"
+      }
+    },
+    {
+      "spent": false
+    },
+    {
+      "spent": false
+    }
+  ],
+  "/tx/ee6ebd9530e28edb805c50ae99f1e79dceefa596d396ead72d5befc977b7327f": {
+    "txid": "ee6ebd9530e28edb805c50ae99f1e79dceefa596d396ead72d5befc977b7327f",
+    "vin": [
+      {
+        "txid": "9b47bab7adfc891ad232e8580238927cd3a6c3d1f7eb7ac33a022611f05e4f29",
+        "vout": 0,
+        "prevout": {
+          "scriptpubkey": "0014aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "scriptpubkey_type": "v0_p2wpkh",
+          "scriptpubkey_address": "SYNTHETIC-branch-A",
+          "valuecommitment": "08abababababababababababababababababababababababababababababababab",
+          "assetcommitment": "0acdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        },
+        "is_coinbase": false,
+        "is_pegin": false
+      }
+    ],
+    "vout": [
+      {
+        "scriptpubkey": "6a",
+        "scriptpubkey_type": "op_return",
+        "value": 1234,
+        "asset": "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d",
+        "pegout": {
+          "genesis_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "scriptpubkey_address": "SYNTHETIC-bitcoin-payout-request",
+          "scriptpubkey": "0014bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      {
+        "scriptpubkey": "",
+        "scriptpubkey_type": "fee",
+        "asset": "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d",
+        "value": 100
+      }
+    ],
+    "status": {
+      "confirmed": true,
+      "block_height": 12345,
+      "block_time": 1700000000,
+      "block_hash": "97f4814cd4feb3e80148d581a058886896228623374bf0bc783fbf6b2e16a410"
+    },
+    "fee": 100,
+    "version": 2
+  }
+}

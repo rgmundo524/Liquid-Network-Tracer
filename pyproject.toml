@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "liquid-utxo-tracer"
+version = "0.2.0"
+description = "Bounded, evidence-preserving Liquid UTXO tracing and Miro graph export"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+liquid-trace = "liquid_tracer.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["liquid_tracer*"]

@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.env
+.env.*
+cases/
+demo-case/
+runs/
+miro/
+case.json
+case.lock
+trace.lock
+*.sqlite*
+dist/
