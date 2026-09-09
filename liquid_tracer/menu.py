@@ -1,13 +1,15 @@
 """Textual investigation interface; secrets are loaded only for live actions."""
 
+import contextlib
 import math
 import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-from .common import TraceError, parse_outpoint, read_json
+from .common import HEX64, LBTC, TraceError, parse_outpoint, read_json
 from .investigations import (create_investigation, default_root, list_investigations,
                              load_settings, read_case, save_settings, update_case)
 
@@ -48,7 +50,7 @@ def _command(arguments, live=False):
 def _seed_values(value):
     values = [part for part in re.split(r"[\s,]+", value.strip()) if part]
     if not values:
-        raise TraceError("Provide at least one starting output as txid:vout.")
+        raise TraceError("Provide at least one starting output as HASH:NUMBER, or use Load outputs to choose one.")
     return sorted({f"{txid}:{index}" for txid, index in map(parse_outpoint, values)})
 
 
@@ -151,7 +153,14 @@ def create_app(root=None):
                     yield Label("Data source")
                     yield Select([("Synthetic demo (offline)", "demo"), ("Live Liquid", "live")],
                                  value="demo", allow_blank=False, id="source")
-                    yield Label("Live starting outputs: txid:vout, separated by spaces, commas or new lines")
+                    yield Label("Transaction hash: look up outputs before choosing where to start")
+                    yield Input(placeholder="64-character Liquid transaction hash", id="lookup-txid")
+                    yield Button("Load outputs", id="lookup")
+                    yield Static("Lookup uses the selected data source. Live lookup retrieves one transaction through SecretSpec and Blockstream. "
+                                 "It may use API credits. It does not start a trace.", markup=False)
+                    yield Label("Starting outputs: HASH:NUMBER (for example, :0 means output 0)")
+                    yield Static("Replace NUMBER with an actual output number, not the word 'vout'. "
+                                 "Separate multiple outputs with spaces, commas or new lines.", markup=False)
                     yield TextArea(id="seeds")
                 if self.mode in ("new", "case", "preview", "sync"):
                     yield Label("Miro board URL or ID" + (" (optional)" if self.mode in ("new", "case") else ""))
@@ -211,6 +220,11 @@ def create_app(root=None):
             return settings
 
         def on_button_pressed(self, event: Button.Pressed):
+            if self.app.busy:
+                return
+            if event.button.id == "lookup" and self.mode == "new":
+                self.lookup_outputs()
+                return
             if event.button.id == "cancel":
                 self.dismiss(None)
                 return
@@ -232,7 +246,8 @@ def create_app(root=None):
                     if self.query_one("#source", Select).value == "demo":
                         fixture = _project() / "examples" / "demo-api.json"
                         lines = (_project() / "examples" / "demo-seeds.txt").read_text().splitlines()
-                        seeds = _seed_values(" ".join(line.split("#", 1)[0] for line in lines))
+                        entered = self.query_one("#seeds", TextArea).text.strip()
+                        seeds = _seed_values(entered or " ".join(line.split("#", 1)[0] for line in lines))
                         if not fixture.is_file():
                             raise TraceError("The synthetic demo fixture is unavailable.")
                     else:
@@ -264,6 +279,104 @@ def create_app(root=None):
                     self.dismiss((arguments, self.mode == "sync"))
             except ACTION_ERRORS as error:
                 self.query_one("#form-error", Static).update(str(error))
+
+        def lookup_outputs(self):
+            error_field = self.query_one("#form-error", Static)
+            error_field.update("")
+            txid = self.query_one("#lookup-txid", Input).value.strip().lower()
+            if not HEX64.fullmatch(txid):
+                error_field.update("Enter only the 64-character transaction hash in the lookup field, without :vout.")
+                return
+            live = self.query_one("#source", Select).value == "live"
+            try:
+                # Keep provider prompts on the real terminal. Only the transaction
+                # report passes through this temporary file, never credentials.
+                self.app.busy = True
+                with tempfile.TemporaryDirectory(prefix="liquid-output-lookup-") as directory:
+                    report_path = Path(directory) / "outputs.json"
+                    arguments = ["inspect-tx", "--txid", txid, "--output", str(report_path)]
+                    if not live:
+                        arguments.extend(["--fixture", str(_project() / "examples" / "demo-api.json")])
+                    with self.app.suspend() if live else contextlib.nullcontext():
+                        options = {} if live else {"capture_output": True, "text": True}
+                        result = subprocess.run(_command(arguments, live=live), cwd=_project(),
+                                                env=_environment(), check=False, **options)
+                    if result.returncode:
+                        raise TraceError("Output lookup failed. Check the terminal for credential or API errors, then retry."
+                                         if live else "Transaction not available in the synthetic demo, or lookup failed.")
+                    report = read_json(report_path)
+                    if not isinstance(report, dict) or report.get("txid") != txid or not isinstance(report.get("outputs"), list):
+                        raise TraceError("Output lookup returned an invalid transaction report.")
+                self.app.push_screen(OutputScreen(report), self.use_outputs)
+            except KeyboardInterrupt:
+                error_field.update("Output lookup interrupted. No investigation was created.")
+            except ACTION_ERRORS as error:
+                error_field.update(str(error))
+            finally:
+                self.app.busy = False
+
+        def use_outputs(self, selection):
+            if selection is not None:
+                # The picker replaces the field deliberately; it must not merge
+                # an earlier mistaken entry or silently include other outputs.
+                self.query_one("#seeds", TextArea).text = "\n".join(selection)
+                self.query_one("#form-error", Static).update("")
+
+    class OutputScreen(BaseScreen):
+        def __init__(self, report):
+            super().__init__()
+            self.report = report
+            self.selected = set()
+            self.outputs = {output["outpoint"]: output for output in report["outputs"]}
+
+        def compose(self) -> ComposeResult:
+            yield Header()
+            with Vertical(classes="panel"):
+                yield Label("Choose starting outputs", classes="title")
+                yield Static(self.report["txid"], markup=False)
+                yield Static("Enter toggles the highlighted output. Nothing is selected initially. "
+                             "Using a selection replaces the starting-output field.", markup=False)
+                yield DataTable(id="outputs", cursor_type="row")
+                yield Static("", id="output-error", markup=False)
+                with Horizontal(classes="buttons"):
+                    yield Button("Cancel", id="cancel-outputs")
+                    yield Button("Use selected outputs", id="use-outputs", variant="primary")
+            yield Footer()
+
+        def on_mount(self):
+            table = self.query_one("#outputs", DataTable)
+            self.choice_column = table.add_columns("Selected", "Output", "Address", "Amount", "Asset", "Type")[0]
+            for outpoint, output in self.outputs.items():
+                asset = output.get("asset")
+                table.add_row("No" if output["selectable"] else "Unavailable", str(output["vout"]),
+                              Text(output.get("address") or "No address"),
+                              str(output["value"]) + " base units" if output.get("value") is not None else "Confidential / unavailable",
+                              Text("L-BTC" if asset == LBTC else asset or "Confidential / unavailable"),
+                              Text(output.get("reason") or output.get("script_type") or "Unknown"), key=outpoint)
+            table.focus()
+
+        def on_data_table_row_selected(self, event: DataTable.RowSelected):
+            key = event.row_key.value
+            error_field = self.query_one("#output-error", Static)
+            if not self.outputs[key]["selectable"]:
+                error_field.update("This is a fee, peg-out, or unspendable output; it cannot start a forward Liquid trace.")
+                return
+            error_field.update("")
+            if key in self.selected:
+                self.selected.remove(key)
+            else:
+                self.selected.add(key)
+            self.query_one("#outputs", DataTable).update_cell(key, self.choice_column, "Yes" if key in self.selected else "No")
+
+        def on_button_pressed(self, event: Button.Pressed):
+            event.stop()
+            if event.button.id == "cancel-outputs":
+                self.dismiss(None)
+            elif event.button.id == "use-outputs":
+                if not self.selected:
+                    self.query_one("#output-error", Static).update("Select at least one output, or cancel.")
+                    return
+                self.dismiss(sorted(self.selected))
 
     class CaseScreen(BaseScreen):
         def __init__(self, case):

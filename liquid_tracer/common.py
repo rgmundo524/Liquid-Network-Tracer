@@ -47,8 +47,12 @@ def read_json(path):
 
 def parse_outpoint(value):
     txid, sep, index = value.strip().rpartition(":")
-    if not sep or not HEX64.fullmatch(txid) or not index.isdigit():
-        raise TraceError("Seed must be a 64-character transaction hash followed by :vout")
+    if not sep or not HEX64.fullmatch(txid):
+        raise TraceError("Seed must contain a 64-character transaction hash, a colon, and an output number, "
+                         "for example HASH:0. Do not include a backslash before the colon.")
+    if not index.isascii() or not index.isdigit():
+        raise TraceError("Seed output number must be a nonnegative integer: 0, 1, 2, etc. "
+                         "Replace the word 'vout' with the actual output number.")
     if int(index) > 0xffffffff:
         raise TraceError("Output index exceeds uint32")
     return txid.lower(), int(index)

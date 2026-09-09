@@ -22,12 +22,16 @@ liquid-trace
 In an interactive terminal, `liquid-trace` opens a Textual interface with **New investigation**, **Continue investigation**, **Settings**, and **Exit**. Select actions with the keyboard or mouse. You can also launch it explicitly with `liquid-trace menu`. Opening the menu does not load credentials or call Blockstream or Miro.
 
 1. Choose **New investigation** and give it a name. The program creates a unique subdirectory under `cases/`.
-2. Select a live investigation or the offline synthetic demo. For a live case, enter the starting Liquid outpoints in the multiline field, separated by whitespace or commas. Optionally provide an existing Miro board URL or ID; you can add it later.
+2. Select **Live Liquid** or the offline synthetic demo. For a live case, paste the bare Liquid hash into **Transaction hash** and choose **Load outputs**. Review the output numbers and addresses, use Enter to toggle the relevant rows, then choose **Use selected outputs**. This fills the starting-output field; it replaces any existing entries. Alternatively enter known outputs directly as `HASH:NUMBER`, separated by whitespace or commas. Optionally provide an existing Miro board URL or ID; you can add it later.
 3. Start the first bounded run from the investigation menu. Review the hop and request limits before running it. A live trace retrieves credentials through SecretSpec; a demo trace needs none.
 4. Review the saved run summary and exported file locations. Preview the planned Miro update locally, then choose Miro sync when ready to publish.
 5. Next time, launch `liquid-trace`, choose **Continue investigation**, and select the saved case. Continue its latest run with another bounded hop allowance, or review and sync what is already saved.
 
 The investigation settings let you change its name, board, and run defaults. Top-level **Settings** changes the numeric defaults used for new investigations. Existing investigations keep their own saved defaults. A board selection does not publish anything automatically. The app updates an existing Miro board; it does not create remote boards.
+
+`vout` means the output's numeric index, starting at zero. In `HASH:0`, `0` selects the first output; `HASH:1` selects the second. Do not type the literal word `vout` or a backslash before the colon. Choose the output connected to your investigation; output 0 is only an example. The picker starts with nothing selected and excludes fees, peg-outs, and unspendable outputs. Hidden amounts and assets remain unknown.
+
+**Load outputs** is a separate bounded lookup: one transaction, with at most five API attempts (including authentication/retries) and a 30-second API budget. Live lookup retrieves credentials through SecretSpec on your machine. It creates no investigation or trace and follows no subsequent spends. The selected output references are saved when you create the investigation; the later trace fetches and archives its own evidence.
 
 For your first trial, select the **offline demo** and use a separate empty Miro test board. Demo hashes and addresses are synthetic. Its full path ends in a synthetic peg-out request, not an actual Bitcoin payout or Avalanche transaction. You can navigate, trace the demo, and preview a Miro plan without credentials. Live Miro sync requires your access token.
 

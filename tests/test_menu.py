@@ -1,6 +1,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import subprocess
 import sys
@@ -43,6 +44,14 @@ class MenuCommandTests(unittest.TestCase):
         for value in ("", "bad", "a" * 64 + ":-1"):
             with self.subTest(value=value), self.assertRaises(TraceError):
                 _seed_values(value)
+
+    def test_seed_entry_explains_numeric_placeholder_and_literal_backslash(self):
+        txid = "a" * 64
+        with self.assertRaisesRegex(TraceError, "Replace the word 'vout'"):
+            _seed_values(txid + ":vout,")
+        with self.assertRaisesRegex(TraceError, "Do not include a backslash"):
+            _seed_values(txid + r"\:0,")
+        self.assertEqual(_seed_values(txid + ":12,"), [txid + ":12"])
 
     def test_nonterminal_menu_does_not_load_the_ui_or_credentials(self):
         with patch("sys.stdin.isatty", return_value=False), patch("liquid_tracer.menu.create_app") as make_app, \
@@ -93,6 +102,150 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         await app.workers.wait_for_complete()
         await pilot.pause()
         self.assertFalse(app.busy)
+
+    async def toggle_output(self, app, pilot, row):
+        from textual.widgets import DataTable
+        table = app.screen.query_one("#outputs", DataTable)
+        table.move_cursor(row=row)
+        table.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+
+    async def test_malformed_output_lookup_never_starts_a_process_or_creates_case(self):
+        from textual.widgets import Input, Select, Static
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run") as process:
+            async with app.run_test(size=(110, 55)) as pilot:
+                await self.click(app, pilot, "#new")
+                app.screen.query_one("#source", Select).value = "live"
+                for value in ("bad", "a" * 64 + ":vout", "a" * 64 + r"\:0"):
+                    with self.subTest(value=value):
+                        app.screen.query_one("#lookup-txid", Input).value = value
+                        await self.click(app, pilot, "#lookup")
+                        self.assertIn("Enter only the 64-character transaction hash",
+                                      str(app.screen.query_one("#form-error", Static).render()))
+                        self.assertFalse(app.busy)
+                        self.assertFalse(self.root.exists())
+                process.assert_not_called()
+
+    async def test_fixture_output_picker_requires_selection_and_preserves_seeds_on_cancel(self):
+        from textual.widgets import DataTable, Input, Static, TextArea
+        fixture = read_json(PROJECT / "examples" / "demo-api.json")
+        transaction = next(value for key, value in fixture.items()
+                           if not key.endswith("outspends") and
+                           any(output.get("scriptpubkey_type") == "op_return" and not output.get("pegout")
+                               for output in value["vout"]))
+        txid = transaction["txid"]
+        original_seed = "b" * 64 + ":7"
+        real_run = subprocess.run
+        commands = []
+
+        def offline_inspection(command, **kwargs):
+            self.assertEqual(command[:4], [sys.executable, "-m", "liquid_tracer", "inspect-tx"])
+            self.assertEqual(command[command.index("--txid") + 1], txid)
+            self.assertEqual(command[command.index("--fixture") + 1], str(PROJECT / "examples" / "demo-api.json"))
+            commands.append(command)
+            return real_run(command, **kwargs)
+
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run", side_effect=offline_inspection):
+            async with app.run_test(size=(110, 55)) as pilot:
+                await self.click(app, pilot, "#new")
+                form = app.screen
+                form.query_one("#seeds", TextArea).text = original_seed
+                form.query_one("#lookup-txid", Input).value = txid.upper()
+                await self.click(app, pilot, "#lookup")
+                table = app.screen.query_one("#outputs", DataTable)
+                choice_column = app.screen.choice_column
+                self.assertEqual(table.row_count, len(transaction["vout"]))
+                self.assertEqual(app.screen.selected, set())
+                self.assertEqual(table.get_cell(txid + ":0", choice_column), "No")
+                await self.click(app, pilot, "#use-outputs")
+                self.assertIn("Select at least one output", str(app.screen.query_one("#output-error", Static).render()))
+                for row in (1, 2):
+                    await self.toggle_output(app, pilot, row)
+                    self.assertEqual(table.get_cell(f"{txid}:{row}", choice_column), "Unavailable")
+                    self.assertEqual(app.screen.selected, set())
+                    self.assertIn("cannot start", str(app.screen.query_one("#output-error", Static).render()))
+                await self.toggle_output(app, pilot, 0)
+                self.assertEqual(table.get_cell(txid + ":0", choice_column), "Yes")
+                await self.click(app, pilot, "#cancel-outputs")
+                self.assertIs(app.screen, form)
+                self.assertEqual(form.query_one("#seeds", TextArea).text, original_seed)
+                self.assertFalse(self.root.exists())
+
+                await self.click(app, pilot, "#lookup")
+                self.assertEqual(app.screen.selected, set())
+                await self.toggle_output(app, pilot, 0)
+                await self.click(app, pilot, "#use-outputs")
+                self.assertIs(app.screen, form)
+                self.assertEqual(form.query_one("#seeds", TextArea).text, txid + ":0")
+                self.assertFalse(self.root.exists())
+                form.query_one("#case-name", Input).value = "Chosen demo output"
+                await self.click(app, pilot, "#submit")
+                case = app.screen.case
+                self.assertEqual(read_case(case)["seeds"], [txid + ":0"])
+                self.assertEqual(read_case(case)["fixture"], str(PROJECT / "examples" / "demo-api.json"))
+                self.assertFalse((case / "runs").exists())
+        self.assertEqual(len(commands), 2)
+        for command in commands:
+            self.assertFalse(Path(command[command.index("--output") + 1]).exists())
+
+    async def test_live_output_lookup_uses_pinned_tools_and_saves_only_explicit_selection(self):
+        from textual.widgets import DataTable, Input, Select, TextArea
+        txid = "c" * 64
+        report = {"txid": txid, "outputs": [
+            {"outpoint": txid + ":0", "vout": 0, "address": "SYNTHETIC-unselected", "value": None,
+             "asset": None, "script_type": "v0_p2wpkh", "selectable": True},
+            {"outpoint": txid + ":1", "vout": 1, "address": None, "value": 100,
+             "asset": None, "script_type": "fee", "selectable": False, "reason": "fee"},
+            {"outpoint": txid + ":2", "vout": 2, "address": "SYNTHETIC-selected", "value": None,
+             "asset": None, "script_type": "v0_p2wpkh", "selectable": True},
+        ]}
+
+        def local_report(command, **kwargs):
+            self.assertEqual(command[:9], ["/nix/store/test-secretspec/bin/secretspec", "--file",
+                             str(PROJECT / "secretspec.toml"), "run", "--provider", "protonpass",
+                             "--profile", "development", "--"])
+            self.assertEqual(command[9:15], [sys.executable, "-m", "liquid_tracer", "inspect-tx", "--txid", txid])
+            self.assertNotIn("--fixture", command)
+            self.assertNotIn("capture_output", kwargs)
+            self.assertNotIn("stdout", kwargs)
+            self.assertNotIn("stderr", kwargs)
+            Path(command[command.index("--output") + 1]).write_text(json.dumps(report))
+            return subprocess.CompletedProcess(command, 0)
+
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run", side_effect=local_report) as process, \
+                patch.object(app, "suspend", side_effect=contextlib.nullcontext) as suspend:
+            async with app.run_test(size=(110, 55)) as pilot:
+                await self.click(app, pilot, "#new")
+                form = app.screen
+                form.query_one("#case-name", Input).value = "Chosen live output"
+                form.query_one("#source", Select).value = "live"
+                form.query_one("#seeds", TextArea).text = "d" * 64 + ":9"
+                form.query_one("#lookup-txid", Input).value = txid
+                process.assert_not_called()
+                await self.click(app, pilot, "#lookup")
+                process.assert_called_once()
+                suspend.assert_called_once()
+                self.assertFalse(self.root.exists())
+                self.assertEqual(app.screen.selected, set())
+                await self.toggle_output(app, pilot, 2)
+                table = app.screen.query_one("#outputs", DataTable)
+                self.assertEqual(table.get_cell(txid + ":0", app.screen.choice_column), "No")
+                self.assertEqual(table.get_cell(txid + ":2", app.screen.choice_column), "Yes")
+                await self.click(app, pilot, "#use-outputs")
+                self.assertIs(app.screen, form)
+                self.assertEqual(form.query_one("#seeds", TextArea).text, txid + ":2")
+                await self.click(app, pilot, "#submit")
+                case = app.screen.case
+                metadata = read_case(case)
+                self.assertEqual(metadata["seeds"], [txid + ":2"])
+                self.assertFalse(metadata.get("fixture"))
+                self.assertIsNone(metadata.get("latest_run"))
+                self.assertFalse((case / "runs").exists())
+                process.assert_called_once()
 
     async def test_navigation_and_default_cancel_never_load_credentials(self):
         app = create_app(self.root)

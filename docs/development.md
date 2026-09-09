@@ -2,7 +2,7 @@
 
 The project uses **one main `devenv.nix`** to define Python, the Textual terminal interface, commands, and nonsecret environment defaults. `secretspec.toml` declares credential names. Proton Pass stores their values. Investigation names, board IDs, run limits, and the latest-run reference belong in the saved investigation files.
 
-Entering the environment and opening the interface do not access a secret provider. Selecting a live trace or Miro sync retrieves credentials through SecretSpec for that action. The demo, navigation, and local previews need no credentials.
+Entering the environment and opening the interface do not access a secret provider. Selecting a live output lookup, trace, or Miro sync retrieves credentials through SecretSpec for that action. The demo, navigation, and local previews need no credentials.
 
 ## Start the environment and interface
 
@@ -19,7 +19,9 @@ In an interactive terminal, the command opens the Textual interface. Use the key
 liquid-trace menu
 ```
 
-Creating an investigation asks for a name, live or synthetic-demo source, starting outpoints for live tracing, an optional existing Miro board URL or ID, and numeric run limits. Enter live outpoints in the multiline field, separated by whitespace or commas. It creates a unique case directory; it does not create a remote Miro board. Within that investigation, start or continue a bounded run, review saved run information, preview a Miro update, explicitly sync it, or change the investigation's name, board, and run limits.
+Creating an investigation asks for a name, live or synthetic-demo source, starting outputs, an optional existing Miro board URL or ID, and numeric run limits. Enter known outputs as `HASH:NUMBER` in the multiline field, separated by whitespace or commas. `vout` is the numeric output index, not a word to enter: `:0` selects the first output and `:1` the second. If you only have a transaction hash, enter it in **Transaction hash**, choose **Load outputs**, toggle the relevant rows with Enter, and choose **Use selected outputs**. Nothing is preselected; applying a selection replaces the starting-output field. The offline demo uses its original sample seeds when this field is empty.
+
+Lookup retrieves one transaction with a five-attempt and 30-second API budget, including authentication and retries. It loads live credentials only after selecting **Load outputs**. The terminal remains available for provider prompts. It follows no spends, saves no case, and uses a temporary report removed after loading the picker. Fees, peg-outs, and unspendable outputs cannot be selected. Confidential quantities remain unknown. Creating the investigation saves the selected references in a unique case directory; the later trace fetches and archives its own evidence. Within that investigation, start or continue a bounded run, review saved information, preview or sync Miro, or change its settings.
 
 A case normally keeps the same board as its graph grows. Board selection and numeric run defaults are saved with the case, so you do not need a board environment variable or a separate Nix file. The top-level Settings screen changes defaults for future investigations. Existing cases retain their saved settings.
 
@@ -37,6 +39,7 @@ Use a current devenv release. The project supplies its own pinned SecretSpec and
 | `liquid-trace` or `liquid-trace menu` | Opens the investigation interface. Retrieves credentials only for a selected live action. |
 | `liquid-trace SUBCOMMAND ...` | Runs an explicit command using the existing process environment. |
 | `liquid-live SUBCOMMAND ...` | Resolves project credentials through SecretSpec, then runs an explicit command. |
+| `liquid-live inspect-tx --txid HASH` | Looks up one live transaction and prints its output numbers, addresses, and available public quantities as JSON. Does not trace spends or create a case. |
 | `liquid-secrets-setup [all\|blockstream\|miro]` | Prompts for selected credentials and stores them in the configured provider; defaults to all three. |
 | `liquid-toolchain-check` | Reports the pinned SecretSpec/Proton CLI versions and checks support for `info`, without accessing a vault. |
 | `liquid-secrets-check [--service blockstream\|miro\|all]` | Loads project secrets and reports presence only; defaults to Blockstream. No Blockstream or Miro calls. |

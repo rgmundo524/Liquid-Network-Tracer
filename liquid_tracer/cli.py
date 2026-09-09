@@ -8,9 +8,10 @@ from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 
 from .api import ENTERPRISE, Esplora, Limits
-from .common import TraceError, digest, load_labels, parse_outpoint, read_json, save_json
+from .common import HEX64, TraceError, digest, load_labels, parse_outpoint, read_json, save_json
 from .export import export_run
 from .investigations import read_case, update_case
+from .inspection import inspect_transaction
 from .miro import _namespace, publish, resolve, sync, validate_plan
 from .store import Store
 from .trace import new_state, trace
@@ -25,11 +26,19 @@ def parser():
     credentials = commands.add_parser("credentials-check", help="Check injected credential presence without contacting services")
     credentials.add_argument("--service", choices=["blockstream", "miro", "all"], default="blockstream",
                              help="Service credentials to check (default: blockstream)")
+    inspect = commands.add_parser("inspect-tx", help="Look up one transaction's outputs before choosing seeds")
+    inspect.add_argument("--txid", required=True, help="64-character Liquid transaction hash")
+    inspect.add_argument("--output", type=Path, help="Write output JSON to a new file instead of stdout")
+    inspect.add_argument("--fixture", type=Path, help="Offline synthetic API response; no network calls")
+    inspect.add_argument("--max-requests", type=int, default=5, help="All HTTP attempts, including OAuth and retries (default: 5)")
+    inspect.add_argument("--max-seconds", type=float, default=30, help="Maximum lookup duration (default: 30)")
+    inspect.add_argument("--base-url", default=ENTERPRISE)
+    inspect.add_argument("--auth", choices=["blockstream", "none"], default="blockstream")
     run = commands.add_parser("trace", help="Start or extend a bounded run")
     run.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                      help="Case directory (default: LIQUID_CASE_DIR)")
-    run.add_argument("--seed", action="append", default=[], help="Liquid txid:vout; may be repeated")
-    run.add_argument("--seeds-file", type=Path, help="One txid:vout per line; # comments allowed")
+    run.add_argument("--seed", action="append", default=[], help="Liquid HASH:NUMBER, using the numeric output index starting at 0; may be repeated")
+    run.add_argument("--seeds-file", type=Path, help="One HASH:NUMBER per line, using the numeric output index starting at 0; # comments allowed")
     run.add_argument("--resume", help="Prior run ID or latest in this case; extends its saved frontier")
     run.add_argument("--only", action="append", help="Resume only these frontier outpoints; may be repeated")
     run.add_argument("--hops", type=int, help="Absolute maximum hop depth (default: 3)")
@@ -306,6 +315,29 @@ def main(argv=None):
         args = parser().parse_args(argv)
         if args.command == "credentials-check":
             return check_credentials(args.service)
+        if args.command == "inspect-tx":
+            # Invalid hashes go directly to inspect_transaction's validation,
+            # before any filesystem checks. Preflight valid lookups before they
+            # can consume API credits, then retain exclusive creation below.
+            if args.output is not None and HEX64.fullmatch(args.txid):
+                if args.output.exists() or args.output.is_symlink():
+                    raise TraceError("Output report already exists; choose a new path")
+                if not args.output.parent.is_dir():
+                    raise TraceError("Output report parent must be an existing directory")
+            result = inspect_transaction(args.txid, fixture=args.fixture, base_url=args.base_url,
+                                         auth=args.auth, max_requests=args.max_requests,
+                                         max_seconds=args.max_seconds)
+            if args.output is None:
+                print(json.dumps(result, indent=2))
+            else:
+                try:
+                    with args.output.open("x", encoding="utf-8") as report:
+                        json.dump(result, report, indent=2)
+                        report.write("\n")
+                except FileExistsError:
+                    raise TraceError("Output report already exists; choose a new path") from None
+                print("Transaction outputs saved.")
+            return 0
         if args.command == "menu":
             from .menu import run_menu
             return run_menu(args.investigations_dir)
