@@ -24,16 +24,16 @@ In an interactive terminal, `liquid-trace` opens a Textual interface with **New 
 1. Choose **New investigation** and give it a name. The program creates a unique subdirectory under `cases/`.
 2. Select **Live Liquid** or the offline synthetic demo. For a live case, paste the bare Liquid hash into **Transaction hash** and choose **Load outputs**. Review the output numbers and addresses, use Enter to toggle the relevant rows, then choose **Use selected outputs**. This fills the starting-output field; it replaces any existing entries. Alternatively enter known outputs directly as `HASH:NUMBER`, separated by whitespace or commas. Optionally provide an existing Miro board URL or ID; you can add it later.
 3. Start the first bounded run from the investigation menu. Review the hop and request limits before running it. A live trace retrieves credentials through SecretSpec; a demo trace needs none.
-4. Review the saved run summary and exported file locations. Preview the planned Miro update locally, then choose Miro sync when ready to publish.
+4. Review the saved run summary and exported file locations. If the case has no board, choose **Create Miro board**, review its name and visibility, and create it. Then choose **Preview Miro** and **Sync to Miro** to publish the saved run.
 5. Next time, launch `liquid-trace`, choose **Continue investigation**, and select the saved case. Continue its latest run with another bounded hop allowance, or review and sync what is already saved.
 
-The investigation settings let you change its name, board, and run defaults. Top-level **Settings** changes the numeric defaults used for new investigations. Existing investigations keep their own saved defaults. A board selection does not publish anything automatically. The app updates an existing Miro board; it does not create remote boards.
+The investigation settings let you change its name, board, and run defaults. Top-level **Settings** changes the numeric defaults used for new investigations. Existing investigations keep their own saved defaults. Creating a board saves its ID with the case and shows its URL in the investigation menu. It creates an empty board; publishing the traced graph is a separate **Sync to Miro** action. A completed run can be synced after creating or linking a board without tracing again.
 
 `vout` means the output's numeric index, starting at zero. In `HASH:0`, `0` selects the first output; `HASH:1` selects the second. Do not type the literal word `vout` or a backslash before the colon. Choose the output connected to your investigation; output 0 is only an example. The picker starts with nothing selected and excludes fees, peg-outs, and unspendable outputs. Hidden amounts and assets remain unknown.
 
 **Load outputs** is a separate bounded lookup: one transaction, with at most five API attempts (including authentication/retries) and a 30-second API budget. Live lookup retrieves credentials through SecretSpec on your machine. It creates no investigation or trace and follows no subsequent spends. The selected output references are saved when you create the investigation; the later trace fetches and archives its own evidence.
 
-For your first trial, select the **offline demo** and use a separate empty Miro test board. Demo hashes and addresses are synthetic. Its full path ends in a synthetic peg-out request, not an actual Bitcoin payout or Avalanche transaction. You can navigate, trace the demo, and preview a Miro plan without credentials. Live Miro sync requires your access token.
+For your first trial, select the **offline demo** and use a separate empty Miro test board. Demo hashes and addresses are synthetic. Its full path ends in a synthetic peg-out request, not an actual Bitcoin payout or Avalanche transaction. You can navigate, trace the demo, and preview a Miro plan without credentials. Creating a Miro board and live sync require your access token, even for a demo investigation.
 
 ## Where investigations and runs are saved
 
@@ -49,6 +49,7 @@ liquid-trace menu --investigations-dir /absolute/path/to/investigations
 | `cases/<investigation>/case.json` | Investigation name, seeds, source, board selection, run defaults, and latest exported run ID. |
 | `cases/<investigation>/runs/<run-id>/` | A separate evidence and export directory for each run. |
 | `cases/<investigation>/miro/` | Saved mapping between graph objects and items on each Miro board. |
+| `cases/<investigation>/miro/board-creation.json` | Board creation request and receipt, retained to recover interrupted creation without duplicating a board. |
 | `cases/<investigation>/miro/reports/` | Sync reports identifying the run and actual board used. |
 
 One investigation normally keeps the same board across continuations. Each new run preserves the previous run and its evidence. A run ID distinguishes the snapshots, but the program saves and selects that ID for you. The latest reference survives closing the shell and restarting the computer.
@@ -199,11 +200,27 @@ Prefer outpoint labels when attribution applies to a particular payment. Address
 
 ## Keep one editable Miro graph up to date
 
-Create or choose a Miro board and obtain an access token with **`boards:read` and `boards:write`** scopes and access to that board. Follow [Miro's REST API quickstart](https://developers.miro.com/docs/rest-api-build-your-first-hello-world-app). Store the token with the setup helper. If it expires, replace it and rerun sync; this program does not refresh Miro tokens automatically.
+Obtain an access token with **`boards:read` and `boards:write`** scopes and access to your Miro team. Follow [Miro's REST API quickstart](https://developers.miro.com/docs/rest-api-build-your-first-hello-world-app). Store the token with the setup helper. If it expires, replace it and retry the selected action; this program does not refresh Miro tokens automatically.
 
 ```bash
 liquid-secrets-setup miro
+```
 
+In the investigation menu, choose **Create Miro board**. The name defaults to the investigation name, limited to 60 characters; demo names start with `SYNTHETIC DEMO`. Visibility defaults to **Private**. **Team members can edit** enables team access; public-link and organization access remain private. An optional Miro team ID selects a destination team. Availability depends on your Miro plan and team permissions; a rejected private request does not automatically become team-visible. Creation uses [Miro's board endpoint](https://developers.miro.com/reference/create-board-1) and its `boards:write` scope.
+
+Confirming creation retrieves the token through SecretSpec, creates an empty board, and saves its ID in `case.json`. The board's name, URL, and creation receipt are saved under `miro/board-creation.json`. The menu then reuses that board for previews and syncing. Opening or cancelling the form does not load credentials. For the same action from the CLI:
+
+```bash
+liquid-live miro-create-board --case cases/theft-liquid
+liquid-trace miro-sync --case cases/theft-liquid --dry-run
+liquid-live miro-sync --case cases/theft-liquid
+```
+
+Creation accepts `--name TEXT`, `--visibility private|team`, and `--team-id ID`. Repeating the command reuses a linked board or a saved successful creation receipt. If a connection failure leaves the outcome uncertain, it blocks another creation request. Inspect Miro, then link the created board through **Investigation settings**. If no board exists, create one in Miro and link it there. Completed run evidence remains unchanged.
+
+To use an existing board, save its URL or ID through **Investigation settings**, or pass it directly:
+
+```bash
 liquid-trace miro-sync --case cases/theft-liquid --dry-run \
   --board 'https://miro.com/app/board/YOUR_CASE_BOARD_ID/'
 
@@ -298,6 +315,6 @@ Evidence is retrieved explorer JSON, not independently verified raw transaction 
 python3 -m unittest discover -v
 ```
 
-Tests cover seed precision, hop boundaries, split/merge paths, continuation, budgets, spend-status freshness, confidential fields, event stops, reference validation, labeling, graph identity, evidence checksums, OAuth refresh, incremental Miro updates, manual-edit preservation, retries, and uncertain creation recovery. API behavior is tested with fixtures and mock transports. **Paid Blockstream access and live Miro publication have not been exercised** because no case seeds or credentials were provided.
+Tests cover seed precision, hop boundaries, split/merge paths, continuation, budgets, spend-status freshness, confidential fields, event stops, reference validation, labeling, graph identity, evidence checksums, OAuth refresh, board creation and persistence, incremental Miro updates, manual-edit preservation, retries, and uncertain creation recovery. Automated API checks use synthetic fixtures and mock transports. Live authentication and publication are verified locally with the operator's credentials.
 
 Source separates the API client, evidence store, tracing engine, export, Miro publication, command parsing, and interactive investigation workflow. The CLI is separate from tracing, so a notebook or case-management interface can call the same engine later.

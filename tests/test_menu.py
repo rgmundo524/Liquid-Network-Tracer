@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from liquid_tracer.common import TraceError, read_json
 from liquid_tracer.investigations import (DEFAULTS, create_investigation, list_investigations,
-                                         load_settings, read_case)
+                                         load_settings, read_case, update_case)
 from liquid_tracer.menu import _command, _seed_values, create_app, run_menu
 
 
@@ -366,6 +366,146 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("capture_output", process.call_args.kwargs)
                 self.assertFalse(app.busy)
                 self.assertIn("did not complete", str(app.screen.query_one("#action-status", Static).render()))
+
+    async def test_create_board_navigation_cancel_and_invalid_names_never_load_credentials(self):
+        from textual.widgets import Button, Input, Select, Static
+        case = create_investigation(self.root, "Synthetic board setup", seeds=["a" * 64 + ":0"])
+        original = (case / "case.json").read_bytes()
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run") as process:
+            async with app.run_test(size=(110, 55)) as pilot:
+                await self.click(app, pilot, "#continue")
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertFalse(app.screen.query_one("#create-board", Button).disabled)
+                await self.click(app, pilot, "#create-board")
+                self.assertEqual(app.screen.query_one("#board-name", Input).value, "Synthetic board setup")
+                self.assertEqual(app.screen.query_one("#board-visibility", Select).value, "private")
+                self.assertEqual(app.screen.query_one("#board-team", Input).value, "")
+                self.assertEqual(app.focused.id, "cancel")
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertEqual(app.screen.case, case)
+                self.assertFalse(app.screen.query_one("#create-board", Button).disabled)
+                process.assert_not_called()
+
+                await self.click(app, pilot, "#create-board")
+                for name in ("", "   ", "x" * 61):
+                    with self.subTest(name=name):
+                        app.screen.query_one("#board-name", Input).value = name
+                        await self.click(app, pilot, "#submit")
+                        self.assertIn("1 to 60 characters", str(app.screen.query_one("#form-error", Static).render()))
+                        self.assertFalse(app.busy)
+                        process.assert_not_called()
+                await pilot.press("escape")
+                await pilot.pause()
+                self.assertEqual(app.screen.case, case)
+                self.assertEqual((case / "case.json").read_bytes(), original)
+                self.assertFalse((case / "runs").exists())
+                self.assertFalse((case / "miro").exists())
+
+    async def test_create_board_after_run_saves_selection_and_preserves_evidence_across_restart(self):
+        from textual.widgets import Button, Input, Select, Static
+        from liquid_tracer.cli import main
+        fixture = PROJECT / "examples" / "demo-api.json"
+        case = create_investigation(self.root, "Synthetic board case", fixture=str(fixture))
+        with contextlib.redirect_stdout(io.StringIO()):
+            status = main(["trace", "--case", str(case), "--fixture", str(fixture),
+                           "--seeds-file", str(PROJECT / "examples" / "demo-seeds.txt"), "--hops", "1"])
+        self.assertEqual(status, 0)
+        before = read_case(case)
+        run_files = {p.relative_to(case): p.read_bytes() for p in (case / "runs").rglob("*") if p.is_file()}
+        selected_name = "Synthetic graph with spaces"
+
+        def save_created_board(command, **kwargs):
+            self.assertEqual(command, ["/nix/store/test-secretspec/bin/secretspec", "--file",
+                str(PROJECT / "secretspec.toml"), "run", "--provider", "protonpass",
+                "--profile", "development", "--", sys.executable, "-m", "liquid_tracer",
+                "miro-create-board", "--case", str(case), "--name", selected_name,
+                "--visibility", "team", "--team-id", "SYNTHETIC-TEAM"])
+            self.assertNotIn("capture_output", kwargs)
+            self.assertNotIn("stdout", kwargs)
+            self.assertNotIn("stderr", kwargs)
+            self.assertFalse(kwargs["check"])
+            update_case(case, {"miro_board": "CREATED="})
+            return subprocess.CompletedProcess(command, 0)
+
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run", side_effect=save_created_board) as process, \
+                patch.object(app, "suspend", side_effect=contextlib.nullcontext) as suspend:
+            async with app.run_test(size=(110, 55)) as pilot:
+                await self.click(app, pilot, "#continue")
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertEqual(app.screen.case, case)
+                self.assertFalse(app.screen.query_one("#create-board", Button).disabled)
+                await self.click(app, pilot, "#create-board")
+                self.assertEqual(app.screen.query_one("#board-name", Input).value,
+                                 "SYNTHETIC DEMO · Synthetic board case")
+                app.screen.query_one("#board-name", Input).value = selected_name
+                app.screen.query_one("#board-visibility", Select).value = "team"
+                app.screen.query_one("#board-team", Input).value = "SYNTHETIC-TEAM"
+                process.assert_not_called()
+                await self.click(app, pilot, "#submit")
+                process.assert_called_once()
+                suspend.assert_called_once()
+                self.assertFalse(app.busy)
+                self.assertIn("Miro board saved", str(app.screen.query_one("#action-status", Static).render()))
+                self.assertIn("https://miro.com/app/board/CREATED=/",
+                              str(app.screen.query_one("#case-summary", Static).render()))
+                self.assertTrue(app.screen.query_one("#create-board", Button).disabled)
+                self.assertEqual(read_case(case)["miro_board"], "CREATED=")
+                self.assertEqual(read_case(case)["latest_run"], before["latest_run"])
+
+        restarted = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run") as process:
+            async with restarted.run_test(size=(110, 55)) as pilot:
+                await self.click(restarted, pilot, "#continue")
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertEqual(restarted.screen.case, case)
+                self.assertTrue(restarted.screen.query_one("#create-board", Button).disabled)
+                self.assertIn("https://miro.com/app/board/CREATED=/",
+                              str(restarted.screen.query_one("#case-summary", Static).render()))
+                await self.click(restarted, pilot, "#preview")
+                self.assertEqual(restarted.screen.query_one("#board", Input).value, "CREATED=")
+                await pilot.press("enter")
+                await pilot.pause()
+                process.assert_not_called()
+        self.assertEqual(run_files, {p.relative_to(case): p.read_bytes()
+                                    for p in (case / "runs").rglob("*") if p.is_file()})
+        self.assertEqual(read_case(case)["latest_run"], before["latest_run"])
+
+    async def test_failed_board_creation_keeps_private_defaults_and_does_not_retry(self):
+        from textual.widgets import Button, Static
+        case = create_investigation(self.root, "Synthetic rejected board")
+        original = (case / "case.json").read_bytes()
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run", return_value=subprocess.CompletedProcess([], 1)) as process, \
+                patch.object(app, "suspend", side_effect=contextlib.nullcontext) as suspend:
+            async with app.run_test(size=(110, 55)) as pilot:
+                await self.click(app, pilot, "#continue")
+                await pilot.press("enter")
+                await pilot.pause()
+                await self.click(app, pilot, "#create-board")
+                process.assert_not_called()
+                await self.click(app, pilot, "#submit")
+                process.assert_called_once()
+                suspend.assert_called_once()
+                command = process.call_args.args[0]
+                self.assertEqual(command[0], "/nix/store/test-secretspec/bin/secretspec")
+                self.assertEqual(command[12:], ["miro-create-board", "--case", str(case), "--name",
+                                               "Synthetic rejected board", "--visibility", "private"])
+                self.assertNotIn("capture_output", process.call_args.kwargs)
+                self.assertFalse(app.busy)
+                self.assertFalse(app.screen.query_one("#create-board", Button).disabled)
+                self.assertIn("Board creation did not complete",
+                              str(app.screen.query_one("#action-status", Static).render()))
+                self.assertEqual((case / "case.json").read_bytes(), original)
+                await self.click(app, pilot, "#create-board")
+                await pilot.press("enter")
+                await pilot.pause()
+                process.assert_called_once()
 
     async def test_invalid_live_seeds_and_board_are_rejected_without_creating_case(self):
         from textual.widgets import Input, Select, Static, TextArea

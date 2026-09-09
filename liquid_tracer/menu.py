@@ -378,6 +378,58 @@ def create_app(root=None):
                     return
                 self.dismiss(sorted(self.selected))
 
+    class CreateBoardScreen(BaseScreen):
+        def __init__(self, case):
+            super().__init__()
+            self.case = case
+            self.metadata = read_case(case)
+
+        def compose(self) -> ComposeResult:
+            from .boards import default_board_name
+            yield Header()
+            with VerticalScroll(classes="form-panel"):
+                yield Label("Create Miro board", classes="title")
+                yield Label("Board name (1 to 60 characters)")
+                yield Input(default_board_name(self.metadata), id="board-name")
+                yield Label("Visibility")
+                yield Select([("Private", "private"), ("Team members can edit", "team")],
+                             value="private", allow_blank=False, id="board-visibility")
+                yield Label("Miro team ID (optional)")
+                yield Input(placeholder="Leave blank unless selecting a specific team", id="board-team")
+                yield Static("Creates an empty board and saves it with this investigation. "
+                             "Choose Sync to Miro afterward to add the traced graph.", markup=False)
+                yield Static("Uses your Miro access token through SecretSpec. "
+                             "Available visibility settings depend on your Miro plan and team permissions.", markup=False)
+                yield Static("", id="form-error", markup=False)
+            with Horizontal(classes="buttons form-actions"):
+                yield Button("Cancel", id="cancel")
+                yield Button("Create Miro board", id="submit", variant="primary")
+            yield Footer()
+
+        def on_mount(self):
+            self.query_one("#cancel", Button).focus()
+
+        def on_button_pressed(self, event: Button.Pressed):
+            event.stop()
+            if event.button.id == "cancel":
+                self.dismiss(None)
+            elif event.button.id == "submit":
+                try:
+                    from .boards import board_options
+                    if read_case(self.case).get("miro_board"):
+                        raise TraceError("A Miro board is already saved. Use Preview Miro or Sync to Miro.")
+                    name = self.query_one("#board-name", Input).value.strip()
+                    team = self.query_one("#board-team", Input).value.strip() or None
+                    visibility = self.query_one("#board-visibility", Select).value
+                    board_options(name, team, visibility)
+                    arguments = ["miro-create-board", "--case", str(self.case), "--name", name,
+                                 "--visibility", visibility]
+                    if team:
+                        arguments.extend(["--team-id", team])
+                    self.dismiss((arguments, True))
+                except ACTION_ERRORS as error:
+                    self.query_one("#form-error", Static).update(str(error))
+
     class CaseScreen(BaseScreen):
         def __init__(self, case):
             super().__init__()
@@ -394,6 +446,8 @@ def create_app(root=None):
                     yield Button("Preview Miro", id="preview")
                     yield Button("Sync to Miro", id="sync")
                 with Horizontal(classes="buttons"):
+                    yield Button("Create Miro board", id="create-board")
+                with Horizontal(classes="buttons"):
                     yield Button("Investigation settings", id="case-settings")
                     yield Button("Back", id="back")
                 yield Static("Ready", id="action-status", markup=False)
@@ -404,11 +458,13 @@ def create_app(root=None):
             try:
                 metadata = read_case(self.case)
                 source = "Synthetic demo" if metadata.get("fixture") else "Live Liquid"
+                board = metadata.get("miro_board")
                 self.query_one("#case-summary", Static).update(
                     f"{metadata.get('name') or self.case.name}\n{source}\n"
                     f"Latest run: {_status(self.case, metadata)}\n"
-                    f"Miro board: {metadata.get('miro_board') or 'not set'}\nDirectory: {self.case}")
+                    f"Miro board: {'https://miro.com/app/board/' + board + '/' if board else 'not set'}\nDirectory: {self.case}")
                 self.query_one("#run", Button).label = "Continue latest run" if metadata.get("latest_run") else "Start first run"
+                self.query_one("#create-board", Button).disabled = self.app.busy or bool(board)
             except ACTION_ERRORS as error:
                 self.show_error(error)
 
@@ -427,6 +483,8 @@ def create_app(root=None):
                     self.action_back()
                 elif action == "case-settings":
                     self.app.push_screen(FormScreen("case", self.case))
+                elif action == "create-board":
+                    self.app.push_screen(CreateBoardScreen(self.case), self.perform)
                 elif action in ("run", "preview", "sync"):
                     self.app.push_screen(FormScreen(action, self.case), self.perform)
                 elif action == "review":
@@ -444,6 +502,7 @@ def create_app(root=None):
             if not selection or self.app.busy:
                 return
             arguments, live = selection
+            self.current_action = arguments[0]
             self.set_busy(True)
             if not live:
                 self.offline_action(arguments)
@@ -474,9 +533,13 @@ def create_app(root=None):
         def finished(self, status, output):
             self.set_busy(False)
             self.query_one("#action-log", RichLog).write(output)
-            self.query_one("#action-status", Static).update(
-                "Completed. Saved evidence is available under Review saved runs." if status == 0
-                else "Action did not complete successfully. Saved evidence remains available; no automatic retry.")
+            if getattr(self, "current_action", None) == "miro-create-board":
+                message = ("Miro board saved. Choose Preview Miro, then Sync to Miro to add the traced graph."
+                           if status == 0 else "Board creation did not complete. Check the terminal result before retrying.")
+            else:
+                message = ("Completed. Saved evidence is available under Review saved runs." if status == 0
+                           else "Action did not complete successfully. Saved evidence remains available; no automatic retry.")
+            self.query_one("#action-status", Static).update(message)
             self.update_summary()
 
     class SelectScreen(BaseScreen):

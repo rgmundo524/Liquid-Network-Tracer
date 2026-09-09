@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 
 from .api import ENTERPRISE, Esplora, Limits
+from .boards import create_board
 from .common import HEX64, TraceError, digest, load_labels, parse_outpoint, read_json, save_json
 from .export import export_run
 from .investigations import read_case, update_case
@@ -65,6 +66,13 @@ def parser():
     export.add_argument("--out", type=Path, required=True, help="New export directory")
     export.add_argument("--merge-addresses", action="store_true", default=None)
     export.add_argument("--offline-preview", action="store_true")
+    board = commands.add_parser("miro-create-board", help="Create and save a Miro board for this investigation")
+    board.add_argument("--case", type=Path, default=case_default, required=case_default is None,
+                       help="Case directory (default: LIQUID_CASE_DIR)")
+    board.add_argument("--name", help="Board name (default: investigation name, at most 60 characters)")
+    board.add_argument("--team-id", help="Optional destination Miro team ID")
+    board.add_argument("--visibility", choices=["private", "team"], default="private",
+                       help="Private or editable by the destination team (default: private)")
     update = commands.add_parser("miro-sync", help="Add a saved run to the existing case graph, preserving manual edits")
     update.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                         help="Case directory (default: LIQUID_CASE_DIR)")
@@ -362,6 +370,8 @@ def main(argv=None):
             finally:
                 store.close()
             print(args.out.resolve())
+        elif args.command == "miro-create-board":
+            print(json.dumps(create_board(args.case, args.name, args.team_id, args.visibility), indent=2))
         elif args.command == "miro-sync":
             print(json.dumps(sync_run(args.case, args.run, args.board, args.max_new_items, args.dry_run, args.plan), indent=2))
         elif args.command == "miro-publish":

@@ -2,7 +2,7 @@
 
 The project uses **one main `devenv.nix`** to define Python, the Textual terminal interface, commands, and nonsecret environment defaults. `secretspec.toml` declares credential names. Proton Pass stores their values. Investigation names, board IDs, run limits, and the latest-run reference belong in the saved investigation files.
 
-Entering the environment and opening the interface do not access a secret provider. Selecting a live output lookup, trace, or Miro sync retrieves credentials through SecretSpec for that action. The demo, navigation, and local previews need no credentials.
+Entering the environment and opening the interface do not access a secret provider. Selecting a live output lookup, trace, Miro board creation, or Miro sync retrieves credentials through SecretSpec for that action. The offline demo trace, navigation, and local previews need no credentials.
 
 ## Start the environment and interface
 
@@ -23,7 +23,9 @@ Creating an investigation asks for a name, live or synthetic-demo source, starti
 
 Lookup retrieves one transaction with a five-attempt and 30-second API budget, including authentication and retries. It loads live credentials only after selecting **Load outputs**. The terminal remains available for provider prompts. It follows no spends, saves no case, and uses a temporary report removed after loading the picker. Fees, peg-outs, and unspendable outputs cannot be selected. Confidential quantities remain unknown. Creating the investigation saves the selected references in a unique case directory; the later trace fetches and archives its own evidence. Within that investigation, start or continue a bounded run, review saved information, preview or sync Miro, or change its settings.
 
-A case normally keeps the same board as its graph grows. Board selection and numeric run defaults are saved with the case, so you do not need a board environment variable or a separate Nix file. The top-level Settings screen changes defaults for future investigations. Existing cases retain their saved settings.
+A case normally keeps the same board as its graph grows. If no board is linked, choose **Create Miro board** from the investigation menu. Review the name, visibility (Private by default), and optional team ID, then create it. SecretSpec supplies the Miro access token only after confirmation. The returned board ID is saved with the case, and its URL appears in the menu. **Preview Miro** and **Sync to Miro** use that selection and the saved run; there is no need to repeat tracing. You can also link an existing board through **Investigation settings**.
+
+Board selection and numeric run defaults are saved with the case, so you do not need a board environment variable or a separate Nix file. The top-level Settings screen changes defaults for future investigations. Existing cases retain their saved settings.
 
 For a command without entering an interactive shell:
 
@@ -40,6 +42,7 @@ Use a current devenv release. The project supplies its own pinned SecretSpec and
 | `liquid-trace SUBCOMMAND ...` | Runs an explicit command using the existing process environment. |
 | `liquid-live SUBCOMMAND ...` | Resolves project credentials through SecretSpec, then runs an explicit command. |
 | `liquid-live inspect-tx --txid HASH` | Looks up one live transaction and prints its output numbers, addresses, and available public quantities as JSON. Does not trace spends or create a case. |
+| `liquid-live miro-create-board --case CASE` | Creates an empty Miro board and saves it with the investigation. Uses the case name and private visibility by default. |
 | `liquid-secrets-setup [all\|blockstream\|miro]` | Prompts for selected credentials and stores them in the configured provider; defaults to all three. |
 | `liquid-toolchain-check` | Reports the pinned SecretSpec/Proton CLI versions and checks support for `info`, without accessing a vault. |
 | `liquid-secrets-check [--service blockstream\|miro\|all]` | Loads project secrets and reports presence only; defaults to Blockstream. No Blockstream or Miro calls. |
@@ -60,6 +63,7 @@ The main environment defines `LIQUID_INVESTIGATIONS_DIR` as `${config.devenv.roo
 | `runs/<run-id>/` | Evidence, CSVs, tracing checkpoint, graph plan, and checksums for one run. |
 | `runs/<run-id>/investigation.json` | Name and board selection as known when that run was traced. |
 | `miro/` | Per-board mapping that keeps graph items stable across continuations. |
+| `miro/board-creation.json` | Board creation request, status, and returned ID/URL for reuse and recovery. |
 | `miro/reports/` | Publication reports recording which run was synced to which board. |
 
 Run IDs are saved references, not variables you must remember or re-enter. The latest pointer advances after the exports finish successfully, including saved runs paused by a budget or an error. It does not depend on shell history or directory timestamps. A continuation preserves its parent and records a new snapshot. Settings or a new board chosen later do not rewrite completed run exports.
@@ -82,7 +86,19 @@ liquid-live trace --case cases/theft-liquid \
   --max-transactions 20 --max-outpoints 100 --max-requests 30 --max-seconds 60
 ```
 
-Preview and sync the latest run. Supply `--board` the first time if the case does not yet have a board saved:
+Create and save a board, then preview and sync the latest run:
+
+```bash
+liquid-live miro-create-board --case cases/theft-liquid
+liquid-trace miro-sync --case cases/theft-liquid --dry-run
+liquid-live miro-sync --case cases/theft-liquid
+```
+
+Optional creation flags are `--name TEXT` (1–60 characters), `--visibility private|team`, and `--team-id ID`. Private visibility restricts team, organization, and public-link access. Team visibility enables team editing while keeping organization and public-link access private. Your Miro plan and permissions must support the chosen setting. Failed requests never automatically broaden visibility.
+
+Creation records a pending request before contacting Miro, then saves the returned board ID before updating `case.json`. A retry reuses an acknowledged board. An uncertain outcome (such as a connection failure after sending the request) blocks a second creation request: inspect Miro and link the board through **Investigation settings**. If none was created, create one in Miro and link it. This avoids duplicate boards and preserves completed run evidence.
+
+Alternatively, supply an existing board with `--board`:
 
 ```bash
 liquid-trace miro-sync --case cases/theft-liquid --dry-run \
@@ -178,7 +194,7 @@ liquid-live trace --case cases/theft-liquid --seed 'LIQUID_TXID:0' --hops 1 \
 liquid-live miro-sync --case cases/theft-liquid
 ```
 
-The manifest marks credentials optional because different commands need different services. The existing application checks Blockstream credentials for authenticated tracing and the Miro token for live sync. Set only the services you use. Secret values are provided to the child process environment and are not added to the interactive parent shell or saved case files. They remain readable by the process that needs them; environment variables are a delivery mechanism, not encrypted storage.
+The manifest marks credentials optional because different commands need different services. The application checks Blockstream credentials for authenticated tracing and the Miro token for board creation and live sync. Set only the services you use. Secret values are provided to the child process environment and are not added to the interactive parent shell or saved case files. They remain readable by the process that needs them; environment variables are a delivery mechanism, not encrypted storage.
 
 ## Optional desktop keyring storage
 
