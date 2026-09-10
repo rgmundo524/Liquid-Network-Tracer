@@ -13,7 +13,7 @@ from liquid_tracer.cli import main, sync_run, verify_export
 from liquid_tracer.common import TraceError, canonical, digest, read_json, save_json
 from liquid_tracer.export import PRESENTATION_VERSION, build_graph
 from liquid_tracer.miro import sync as real_sync
-from tests.fixtures import A, X, fixture
+from tests.fixtures import A, B, X, fixture
 from tests.test_miro_sync import FakeMiro
 
 
@@ -44,6 +44,8 @@ class PresentationRefreshTests(unittest.TestCase):
                 item["body"]["data"]["content"] = "<p>Red: seed. Yellow: candidate. Gray: context. Asset and amount may be confidential.</p>"
             elif item["body"]["data"]["shape"] == "circle":
                 item["body"]["data"]["content"] = "<p>Old address label<br>" + X + ":0</p>"
+            elif item["key"].startswith("tx:"):
+                item["body"]["data"]["content"] = item["body"]["data"]["content"].replace("<br>2023-11-14 UTC", "")
         for item in self.old_plan["connectors"]:
             item["body"]["captions"][0]["content"] = "vout 0 · amount confidential · asset confidential"
         self.save_old_plan()
@@ -117,6 +119,24 @@ class PresentationRefreshTests(unittest.TestCase):
                 self.assertFalse({"position", "geometry", "startItem", "endItem"} & body.keys())
         self.assertEqual(self.snapshot(self.run), self.archive)
         self.assertEqual(read_json(self.case / "case.json")["latest_run"], latest)
+        verify_export(self.run)
+
+    def test_date_refresh_updates_existing_transactions_and_preserves_manual_labels(self):
+        ids = self.populate_old_board()
+        managed = self.remote.items[ids["tx:" + A]]
+        manual = self.remote.items[ids["tx:" + B]]
+        self.assertNotIn("2023-11-14 UTC", managed["data"]["content"])
+        manual["data"]["content"] += "<p>Analyst transaction note</p>"
+        original_manual = copy.deepcopy(manual)
+        with patch("liquid_tracer.cli.sync", self.adapter), \
+                patch("liquid_tracer.cli.Esplora", side_effect=AssertionError("Saved run must not retrace")):
+            result = sync_run(self.case, "latest", "SYNTHETIC=", max_new_items=0)
+        self.assertEqual(result["created"], 0)
+        self.assertIn("2023-11-14 UTC", self.remote.items[ids["tx:" + A]]["data"]["content"])
+        self.assertEqual(self.remote.items[ids["tx:" + B]], original_manual)
+        self.assertIn(("tx:" + B, "data.content"),
+                      {(conflict["key"], conflict["field"]) for conflict in result["conflicts"]})
+        self.assertEqual(self.snapshot(self.run), self.archive)
         verify_export(self.run)
 
     def test_preview_refreshes_in_memory_without_credentials_network_or_writes(self):

@@ -1,6 +1,7 @@
 import csv
 import html
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .common import (LBTC, TraceError, canonical, digest, match_labels, output_kind,
@@ -8,7 +9,7 @@ from .common import (LBTC, TraceError, canonical, digest, match_labels, output_k
 from .trace import TERMINAL
 from .layout import arrange, fee_date, transaction_ranks
 
-PRESENTATION_VERSION = 4
+PRESENTATION_VERSION = 5
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -54,6 +55,23 @@ def graph_quantity(output):
 
 def short(value):
     return value if len(value) <= 20 else value[:10] + "…" + value[-7:]
+
+
+def transaction_date(transaction):
+    """Display the recorded block date, never the run or observation date."""
+    status = transaction.get("status")
+    if not isinstance(status, dict):
+        return "Date ??"
+    if status.get("confirmed") is False:
+        return "Unconfirmed"
+    timestamp = status.get("block_time")
+    if (status.get("confirmed") is True and isinstance(timestamp, int)
+            and not isinstance(timestamp, bool) and timestamp >= 0):
+        try:
+            return datetime.fromtimestamp(timestamp, timezone.utc).date().isoformat() + " UTC"
+        except (ValueError, OverflowError, OSError):
+            pass
+    return "Date ??"
 
 
 def build_graph(state, merge_addresses=False, include_fees=False):
@@ -117,7 +135,8 @@ def build_graph(state, merge_addresses=False, include_fees=False):
         tx = record["data"]
         column = 2 * ranks[txid] + 1
         role = "starting_transaction" if txid in starting_transactions else "transaction"
-        txnode = add_node("tx:" + txid, "transaction", "TX\n" + short(txid) + "\nhop " + str(record["depth"]),
+        txnode = add_node("tx:" + txid, "transaction",
+                          "TX\n" + short(txid) + "\n" + transaction_date(tx) + "\nhop " + str(record["depth"]),
                           column, {"transaction": tx, "observation_id": record["observation_id"]},
                           None if simulated else explorer + "/tx/" + txid, COLORS[role])
         nodes[txnode]["role"] = role

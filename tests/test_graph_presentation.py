@@ -1,15 +1,18 @@
 import copy
+import os
 import re
 import tempfile
+import time
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest.mock import patch
 
 from liquid_tracer.api import Esplora, Limits
 from liquid_tracer.common import LBTC, save_json
 from liquid_tracer.export import (COLORS, PALETTE, PRESENTATION_VERSION,
                                   build_graph, edge_color, graph_quantity,
-                                  short, svg_graph)
+                                  short, svg_graph, transaction_date)
 from liquid_tracer.miro import make_plan, validate_plan
 from liquid_tracer.store import Store
 from liquid_tracer.trace import new_state, trace
@@ -30,6 +33,44 @@ class GraphPresentationTests(unittest.TestCase):
         state = new_state([A + ":0"], api.base, limits, [])
         api.run_id = state["run_id"]
         self.state = trace(api, state, limits, root / "run" / "trace.json")
+
+    def test_transaction_dates_use_utc_even_when_local_day_differs(self):
+        transaction = {"status": {"confirmed": True, "block_time": 1700006400}}
+        self.assertEqual(transaction_date(transaction), "2023-11-15 UTC")
+        if hasattr(time, "tzset"):
+            try:
+                with patch.dict(os.environ, {"TZ": "EST5"}):
+                    time.tzset()
+                    self.assertEqual(time.strftime("%Y-%m-%d", time.localtime(1700006400)), "2023-11-14")
+                    self.assertEqual(transaction_date(transaction), "2023-11-15 UTC")
+            finally:
+                time.tzset()
+
+    def test_transaction_dates_do_not_invent_confirmation_or_missing_dates(self):
+        for status in ({"confirmed": False}, {"confirmed": False, "block_time": 1700000000}):
+            with self.subTest(status=status):
+                self.assertEqual(transaction_date({"status": status}), "Unconfirmed")
+        for timestamp in (None, True, False, "1700000000", 1700000000.5, -1, 10 ** 100):
+            with self.subTest(timestamp=timestamp):
+                self.assertEqual(transaction_date({"status": {"confirmed": True, "block_time": timestamp}}), "Date ??")
+        for transaction in ({}, {"status": None}, {"status": {}}, {"status": {"confirmed": True}},
+                            {"status": {"block_time": 1700000000}}):
+            with self.subTest(transaction=transaction):
+                self.assertEqual(transaction_date(transaction), "Date ??")
+
+    def test_transaction_dates_reach_both_renderers_without_changing_evidence(self):
+        before = copy.deepcopy(self.state)
+        graph = build_graph(self.state)
+        plan = make_plan(graph)
+        svg = svg_graph(graph)
+        for node in graph["nodes"]:
+            if node["kind"] != "transaction":
+                continue
+            self.assertIn("2023-11-14 UTC", node["label"].splitlines())
+            shape = next(item for item in plan["shapes"] if item["key"] == node["id"])
+            self.assertIn("<br>2023-11-14 UTC<br>", shape["body"]["data"]["content"])
+        self.assertIn("2023-11-14 UTC", svg)
+        self.assertEqual(self.state, before)
 
     def test_missing_quantities_are_compact_and_public_values_remain_exact(self):
         hidden = {"valuecommitment": "08" + "ab" * 32,
