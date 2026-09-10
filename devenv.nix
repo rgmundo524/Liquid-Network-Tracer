@@ -11,7 +11,7 @@
   packages =
     assert lib.assertMsg (lib.versionAtLeast pkgs.secretspec.version "0.19")
       "The Proton Pass provider requires SecretSpec 0.19 or newer with current pass-cli releases.";
-    [ pkgs.git pkgs.secretspec pkgs.proton-pass-cli ];
+    [ pkgs.git pkgs.secretspec pkgs.proton-pass-cli pkgs.mermaid-cli ];
 
   # Only public configuration belongs in env. Secret values are resolved by
   # liquid-live at process startup, never interpolated into a Nix expression.
@@ -24,6 +24,9 @@
     LIQUID_SECRET_PROFILE = "development";
     LIQUID_SECRETSPEC_BIN = "${pkgs.secretspec}/bin/secretspec";
     SECRETSPEC_PROTONPASS_CLI_PATH = "${pkgs.proton-pass-cli}/bin/pass-cli";
+    # Mermaid's Nix wrapper also supplies Chromium on Linux. Rendering uses
+    # local files and never needs API credentials or a separate server.
+    LIQUID_MERMAID_BIN = "${pkgs.mermaid-cli}/bin/mmdc";
   };
 
   # SecretSpec's runtime dotenv provider is supported as an alternative to
@@ -135,6 +138,7 @@
 
   enterTest = ''
     liquid-toolchain-check
+    "$LIQUID_MERMAID_BIN" --version
     liquid-test
   '';
 }

@@ -1,6 +1,6 @@
 # Local development and API secrets
 
-The project uses **one main `devenv.nix`** to define Python, the Textual terminal interface, commands, and nonsecret environment defaults. `secretspec.toml` declares credential names. Proton Pass stores their values. Investigation names, board IDs, run limits, and the latest-run reference belong in the saved investigation files.
+The project uses **one main `devenv.nix`** to define Python, the Textual terminal interface, Mermaid CLI, commands, and nonsecret environment defaults. `secretspec.toml` declares credential names. Proton Pass stores their values. Investigation names, board IDs, run limits, and the latest-run reference belong in the saved investigation files.
 
 Entering the environment and opening the interface do not access a secret provider. Selecting a live output lookup, trace, Miro board creation, or Miro sync retrieves credentials through SecretSpec for that action. The offline demo trace, navigation, and local previews need no credentials.
 
@@ -28,6 +28,10 @@ Live credentials load only after selecting **Load outputs**, with the terminal a
 A case normally keeps the same board as its graph grows. If no board is linked, choose **Create Miro board** from the investigation menu. Review the name, visibility (Private by default), and optional team ID, then create it. SecretSpec supplies the Miro access token only after confirmation. The returned board ID is saved with the case, and its URL appears in the menu. **Preview Miro** and **Sync to Miro** use that selection and the saved run; there is no need to repeat tracing. You can also link an existing board through **Investigation settings**.
 
 Board selection, run limits, and the **Include transaction fee flows** checkbox are saved with the case, so you do not need a board environment variable or a separate Nix file. Fees are excluded by default, including for older cases without that setting. The top-level Settings screen changes defaults for future investigations. Existing cases retain their saved settings.
+
+**Mermaid chart** creates a local preview from the latest verified run without opening the secret provider. It is enabled once a run has been saved and does not require a Miro board. Rendering runs in the interface's background worker and opens the generated HTML in your browser; the result also shows its path. Each click creates `previews/<run-id>-mermaid-<id>/` inside the case, containing `graph.mmd`, genuine Mermaid-rendered `graph.svg`, a self-contained `graph.html`, full `graph.json` details, a node-ID mapping, and renderer configuration. The saved address mode and current fee choice apply; archived runs and Miro publication state are not modified.
+
+Mermaid provides its own automatic left-to-right layout. It retains the graph's directions and styling, including starting-transaction color priority and recorded dates, but does not copy Miro positions, fixed connection sides, or its chronological fee row. The local chart is a quick view; use Miro for interactive arrangement and annotations.
 
 Choose **Organize Miro graph** to apply the current left-to-right layout to an existing board. The confirmation form explains that managed positions and transaction connector attachment sides will change; cancelling makes no API call. Normal syncing preserves manual positions and existing connector attachments. The layout uses actual recorded transaction dependencies, groups nearby input/output nodes, and places included fees chronologically in a separate row above the flow. Repeated addresses appear as separate UTXO occurrences by default; merged address cycles can require return edges.
 
@@ -104,7 +108,17 @@ liquid-live trace --case cases/theft-liquid \
   --max-transactions 20 --max-outpoints 100 --max-requests 30 --max-seconds 60
 ```
 
-`trace`, `export`, and `miro-sync` accept `--include-fees` and `--exclude-fees`. These are presentation overrides; the underlying trace and fee evidence are unchanged. Without a flag, the case's `run_defaults.include_fees` applies, defaulting to `false`. A verified explicit `--plan` cannot be combined with a fee override; regenerate an export when a different selection is needed.
+`trace`, `export`, `mermaid`, and `miro-sync` accept `--include-fees` and `--exclude-fees`. These are presentation overrides; the underlying trace and fee evidence are unchanged. Without a flag, the case's `run_defaults.include_fees` applies, defaulting to `false`. A verified explicit `--plan` cannot be combined with a fee override; regenerate an export when a different selection is needed.
+
+Create a local Mermaid preview with the same defaults as the menu:
+
+```bash
+liquid-trace mermaid --case cases/theft-liquid --open
+```
+
+Omit `--open` to render without launching a browser. `--run RUN_ID` selects an older snapshot and `--out NEW_DIRECTORY` chooses an explicit destination; existing directories and destinations inside the case's `runs/` are rejected. The command prints JSON with the selected run, file paths, fee visibility, and whether the browser launch succeeded. A missing desktop browser does not fail a completed export. Rendering failures return a nonzero status and keep the source and configuration for diagnosis.
+
+The existing pinned package input supplies Mermaid CLI **11.16.0**, with its Chromium wrapper on Linux. `LIQUID_MERMAID_BIN` is set by the main `devenv.nix`; no manual environment variables, CDN, Mermaid account, or server are needed. Outside devenv, install [Mermaid CLI](https://github.com/mermaid-js/mermaid-cli) and its supported browser, with `mmdc` available on PATH. Rendering is bounded to 120 seconds and graph-size limits are configured to include every saved edge. `devenv test` checks the renderer executable and runs a real synthetic SVG rendering test alongside the offline suite.
 
 Create and save a board, then preview and sync the latest run:
 

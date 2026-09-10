@@ -2,6 +2,7 @@ import argparse
 import fcntl
 import json
 import os
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -84,6 +85,13 @@ def parser():
     export.add_argument("--merge-addresses", action="store_true", default=None)
     fee_arguments(export)
     export.add_argument("--offline-preview", action="store_true")
+    mermaid = commands.add_parser("mermaid", help="Create a local Mermaid chart from a saved run without API calls")
+    mermaid.add_argument("--case", type=Path, default=case_default, required=case_default is None,
+                         help="Case directory (default: LIQUID_CASE_DIR)")
+    mermaid.add_argument("--run", default="latest", help="Saved run ID (default: latest)")
+    mermaid.add_argument("--out", type=Path, help="New preview directory (default: automatically saved under the case's previews/)")
+    mermaid.add_argument("--open", dest="open_browser", action="store_true", help="Open the completed local HTML chart in your browser")
+    fee_arguments(mermaid)
     board = commands.add_parser("miro-create-board", help="Create and save a Miro board for this investigation")
     board.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                        help="Case directory (default: LIQUID_CASE_DIR)")
@@ -405,6 +413,43 @@ def run_trace(args):
             store.close()
 
 
+def open_preview(path):
+    """Best effort desktop launch; a missing browser cannot block a saved chart."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", "import sys, webbrowser; sys.exit(0 if webbrowser.open_new_tab(sys.argv[1]) else 1)",
+             Path(path).resolve().as_uri()],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def mermaid_run(case, run_id="latest", out=None, include_fees=None, open_browser=False):
+    from .mermaid import export_mermaid
+
+    case = Path(case)
+    metadata = read_case(case)
+    run_id = resolve_latest(case, run_id)
+    archive = run_path(case, run_id)
+    verify_export(archive)
+    state = read_json(archive / "trace.json")
+    if state.get("run_id") != run_id:
+        raise TraceError("Saved trace does not match the selected run")
+    if state.get("case_id") != metadata["case_id"]:
+        raise TraceError("The saved run belongs to a different case")
+    fees = include_fee_flows(metadata, include_fees)
+    graph = build_graph(state, merge_addresses=state.get("address_mode") == "merged", include_fees=fees)
+    destination = Path(out) if out is not None else case / "previews" / (run_id + "-mermaid-" + uuid.uuid4().hex[:8])
+    if destination.resolve().is_relative_to((case / "runs").resolve()):
+        raise TraceError("Save Mermaid previews outside runs/ to preserve archived evidence")
+    result = export_mermaid(graph, destination)
+    result.update({"run_id": run_id, "include_fees": fees,
+                   "browser_opened": open_preview(result["html"]) if open_browser else False})
+    return result
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
@@ -465,6 +510,8 @@ def main(argv=None):
             finally:
                 store.close()
             print(args.out.resolve())
+        elif args.command == "mermaid":
+            print(json.dumps(mermaid_run(args.case, args.run, args.out, args.include_fees, args.open_browser), indent=2))
         elif args.command == "miro-create-board":
             print(json.dumps(create_board(args.case, args.name, args.team_id, args.visibility), indent=2))
         elif args.command == "miro-sync":

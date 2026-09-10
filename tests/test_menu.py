@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -440,6 +441,80 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(command[command.index("--case") + 1] == str(case) for command in commands))
         self.assertIn("DEMO=", commands[1])
         self.assertNotIn("UNRELATED=", commands[1])
+
+    async def test_mermaid_requires_a_saved_run_without_requiring_a_miro_board(self):
+        from textual.widgets import Button
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run") as process:
+            async with app.run_test(size=(110, 55)) as pilot:
+                case = await self.new_demo(app, pilot, board="")
+                self.assertFalse(read_case(case).get("miro_board"))
+                self.assertTrue(app.screen.query_one("#mermaid", Button).disabled)
+                self.assertFalse(app.screen.query_one("#run", Button).disabled)
+                self.assertFalse(app.screen.query_one("#create-board", Button).disabled)
+                self.assertTrue(app.screen.query_one("#layout", Button).disabled)
+                await self.click(app, pilot, "#mermaid")
+                await self.click(app, pilot, "#review")
+                await self.click(app, pilot, "#back")
+                self.assertEqual(app.screen.case, case)
+                self.assertTrue(app.screen.query_one("#mermaid", Button).disabled)
+                process.assert_not_called()
+
+    async def test_mermaid_button_uses_offline_worker_and_preserves_saved_investigation(self):
+        from textual.widgets import Button, Static
+        from liquid_tracer.cli import main
+        fixture = PROJECT / "examples" / "demo-api.json"
+        case = create_investigation(self.root, "Synthetic Mermaid case", fixture=str(fixture))
+        with contextlib.redirect_stdout(io.StringIO()):
+            status = main(["trace", "--case", str(case), "--fixture", str(fixture),
+                           "--seeds-file", str(PROJECT / "examples" / "demo-seeds.txt"), "--hops", "1"])
+        self.assertEqual(status, 0)
+        self.assertFalse(read_case(case).get("miro_board"))
+        settings = dict(read_case(case)["run_defaults"], include_fees=True)
+        update_case(case, {"run_defaults": settings})
+        snapshot = {p.relative_to(case): p.read_bytes() for p in case.rglob("*") if p.is_file()}
+        preview = case / "previews" / "synthetic-mermaid" / "graph.html"
+        started, release = threading.Event(), threading.Event()
+
+        def render_locally(command, **kwargs):
+            self.assertEqual(command, [sys.executable, "-m", "liquid_tracer", "mermaid",
+                                      "--case", str(case), "--run", "latest", "--open"])
+            self.assertTrue(kwargs["capture_output"])
+            self.assertTrue(kwargs["text"])
+            self.assertFalse(kwargs["check"])
+            started.set()
+            if not release.wait(10):
+                raise AssertionError("Mermaid worker was not released")
+            return subprocess.CompletedProcess(command, 0, json.dumps({
+                "html": str(preview), "browser_opened": False}), "")
+
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run", side_effect=render_locally) as process, \
+                patch.object(app, "suspend") as suspend:
+            async with app.run_test(size=(110, 55)) as pilot:
+                await self.click(app, pilot, "#continue")
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertFalse(app.screen.query_one("#mermaid", Button).disabled)
+                try:
+                    await self.click(app, pilot, "#mermaid")
+                    self.assertTrue(started.is_set())
+                    self.assertTrue(app.busy)
+                    self.assertTrue(all(button.disabled for button in app.screen.query(Button)))
+                    app.screen.perform((["mermaid", "--case", str(case)], False))
+                    process.assert_called_once()
+                finally:
+                    release.set()
+                await self.finish_action(app, pilot)
+                suspend.assert_not_called()
+                self.assertFalse(app.screen.query_one("#mermaid", Button).disabled)
+                message = str(app.screen.query_one("#action-status", Static).render())
+                self.assertIn("Mermaid chart saved", message)
+                self.assertIn("Open in your browser", message)
+                self.assertIn(str(preview), message)
+                self.assertFalse(app.screen.query_one("#create-board", Button).disabled)
+                self.assertEqual(snapshot, {p.relative_to(case): p.read_bytes()
+                                            for p in case.rglob("*") if p.is_file()})
 
     async def test_global_and_case_settings_are_saved_without_remote_actions(self):
         from textual.widgets import Checkbox, Input, Static

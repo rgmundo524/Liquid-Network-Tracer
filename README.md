@@ -56,6 +56,8 @@ In an interactive terminal, `liquid-trace` opens a Textual interface with **New 
 
 The investigation settings let you change its name, board, run limits, and fee visibility. Top-level **Settings** changes defaults for new investigations. Existing investigations keep their own saved defaults. Creating a board saves its ID with the case and shows its URL in the investigation menu. It creates an empty board; publishing the traced graph is a separate **Sync to Miro** action. A completed run can be synced after creating or linking a board without tracing again.
 
+For a quick local view, choose **Mermaid chart** in the investigation menu after saving a run. The button creates a Mermaid source file, renders an SVG, and opens an HTML preview in your browser. It uses the latest saved run and current fee setting, needs no API credentials or Miro board, and saves each preview in a new directory under the investigation's `previews/`. The menu shows the file path if a browser cannot be opened. Miro remains the editable investigation board.
+
 `vout` means the output's numeric index, starting at zero. In `HASH:0`, `0` selects the first output; `HASH:1` selects the second. Do not type the literal word `vout` or a backslash before the colon. Choose the output connected to your investigation; output 0 is only an example. The picker starts with nothing selected and excludes fees, peg-outs, and unspendable outputs. Hidden amounts and assets remain unknown.
 
 **Load outputs** accepts up to 100 distinct transaction hashes. Commas, spaces, or newlines separate hashes; duplicates are removed and the full list is validated before lookup. One credential session and API client serve the batch. The shared lookup budget defaults to five API attempts and 30 seconds per distinct transaction, including authentication and retries. For 10 transactions that means at most 50 attempts and 300 seconds across the batch. A failed lookup preserves the existing starting-output field; a partial result is not applied.
@@ -77,6 +79,7 @@ liquid-trace menu --investigations-dir /absolute/path/to/investigations
 | `cases/settings.json` | Run limits and fee visibility defaults for new investigations. |
 | `cases/<investigation>/case.json` | Investigation name, seeds, source, board selection, run defaults, and latest exported run ID. |
 | `cases/<investigation>/runs/<run-id>/` | A separate evidence and export directory for each run. |
+| `cases/<investigation>/previews/<run-id>-mermaid-<id>/` | Local Mermaid source, SVG/HTML preview, graph details, and node identifiers. |
 | `cases/<investigation>/miro/` | Saved mapping between graph objects and items on each Miro board. |
 | `cases/<investigation>/miro/board-creation.json` | Board creation request and receipt, retained to recover interrupted creation without duplicating a board. |
 | `cases/<investigation>/miro/reports/` | Sync reports identifying the run and actual board used. |
@@ -115,6 +118,16 @@ liquid-demo-sync
 A new independent root cannot overwrite an already published graph's lineage. The interactive menu avoids this manual selection by offering continuation within the saved investigation.
 
 If needed, add `--offline-preview` to `trace` or `export` to also save an HTML inspector and SVG. These are optional inspection files; normal runs use Miro for visual review.
+
+To create a Mermaid chart directly from a saved investigation:
+
+```bash
+liquid-trace mermaid --case cases/theft-liquid --open
+```
+
+The command selects `latest` automatically. Optional `--run RUN_ID` selects a historical snapshot; `--out NEW_DIRECTORY` chooses a new destination. `--include-fees` and `--exclude-fees` override visibility for this preview only. Each invocation verifies the saved evidence before rendering and leaves archived runs and Miro mappings unchanged. The existing `devenv.nix` supplies Mermaid CLI and Chromium on Linux; leave an older shell and enter `devenv shell` after updating the project.
+
+Mermaid preserves the graph's arrows, shapes, colors, dates, and compact quantity labels, but computes its own left-to-right layout. Fixed Miro connection sides, manually arranged positions, and the chronological fee row are not copied. Large cumulative graphs can still take time to lay out; rendering stops after 120 seconds and keeps `graph.mmd` if it fails. The generated HTML is self-contained and can be viewed offline. Full identifiers remain in `graph.json` and `mermaid-node-map.json` beside the chart.
 
 Outside devenv, Python 3.11+ works with `python3 -m liquid_tracer`; use explicit paths and install SecretSpec and its provider CLI before selecting live menu actions. Install the package with its interactive interface using `python3 -m pip install -e '.[tui]'`, or use `python3 -m pip install -e .` for explicit commands only.
 

@@ -1,6 +1,7 @@
 """Textual investigation interface; secrets are loaded only for live actions."""
 
 import contextlib
+import json
 import math
 import os
 import re
@@ -512,6 +513,7 @@ def create_app(root=None):
                 with Horizontal(classes="buttons"):
                     yield Button("Preview Miro", id="preview")
                     yield Button("Sync to Miro", id="sync")
+                    yield Button("Mermaid chart", id="mermaid")
                 with Horizontal(classes="buttons"):
                     yield Button("Create Miro board", id="create-board")
                     yield Button("Organize Miro graph", id="layout")
@@ -536,6 +538,7 @@ def create_app(root=None):
                 self.query_one("#run", Button).label = "Continue latest run" if metadata.get("latest_run") else "Start first run"
                 self.query_one("#create-board", Button).disabled = self.app.busy or bool(board)
                 self.query_one("#layout", Button).disabled = self.app.busy or not (board and metadata.get("latest_run"))
+                self.query_one("#mermaid", Button).disabled = self.app.busy or not metadata.get("latest_run")
             except ACTION_ERRORS as error:
                 self.show_error(error)
 
@@ -556,6 +559,9 @@ def create_app(root=None):
                     self.app.push_screen(FormScreen("case", self.case))
                 elif action == "create-board":
                     self.app.push_screen(CreateBoardScreen(self.case), self.perform)
+                elif action == "mermaid":
+                    _latest(self.case, read_case(self.case), verify=True)
+                    self.perform((["mermaid", "--case", str(self.case), "--run", "latest", "--open"], False))
                 elif action in ("run", "preview", "sync", "layout"):
                     self.app.push_screen(FormScreen(action, self.case), self.perform)
                 elif action == "review":
@@ -608,6 +614,18 @@ def create_app(root=None):
             if getattr(self, "current_action", None) == "miro-create-board":
                 message = ("Miro board saved. Choose Preview Miro, then Sync to Miro to add the traced graph."
                            if status == 0 else "Board creation did not complete. Check the terminal result before retrying.")
+            elif getattr(self, "current_action", None) == "mermaid":
+                message = ("Mermaid chart saved. Preview paths are listed below." if status == 0
+                           else "Mermaid chart did not complete. Check the result below; saved evidence remains available.")
+                if status == 0:
+                    try:
+                        result = json.loads(output)
+                        if isinstance(result, dict) and isinstance(result.get("html"), str):
+                            action = ("Browser launch requested: " if result.get("browser_opened") is True
+                                      else "Open in your browser: ")
+                            message = "Mermaid chart saved. " + action + result["html"]
+                    except ValueError:
+                        pass
             elif getattr(self, "reorganizing", False):
                 message = ("Miro graph organized. You can adjust item positions directly in Miro."
                            if status == 0 else "Graph organization did not complete. Check the terminal result before retrying.")
