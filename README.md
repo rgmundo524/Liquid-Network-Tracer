@@ -1,6 +1,6 @@
 # Liquid UTXO Tracer
 
-A local Python program for bounded forward tracing on Liquid, per-run CSV/evidence exports, and incremental updates to an editable Miro graph. Version 0.2.0; Python 3.11+ on Linux or macOS. The interactive interface uses Textual; explicit tracing commands use the Python standard library. Live case integration still needs validation with your credentials and starting outputs.
+A local Python program for bounded forward tracing on Liquid, per-run CSV/evidence exports, and incremental updates to an editable Miro graph. Version 0.2.0; Python 3.11+ on Linux or macOS. Choose the Textual terminal interface or the local Astro browser interface; both use the same Python tracer and saved investigations. Live case integration still needs validation with your credentials and starting outputs.
 
 Miro is the investigation workspace. The program retrieves blockchain data and keeps the evidence and object mapping; it can be run from your terminal without a Miro plugin. CSV files document each run. The saved graph plan supplies native Miro shapes and connectors directly through the REST API, so a generic CSV-to-graph importer is unnecessary.
 
@@ -35,7 +35,7 @@ The pink diamonds identify special outputs. **PEG-OUT REQUEST** records Esplora'
 
 ## Start the program
 
-The project has **one main `devenv.nix`** for Python, commands, and environment defaults. SecretSpec retrieves API credentials from Proton Pass when a selected action needs them. Investigation names, board IDs, and run history are saved as case data; you do not need another Nix file or shell variables for each investigation.
+The project has **one main `devenv.nix`** for Python, Node.js, commands, and environment defaults. SecretSpec retrieves API credentials from Proton Pass when a selected action needs them. Investigation names, board IDs, and run history are saved as case data; you do not need another Nix file or shell variables for each investigation.
 
 The bundled Proton Pass CLI supports Linux on x86_64 or ARM64 and macOS on Apple Silicon. Clone the project and enter its devenv shell. Install [devenv](https://devenv.sh/getting-started/) first if needed:
 
@@ -70,6 +70,30 @@ Lookup creates no investigation or trace and follows no subsequent spends. The s
 
 For your first trial, select the **offline demo** and use a separate empty Miro test board. Demo hashes and addresses are synthetic. Its full path ends in a synthetic peg-out request, not an actual Bitcoin payout or Avalanche transaction. You can navigate, trace the demo, and preview a Miro plan without credentials. Creating a Miro board and live sync require your access token, even for a demo investigation.
 
+## Local browser interface
+
+For the Astro alternative, enter the same environment and launch:
+
+```bash
+devenv shell
+liquid-web
+```
+
+This builds the interface and opens [http://127.0.0.1:4321](http://127.0.0.1:4321) in your browser. The first launch installs the locked frontend packages; later launches reuse that installation unless the package manifest or lockfile changes. Leave the launching terminal open. Use `liquid-web --no-open` to open the address yourself, `--port 4322` to choose another port, or `--root /absolute/path/to/investigations` to select another investigation directory. `liquid-web --help` shows the options without building the interface.
+
+The browser and terminal interfaces share the same `cases/`, defaults, run history, and Miro mappings. An investigation created in either interface can be reopened in the other without importing or migrating it.
+
+1. Open a saved investigation, or create a new live or synthetic-demo investigation. For live cases, paste comma-separated transaction hashes, load their outputs, and select the relevant UTXOs grouped by transaction.
+2. Review the bounded run limits and start tracing. A later run continues the investigation's latest saved snapshot.
+3. Select a saved run to review it, create a local Mermaid chart, or export CSV tables. The browser provides links to the generated files.
+4. Create a private Miro board or link an existing board in the investigation settings. Preview the saved run, then sync it to Miro. Organizing an existing graph is a separate action because it changes managed positions and connector attachments.
+
+The investigation settings include run limits and the fee-flow checkbox; global settings provide defaults for new investigations. The synthetic demo, saved-run review, Mermaid rendering, CSV export, and Miro plan preview need no API credentials. Miro board creation, sync, and organization still contact Miro, including for demo cases.
+
+Live actions retrieve credentials through the existing SecretSpec/Proton Pass setup. If Proton Pass needs login or unlocking, respond in the **launching terminal**; do not enter API keys in the browser. Only one job runs at a time in each local server. Closing a browser tab does not cancel its job: reopen the address to see progress. **Ctrl+C** stops the server and its active offline worker. While a live action owns the terminal for provider prompts, the first Ctrl+C cancels that action; press it again after the prompt returns to stop the server. Restart `liquid-web` to reopen saved investigations from disk.
+
+Astro supplies the local interface; Python serves it and runs the existing tracer commands. The built interface and Mermaid previews need no CDN or hosted frontend. This does not provide an offline copy of Miro: use Mermaid for the local chart and Miro for online editing and collaboration. See [local browser development](docs/development.md#local-astro-interface) for build and test commands.
+
 ## Where investigations and runs are saved
 
 The menu uses `LIQUID_INVESTIGATIONS_DIR`, configured by devenv as the repository's `cases/` directory. To select another location explicitly, use:
@@ -97,7 +121,7 @@ The default `cases/` directory is ignored by Git. Preserve the whole investigati
 
 ## Explicit commands and demo helpers
 
-The menu is the normal starting point. All existing subcommands remain available for scripts and advanced tracing. `liquid-live` loads credentials before running a direct command; the menu handles that step when you select a live action. `liquid-test` runs the offline suite.
+Either interface can be the normal starting point. All existing subcommands remain available for scripts and advanced tracing. `liquid-live` loads credentials before running a direct command; the interfaces handle that step when you select a live action. `liquid-test` runs the offline Python suite.
 
 For a quick fixture run without the menu:
 

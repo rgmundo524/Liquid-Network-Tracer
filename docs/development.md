@@ -1,6 +1,6 @@
 # Local development and API secrets
 
-The project uses **one main `devenv.nix`** to define Python, the Textual terminal interface, Mermaid CLI, commands, and nonsecret environment defaults. `secretspec.toml` declares credential names. Proton Pass stores their values. Investigation names, board IDs, run limits, and the latest-run reference belong in the saved investigation files.
+The project uses **one main `devenv.nix`** to define Python, the Textual terminal interface, Node.js 24 for the Astro browser interface, Mermaid CLI, commands, and nonsecret environment defaults. `secretspec.toml` declares credential names. Proton Pass stores their values. Investigation names, board IDs, run limits, and the latest-run reference belong in the saved investigation files.
 
 Entering the environment and opening the interface do not access a secret provider. Selecting a live output lookup, trace, Miro board creation, or Miro sync retrieves credentials through SecretSpec for that action. The offline demo trace, navigation, and local previews need no credentials.
 
@@ -53,6 +53,8 @@ Use a current devenv release. The project supplies its own pinned SecretSpec and
 | Command | Behavior |
 | --- | --- |
 | `liquid-trace` or `liquid-trace menu` | Opens the investigation interface. Retrieves credentials only for a selected live action. |
+| `liquid-web` | Builds and opens the local Astro interface at `http://127.0.0.1:4321`, using the same investigations and secrets workflow. |
+| `liquid-web-build` | Installs locked frontend dependencies when needed and builds the local interface without starting its server. |
 | `liquid-trace SUBCOMMAND ...` | Runs an explicit command using the existing process environment. |
 | `liquid-live SUBCOMMAND ...` | Resolves project credentials through SecretSpec, then runs an explicit command. |
 | `liquid-live inspect-tx --txid HASH` | Looks up one live transaction and prints its output numbers, addresses, and available public quantities as JSON. Does not trace spends or create a case. |
@@ -65,9 +67,47 @@ Use a current devenv release. The project supplies its own pinned SecretSpec and
 | `liquid-demo` | Creates a fresh synthetic one-hop run under `LIQUID_DEMO_CASE_DIR`; no paid requests or credentials. |
 | `liquid-demo-preview [--board URL_OR_ID]` | Locally previews the latest demo run for the selected or saved board. |
 | `liquid-demo-sync [--board URL_OR_ID]` | Loads credentials through SecretSpec and syncs the latest demo run to the selected or saved board. |
-| `liquid-test` | Runs the offline test suite. |
+| `liquid-test` | Runs the offline Python test suite, including terminal and browser-backend tests. |
 
-The launchers locate the source and secret declaration using `LIQUID_TRACER_ROOT`, preserving your working directory for relative case paths. The ordinary command-line tracing engine uses Python's standard library. The interactive interface uses Textual, provided by devenv; outside devenv, install it with `python3 -m pip install -e '.[tui]'`.
+The launchers locate the source and secret declaration using `LIQUID_TRACER_ROOT`, preserving your working directory for relative case paths. The ordinary command-line tracing engine uses Python's standard library. The terminal interface uses Textual, provided by devenv; outside devenv, install it with `python3 -m pip install -e '.[tui]'`.
+
+## Local Astro interface
+
+From the same devenv shell, start the alternative browser interface with:
+
+```bash
+liquid-web
+```
+
+The launcher installs frontend dependencies with `npm ci` when the installation is absent or the package manifest or lockfile changes, then builds the Astro assets before starting the Python server. The initial installation needs package-registry access; subsequent launches reuse installed dependencies. Node.js 24 and npm come from the existing pinned devenv input, and the frontend's package lock is committed. No additional `devenv.nix` or per-case environment variables are needed.
+
+The default address is [http://127.0.0.1:4321](http://127.0.0.1:4321). Keep the terminal running while using the browser. Launch options are:
+
+```bash
+liquid-web --no-open
+liquid-web --port 4322
+liquid-web --root /absolute/path/to/investigations
+liquid-web --help
+```
+
+`--no-open` leaves browser launch to you; `--help` returns without installing packages or building. The root defaults to the same `LIQUID_INVESTIGATIONS_DIR` used by the terminal interface. Cases, global defaults, run limits, seeds, latest-run pointers, immutable archives, exports, and Miro mappings use the existing Python formats. Switching interfaces requires no migration.
+
+The browser supports new live or synthetic-demo investigations, comma-separated transaction lookup and grouped UTXO selection, bounded tracing and continuation, saved-run review, Mermaid previews, CSV downloads, and Miro board creation, plan preview, sync, and organization. Case settings retain the board and fee-flow checkbox; global settings apply to future cases. A historical run selection controls review and exports. Continuation follows the case's latest saved run so it extends the current lineage.
+
+Opening the browser and performing local actions do not resolve secrets. Live jobs invoke the same SecretSpec command, project manifest, provider, and profile as the terminal workflow. Proton Pass login or unlock prompts appear in the launching terminal. API credentials are never form fields or frontend build variables. A demo trace is offline; publishing its results to Miro still requires a Miro token and network access.
+
+One job is active per server at a time. The browser polls its status while work continues in the background. Closing the tab does not interrupt that job; reopening the local address reconnects to the running server. Pressing Ctrl+C shuts down the server and any active offline worker. While a live action owns the terminal for provider prompts, the first Ctrl+C cancels that action and returns control to the server; press Ctrl+C again to stop the server. Saved case files remain the source for later sessions. Incomplete live Miro operations use the same recovery and mapping rules as CLI operations; review the next preview before retrying an interrupted sync.
+
+Astro builds static interface assets, served locally by the Python backend alongside its restricted action API. Tracing runs through the existing CLI and keeps the same validation, budgets, case locks, and evidence export. The backend binds to `127.0.0.1`, checks Host and Origin, and protects writes with a per-server request token. It serves approved case artifacts through local download routes; the cases directory is not a static website folder. This is a desktop interface, not a shared or publicly deployed investigation service. Runtime frontend assets and fonts do not use a CDN. Miro remains online; local charts use the existing Mermaid CLI renderer.
+
+After editing the frontend, stop the server and run `liquid-web` again to rebuild and reopen it. Build without starting the server, then run the full checks with:
+
+```bash
+liquid-web-build
+devenv test
+```
+
+`devenv test` includes the Astro check/build, Python backend and terminal tests, pinned toolchain checks, and a genuine synthetic Mermaid render. The suite uses no real API credentials or investigation data. `liquid-test` runs just the Python suite when frontend files have not changed.
 
 ## Saved investigations and settings
 
@@ -211,7 +251,7 @@ liquid-secrets-check
 
 The first command needs no login. The second contacts the secret provider and reports `present` or `MISSING` for each requested value, without printing values. It defaults to the two Blockstream credentials; `--service miro` checks the Miro token, and `--service all` checks all three. A missing value causes exit status 1. This verifies delivery to the application, not acceptance by Blockstream or Miro. It also avoids the indentation problems of pasting a multiline Python probe into a shell.
 
-`devenv test` runs the toolchain check and offline suite without vault access. GitHub Actions runs this through the actual Nix environment as well as running the Python/TUI suite separately. Neither job uses real credentials.
+`devenv test` runs the toolchain check, Astro check/build, and offline Python suite without vault access. GitHub Actions runs this through the actual Nix environment as well as running the Python/TUI suite separately. Neither job uses real credentials.
 
 Inside the project shell, run the setup helper and enter each credential at the prompt:
 

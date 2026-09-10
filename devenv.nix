@@ -11,12 +11,13 @@
   packages =
     assert lib.assertMsg (lib.versionAtLeast pkgs.secretspec.version "0.19")
       "The Proton Pass provider requires SecretSpec 0.19 or newer with current pass-cli releases.";
-    [ pkgs.git pkgs.secretspec pkgs.proton-pass-cli pkgs.mermaid-cli ];
+    [ pkgs.git pkgs.secretspec pkgs.proton-pass-cli pkgs.mermaid-cli pkgs.nodejs_24 ];
 
   # Only public configuration belongs in env. Secret values are resolved by
   # liquid-live at process startup, never interpolated into a Nix expression.
   env = {
     LIQUID_TRACER_ROOT = config.devenv.root;
+    ASTRO_TELEMETRY_DISABLED = "1";
     LIQUID_INVESTIGATIONS_DIR = "${config.devenv.root}/cases";
     LIQUID_CASE_DIR = "${config.devenv.root}/cases/current";
     LIQUID_DEMO_CASE_DIR = "${config.devenv.root}/demo-case";
@@ -39,6 +40,33 @@
     exec = ''
       export PYTHONPATH="$LIQUID_TRACER_ROOT''${PYTHONPATH:+:$PYTHONPATH}"
       exec ${config.languages.python.package}/bin/python3 -m liquid_tracer "$@"
+    '';
+  };
+
+  scripts.liquid-web-build = {
+    description = "Install locked Astro dependencies when needed and build the local UI";
+    exec = ''
+      set -euo pipefail
+      cd "$LIQUID_TRACER_ROOT/web"
+      web_lock_hash="$(sha256sum package.json package-lock.json | sha256sum | cut -d ' ' -f 1)"
+      if [ ! -f node_modules/.liquid-lock ] || [ "$(cat node_modules/.liquid-lock)" != "$web_lock_hash" ]; then
+        ${pkgs.nodejs_24}/bin/npm ci --no-audit --no-fund
+        printf '%s\n' "$web_lock_hash" > node_modules/.liquid-lock
+      fi
+      exec ${pkgs.nodejs_24}/bin/npm run build
+    '';
+  };
+
+  scripts.liquid-web = {
+    description = "Open the local Astro investigation interface on 127.0.0.1";
+    exec = ''
+      set -euo pipefail
+      export PYTHONPATH="$LIQUID_TRACER_ROOT''${PYTHONPATH:+:$PYTHONPATH}"
+      case "''${1:-}" in
+        -h|--help) ;;
+        *) liquid-web-build ;;
+      esac
+      exec ${config.languages.python.package}/bin/python3 -m liquid_tracer.web "$@"
     '';
   };
 
@@ -139,6 +167,8 @@
   enterTest = ''
     liquid-toolchain-check
     "$LIQUID_MERMAID_BIN" --version
+    liquid-web-build
+    ${pkgs.nodejs_24}/bin/npm --prefix "$LIQUID_TRACER_ROOT/web" run check
     liquid-test
   '';
 }
