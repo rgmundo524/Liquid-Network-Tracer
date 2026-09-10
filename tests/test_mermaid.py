@@ -237,7 +237,42 @@ class MermaidTests(unittest.TestCase):
         graph["nodes"].append({"id": "synthetic:hostile", "kind": "address",
                                "label": 'Literal "quotes" | #34; <script>bad</script>\n`text`',
                                "color": COLORS["address"]})
-        result = export_mermaid(graph, self.destination)
+        # Report renderer diagnostics only for this synthetic fixture. Product
+        # errors deliberately avoid echoing private investigation labels. The
+        # spy preserves the actual timeout and process-group cleanup and never
+        # runs the renderer a second time merely to recover its stderr.
+        diagnostic_output = []
+        real_popen = subprocess.Popen
+        fixture_browser_config = None
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            # Hosted Ubuntu runners can block Chromium user-namespace
+            # sandboxes. This override is confined to synthetic fixture data
+            # in CI; production previews and ordinary devenv tests retain the
+            # browser's sandbox defaults. See pptr.dev/troubleshooting.
+            fixture_browser_config = self.root / "fixture-puppeteer.json"
+            save_json(fixture_browser_config, {"args": ["--no-sandbox"]})
+
+        def capture_fixture_renderer(*args, **kwargs):
+            if fixture_browser_config:
+                command = [*args[0], "--puppeteerConfigFile", str(fixture_browser_config)]
+                args = (command, *args[1:])
+            process = real_popen(*args, **kwargs)
+            communicate = process.communicate
+
+            def capture_communication(*call_args, **call_kwargs):
+                output = communicate(*call_args, **call_kwargs)
+                diagnostic_output.extend(text for text in output if text)
+                return output
+
+            process.communicate = capture_communication
+            return process
+
+        with patch("liquid_tracer.mermaid.subprocess.Popen", side_effect=capture_fixture_renderer):
+            try:
+                result = export_mermaid(graph, self.destination)
+            except TraceError as error:
+                self.fail(str(error) + "\nSynthetic fixture renderer diagnostics:\n" +
+                          "\n".join(diagnostic_output))
         svg = Path(result["svg"]).read_text()
         root = ET.fromstring(svg)
         visible = " ".join(" ".join(root.itertext()).split())

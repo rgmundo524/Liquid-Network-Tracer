@@ -120,6 +120,8 @@ Omit `--open` to render without launching a browser. `--run RUN_ID` selects an o
 
 The existing pinned package input supplies Mermaid CLI **11.16.0**, with its Chromium wrapper on Linux. `LIQUID_MERMAID_BIN` is set by the main `devenv.nix`; no manual environment variables, CDN, Mermaid account, or server are needed. Outside devenv, install [Mermaid CLI](https://github.com/mermaid-js/mermaid-cli) and its supported browser, with `mmdc` available on PATH. Rendering is bounded to 120 seconds and graph-size limits are configured to include every saved edge. `devenv test` checks the renderer executable and runs a real synthetic SVG rendering test alongside the offline suite.
 
+On GitHub's hosted Ubuntu runner, that synthetic test uses a fixture-only `--no-sandbox` Chromium configuration to accommodate the runner's user-namespace restrictions. Ordinary preview commands and local `devenv test` keep Chromium's default sandbox. Test failures include renderer diagnostics from synthetic data; product errors retain private investigation text locally.
+
 Create and save a board, then preview and sync the latest run:
 
 ```bash
