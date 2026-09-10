@@ -19,6 +19,8 @@ In an interactive terminal, the command opens the Textual interface. Use the key
 liquid-trace menu
 ```
 
+On a focused button, **↑ ↓ ← →** moves to another enabled button and **Enter** activates it. Left/right prefers the same row; up/down prefers buttons aligned above/below. When that direction has no candidate, navigation falls back to the previous/next button and stops at the ends. Focused buttons scroll into view. **Tab** and **Shift+Tab** still move between all controls; use them to enter or leave a text field or table. Arrows inside inputs, multiline text, dropdowns, and tables retain their native editing/selection behavior. **Space** toggles checkboxes and **Esc** returns to the prior screen. Footer hints appear when a button is focused.
+
 Creating an investigation asks for a name, live or synthetic-demo source, starting outputs, an optional existing Miro board URL or ID, and numeric run limits. Enter known outputs as `HASH:NUMBER` in the multiline field, separated by whitespace or commas. `vout` is the numeric output index, not a word to enter: `:0` selects the first output and `:1` the second. To look up outputs, paste transaction hashes separated by commas into **Transaction hashes**, choose **Load outputs**, toggle the relevant rows across transactions with Enter, and choose **Use selected outputs**. The picker identifies each transaction and output separately, including outputs with the same index from different transactions. Nothing is preselected; applying a selection replaces the starting-output field. The offline demo uses its original sample seeds when this field is empty.
 
 Lookup accepts up to 100 distinct hashes, validates the full list, and deduplicates it before requesting data. One shared client uses a batch budget of five API attempts and 30 seconds per distinct hash by default, including authentication and retries. Ten hashes therefore share a 50-attempt, 300-second maximum. Explicit CLI limits apply to the whole batch. The single-hash command retains its five-attempt, 30-second defaults.
@@ -32,6 +34,8 @@ Board selection, run limits, and the **Include transaction fee flows** checkbox 
 **Mermaid chart** creates a local preview from the latest verified run without opening the secret provider. It is enabled once a run has been saved and does not require a Miro board. Rendering runs in the interface's background worker and opens the generated HTML in your browser; the result also shows its path. Each click creates `previews/<run-id>-mermaid-<id>/` inside the case, containing `graph.mmd`, genuine Mermaid-rendered `graph.svg`, a self-contained `graph.html`, full `graph.json` details, a node-ID mapping, and renderer configuration. The saved address mode and current fee choice apply; archived runs and Miro publication state are not modified.
 
 Mermaid provides its own automatic left-to-right layout. It retains the graph's directions and styling, including starting-transaction color priority and recorded dates, but does not copy Miro positions, fixed connection sides, or its chronological fee row. The local chart is a quick view; use Miro for interactive arrangement and annotations.
+
+**Export CSV**, beside **Mermaid chart**, saves seven CSV tables from the latest run into a new `exports/<run-id>-csv-<id>/` directory in the case. The menu displays the directory and every CSV path. It uses the same offline worker and saved-run selection, requires no board or secret-provider session, and leaves the original archive and case settings unchanged. The original run's CSVs remain available under `runs/<run-id>/` as well.
 
 Choose **Organize Miro graph** to apply the current left-to-right layout to an existing board. The confirmation form explains that managed positions and transaction connector attachment sides will change; cancelling makes no API call. Normal syncing preserves manual positions and existing connector attachments. The layout uses actual recorded transaction dependencies, groups nearby input/output nodes, and places included fees chronologically in a separate row above the flow. Repeated addresses appear as separate UTXO occurrences by default; merged address cycles can require return edges.
 
@@ -108,7 +112,19 @@ liquid-live trace --case cases/theft-liquid \
   --max-transactions 20 --max-outpoints 100 --max-requests 30 --max-seconds 60
 ```
 
-`trace`, `export`, `mermaid`, and `miro-sync` accept `--include-fees` and `--exclude-fees`. These are presentation overrides; the underlying trace and fee evidence are unchanged. Without a flag, the case's `run_defaults.include_fees` applies, defaulting to `false`. A verified explicit `--plan` cannot be combined with a fee override; regenerate an export when a different selection is needed.
+`trace`, `export`, `mermaid`, `csv-export`, and `miro-sync` accept `--include-fees` and `--exclude-fees`. These are presentation overrides; the underlying trace and fee evidence are unchanged. Without a flag, the case's `run_defaults.include_fees` applies, defaulting to `false`. A verified explicit `--plan` cannot be combined with a fee override; regenerate an export when a different selection is needed.
+
+Export CSV tables without querying an API or reading the case database:
+
+```bash
+liquid-trace csv-export --case cases/theft-liquid
+```
+
+The command defaults to `--run latest` and chooses a new directory automatically. Optional `--run RUN_ID` selects a historical snapshot, and `--out NEW_DIRECTORY` selects an explicit destination. It prints JSON containing the run ID, fee choice, directory, and CSV paths. Existing paths and destinations inside the case's `runs/` are rejected.
+
+The graph tables, `nodes.csv` and `edges.csv`, are regenerated from the verified saved trace using the program's current display format and recorded transaction dates. Labels and address mode come from that saved run; fee visibility uses the current case setting or explicit override. Full node/edge IDs and relationships remain available even when a display label is shortened. The five detailed tables, `inputs.csv`, `outputs.csv`, `spends.csv`, `events.csv`, and `frontier.csv`, are copied byte-for-byte only after their captured bytes match explicit entries in the archive's checksum manifest. They always retain all recorded fees. Empty numeric CSV cells indicate unavailable values, while compact graph captions use `??`; nested structures remain JSON in CSV cells.
+
+`export.json` records the case/run, source archive and file hashes, address mode, presentation version, and graph options. A new `SHA256SUMS` covers the complete CSV bundle and provenance file. These checksums detect changed bytes; they do not provide an independent signature or timestamp. The existing `export` command remains available when a complete evidence bundle, including raw observations and Miro plan, is wanted instead of CSV tables alone.
 
 Create a local Mermaid preview with the same defaults as the menu:
 

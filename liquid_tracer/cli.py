@@ -92,6 +92,12 @@ def parser():
     mermaid.add_argument("--out", type=Path, help="New preview directory (default: automatically saved under the case's previews/)")
     mermaid.add_argument("--open", dest="open_browser", action="store_true", help="Open the completed local HTML chart in your browser")
     fee_arguments(mermaid)
+    csv = commands.add_parser("csv-export", help="Export CSV tables from a saved run without API calls")
+    csv.add_argument("--case", type=Path, default=case_default, required=case_default is None,
+                     help="Case directory (default: LIQUID_CASE_DIR)")
+    csv.add_argument("--run", default="latest", help="Saved run ID (default: latest)")
+    csv.add_argument("--out", type=Path, help="New export directory (default: automatically saved under the case's exports/)")
+    fee_arguments(csv)
     board = commands.add_parser("miro-create-board", help="Create and save a Miro board for this investigation")
     board.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                        help="Case directory (default: LIQUID_CASE_DIR)")
@@ -426,9 +432,8 @@ def open_preview(path):
         return False
 
 
-def mermaid_run(case, run_id="latest", out=None, include_fees=None, open_browser=False):
-    from .mermaid import export_mermaid
-
+def saved_graph(case, run_id="latest", include_fees=None):
+    """Build current presentation from a verified snapshot, without case writes."""
     case = Path(case)
     metadata = read_case(case)
     run_id = resolve_latest(case, run_id)
@@ -441,12 +446,33 @@ def mermaid_run(case, run_id="latest", out=None, include_fees=None, open_browser
         raise TraceError("The saved run belongs to a different case")
     fees = include_fee_flows(metadata, include_fees)
     graph = build_graph(state, merge_addresses=state.get("address_mode") == "merged", include_fees=fees)
+    return run_id, archive, graph
+
+
+def mermaid_run(case, run_id="latest", out=None, include_fees=None, open_browser=False):
+    from .mermaid import export_mermaid
+
+    case = Path(case)
+    run_id, _, graph = saved_graph(case, run_id, include_fees)
     destination = Path(out) if out is not None else case / "previews" / (run_id + "-mermaid-" + uuid.uuid4().hex[:8])
     if destination.resolve().is_relative_to((case / "runs").resolve()):
         raise TraceError("Save Mermaid previews outside runs/ to preserve archived evidence")
     result = export_mermaid(graph, destination)
-    result.update({"run_id": run_id, "include_fees": fees,
+    result.update({"run_id": run_id, "include_fees": graph["include_fees"],
                    "browser_opened": open_preview(result["html"]) if open_browser else False})
+    return result
+
+
+def csv_run(case, run_id="latest", out=None, include_fees=None):
+    from .csv_export import export_csv
+
+    case = Path(case)
+    run_id, archive, graph = saved_graph(case, run_id, include_fees)
+    destination = Path(out) if out is not None else case / "exports" / (run_id + "-csv-" + uuid.uuid4().hex[:8])
+    if destination.resolve().is_relative_to((case / "runs").resolve()):
+        raise TraceError("Save CSV exports outside runs/ to preserve archived evidence")
+    result = export_csv(graph, archive, destination)
+    result.update({"run_id": run_id, "include_fees": graph["include_fees"]})
     return result
 
 
@@ -512,6 +538,8 @@ def main(argv=None):
             print(args.out.resolve())
         elif args.command == "mermaid":
             print(json.dumps(mermaid_run(args.case, args.run, args.out, args.include_fees, args.open_browser), indent=2))
+        elif args.command == "csv-export":
+            print(json.dumps(csv_run(args.case, args.run, args.out, args.include_fees), indent=2))
         elif args.command == "miro-create-board":
             print(json.dumps(create_board(args.case, args.name, args.team_id, args.visibility), indent=2))
         elif args.command == "miro-sync":

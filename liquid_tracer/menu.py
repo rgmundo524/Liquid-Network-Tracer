@@ -142,12 +142,61 @@ def create_app(root=None):
     """Construct the optional TUI lazily so ordinary CLI commands stay dependency-free."""
     from textual import work
     from textual.app import App, ComposeResult
+    from textual.binding import Binding
     from textual.containers import Horizontal, Vertical, VerticalScroll
     from textual.screen import Screen
-    from textual.widgets import Button, Checkbox, DataTable, Footer, Header, Input, Label, RichLog, Select, Static, TextArea
+    from textual.widgets import Button as TextualButton
+    from textual.widgets import Checkbox, DataTable, Footer, Header, Input, Label, RichLog, Select, Static, TextArea
     from rich.text import Text
 
     investigation_root = (Path(root) if root is not None else default_root()).expanduser().resolve()
+
+    class Button(TextualButton):
+        # Bind on buttons, before a scroll container handles the arrows. Other
+        # controls keep their native cursor, selection and scrolling behavior.
+        BINDINGS = [
+            Binding("up", "navigate('up')", "Buttons", key_display="↑↓←→"),
+            Binding("down", "navigate('down')", "", show=False),
+            Binding("left", "navigate('left')", "", show=False),
+            Binding("right", "navigate('right')", "", show=False),
+            Binding("enter", "press", "Select"),
+        ]
+
+        def action_navigate(self, direction):
+            buttons = [widget for widget in self.screen.focus_chain
+                       if isinstance(widget, TextualButton) and widget.region]
+            if self not in buttons:
+                return
+            x, y = self.region.center
+            horizontal = direction in ("left", "right")
+            sign = -1 if direction in ("up", "left") else 1
+            candidates = []
+            for order, button in enumerate(buttons):
+                if button is self:
+                    continue
+                bx, by = button.region.center
+                primary, secondary = (bx - x, by - y) if horizontal else (by - y, bx - x)
+                if primary * sign <= 0:
+                    continue
+                if horizontal:
+                    aligned = button.region.y < self.region.bottom and button.region.bottom > self.region.y
+                    # Left/right stay in this row when another button is there.
+                    if not aligned:
+                        continue
+                else:
+                    aligned = button.region.x < self.region.right and button.region.right > self.region.x
+                candidates.append(((not aligned, abs(primary), abs(secondary), order), button))
+            if candidates:
+                target = min(candidates, key=lambda item: item[0])[1]
+            else:
+                # Single-column menus and single-row forms can still use any
+                # arrow pair. At the first/last item, leave focus in place.
+                index = buttons.index(self) + sign
+                if not 0 <= index < len(buttons):
+                    return
+                target = buttons[index]
+            target.focus(scroll_visible=False)
+            target.scroll_visible(animate=False, immediate=True)
 
     class BaseScreen(Screen):
         BINDINGS = [("escape", "back", "Back")]
@@ -513,7 +562,9 @@ def create_app(root=None):
                 with Horizontal(classes="buttons"):
                     yield Button("Preview Miro", id="preview")
                     yield Button("Sync to Miro", id="sync")
+                with Horizontal(classes="buttons"):
                     yield Button("Mermaid chart", id="mermaid")
+                    yield Button("Export CSV", id="csv")
                 with Horizontal(classes="buttons"):
                     yield Button("Create Miro board", id="create-board")
                     yield Button("Organize Miro graph", id="layout")
@@ -539,6 +590,7 @@ def create_app(root=None):
                 self.query_one("#create-board", Button).disabled = self.app.busy or bool(board)
                 self.query_one("#layout", Button).disabled = self.app.busy or not (board and metadata.get("latest_run"))
                 self.query_one("#mermaid", Button).disabled = self.app.busy or not metadata.get("latest_run")
+                self.query_one("#csv", Button).disabled = self.app.busy or not metadata.get("latest_run")
             except ACTION_ERRORS as error:
                 self.show_error(error)
 
@@ -562,6 +614,9 @@ def create_app(root=None):
                 elif action == "mermaid":
                     _latest(self.case, read_case(self.case), verify=True)
                     self.perform((["mermaid", "--case", str(self.case), "--run", "latest", "--open"], False))
+                elif action == "csv":
+                    _latest(self.case, read_case(self.case), verify=True)
+                    self.perform((["csv-export", "--case", str(self.case), "--run", "latest"], False))
                 elif action in ("run", "preview", "sync", "layout"):
                     self.app.push_screen(FormScreen(action, self.case), self.perform)
                 elif action == "review":
@@ -624,6 +679,19 @@ def create_app(root=None):
                             action = ("Browser launch requested: " if result.get("browser_opened") is True
                                       else "Open in your browser: ")
                             message = "Mermaid chart saved. " + action + result["html"]
+                    except ValueError:
+                        pass
+            elif getattr(self, "current_action", None) == "csv-export":
+                message = ("CSV export saved. File paths are listed below." if status == 0
+                           else "CSV export did not complete. Check the result below; saved evidence remains available.")
+                if status == 0:
+                    try:
+                        result = json.loads(output)
+                        if isinstance(result, dict) and isinstance(result.get("directory"), str):
+                            message = "CSV export saved to: " + result["directory"]
+                            files = result.get("files")
+                            if isinstance(files, list) and all(isinstance(path, str) for path in files):
+                                message += "\n" + "\n".join(files)
                     except ValueError:
                         pass
             elif getattr(self, "reorganizing", False):
@@ -712,7 +780,7 @@ def create_app(root=None):
         CSS = """
         Screen { background: $background; }
         .panel, .form-panel { padding: 1 2; width: 100%; height: 1fr; }
-        #home { width: 64; max-width: 100%; height: auto; margin: 2 2; padding: 1 2; border: round $primary; }
+        #home { width: 64; max-width: 100%; height: 1fr; max-height: 29; margin: 1 2; padding: 1 2; border: round $primary; }
         #home Button { width: 100%; margin-top: 1; }
         .title { text-style: bold; color: $accent; margin-bottom: 1; }
         .buttons { height: auto; margin-top: 1; }
@@ -735,7 +803,7 @@ def create_app(root=None):
 
         def compose(self) -> ComposeResult:
             yield Header()
-            with Vertical(id="home"):
+            with VerticalScroll(id="home"):
                 yield Label("Investigations", classes="title")
                 yield Static("Start a bounded trace or continue saved work.", markup=False)
                 yield Button("New investigation", id="new", variant="primary")

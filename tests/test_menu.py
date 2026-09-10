@@ -391,6 +391,112 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertEqual(app.screen.case, case)
 
+    async def test_arrow_buttons_and_enter_work_without_taking_over_form_controls(self):
+        from textual.widgets import Button, Checkbox, Input, Select, TextArea
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run") as process:
+            async with app.run_test(size=(80, 24)) as pilot:
+                app.query_one("#new", Button).focus()
+                await pilot.press("down")
+                self.assertEqual(app.focused.id, "continue")
+                await pilot.press("right")
+                self.assertEqual(app.focused.id, "settings")
+                await pilot.press("down")
+                await pilot.pause()
+                self.assertEqual(app.focused.id, "exit")
+                self.assertGreaterEqual(app.focused.region.y, 1)
+                self.assertLessEqual(app.focused.region.bottom, 23)
+                await pilot.press("up", "up", "left")
+                self.assertEqual(app.focused.id, "new")
+                await pilot.press("enter")
+                await pilot.pause()
+                field = app.screen.query_one("#case-name", Input)
+                self.assertIs(app.focused, field)
+                field.value = "abcd"
+                field.cursor_position = 2
+                await pilot.press("left")
+                self.assertEqual(field.cursor_position, 1)
+                await pilot.press("right")
+                self.assertEqual(field.cursor_position, 2)
+                self.assertIs(app.focused, field)
+
+                seeds = app.screen.query_one("#seeds", TextArea)
+                seeds.text = "abc\ndef"
+                seeds.focus()
+                seeds.move_cursor((0, 1))
+                await pilot.press("down", "right")
+                self.assertEqual(seeds.cursor_location, (1, 2))
+                self.assertIs(app.focused, seeds)
+
+                source = app.screen.query_one("#source", Select)
+                source.focus()
+                await pilot.press("enter", "down", "enter")
+                self.assertEqual(source.value, "live")
+                checkbox = app.screen.query_one("#include-fees", Checkbox)
+                checkbox.focus()
+                await pilot.press("space")
+                self.assertTrue(checkbox.value)
+                self.assertIs(app.focused, checkbox)
+
+                cancel = app.screen.query_one("#cancel", Button)
+                cancel.focus()
+                await pilot.press("right")
+                self.assertEqual(app.focused.id, "submit")
+                await pilot.press("left", "enter")
+                await pilot.pause()
+                self.assertEqual(len(app.screen_stack), 1)
+                process.assert_not_called()
+
+    async def test_arrow_navigation_skips_disabled_hidden_buttons_and_scrolls_small_screen(self):
+        from textual.widgets import Button, DataTable
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run") as process:
+            async with app.run_test(size=(80, 24)) as pilot:
+                case = await self.new_demo(app, pilot, board="")
+                for selector in ("#mermaid", "#csv", "#layout"):
+                    self.assertTrue(app.screen.query_one(selector, Button).disabled)
+                run = app.screen.query_one("#run", Button)
+                run.focus()
+                await pilot.press("right")
+                self.assertEqual(app.focused.id, "review")
+                await pilot.press("left", "down")
+                self.assertEqual(app.focused.id, "preview")
+                await pilot.press("down")
+                self.assertEqual(app.focused.id, "create-board")
+                await pilot.press("down")
+                self.assertEqual(app.focused.id, "case-settings")
+                await pilot.pause()
+                region = app.focused.region
+                self.assertGreaterEqual(region.y, 1)
+                self.assertLessEqual(region.bottom, 23)
+                await pilot.press("right")
+                self.assertEqual(app.focused.id, "back")
+                hidden = app.screen.query_one("#case-settings", Button)
+                hidden.display = False
+                await pilot.pause()
+                await pilot.press("left")
+                self.assertEqual(app.focused.id, "create-board")
+                hidden.display = True
+                await pilot.pause()
+                app.screen.query_one("#back", Button).focus()
+                await pilot.press("enter")
+                await pilot.pause()
+
+                create_investigation(self.root, "Second synthetic case")
+                await self.click(app, pilot, "#continue")
+                table = app.screen.query_one("#investigations", DataTable)
+                self.assertIs(app.focused, table)
+                self.assertEqual(table.cursor_row, 0)
+                await pilot.press("down")
+                self.assertEqual(table.cursor_row, 1)
+                self.assertIs(app.focused, table)
+                await pilot.press("tab")
+                self.assertEqual(app.focused.id, "back")
+                await pilot.press("shift+tab")
+                self.assertIs(app.focused, table)
+                self.assertIsNone(read_case(case).get("latest_run"))
+                process.assert_not_called()
+
     async def test_fixture_run_restart_continue_and_readonly_preview(self):
         from textual.widgets import Input
         real_run = subprocess.run
@@ -450,15 +556,82 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 case = await self.new_demo(app, pilot, board="")
                 self.assertFalse(read_case(case).get("miro_board"))
                 self.assertTrue(app.screen.query_one("#mermaid", Button).disabled)
+                self.assertTrue(app.screen.query_one("#csv", Button).disabled)
                 self.assertFalse(app.screen.query_one("#run", Button).disabled)
                 self.assertFalse(app.screen.query_one("#create-board", Button).disabled)
                 self.assertTrue(app.screen.query_one("#layout", Button).disabled)
                 await self.click(app, pilot, "#mermaid")
+                await self.click(app, pilot, "#csv")
                 await self.click(app, pilot, "#review")
                 await self.click(app, pilot, "#back")
                 self.assertEqual(app.screen.case, case)
                 self.assertTrue(app.screen.query_one("#mermaid", Button).disabled)
                 process.assert_not_called()
+
+    async def test_csv_button_uses_offline_worker_and_reports_saved_paths_at_small_size(self):
+        from textual.widgets import Button, Static
+        from liquid_tracer.cli import main
+        fixture = PROJECT / "examples" / "demo-api.json"
+        case = create_investigation(self.root, "Synthetic CSV case", fixture=str(fixture))
+        with contextlib.redirect_stdout(io.StringIO()):
+            status = main(["trace", "--case", str(case), "--fixture", str(fixture),
+                           "--seeds-file", str(PROJECT / "examples" / "demo-seeds.txt"), "--hops", "1"])
+        self.assertEqual(status, 0)
+        self.assertFalse(read_case(case).get("miro_board"))
+        snapshot = {p.relative_to(case): p.read_bytes() for p in case.rglob("*") if p.is_file()}
+        directory = case / "exports" / "synthetic-csv"
+        files = [str(directory / name) for name in ("transactions.csv", "outputs.csv")]
+        started, release = threading.Event(), threading.Event()
+
+        def export_locally(command, **kwargs):
+            self.assertEqual(command, [sys.executable, "-m", "liquid_tracer", "csv-export",
+                                      "--case", str(case), "--run", "latest"])
+            self.assertTrue(kwargs["capture_output"])
+            self.assertTrue(kwargs["text"])
+            started.set()
+            if not release.wait(10):
+                raise AssertionError("CSV worker was not released")
+            return subprocess.CompletedProcess(command, 0, json.dumps({
+                "directory": str(directory), "run_id": read_case(case)["latest_run"], "files": files}), "")
+
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run", side_effect=export_locally) as process, \
+                patch.object(app, "suspend") as suspend:
+            async with app.run_test(size=(80, 24)) as pilot:
+                await self.click(app, pilot, "#continue")
+                await pilot.press("enter")
+                await pilot.pause()
+                mermaid = app.screen.query_one("#mermaid", Button)
+                csv = app.screen.query_one("#csv", Button)
+                self.assertFalse(csv.disabled)
+                mermaid.focus()
+                await pilot.press("right")
+                await pilot.pause()
+                self.assertIs(app.focused, csv)
+                self.assertEqual(mermaid.region.y, csv.region.y)
+                self.assertGreaterEqual(csv.region.y, 1)
+                self.assertLessEqual(csv.region.right, 80)
+                self.assertLessEqual(csv.region.bottom, 23)
+                try:
+                    await pilot.press("enter")
+                    await pilot.pause()
+                    self.assertTrue(started.is_set())
+                    self.assertTrue(app.busy)
+                    self.assertTrue(all(button.disabled for button in app.screen.query(Button)))
+                    app.screen.perform((["csv-export", "--case", str(case)], False))
+                    process.assert_called_once()
+                finally:
+                    release.set()
+                await self.finish_action(app, pilot)
+                suspend.assert_not_called()
+                self.assertFalse(csv.disabled)
+                message = str(app.screen.query_one("#action-status", Static).render())
+                self.assertIn("CSV export saved", message)
+                self.assertIn(str(directory), message)
+                for path in files:
+                    self.assertIn(path, message)
+                self.assertEqual(snapshot, {p.relative_to(case): p.read_bytes()
+                                            for p in case.rglob("*") if p.is_file()})
 
     async def test_mermaid_button_uses_offline_worker_and_preserves_saved_investigation(self):
         from textual.widgets import Button, Static

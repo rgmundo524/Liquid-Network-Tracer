@@ -48,6 +48,8 @@ liquid-trace
 
 In an interactive terminal, `liquid-trace` opens a Textual interface with **New investigation**, **Continue investigation**, **Settings**, and **Exit**. Select actions with the keyboard or mouse. You can also launch it explicitly with `liquid-trace menu`. Opening the menu does not load credentials or call Blockstream or Miro.
 
+When a button is highlighted, use **↑ ↓ ← →** to move between buttons and **Enter** to activate it. **Tab** and **Shift+Tab** move between all controls. Text fields, dropdowns, and tables keep their normal arrow-key behavior. **Space** toggles a checkbox; **Esc** returns to the previous screen. Disabled buttons are skipped, and navigation scrolls the focused button into view.
+
 1. Choose **New investigation** and give it a name. The program creates a unique subdirectory under `cases/`.
 2. Select **Live Liquid** or the offline synthetic demo. Paste one or more bare Liquid transaction hashes, separated by commas, into **Transaction hashes** and choose **Load outputs**. Review the outputs grouped by transaction, use Enter to toggle the relevant rows across transactions, then choose **Use selected outputs**. This fills the starting-output field; it replaces any existing entries. Alternatively enter known outputs directly as `HASH:NUMBER`, separated by whitespace or commas. Optionally provide an existing Miro board URL or ID; you can add it later.
 3. Start the first bounded run from the investigation menu. Review the hop and request limits before running it. A live trace retrieves credentials through SecretSpec; a demo trace needs none.
@@ -57,6 +59,8 @@ In an interactive terminal, `liquid-trace` opens a Textual interface with **New 
 The investigation settings let you change its name, board, run limits, and fee visibility. Top-level **Settings** changes defaults for new investigations. Existing investigations keep their own saved defaults. Creating a board saves its ID with the case and shows its URL in the investigation menu. It creates an empty board; publishing the traced graph is a separate **Sync to Miro** action. A completed run can be synced after creating or linking a board without tracing again.
 
 For a quick local view, choose **Mermaid chart** in the investigation menu after saving a run. The button creates a Mermaid source file, renders an SVG, and opens an HTML preview in your browser. It uses the latest saved run and current fee setting, needs no API credentials or Miro board, and saves each preview in a new directory under the investigation's `previews/`. The menu shows the file path if a browser cannot be opened. Miro remains the editable investigation board.
+
+Choose **Export CSV** beside **Mermaid chart** to save tables from the latest run. Each click creates a new directory under the investigation's `exports/` and displays its file paths. This offline action requires a saved run, with no Miro board or secret-provider session. Completed runs already contain CSVs; the menu action makes a separate export for review or use in another application.
 
 `vout` means the output's numeric index, starting at zero. In `HASH:0`, `0` selects the first output; `HASH:1` selects the second. Do not type the literal word `vout` or a backslash before the colon. Choose the output connected to your investigation; output 0 is only an example. The picker starts with nothing selected and excludes fees, peg-outs, and unspendable outputs. Hidden amounts and assets remain unknown.
 
@@ -80,6 +84,7 @@ liquid-trace menu --investigations-dir /absolute/path/to/investigations
 | `cases/<investigation>/case.json` | Investigation name, seeds, source, board selection, run defaults, and latest exported run ID. |
 | `cases/<investigation>/runs/<run-id>/` | A separate evidence and export directory for each run. |
 | `cases/<investigation>/previews/<run-id>-mermaid-<id>/` | Local Mermaid source, SVG/HTML preview, graph details, and node identifiers. |
+| `cases/<investigation>/exports/<run-id>-csv-<id>/` | CSV tables with export provenance and checksums. |
 | `cases/<investigation>/miro/` | Saved mapping between graph objects and items on each Miro board. |
 | `cases/<investigation>/miro/board-creation.json` | Board creation request and receipt, retained to recover interrupted creation without duplicating a board. |
 | `cases/<investigation>/miro/reports/` | Sync reports identifying the run and actual board used. |
@@ -128,6 +133,26 @@ liquid-trace mermaid --case cases/theft-liquid --open
 The command selects `latest` automatically. Optional `--run RUN_ID` selects a historical snapshot; `--out NEW_DIRECTORY` chooses a new destination. `--include-fees` and `--exclude-fees` override visibility for this preview only. Each invocation verifies the saved evidence before rendering and leaves archived runs and Miro mappings unchanged. The existing `devenv.nix` supplies Mermaid CLI and Chromium on Linux; leave an older shell and enter `devenv shell` after updating the project.
 
 Mermaid preserves the graph's arrows, shapes, colors, dates, and compact quantity labels, but computes its own left-to-right layout. Fixed Miro connection sides, manually arranged positions, and the chronological fee row are not copied. Large cumulative graphs can still take time to lay out; rendering stops after 120 seconds and keeps `graph.mmd` if it fails. The generated HTML is self-contained and can be viewed offline. Full identifiers remain in `graph.json` and `mermaid-node-map.json` beside the chart.
+
+To export CSV tables directly:
+
+```bash
+liquid-trace csv-export --case cases/theft-liquid
+```
+
+`--run RUN_ID` selects an older saved snapshot; `--out NEW_DIRECTORY` chooses a destination. Without either flag, the command uses the saved `latest` pointer and creates its own export directory. Existing directories and destinations inside `runs/` are rejected. The output contains:
+
+| File | Contents |
+| --- | --- |
+| `nodes.csv` | Graph objects, full logical IDs, labels, colors, and details. |
+| `edges.csv` | Directed graph links, source/target IDs, outpoints, roles, and quantities. |
+| `inputs.csv` | Transaction inputs, previous outputs, addresses, and public values/assets. |
+| `outputs.csv` | Transaction outputs, addresses, public values/assets, commitments, and trace status. |
+| `spends.csv` | Recorded links from an output to its spending transaction and input. |
+| `events.csv` | Fees, peg-outs, unspendable outputs, peg-ins, and issuance events recorded in the run. |
+| `frontier.csv` | Unresolved branches and their stopping reasons. |
+
+`nodes.csv` and `edges.csv` use the current presentation, saved address mode, and case fee setting. Optional `--include-fees` or `--exclude-fees` affects those two graph tables for this export only. The other five tables are exact copies of verified archived CSVs and retain all recorded fee data. Unavailable numeric values remain empty fields in detailed tables; graph captions use `??`. Nested details remain JSON within quoted CSV cells. `export.json` records provenance and display options, and `SHA256SUMS` covers the new bundle. Exporting does not modify saved runs, settings, or Miro mappings.
 
 Outside devenv, Python 3.11+ works with `python3 -m liquid_tracer`; use explicit paths and install SecretSpec and its provider CLI before selecting live menu actions. Install the package with its interactive interface using `python3 -m pip install -e '.[tui]'`, or use `python3 -m pip install -e .` for explicit commands only.
 
