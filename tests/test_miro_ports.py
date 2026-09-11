@@ -6,6 +6,7 @@ from pathlib import Path
 
 from liquid_tracer.api import Esplora, Limits
 from liquid_tracer.cli import refresh_presentation
+from liquid_tracer.miro_state import load_state
 from liquid_tracer.common import TraceError, canonical, digest, read_json, save_json
 from liquid_tracer.export import COLORS, PRESENTATION_VERSION, build_graph
 from liquid_tracer.miro import make_plan, publish, resolve, sync, validate_plan
@@ -108,7 +109,7 @@ class MiroPortTests(unittest.TestCase):
 
         def inspect(method, url, headers, body, timeout):
             if method == "PATCH" and any(field in json.loads(body) for field in ("startItem", "endItem")):
-                observed.append(read_json(self.state_path)["layout_history"][-1])
+                observed.append(load_state(self.state_path)["layout_history"][-1])
             return remote(method, url, headers, body, timeout)
 
         self.remote = inspect
@@ -210,8 +211,8 @@ class MiroPortTests(unittest.TestCase):
 
         self.remote = lose_connector
         with self.assertRaisesRegex(TraceError, "lost response"):
-            self.sync()
-        pending = read_json(self.state_path)["pending"]
+            self.sync(workers=1)
+        pending = next(iter(read_json(self.state_path)["pending_creations"].values()))
         self.assertEqual(pending["attachments"], {"endItem": {"snapTo": "left"}})
         resolve(self.state_path, item_id="remote-" + str(remote.counter))
         self.remote = remote

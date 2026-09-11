@@ -50,6 +50,41 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertNotIn("Traceback", errors)
         self.assertFalse(self.case.exists())
 
+    def test_miro_resolve_selects_one_uncertain_creation_by_logical_key(self):
+        state_path = Path(self.temp.name) / "miro-state.json"
+        pending = {}
+        for key in ("addr:a", "addr:b"):
+            pending[key] = {"key": key, "endpoint": "shapes", "run_id": "synthetic-run",
+                            "body": {"data": {"shape": "circle", "content": key},
+                                     "position": {"x": 0, "y": 0},
+                                     "geometry": {"width": 100, "height": 100},
+                                     "style": {"fillColor": "#ffffff"}}}
+        save_json(state_path, {"schema_version": 2, "items": {}, "pending": None,
+                               "pending_creations": pending})
+        command = ["miro-resolve", "--state", str(state_path)]
+        before = state_path.read_bytes()
+        status, _, errors = self.invoke(command + ["--item-id", "remote-a"])
+        self.assertEqual(status, 1)
+        self.assertIn("--key", errors)
+        self.assertEqual(state_path.read_bytes(), before)
+
+        status, _, errors = self.invoke(command + ["--key", "addr:a", "--item-id", "remote-a"])
+        self.assertEqual(status, 0, errors)
+        saved = read_json(state_path)
+        self.assertEqual(saved["items"]["addr:a"]["id"], "remote-a")
+        self.assertEqual(set(saved["pending_creations"]), {"addr:b"})
+        before = state_path.read_bytes()
+        status, _, errors = self.invoke(command + ["--key", "addr:b", "--item-id", "remote-a"])
+        self.assertEqual(status, 1)
+        self.assertIn("already mapped", errors)
+        self.assertEqual(state_path.read_bytes(), before)
+
+        status, _, errors = self.invoke(command + ["--key", "addr:b", "--absent"])
+        self.assertEqual(status, 0, errors)
+        saved = read_json(state_path)
+        self.assertEqual(saved["pending_creations"], {})
+        self.assertEqual(set(saved["items"]), {"addr:a"})
+
     def test_fetch_configuration_is_inherited_overridden_and_archived(self):
         with patch.dict(os.environ, {"LIQUID_BLOCKSTREAM_API_RPS": "10"}):
             first = self.start("--hops", "0", "--api-workers", "2")

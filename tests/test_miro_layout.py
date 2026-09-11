@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from liquid_tracer.miro_state import load_state
 from liquid_tracer.common import TraceError, canonical, digest, read_json
 from liquid_tracer.miro import make_plan, sync
 from tests.test_miro_sync import FakeMiro, graph
@@ -109,7 +110,7 @@ class MiroLayoutTests(unittest.TestCase):
 
         def inspect(method, url, headers, body, timeout):
             if method == "PATCH" and "position" in json.loads(body):
-                snapshots.append(read_json(self.state_path)["layout_history"][-1])
+                snapshots.append(load_state(self.state_path)["layout_history"][-1])
             return original_transport(method, url, headers, body, timeout)
 
         report = sync(make_plan(presented()), "board=", self.state_path, token="test-token",

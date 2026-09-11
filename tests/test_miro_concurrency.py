@@ -4,9 +4,12 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from liquid_tracer.miro_state import load_state
 from liquid_tracer.common import TraceError, read_json, save_json
 from liquid_tracer.miro import make_plan, sync
+from liquid_tracer.miro_requests import MiroRequests, MiroRequestNotSent
 from tests.test_miro_sync import FakeMiro, graph
 
 
@@ -97,8 +100,22 @@ class MiroConcurrencyTests(unittest.TestCase):
         caller = threading.get_ident()
         parallel = self.call(plan, workers=4, reorganize=True,
                              progress=lambda event: callback_threads.append(threading.get_ident()))
-        self.assertEqual(self.remote.items, serial_remote.items)
-        self.assertEqual(read_json(self.state_path)["items"], read_json(serial_path)["items"])
+        def logical_board(path, remote):
+            records = read_json(path)["items"]
+            logical = {record["id"]: key for key, record in records.items()}
+            board = {}
+            for key, record in records.items():
+                item = copy.deepcopy(remote.items[record["id"]])
+                item["id"] = key
+                for field in ("startItem", "endItem"):
+                    if field in item:
+                        item[field]["id"] = logical[item[field]["id"]]
+                board[key] = item
+            return board, {key: {field: value for field, value in record.items() if field != "id"}
+                           for key, record in records.items()}
+        # Parallel POSTs may receive their IDs in a different order. The
+        # resulting logical graph, endpoints, and baselines must still agree.
+        self.assertEqual(logical_board(self.state_path, self.remote), logical_board(serial_path, serial_remote))
         for field in ("created", "updated", "moved", "reattached", "conflicts"):
             self.assertEqual(parallel[field], serial[field])
         self.assertGreater(parallel["updated"], 1)
@@ -106,7 +123,8 @@ class MiroConcurrencyTests(unittest.TestCase):
             self.assertGreater(self.remote.peak[method], 1)
             self.assertLessEqual(self.remote.peak[method], 4)
             self.assertEqual(serial_remote.peak[method], 1)
-        self.assertEqual(self.remote.peak["POST"], 1)
+        self.assertGreater(self.remote.peak["POST"], 1)
+        self.assertLessEqual(self.remote.peak["POST"], 4)
         self.assertEqual(set(self.remote.reads_before_write), {len(initial_state["items"])})
         self.assertTrue(callback_threads)
         self.assertEqual(set(callback_threads), {caller})
@@ -132,7 +150,7 @@ class MiroConcurrencyTests(unittest.TestCase):
 
         def transport(method, url, *args):
             if method == "PATCH":
-                pending_seen.append(copy.deepcopy(read_json(self.state_path).get("pending_updates", {})))
+                pending_seen.append(copy.deepcopy(load_state(self.state_path).get("pending_updates", {})))
                 if url.endswith("/" + successful_id):
                     success_started.set()
                     if not failure_returned.wait(3):
@@ -160,7 +178,7 @@ class MiroConcurrencyTests(unittest.TestCase):
         self.assertTrue(all("addr:a" in pending and "addr:b" in pending for pending in pending_seen))
         recovered = self.call(plan, workers=2)
         self.assertEqual(recovered["updated"], 1)
-        self.assertEqual(read_json(self.state_path).get("pending_updates", {}), {})
+        self.assertEqual(load_state(self.state_path).get("pending_updates", {}), {})
         self.assertIsNone(read_json(self.state_path)["active_run_id"])
 
     def lose_patch_response(self):
@@ -203,7 +221,7 @@ class MiroConcurrencyTests(unittest.TestCase):
         self.assertEqual(report["updated"], 0)
         self.assertEqual(self.remote.writes, [])
         self.assertTrue(report["conflicts"])
-        self.assertEqual(read_json(self.state_path).get("pending_updates", {}), {})
+        self.assertEqual(load_state(self.state_path).get("pending_updates", {}), {})
 
     def test_worker_count_is_validated_before_requests(self):
         for workers in (0, -1, 5, True, False, 1.5, "4", None):
@@ -211,16 +229,16 @@ class MiroConcurrencyTests(unittest.TestCase):
                 self.call(self.initial_plan, workers=workers)
         self.assertEqual(self.remote.calls, [])
 
-    def test_long_rate_limit_after_rejected_post_does_not_leave_uncertain_creation(self):
+    def test_invalid_rate_limit_after_rejected_post_does_not_leave_uncertain_creation(self):
         attempts = []
 
         def transport(method, url, *args):
             if method == "POST":
                 attempts.append(url)
-                return 429, {"Retry-After": "31"}, b"{}"
+                return 429, {"Retry-After": "nan"}, b"{}"
             return self.remote(method, url, *args)
 
-        with self.assertRaisesRegex(TraceError, "wait for the limit to reset"):
+        with self.assertRaisesRegex(TraceError, "rate limit|rate-limit"):
             self.call(make_plan(graph("two", True)), workers=4, transport=transport)
         state = read_json(self.state_path)
         self.assertEqual(len(attempts), 1)
@@ -234,24 +252,27 @@ class MiroConcurrencyTests(unittest.TestCase):
         posts = []
 
         def transport(method, url, *args):
-            result = remote(method, url, *args)
             if method == "POST":
                 posts.append(url)
-                return result[0], {"X-RateLimit-Remaining": "0",
-                                   "X-RateLimit-Reset": str(time.time() + 60)}, result[2]
-            return result
+            return remote(method, url, *args)
 
-        with self.assertRaisesRegex(TraceError, "wait for the limit to reset"):
+        original_send = MiroRequests.send
+        def refuse_connectors(requests, method, url, *args, **kwargs):
+            if method == "POST" and url.endswith("/connectors"):
+                raise MiroRequestNotSent("Synthetic quota reservation failure")
+            return original_send(requests, method, url, *args, **kwargs)
+
+        with patch.object(MiroRequests, "send", refuse_connectors), self.assertRaisesRegex(TraceError, "quota reservation"):
             sync(self.initial_plan, "board=", state_path, token="test-token",
                  transport=transport, interval=0, workers=4)
         state = read_json(state_path)
         self.assertEqual(len(posts), 1)
-        self.assertEqual(len(state["items"]), 1)
+        self.assertEqual(len(state["items"]), len(self.initial_plan["shapes"]))
         self.assertEqual({entry["id"] for entry in state["items"].values()}, set(remote.items))
         self.assertIsNone(state["pending"])
         report = sync(self.initial_plan, "board=", state_path, token="test-token",
                       transport=remote, interval=0, workers=4)
-        self.assertEqual(report["created"], 6)
+        self.assertEqual(report["created"], len(self.initial_plan["connectors"]))
         self.assertEqual(len(remote.items), 7)
 
 

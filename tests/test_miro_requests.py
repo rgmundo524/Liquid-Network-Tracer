@@ -1,6 +1,8 @@
 import threading
 import time
 import unittest
+import os
+import signal
 from unittest.mock import patch
 
 from liquid_tracer.common import TraceError, canonical
@@ -218,17 +220,19 @@ class MiroRequestsTests(unittest.TestCase):
             requests._observe({"X-RateLimit-Remaining": "400", "X-RateLimit-Reset": reset}, 100, 200)
             self.assertEqual(requests._remaining, 100)
 
-    def test_overlong_rate_limit_is_reported_without_retrying(self):
-        calls = []
+    def test_valid_long_rate_limit_waits_before_retrying(self):
+        calls, clock = [], [100.]
 
         def transport(*_):
             calls.append(1)
-            return 429, {"Retry-After": "31"}, b"{}"
+            return (429, {"Retry-After": "60"}, b"{}") if len(calls) == 1 else (200, {}, b"{}")
 
-        with MiroRequests(transport, interval=0) as requests:
-            with self.assertRaisesRegex(TraceError, "more than 30 seconds"):
-                requests.request("PATCH", "url", {}, {})
-        self.assertEqual(len(calls), 1)
+        with MiroRequests(transport, interval=0) as requests, \
+                patch("liquid_tracer.miro_requests.time.monotonic", side_effect=lambda: clock[0]), \
+                patch.object(requests, "_wait", side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay)) as pause:
+            self.assertEqual(requests.request("PATCH", "url", {}, {})[0], 200)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(pause.call_args.args, (60.,))
 
     def test_raw_send_preserves_known_rejection_and_caller_owns_progress(self):
         calls = []
@@ -236,27 +240,30 @@ class MiroRequestsTests(unittest.TestCase):
 
         def transport(*_):
             calls.append(1)
-            return 429, {"Retry-After": "31"}, b"{}"
+            return 429, {"Retry-After": "inf"}, b"{}"
 
         with MiroRequests(transport, interval=0, progress=progress) as requests:
             self.assertEqual(requests.send("POST", "url", {}, b"{}")[0], 429)
             self.assertEqual(progress.events, [])
-            with self.assertRaisesRegex(TraceError, "more than 30 seconds"):
+            with self.assertRaisesRegex(TraceError, "invalid rate-limit retry delay"):
                 requests.send("POST", "url", {}, b"{}")
         self.assertEqual(len(calls), 1)
 
-    def test_exhausted_long_window_is_distinguished_as_not_sent(self):
-        calls = []
+    def test_exhausted_minute_budget_waits_without_requiring_restart(self):
+        calls, clock = [], [100.]
 
         def transport(*_):
             calls.append(1)
-            return 200, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(time.time() + 60)}, b"{}"
+            return (200, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1060"}, b"{}") if len(calls) == 1 else (200, {}, b"{}")
 
-        with MiroRequests(transport, interval=0) as requests:
+        with MiroRequests(transport, interval=0) as requests, \
+                patch("liquid_tracer.miro_requests.time.monotonic", side_effect=lambda: clock[0]), \
+                patch("liquid_tracer.miro_requests.time.time", return_value=1000.), \
+                patch.object(requests, "_wait", side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay)) as pause:
             requests.send("GET", "url", {})
-            with self.assertRaises(MiroRequestNotSent):
-                requests.send("POST", "url", {}, b"{}")
-        self.assertEqual(calls, [1])
+            self.assertEqual(requests.send("POST", "url", {}, b"{}")[0], 200)
+        self.assertEqual(calls, [1, 1])
+        self.assertEqual(pause.call_args.args, (60.,))
 
     def test_workers_persist_across_read_and_edit_phases(self):
         identities = []
@@ -304,6 +311,59 @@ class MiroRequestsTests(unittest.TestCase):
         for interval in (-1, float("nan"), float("inf"), True, "0"):
             with self.assertRaises(TraceError):
                 MiroRequests(None, interval=interval)
+
+    def test_reject_callback_distinguishes_waiting_requests_from_uncertain_transport(self):
+        called, rejected = [], []
+        coordinator = threading.get_ident()
+
+        def transport(method, url, *_):
+            called.append(url)
+            time.sleep(.03)
+            raise TraceError("synthetic lost response")
+
+        with MiroRequests(transport, interval=.2, workers=4) as requests:
+            with self.assertRaises(TraceError):
+                requests.map(range(20), lambda item: requests.send("POST", str(item)), lambda *_: None,
+                             reject=lambda item, error: rejected.append((item, error, threading.get_ident())))
+        self.assertEqual(len(called), 1)
+        self.assertEqual(len(rejected), 4)
+        self.assertTrue(all(identity == coordinator for _, _, identity in rejected))
+        for item, error, _ in rejected:
+            self.assertEqual(isinstance(error, MiroRequestNotSent), str(item) not in called)
+
+    def test_signal_during_submit_registration_still_checkpoints_sent_post(self):
+        accepted, rejected = [], []
+        original_submit = miro_requests.ThreadPoolExecutor.submit
+        submitted = []
+
+        def interrupted_submit(executor, fn, *args, **kwargs):
+            future = original_submit(executor, fn, *args, **kwargs)
+            submitted.append(1)
+            if len(submitted) == 1:
+                os.kill(os.getpid(), signal.SIGINT)
+            return future
+
+        def worker(item):
+            time.sleep(.03)
+            return (201, {"id": "synthetic-created"})
+
+        with MiroRequests(None, interval=0) as requests, \
+                patch.object(miro_requests.ThreadPoolExecutor, "submit", new=interrupted_submit):
+            with self.assertRaises(KeyboardInterrupt):
+                requests.map([0, 1], worker, lambda item, result: accepted.append((item, result)),
+                             reject=lambda item, error: rejected.append((item, error)))
+        self.assertEqual(accepted, [(0, (201, {"id": "synthetic-created"}))])
+        self.assertEqual(rejected, [])
+
+    def test_executor_shutdown_rejects_yielded_journal_job_as_not_sent(self):
+        rejected = []
+        with MiroRequests(None, interval=0) as requests, \
+                patch.object(miro_requests.ThreadPoolExecutor, "submit", side_effect=RuntimeError("cannot schedule new futures after shutdown")):
+            with self.assertRaises(RuntimeError):
+                requests.map([0, 1], lambda _: None, lambda *_: None,
+                             reject=lambda item, error: rejected.append((item, error)))
+        self.assertEqual([item for item, _ in rejected], [0])
+        self.assertIsInstance(rejected[0][1], MiroRequestNotSent)
 
 
 if __name__ == "__main__":

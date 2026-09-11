@@ -41,7 +41,7 @@ def public_progress(event):
         elif reason == "server_retry":
             value.update(reason=reason, message="Waiting before retrying a temporary Miro read error")
     delay = event.get("retry_after")
-    if type(delay) in (int, float) and 0 <= delay <= 30 and math.isfinite(delay):
+    if type(delay) in (int, float) and 0 <= delay <= 2 ** 53 - 1 and math.isfinite(delay):
         value["retry_after"] = delay
     elapsed = event.get("elapsed_seconds")
     if type(elapsed) in (int, float) and 0 <= elapsed <= 2 ** 53 - 1 and math.isfinite(elapsed):

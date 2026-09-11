@@ -12,10 +12,13 @@ from contextlib import ExitStack
 from pathlib import Path
 
 from .api import http
-from .common import TraceError, canonical, digest, now, read_json, save_json
+from .common import TraceError, canonical, digest, now
 from .export import COLORS, edge_color, legend_lines
 from .miro_http import MiroHTTP
 from .miro_requests import MiroRequestNotSent, MiroRequests
+from .miro_state import SyncState, load_state
+from .miro_reads import preflight
+from .miro_quota import SharedMiroQuota
 
 
 def make_plan(graph):
@@ -254,9 +257,9 @@ def _namespace(plan):
 
 
 def _load_sync_state(path, board_id, namespace):
-    state = read_json(path) if Path(path).exists() else {
+    state = load_state(path, {
         "schema_version": 2, "board_id": board_id, "namespace": copy.deepcopy(namespace),
-        "items": {}, "runs": {}, "pending": None}
+        "items": {}, "runs": {}, "pending": None, "pending_creations": {}})
     if state.get("schema_version") != 2:
         raise TraceError("This is legacy Miro snapshot state; keep it intact and use a separate sync state file")
     if state.get("board_id") != board_id or state.get("namespace") != namespace:
@@ -282,9 +285,20 @@ def _load_sync_state(path, board_id, namespace):
                 or entry.get("id") != record["id"] or entry.get("endpoint") != record["endpoint"]
                 or not isinstance(entry.get("patch"), dict)):
             raise TraceError("Malformed Miro update journal; restore its last intact version")
+    pending_creations = state.get("pending_creations", {})
+    if not isinstance(pending_creations, dict):
+        raise TraceError("Malformed Miro creation journal; restore its last intact version")
+    for key, entry in pending_creations.items():
+        if (not isinstance(key, str) or not isinstance(entry, dict) or entry.get("key") != key
+                or entry.get("endpoint") not in ("shapes", "connectors")
+                or not isinstance(entry.get("body"), dict) or key in state["items"]):
+            raise TraceError("Malformed Miro creation journal; restore its last intact version")
+    unresolved = list(pending_creations)
     if state.get("pending"):
-        raise TraceError("Prior Miro POST outcome is uncertain for " + str(state["pending"].get("key")) +
-                         "; inspect the board and use miro-resolve before retrying")
+        unresolved.append(str(state["pending"].get("key")))
+    if unresolved:
+        raise TraceError("Prior Miro POST outcome is uncertain for " + ", ".join(unresolved) +
+                         "; inspect the board and use miro-resolve --key for each item before retrying")
     return state
 
 
@@ -754,7 +768,172 @@ def _placements(plan, state, remote, removed, reorganize):
     return result, 0
 
 
-def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, interval=.1, dry_run=False,
+# Miro's bulk response has no request-order guarantee or client key. Keep every
+# request spatially unambiguous and match returned shapes by type and board
+# position. A hundredth of a board unit tolerates insignificant serialization
+# rounding, while any overlapping candidate leaves the whole operation pending.
+_BULK_POSITION_TOLERANCE = .01
+
+
+def _same_shape_position(first, second):
+    try:
+        if first["data"]["shape"] != second["data"]["shape"]:
+            return False
+        return all(math.isfinite(float(second["position"][axis]))
+                   and abs(float(first["position"][axis]) - float(second["position"][axis]))
+                   <= _BULK_POSITION_TOLERANCE for axis in ("x", "y"))
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+
+
+def _shape_batches(shapes):
+    """Do not put indistinguishable shapes in the same bulk request."""
+    batch = []
+    for pending in shapes:
+        if len(batch) == 20 or any(_same_shape_position(pending["body"], other["body"])
+                                   for other in batch):
+            yield batch
+            batch = []
+        batch.append(pending)
+    if batch:
+        yield batch
+
+
+def _bulk_records(batch, raw, mapped_ids):
+    response = _response(raw, "bulk POST; reconcile the pending items before retrying")
+    returned = response.get("data")
+    if not isinstance(returned, list) or len(returned) != len(batch):
+        raise TraceError("Miro bulk POST returned an incomplete item list; reconcile the pending items")
+    assignments, ids = {}, set()
+    for item in returned:
+        if (not isinstance(item, dict) or item.get("type") != "shape"
+                or not isinstance(item.get("id"), str) or not item["id"]
+                or item["id"] in mapped_ids or item["id"] in ids):
+            raise TraceError("Miro bulk POST returned an invalid or already mapped ID; reconcile the pending items")
+        parent, position = item.get("parent"), item.get("position")
+        if ((parent is not None and (not isinstance(parent, dict) or parent.get("id")))
+                or not isinstance(position, dict)
+                or position.get("origin", "center") != "center"
+                or position.get("relativeTo", "canvas_center") != "canvas_center"):
+            raise TraceError("Miro bulk POST returned non-canvas positions; reconcile the pending items")
+        candidates = [pending for pending in batch if _same_shape_position(pending["body"], item)]
+        if len(candidates) != 1 or candidates[0]["key"] in assignments:
+            raise TraceError("Miro bulk POST returned ambiguous shape positions; reconcile the pending items")
+        pending = candidates[0]
+        ids.add(item["id"])
+        assignments[pending["key"]] = _record_pending(pending, item["id"], item)
+    return assignments
+
+
+def _create_items(plan, state, journal, requests, base, headers, positions, mapped_ids, report, progress):
+    """Batch shapes, then overlap connectors whose endpoint IDs are durable.
+
+    All checkpoint changes happen on the coordinator. On failure the request
+    pool drains acknowledgements; only jobs proved never sent lose their intent.
+    A POST with no trustworthy response is never retried automatically.
+    """
+    progress.emit("creating", 0, report["new_items"], "Adding new shapes and connections")
+
+    def pending_item(item, endpoint):
+        key = item["key"]
+        body = copy.deepcopy(item["body"])
+        if endpoint == "shapes":
+            body["position"].update(dict(zip(("x", "y"), positions[key])))
+        else:
+            body.update(_connection_body(item, state["items"][item["source"]]["id"],
+                                         state["items"][item["target"]]["id"]))
+        pending = {"key": key, "endpoint": endpoint, "body": body, "run_id": plan["run_id"]}
+        if key in plan.get("fee_items", {}):
+            pending["fee_proof"] = copy.deepcopy(plan["fee_items"][key])
+        if endpoint == "connectors":
+            pending.update({"source": item["source"], "target": item["target"]})
+            if item.get("attachment"):
+                pending["attachments"] = copy.deepcopy(item["attachment"])
+        return pending
+
+    def journal_job(batch, endpoint):
+        operation = digest(canonical({"run_id": plan["run_id"], "endpoint": endpoint, "items": batch}))[:24]
+        for pending in batch:
+            pending["operation_id"] = operation
+        journal.commit(sets=[(("pending_creations", pending["key"]), pending) for pending in batch])
+        return {"items": batch, "endpoint": endpoint}
+
+    def clear(job):
+        journal.commit(deletes=[("pending_creations", pending["key"]) for pending in job["items"]])
+
+    def worker(job):
+        batch = job["items"]
+        body = ([{"type": "shape", **pending["body"]} for pending in batch]
+                if job["endpoint"] == "items/bulk" else batch[0]["body"])
+        encoded = canonical(body)
+        for attempt in range(4):
+            result = requests.send("POST", base + "/" + job["endpoint"], headers, encoded, 30,
+                                   credits=100 * len(batch))
+            if result[0] == 429 and attempt < 3:
+                try:
+                    requests.pause_for_rate_limit(result[1])
+                except TraceError as error:
+                    # The rejection is known. Pass it back to the coordinator
+                    # before raising the wait error so no false uncertainty stays.
+                    return result, error
+                continue
+            return result, None
+
+    def reject(job, error):
+        if isinstance(error, MiroRequestNotSent):
+            clear(job)
+
+    def accept(job, outcome):
+        (status, _, raw), known_error = outcome
+        if not 200 <= status < 300:
+            rejected = 400 <= status < 500 and status != 408
+            if rejected:
+                clear(job)
+            if known_error is not None:
+                raise known_error
+            raise TraceError("Miro POST returned HTTP " + str(status) +
+                             ("; fix the error and rerun sync" if rejected
+                              else "; reconcile the pending items before retrying"))
+        batch = job["items"]
+        if job["endpoint"] == "items/bulk":
+            records = _bulk_records(batch, raw, mapped_ids)
+        else:
+            response = _response(raw, "POST; reconcile the pending item before retrying")
+            item_id = response.get("id")
+            if not isinstance(item_id, str) or not item_id or item_id in mapped_ids:
+                raise TraceError("Miro POST returned an invalid or already mapped ID; reconcile the pending item")
+            pending = batch[0]
+            records = {pending["key"]: _record_pending(pending, item_id, response)}
+        # Atomically record the entire acknowledged batch before its connector
+        # IDs can be used. Invalid response matching never saves partial guesses.
+        journal.commit(sets=[(("items", key), record) for key, record in records.items()],
+                       deletes=[("pending_creations", pending["key"]) for pending in batch])
+        mapped_ids.update(record["id"] for record in records.values())
+        for _ in batch:
+            report["created"] += 1
+            progress.emit("creating", report["created"], report["new_items"], "Adding new shapes and connections")
+
+    shape_items = (pending_item(item, "shapes") for item in plan["shapes"] if item["key"] not in state["items"])
+    # Serial bulk requests already remove almost all shape round trips. Keeping
+    # one outstanding bulk makes an uncertain response straightforward to inspect.
+    for batch in _shape_batches(shape_items):
+        def shape_job():
+            yield journal_job(batch, "items/bulk" if len(batch) > 1 else "shapes")
+        # The one-job worker batch also distinguishes cancellation while waiting
+        # for quota from an uncertain POST and drains any response already sent.
+        requests.map(shape_job(), worker, accept, reject=reject)
+
+    def connector_jobs():
+        for item in plan["connectors"]:
+            if item["key"] not in state["items"]:
+                # The generator runs on the coordinator before executor.submit.
+                # At most workers intents are outstanding, never the whole graph.
+                yield journal_job([pending_item(item, "connectors")], "connectors")
+
+    requests.map(connector_jobs(), worker, accept, reject=reject)
+
+
+def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, interval=.02, dry_run=False,
          reorganize=False, progress=None, workers=4):
     """Add bounded runs to one board; preserve manually edited fields and geometry.
 
@@ -767,12 +946,11 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
     A dry run is local-only, so it cannot predict remote conflicts or positions.
     The same state file must be reused for every run of this case and board.
     Progress receives generic phase/count dictionaries, without board content.
-    Existing reads and PATCHes use at most four workers. Request starts share
-    one pacing gate: .05 seconds for reads and .1 for writes by default. These
-    Level 1/2 endpoints consume at most 60,000 credits/minute at those rates.
-    Creation and fee deletion remain serial. An explicit interval changes the
-    write gap and caps the read gap at .05 seconds; zero disables pacing.
-    Shared per-user/app limits still require bounded 429 handling.
+    Reads, updates, and connector creation use at most four workers. Shapes
+    are created in batches of up to twenty, matched by their unique positions
+    rather than response order. Every POST has a durable per-item intent before
+    dispatch; uncertain outcomes require explicit reconciliation. A local quota
+    coordinator shares credit reservations across processes using this token.
     https://developers.miro.com/reference/rate-limiting
     """
     validate_plan(plan)
@@ -846,45 +1024,19 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
         removals = _fee_removals(plan, state)
         base = "https://api.miro.com/v2/boards/" + urllib.parse.quote(board_id, safe="")
         headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json", "Accept": "application/json"}
+        quota = None
         if transport is http:
+            quota = resources.enter_context(SharedMiroQuota(token))
             transport = resources.enter_context(MiroHTTP())
         requests = resources.enter_context(MiroRequests(transport, interval=interval, workers=workers,
-                                                         progress=status_progress))
-        remote, missing = {}, []
-        preflight_total = len(state["items"])
-        status_progress.emit("preflight", 0, preflight_total, "Checking existing board items")
-        # Complete all mapped-item GETs before the first POST or PATCH.
-        checked = 0
-
-        def read_item(job):
-            _, record = job
-            return requests.request("GET", _remote_url(base, record), headers)
-
-        def accept_read(job, result):
-            nonlocal checked
-            key, record = job
-            status, _, raw = result
-            checked += 1
-            if status == 404:
-                status_progress.emit("preflight", checked, preflight_total, "Checking existing board items")
-                if key in removals and state.get("pending_deletions", {}).get(key, {}).get("attempted"):
-                    return
-                missing.append(key + " (" + record["id"] + ")")
-                return
-            if not 200 <= status < 300:
-                raise TraceError("Miro preflight GET returned HTTP " + str(status) + "; no board writes made")
-            item = _response(raw, "preflight GET")
-            if item.get("id") != record["id"]:
-                raise TraceError("Miro preflight returned the wrong item ID; no board writes made")
-            remote[key] = item
-            status_progress.emit("preflight", checked, preflight_total, "Checking existing board items")
-        requests.map(state["items"].items(), read_item, accept_read)
-        if missing:
-            raise TraceError("Miro preflight found missing or inaccessible mapped items: " + ", ".join(missing) +
-                             ". No board writes made. Restore the items/access or repair the mapping; they will not be recreated automatically.")
+                                                         progress=status_progress, quota=quota))
+        # The complete live preflight must succeed before any state or board writes.
+        remote = preflight(requests, base, headers, state, removals, progress=status_progress)
 
         status_progress.emit("layout", 0, 1, "Checking connections and preparing the layout")
         _check_fee_removals(state, remote, removals)
+        original_recovered = {key: copy.deepcopy(state["items"][key])
+                              for key in state.get("pending_updates", {})}
         _recover_updates(state, remote)
         positions, shift_x = _placements(plan, state, remote, removals, reorganize)
         updates, conflicts, attachment_intents = [], [], {}
@@ -929,6 +1081,10 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
         connector_shapes = [{"key": key, "item_id": state["items"][key]["id"],
                              "before": remote[key].get("shape"), "after": patch["shape"]}
                             for key, patch, _, _ in updates if "shape" in patch]
+        recovered_records = {key: state["items"][key] for key in original_recovered}
+        state["items"].update(original_recovered)
+        journal = resources.enter_context(SyncState(state_path, state))
+        state["items"].update(recovered_records)
         if changes or attachment_changes or connector_shapes:
             snapshot = {"recorded_at": now(), "run_id": plan["run_id"], "plan_sha256": plan["sha256"],
                         "positions": changes, "attachments": attachment_changes}
@@ -946,7 +1102,15 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
         pending_deletions = state.setdefault("pending_deletions", {})
         for key, proof in removals.items():
             pending_deletions.setdefault(key, {"id": state["items"][key]["id"], "proof": copy.deepcopy(proof), "attempted": False})
-        save_json(state_path, state)
+        initial_sets = [(("active_run_id",), state["active_run_id"]),
+                        (("pending_updates",), state["pending_updates"]),
+                        (("pending_deletions",), pending_deletions)]
+        if changes or attachment_changes or connector_shapes:
+            initial_sets.append((("layout_history",), state["layout_history"]))
+        # _recover_updates refreshed these records from live evidence. Save those
+        # changes alongside the new edit journal before dispatching mutations.
+        initial_sets.extend((("items", key), record) for key, record in recovered_records.items())
+        journal.commit(sets=initial_sets)
         mapped_ids = {record["id"] for record in state["items"].values()}
         status_progress.emit("removing", 0, len(removals), "Removing excluded fee items")
         for key in sorted(removals, key=lambda key: (0 if state["items"][key]["endpoint"] == "connectors" else 1, key)):
@@ -954,14 +1118,14 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
             # Save intent before DELETE so a lost response can be reconciled by
             # the next preflight GET, without tolerating unrelated missing items.
             pending_deletions[key]["attempted"] = True
-            save_json(state_path, state)
+            journal.commit(sets=[(("pending_deletions", key), pending_deletions[key])])
             status, _, _ = requests.request("DELETE", _remote_url(base, record), headers)
             if not (200 <= status < 300 or status == 404):
                 raise TraceError("Miro fee DELETE returned HTTP " + str(status) + "; acknowledged progress is saved; rerun with fees excluded")
             del state["items"][key]
             mapped_ids.remove(record["id"])
             del pending_deletions[key]
-            save_json(state_path, state)
+            journal.commit(deletes=[("items", key), ("pending_deletions", key)])
             report["deleted"] += 1
             status_progress.emit("removing", report["deleted"], len(removals), "Removing excluded fee items")
         status_progress.emit("updating", 0, len(updates), "Applying changes while preserving manual edits")
@@ -1005,69 +1169,20 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
             # PATCHes and refreshed baselines still persist before continuing.
             if patch or changed:
                 state["pending_updates"].pop(key, None)
-                save_json(state_path, state)
+                journal.commit(sets=[(("items", key), record)], deletes=[("pending_updates", key)])
             checked += 1
             status_progress.emit("updating", checked, len(updates), "Applying changes while preserving manual edits")
         requests.map(updates, update_item, accept_update)
-        status_progress.emit("creating", 0, report["new_items"], "Adding new shapes and connections")
-        for endpoint, collection in collections:
-            for item in collection:
-                key = item["key"]
-                if key in state["items"]:
-                    continue
-                body = copy.deepcopy(item["body"])
-                if endpoint == "shapes":
-                    body["position"].update(dict(zip(("x", "y"), positions[key])))
-                else:
-                    body.update(_connection_body(item, state["items"][item["source"]]["id"],
-                                                 state["items"][item["target"]]["id"]))
-                pending = {"key": key, "endpoint": endpoint, "body": body, "run_id": plan["run_id"]}
-                if key in plan.get("fee_items", {}):
-                    pending["fee_proof"] = copy.deepcopy(plan["fee_items"][key])
-                if endpoint == "connectors":
-                    pending.update({"source": item["source"], "target": item["target"]})
-                    if item.get("attachment"):
-                        pending["attachments"] = copy.deepcopy(item["attachment"])
-                for attempt in range(4):
-                    state["pending"] = pending
-                    save_json(state_path, state)
-                    try:
-                        status, response_headers, raw = requests.send("POST", base + "/" + endpoint, headers, canonical(body), 30)
-                    except MiroRequestNotSent:
-                        state["pending"] = None
-                        save_json(state_path, state)
-                        raise
-                    if 200 <= status < 300:
-                        response = _response(raw, "POST; reconcile the pending item before retrying")
-                        item_id = response.get("id")
-                        if not isinstance(item_id, str) or not item_id:
-                            raise TraceError("Miro accepted POST without a valid ID; reconcile the pending item")
-                        if item_id in mapped_ids:
-                            raise TraceError("Miro POST returned an already mapped ID; reconcile the pending item")
-                        record = _record_pending(pending, item_id, response)
-                        state["items"][key], state["pending"] = record, None
-                        save_json(state_path, state)
-                        mapped_ids.add(item_id)
-                        report["created"] += 1
-                        status_progress.emit("creating", report["created"], report["new_items"],
-                                             "Adding new shapes and connections")
-                        break
-                    # 408 and 5xx can occur after a server-side commit; never retry them.
-                    if 400 <= status < 500 and status != 408:
-                        state["pending"] = None
-                        save_json(state_path, state)
-                    if status == 429 and attempt < 3:
-                        status_progress.pause(_retry_delay(response_headers), "Waiting for the Miro rate limit to reset")
-                        continue
-                    raise TraceError("Miro POST returned HTTP " + str(status) +
-                                     ("; reconcile the pending item" if state["pending"] else "; fix the error and rerun sync"))
+        _create_items(plan, state, journal, requests, base, headers, positions, mapped_ids,
+                      report, status_progress)
         summary = state["runs"].setdefault(plan["run_id"], {"first_synced_at": now(), "plan_sha256s": []})
         if plan["sha256"] not in summary["plan_sha256s"]:
             summary["plan_sha256s"].append(plan["sha256"])
         summary.update({"last_synced_at": now(), "shapes": len(plan["shapes"]), "connectors": len(plan["connectors"]),
                         "conflicts": conflicts, "run": copy.deepcopy(plan.get("run", {}))})
         state["latest_run_id"], state["active_run_id"] = plan["run_id"], None
-        save_json(state_path, state)
+        journal.commit(sets=[(("runs", plan["run_id"]), summary),
+                             (("latest_run_id",), state["latest_run_id"]), (("active_run_id",), None)])
         report["items"] = len(state["items"])
         report["runs"] = len(state["runs"])
         status_progress.emit("complete", 1, 1, "Miro sync complete")
@@ -1104,18 +1219,19 @@ def publish(plan, board_id, state_path, max_items=750, token=None, transport=htt
         raise TraceError("Provide the Miro board ID, not its full URL")
     state_path = Path(state_path)
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    with state_path.with_suffix(".lock").open("w") as lock:
+    with state_path.with_suffix(".lock").open("w") as lock, ExitStack() as resources:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise TraceError("Another publisher is using this state file") from None
-        state = read_json(state_path) if state_path.exists() else {
-            "board_id": board_id, "plan_sha256": plan["sha256"], "items": {}, "pending": None}
+        state = load_state(state_path, {
+            "board_id": board_id, "plan_sha256": plan["sha256"], "items": {}, "pending": None})
         if state["board_id"] != board_id or state["plan_sha256"] != plan["sha256"]:
             raise TraceError("Miro state belongs to a different board or plan")
         if state.get("pending"):
             raise TraceError("Prior Miro POST outcome is uncertain for " + state["pending"]["key"] +
                              "; inspect the board and use miro-resolve before retrying")
+        journal = resources.enter_context(SyncState(state_path, state))
         base = "https://api.miro.com/v2/boards/" + urllib.parse.quote(board_id, safe="")
         for endpoint, collection in (("shapes", plan["shapes"]), ("connectors", plan["connectors"])):
             for item in collection:
@@ -1127,7 +1243,7 @@ def publish(plan, board_id, state_path, max_items=750, token=None, transport=htt
                     body.update(_connection_body(item, state["items"][item["source"]], state["items"][item["target"]]))
                 for attempt in range(4):
                     state["pending"] = {"key": key, "endpoint": endpoint}
-                    save_json(state_path, state)
+                    journal.commit(sets=[(("pending",), state["pending"])])
                     # Network failures leave pending intact for explicit reconciliation.
                     status, headers, raw = transport("POST", base + "/" + endpoint,
                         {"Authorization": "Bearer " + token, "Content-Type": "application/json", "Accept": "application/json"}, canonical(body), 30)
@@ -1140,11 +1256,11 @@ def publish(plan, board_id, state_path, max_items=750, token=None, transport=htt
                             raise TraceError("Miro accepted POST but returned no valid ID; reconcile the pending item") from None
                         state["items"][key] = item_id
                         state["pending"] = None
-                        save_json(state_path, state)
+                        journal.commit(sets=[(("items", key), item_id), (("pending",), None)])
                         break
                     if 400 <= status < 500 and status != 408:
                         state["pending"] = None
-                        save_json(state_path, state)
+                        journal.commit(sets=[(("pending",), None)])
                     if status == 429 and attempt < 3:
                         retry = next((v for k, v in headers.items() if k.lower() == "retry-after"), "5")
                         try:
@@ -1161,26 +1277,56 @@ def publish(plan, board_id, state_path, max_items=750, token=None, transport=htt
                 "items": len(state["items"]), "state_path": str(state_path)}
 
 
-def resolve(state_path, item_id=None, absent=False):
+def resolve(state_path, item_id=None, absent=False, key=None):
+    """Reconcile one explicitly inspected creation, including a bulk member."""
     if bool(item_id) == bool(absent):
         raise TraceError("Choose an existing remote item ID or --absent")
+    if key is not None and (not isinstance(key, str) or not key):
+        raise TraceError("Provide the logical pending item key")
     state_path = Path(state_path)
     with state_path.with_suffix(".lock").open("w") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise TraceError("Publisher is running") from None
-        state = read_json(state_path)
-        if not state.get("pending"):
+        state = load_state(state_path)
+        entries = state.get("pending_creations", {})
+        if not isinstance(entries, dict):
+            raise TraceError("Malformed Miro creation journal; restore its last intact version")
+        pending = dict(entries)
+        legacy = state.get("pending")
+        if legacy:
+            if not isinstance(legacy, dict) or not isinstance(legacy.get("key"), str):
+                raise TraceError("Malformed pending Miro item")
+            if legacy["key"] in pending:
+                raise TraceError("Duplicate pending Miro item; restore its last intact version")
+            pending[legacy["key"]] = legacy
+        if not pending:
             raise TraceError("No pending item to reconcile")
+        if key is None:
+            if len(pending) != 1:
+                raise TraceError("Multiple Miro items need reconciliation; use --key for one of: " + ", ".join(pending))
+            key = next(iter(pending))
+        if key not in pending:
+            raise TraceError("That key is not a pending Miro item; choose one of: " + ", ".join(pending))
+        entry = pending[key]
+        sets = []
         if item_id:
             if not isinstance(item_id, str) or not item_id.strip() or "/" in item_id:
                 raise TraceError("Provide the remote item ID, not a URL")
             if state.get("schema_version") == 2:
                 if item_id in {record["id"] for record in state["items"].values()}:
                     raise TraceError("That remote item ID is already mapped; inspect the pending item again")
-                state["items"][state["pending"]["key"]] = _record_pending(state["pending"], item_id)
+                record = _record_pending(entry, item_id)
             else:
-                state["items"][state["pending"]["key"]] = item_id
-        state["pending"] = None
-        save_json(state_path, state)
+                if item_id in state["items"].values():
+                    raise TraceError("That remote item ID is already mapped; inspect the pending item again")
+                record = item_id
+            sets.append((("items", key), record))
+        deletes = []
+        if key in entries:
+            deletes.append(("pending_creations", key))
+        else:
+            sets.append((("pending",), None))
+        with SyncState(state_path, state) as journal:
+            journal.commit(sets=sets, deletes=deletes)

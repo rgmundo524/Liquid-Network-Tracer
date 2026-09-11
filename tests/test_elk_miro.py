@@ -240,8 +240,8 @@ class ElkMiroTests(unittest.TestCase):
 
         self.remote = lose_connector
         with self.assertRaisesRegex(TraceError, "lost response"):
-            self.sync()
-        pending = read_json(self.state_path)["pending"]
+            self.sync(workers=1)
+        pending = next(iter(read_json(self.state_path)["pending_creations"].values()))
         self.assertEqual(set(pending["attachments"]), {"startItem", "endItem"})
         resolve(self.state_path, item_id="remote-" + str(remote.counter))
         self.remote = remote

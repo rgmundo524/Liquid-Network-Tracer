@@ -141,6 +141,7 @@ def parser():
     miro.add_argument("--max-items", type=int, default=750)
     reconcile = commands.add_parser("miro-resolve", help="Resolve a POST with uncertain outcome after inspecting the board")
     reconcile.add_argument("--state", type=Path, required=True)
+    reconcile.add_argument("--key", help="Logical item key to reconcile when multiple creations have uncertain outcomes")
     group = reconcile.add_mutually_exclusive_group(required=True)
     group.add_argument("--item-id")
     group.add_argument("--absent", action="store_true", help="You verified that the pending item is absent")
@@ -620,7 +621,7 @@ def main(argv=None, *, progress=None):
         elif args.command == "miro-publish":
             print(json.dumps(publish(read_json(args.plan), board_id(args.board_id), args.state, args.max_items), indent=2))
         elif args.command == "miro-resolve":
-            resolve(args.state, args.item_id, args.absent)
+            resolve(args.state, args.item_id, args.absent, key=args.key)
             print("Pending publication reconciled.")
         return 0
     except KeyboardInterrupt:

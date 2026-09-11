@@ -46,11 +46,11 @@ class ProgressReportTests(unittest.TestCase):
         for event in invalid:
             with self.subTest(event=event):
                 self.assertIsNone(public_progress(event))
-        for retry_after in (0, 2.5, 30):
+        for retry_after in (0, 2.5, 30, 60, 3600):
             result = public_progress({**valid, "phase": "waiting", "retry_after": retry_after})
             self.assertEqual(result["retry_after"], retry_after)
             json.dumps(result, allow_nan=False)
-        for retry_after in (True, -1, 31, 10 ** 400, "2", None, float("nan"), float("inf")):
+        for retry_after in (True, -1, 2 ** 53, 10 ** 400, "2", None, float("nan"), float("inf")):
             with self.subTest(retry_after=retry_after):
                 result = public_progress({**valid, "phase": "waiting", "retry_after": retry_after})
                 self.assertNotIn("retry_after", result)
