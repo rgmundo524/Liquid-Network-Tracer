@@ -429,7 +429,7 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
                         "routing_exceptions": exceptions, "routing_checks_truncated": routing_checks_truncated}
     result.setdefault("graph_options", {})["connector_style"] = connector_style
     result["connector_attachment"] = "transaction_ports_v2"
-    result["presentation_version"] = 6
+    result["presentation_version"] = max(6, graph.get("presentation_version", 0))
     return result
 
 
@@ -541,7 +541,7 @@ def fallback_graph(graph, connector_style="straight", reason="size_limit"):
                                     "routing_exceptions": exceptions, "miro_routes_exact": False}
     result.setdefault("graph_options", {})["connector_style"] = connector_style
     result["connector_attachment"] = "transaction_ports_v2"
-    result["presentation_version"] = 6
+    result["presentation_version"] = max(6, graph.get("presentation_version", 0))
     return result
 
 

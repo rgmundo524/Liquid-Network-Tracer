@@ -130,7 +130,7 @@ class LargeMiroLayoutTests(unittest.TestCase):
         for node in value["nodes"]:
             self.assertEqual(self.item(node["id"])["position"],
                              {"x": node["x"], "y": node["y"], "origin": "center"})
-        self.assertEqual(report["created"], len(plan["shapes"]) + len(plan["connectors"]))
+        self.assertEqual(report["created"], len(plan["shapes"]) + len(plan["connectors"]) + len(plan["frames"]))
 
 
 if __name__ == "__main__":

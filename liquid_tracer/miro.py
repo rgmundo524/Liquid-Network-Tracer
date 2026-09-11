@@ -17,8 +17,9 @@ from .export import COLORS, edge_color, legend_lines
 from .miro_http import MiroHTTP
 from .miro_requests import MiroRequestNotSent, MiroRequests
 from .miro_state import SyncState, load_state
-from .miro_reads import preflight
+from .miro_reads import check_empty_frames, preflight, validate_frame_children
 from .miro_quota import SharedMiroQuota
+from .miro_frames import frame_bodies, validate_activity_frames
 
 
 def make_plan(graph):
@@ -97,6 +98,10 @@ def make_plan(graph):
     if incremental:
         plan["namespace"] = copy.deepcopy(graph["namespace"])
         plan["run"] = copy.deepcopy(graph.get("run", {}))
+    if "activity_frames" in graph:
+        plan["activity_frames"] = copy.deepcopy(graph["activity_frames"])
+        plan["frames"] = frame_bodies(plan["activity_frames"], {
+            item["key"]: _bounds(item["body"], item["key"]) for item in shapes})
     plan["sha256"] = digest(canonical(plan))
     return plan
 
@@ -110,12 +115,12 @@ def validate_plan(plan):
     try:
         if not isinstance(plan["run_id"], str) or not plan["run_id"]:
             raise ValueError
-        if not all(isinstance(plan[k], list) for k in ("shapes", "connectors")):
+        if not all(isinstance(plan[k], list) for k in ("shapes", "connectors")) or not isinstance(plan.get("frames", []), list):
             raise ValueError
-        keys = [item["key"] for item in plan["shapes"] + plan["connectors"]]
+        keys = [item["key"] for item in plan["shapes"] + plan["connectors"] + plan.get("frames", [])]
         if any(not isinstance(k, str) or not k for k in keys):
             raise ValueError
-        for item in plan["shapes"] + plan["connectors"]:
+        for item in plan["shapes"] + plan["connectors"] + plan.get("frames", []):
             if not isinstance(item["body"], dict):
                 raise ValueError
         if plan["schema_version"] == 2:
@@ -144,6 +149,18 @@ def validate_plan(plan):
             raise TraceError("Invalid Miro connector endpoints")
     _validate_attachments(plan)
     _fee_catalog(plan)
+    if "activity_frames" in plan:
+        seeds = plan.get("run", {}).get("seeds")
+        starts = ({"tx:" + seed.rpartition(":")[0] for seed in seeds
+                   if isinstance(seed, str) and ":" in seed} & shape_keys) if isinstance(seeds, list) else None
+        validate_activity_frames(plan["activity_frames"], shape_keys, plan["connectors"],
+                                 starting_transaction_keys=starts)
+        expected = frame_bodies(plan["activity_frames"], {
+            item["key"]: _bounds(item["body"], item["key"]) for item in plan["shapes"]})
+        if plan.get("frames") != expected:
+            raise TraceError("Miro frame geometry disagrees with the graph; regenerate the export")
+    elif "frames" in plan:
+        raise TraceError("Miro frames need activity metadata; regenerate the export")
 
 
 def _validate_attachments(plan):
@@ -270,10 +287,12 @@ def _load_sync_state(path, board_id, namespace):
     for key, record in state["items"].items():
         if (not isinstance(key, str) or not isinstance(record, dict)
                 or not isinstance(record.get("id"), str) or not record["id"]
-                or record.get("endpoint") not in ("shapes", "connectors")
+                or record.get("endpoint") not in ("shapes", "connectors", "frames")
                 or not isinstance(record.get("managed"), dict) or not isinstance(record.get("intent"), dict)):
             raise TraceError("Malformed Miro item mapping; restore its last intact version")
         ids.append(record["id"])
+        if record["endpoint"] == "frames" and record.get("frame_proof") != _frame_proof(key):
+            raise TraceError("Malformed managed Miro frame mapping; restore its last intact version")
     if len(ids) != len(set(ids)):
         raise TraceError("Miro state maps different objects to the same remote ID; repair the mapping")
     pending_updates = state.get("pending_updates", {})
@@ -290,9 +309,11 @@ def _load_sync_state(path, board_id, namespace):
         raise TraceError("Malformed Miro creation journal; restore its last intact version")
     for key, entry in pending_creations.items():
         if (not isinstance(key, str) or not isinstance(entry, dict) or entry.get("key") != key
-                or entry.get("endpoint") not in ("shapes", "connectors")
+                or entry.get("endpoint") not in ("shapes", "connectors", "frames")
                 or not isinstance(entry.get("body"), dict) or key in state["items"]):
             raise TraceError("Malformed Miro creation journal; restore its last intact version")
+        if entry["endpoint"] == "frames" and entry.get("frame_proof") != _frame_proof(key):
+            raise TraceError("Malformed pending Miro frame; restore its last intact version")
     unresolved = list(pending_creations)
     if state.get("pending"):
         unresolved.append(str(state["pending"].get("key")))
@@ -326,6 +347,8 @@ def _editable(body, endpoint):
     result = {}
     if endpoint == "shapes" and "content" in body.get("data", {}):
         result["data"] = {"content": copy.deepcopy(body["data"]["content"])}
+    if endpoint == "frames" and "title" in body.get("data", {}):
+        result["data"] = {"title": copy.deepcopy(body["data"]["title"])}
     if "style" in body:
         result["style"] = copy.deepcopy(body["style"])
     if endpoint == "connectors" and "captions" in body:
@@ -585,6 +608,57 @@ def _check_fee_removals(state, remote, removals):
                     raise TraceError("Miro connector endpoints were changed for " + key + "; restore or repair this connection before syncing. No board writes made.")
 
 
+def _frame_proof(key):
+    """A dedicated marker separates generated frames from other mapped items."""
+    if key == "frame:graph":
+        kind = "graph"
+    elif isinstance(key, str) and re.fullmatch(r"frame:activity:[0-9a-f]{64}", key):
+        kind = "activity"
+    else:
+        raise TraceError("Invalid managed Miro frame key; restore the sync state")
+    return {"schema_version": 1, "key": key, "kind": kind}
+
+
+def _frame_removals(plan, state):
+    desired = {item["key"] for item in plan.get("frames", [])}
+    removals = {}
+    if "activity_frames" in plan:
+        for key, record in state["items"].items():
+            if record["endpoint"] == "frames" and key not in desired:
+                proof = _frame_proof(key)
+                if record.get("frame_proof") != proof:
+                    raise TraceError("Miro frame proof disagrees with its saved mapping; no board writes made")
+                removals[key] = proof
+    pending = state.get("pending_frame_deletions", {})
+    if not isinstance(pending, dict):
+        raise TraceError("Malformed pending Miro frame deletions; restore the sync state")
+    for key, entry in pending.items():
+        record = state["items"].get(key)
+        if (key not in removals or not isinstance(entry, dict) or not record
+                or entry.get("id") != record["id"] or entry.get("proof") != removals[key]
+                or type(entry.get("attempted")) is not bool):
+            raise TraceError("Finish the interrupted Miro frame update with the same graph before changing plans")
+    return removals
+
+
+def _live_frames(plan, state, remote, positions, removals):
+    """Fit frames to the geometry that this sync will actually leave on canvas.
+
+    Older run notes remain included in the full-graph export frame. Retained
+    shapes contribute their live sizes and rotations, including manual edits.
+    Frames are presentation containers, so their bounds are always refreshed.
+    """
+    if "activity_frames" not in plan:
+        return []
+    bounds = {key: _bounds(remote[key], key) for key, record in state["items"].items()
+              if record["endpoint"] == "shapes" and key not in removals}
+    for item in plan["shapes"]:
+        key = item["key"]
+        value = bounds.get(key) or _bounds(item["body"], key)
+        bounds[key] = (*positions[key], value[2], value[3]) if key in positions else value
+    return frame_bodies(plan["activity_frames"], bounds)
+
+
 def _bounds(body, key):
     position = body.get("position", {})
     if (position.get("relativeTo") not in (None, "canvas_center")
@@ -839,7 +913,9 @@ def _create_items(plan, state, journal, requests, base, headers, positions, mapp
         body = copy.deepcopy(item["body"])
         if endpoint == "shapes":
             body["position"].update(dict(zip(("x", "y"), positions[key])))
-        else:
+            if "activity_frames" in plan:
+                body["parent"] = {"id": None}
+        elif endpoint == "connectors":
             body.update(_connection_body(item, state["items"][item["source"]]["id"],
                                          state["items"][item["target"]]["id"]))
         pending = {"key": key, "endpoint": endpoint, "body": body, "run_id": plan["run_id"]}
@@ -849,6 +925,8 @@ def _create_items(plan, state, journal, requests, base, headers, positions, mapp
             pending.update({"source": item["source"], "target": item["target"]})
             if item.get("attachment"):
                 pending["attachments"] = copy.deepcopy(item["attachment"])
+        if endpoint == "frames":
+            pending["frame_proof"] = _frame_proof(key)
         return pending
 
     def journal_job(batch, endpoint):
@@ -911,7 +989,11 @@ def _create_items(plan, state, journal, requests, base, headers, positions, mapp
         mapped_ids.update(record["id"] for record in records.values())
         for _ in batch:
             report["created"] += 1
-            progress.emit("creating", report["created"], report["new_items"], "Adding new shapes and connections")
+            if job["endpoint"] == "frames":
+                report["created_frames"] = report.get("created_frames", 0) + 1
+                progress.emit("framing", report["created_frames"], report["new_frames"], "Updating graph export frames")
+            else:
+                progress.emit("creating", report["created"], report["new_items"], "Adding new shapes and connections")
 
     shape_items = (pending_item(item, "shapes") for item in plan["shapes"] if item["key"] not in state["items"])
     # Serial bulk requests already remove almost all shape round trips. Keeping
@@ -931,6 +1013,14 @@ def _create_items(plan, state, journal, requests, base, headers, positions, mapp
                 yield journal_job([pending_item(item, "connectors")], "connectors")
 
     requests.map(connector_jobs(), worker, accept, reject=reject)
+    # Frames are created last and one at a time. They have no native parent or
+    # children fields: the nested export regions are defined by canvas bounds.
+    for item in plan.get("frames", []):
+        if item["key"] not in state["items"]:
+            progress.emit("framing", report.get("created_frames", 0), report["new_frames"], "Updating graph export frames")
+            def frame_job():
+                yield journal_job([pending_item(item, "frames")], "frames")
+            requests.map(frame_job(), worker, accept, reject=reject)
 
 
 def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, interval=.02, dry_run=False,
@@ -972,14 +1062,17 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
     status_progress = _SyncProgress(progress)
     state_path = Path(state_path)
     state = _load_sync_state(state_path, board_id, namespace)
-    collections = (("shapes", plan["shapes"]), ("connectors", plan["connectors"]))
+    collections = (("shapes", plan["shapes"]), ("connectors", plan["connectors"]),
+                   ("frames", plan.get("frames", [])))
 
     def preview(current):
         _check_lineage(plan, current)
         removals = _fee_removals(plan, current)
+        frame_removals = _frame_removals(plan, current)
         report = {"dry_run": dry_run, "board_url": "https://miro.com/app/board/" + urllib.parse.quote(board_id, safe="") + "/",
                   "run_id": plan["run_id"], "namespace": namespace, "state_path": str(state_path), "max_items": max_items,
-                  "reorganize": reorganize, "fee_items_to_remove": len(removals)}
+                  "reorganize": reorganize, "fee_items_to_remove": len(removals),
+                  "frames_to_remove": len(frame_removals)}
         layout = plan.get("layout", {})
         if layout.get("algorithm"):
             report["layout_algorithm"] = layout["algorithm"]
@@ -999,7 +1092,7 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
                     raise TraceError("Miro connector logical key changed endpoints: " + item["key"])
             report["new_" + endpoint] = sum(item["key"] not in current["items"] for item in collection)
             report["mapped_" + endpoint] = len(collection) - report["new_" + endpoint]
-        report["new_items"] = report["new_shapes"] + report["new_connectors"]
+        report["new_items"] = report["new_shapes"] + report["new_connectors"] + report["new_frames"]
         report["existing_items"] = len(current["items"])
         if report["new_items"] > max_items:
             raise TraceError(f"Sync needs {report['new_items']} new items, above max-items={max_items}; reduce the trace or explicitly raise the limit")
@@ -1022,6 +1115,7 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
         state = _load_sync_state(state_path, board_id, namespace)
         report = preview(state)
         removals = _fee_removals(plan, state)
+        frame_removals = _frame_removals(plan, state)
         base = "https://api.miro.com/v2/boards/" + urllib.parse.quote(board_id, safe="")
         headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json", "Accept": "application/json"}
         quota = None
@@ -1031,7 +1125,10 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
         requests = resources.enter_context(MiroRequests(transport, interval=interval, workers=workers,
                                                          progress=status_progress, quota=quota))
         # The complete live preflight must succeed before any state or board writes.
-        remote = preflight(requests, base, headers, state, removals, progress=status_progress)
+        remote = preflight(requests, base, headers, state, {**removals, **frame_removals}, progress=status_progress)
+        live_frame_records = {key: record for key, record in state["items"].items()
+                              if record["endpoint"] == "frames" and key in remote}
+        live_frame_ids = {record["id"] for record in live_frame_records.values()}
 
         status_progress.emit("layout", 0, 1, "Checking connections and preparing the layout")
         _check_fee_removals(state, remote, removals)
@@ -1039,8 +1136,10 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
                               for key in state.get("pending_updates", {})}
         _recover_updates(state, remote)
         positions, shift_x = _placements(plan, state, remote, removals, reorganize)
+        frames = _live_frames(plan, state, remote, positions, removals)
+        live_collections = (("shapes", plan["shapes"]), ("connectors", plan["connectors"]), ("frames", frames))
         updates, conflicts, attachment_intents = [], [], {}
-        for endpoint, collection in collections:
+        for endpoint, collection in live_collections:
             for item in collection:
                 key = item["key"]
                 if key not in state["items"]:
@@ -1063,8 +1162,37 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
                     if (plan.get("connector_attachment") == "transaction_ports_v2"
                             and remote[key].get("shape") != item["body"]["shape"]):
                         patch["shape"] = item["body"]["shape"]
+                if endpoint == "frames":
+                    _bounds(remote[key], key)
+                    for group, fields in (("position", ("x", "y")), ("geometry", ("width", "height"))):
+                        if any(not math.isclose(float(remote[key][group][field]), float(item["body"][group][field]),
+                                                rel_tol=0, abs_tol=.01) for field in fields):
+                            patch[group] = copy.deepcopy(item["body"][group])
                 conflicts.extend(item_conflicts)
                 updates.append((key, patch, managed, intent))
+        affected_frame_keys = {key for key, patch, _, _ in updates
+                               if state["items"][key]["endpoint"] == "frames"
+                               and ("position" in patch or "geometry" in patch)} | set(frame_removals)
+        affected_frames = {key: record for key, record in live_frame_records.items() if key in affected_frame_keys}
+        validate_frame_children(requests, base, headers, state, remote, affected_frames)
+        affected_frame_ids = {record["id"] for record in affected_frames.values()}
+        updates_by_key = {job[0]: job for job in updates}
+        for key, record in state["items"].items():
+            if record["endpoint"] != "shapes" or key in removals:
+                continue
+            parent_id = (remote[key].get("parent") or {}).get("id")
+            job = updates_by_key.get(key)
+            if (parent_id not in live_frame_ids
+                    or (parent_id not in affected_frame_ids and not (job and "position" in job[1]))):
+                continue
+            # Detach only when this shape or its frame must move. An unchanged
+            # export region can retain attached analyst notes without blocking
+            # an otherwise empty sync. Include older run notes absent the plan.
+            x, y = positions.get(key, _bounds(remote[key], key)[:2])
+            if job is None:
+                job = (key, {}, copy.deepcopy(record["managed"]), copy.deepcopy(record["intent"]))
+                updates.append(job)
+            job[1].update({"parent": {"id": None}, "position": {"x": x, "y": y}})
         status_progress.emit("layout", 1, 1, "Checking connections and preparing the layout")
         # State changes begin only after local and remote preflight succeeds.
         report.update({"created": 0, "updated": 0, "deleted": 0, "moved": 0, "reattached": 0,
@@ -1102,9 +1230,14 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
         pending_deletions = state.setdefault("pending_deletions", {})
         for key, proof in removals.items():
             pending_deletions.setdefault(key, {"id": state["items"][key]["id"], "proof": copy.deepcopy(proof), "attempted": False})
+        pending_frame_deletions = state.setdefault("pending_frame_deletions", {})
+        for key, proof in frame_removals.items():
+            pending_frame_deletions.setdefault(key, {
+                "id": state["items"][key]["id"], "proof": copy.deepcopy(proof), "attempted": False})
         initial_sets = [(("active_run_id",), state["active_run_id"]),
                         (("pending_updates",), state["pending_updates"]),
-                        (("pending_deletions",), pending_deletions)]
+                        (("pending_deletions",), pending_deletions),
+                        (("pending_frame_deletions",), pending_frame_deletions)]
         if changes or attachment_changes or connector_shapes:
             initial_sets.append((("layout_history",), state["layout_history"]))
         # _recover_updates refreshed these records from live evidence. Save those
@@ -1172,13 +1305,44 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
                 journal.commit(sets=[(("items", key), record)], deletes=[("pending_updates", key)])
             checked += 1
             status_progress.emit("updating", checked, len(updates), "Applying changes while preserving manual edits")
-        requests.map(updates, update_item, accept_update)
-        _create_items(plan, state, journal, requests, base, headers, positions, mapped_ids,
+        # Native frame children must be detached and acknowledged before a
+        # frame moves. Parallelizing these two groups together can move a child
+        # twice even though every individual PATCH reports success.
+        requests.map((job for job in updates if state["items"][job[0]]["endpoint"] != "frames"),
+                     update_item, accept_update)
+        changing_frames = {job[0]: state["items"][job[0]] for job in updates
+                           if state["items"][job[0]]["endpoint"] == "frames"
+                           and ("position" in job[1] or "geometry" in job[1])}
+        check_empty_frames(requests, base, headers, changing_frames)
+        if changing_frames:
+            status_progress.emit("framing", 0, len(changing_frames), "Updating graph export frames")
+        requests.map((job for job in updates if state["items"][job[0]]["endpoint"] == "frames"),
+                     update_item, accept_update)
+        _create_items({**plan, "frames": frames}, state, journal, requests, base, headers, positions, mapped_ids,
                       report, status_progress)
+        # Obsolete component frames are removed only after the new graph and
+        # replacement export regions exist. These IDs are ours, never frames
+        # discovered by searching the board or user-created containers.
+        if frame_removals:
+            status_progress.emit("framing", 0, len(frame_removals), "Updating graph export frames")
+        for index, key in enumerate(sorted(frame_removals), 1):
+            record = state["items"][key]
+            if key in remote:
+                check_empty_frames(requests, base, headers, {key: record})
+            pending_frame_deletions[key]["attempted"] = True
+            journal.commit(sets=[(("pending_frame_deletions", key), pending_frame_deletions[key])])
+            status, _, _ = requests.request("DELETE", _remote_url(base, record), headers)
+            if not (200 <= status < 300 or status == 404):
+                raise TraceError("Miro frame DELETE returned HTTP " + str(status) + "; acknowledged progress is saved; rerun sync")
+            journal.commit(deletes=[("items", key), ("pending_frame_deletions", key)])
+            mapped_ids.remove(record["id"])
+            report["deleted"] += 1
+            status_progress.emit("framing", index, len(frame_removals), "Updating graph export frames")
         summary = state["runs"].setdefault(plan["run_id"], {"first_synced_at": now(), "plan_sha256s": []})
         if plan["sha256"] not in summary["plan_sha256s"]:
             summary["plan_sha256s"].append(plan["sha256"])
         summary.update({"last_synced_at": now(), "shapes": len(plan["shapes"]), "connectors": len(plan["connectors"]),
+                        "frames": len(frames),
                         "conflicts": conflicts, "run": copy.deepcopy(plan.get("run", {}))})
         state["latest_run_id"], state["active_run_id"] = plan["run_id"], None
         journal.commit(sets=[(("runs", plan["run_id"]), summary),
@@ -1199,6 +1363,8 @@ def _record_pending(pending, item_id, response=None):
             record["attachments"] = copy.deepcopy(pending["attachments"])
     if "fee_proof" in pending:
         record["fee_proof"] = copy.deepcopy(pending["fee_proof"])
+    if "frame_proof" in pending:
+        record["frame_proof"] = copy.deepcopy(pending["frame_proof"])
     return record
 
 
@@ -1209,7 +1375,7 @@ def publish(plan, board_id, state_path, max_items=750, token=None, transport=htt
     remote item may exist even if its response was lost. Reconcile via CLI.
     """
     validate_plan(plan)
-    count = len(plan["shapes"]) + len(plan["connectors"])
+    count = len(plan["shapes"]) + len(plan["connectors"]) + len(plan.get("frames", []))
     if count > max_items:
         raise TraceError(f"Plan has {count} items, above max-items={max_items}; select a smaller trace or explicitly raise the limit")
     token = token or os.getenv("MIRO_ACCESS_TOKEN")
@@ -1233,12 +1399,15 @@ def publish(plan, board_id, state_path, max_items=750, token=None, transport=htt
                              "; inspect the board and use miro-resolve before retrying")
         journal = resources.enter_context(SyncState(state_path, state))
         base = "https://api.miro.com/v2/boards/" + urllib.parse.quote(board_id, safe="")
-        for endpoint, collection in (("shapes", plan["shapes"]), ("connectors", plan["connectors"])):
+        for endpoint, collection in (("shapes", plan["shapes"]), ("connectors", plan["connectors"]),
+                                     ("frames", plan.get("frames", []))):
             for item in collection:
                 key = item["key"]
                 if key in state["items"]:
                     continue
                 body = dict(item["body"])
+                if endpoint == "shapes" and "activity_frames" in plan:
+                    body["parent"] = {"id": None}
                 if endpoint == "connectors":
                     body.update(_connection_body(item, state["items"][item["source"]], state["items"][item["target"]]))
                 for attempt in range(4):

@@ -3,6 +3,7 @@ import json
 import tempfile
 import time
 import unittest
+from urllib.parse import parse_qs, urlsplit
 from pathlib import Path
 from unittest.mock import patch
 
@@ -53,6 +54,10 @@ class FakeMiro:
         payload = json.loads(body) if body is not None else None
         self.calls.append((method, url, copy.deepcopy(payload)))
         parts = url.split("/")
+        if method == "GET" and urlsplit(url).path.endswith("/items"):
+            parent = parse_qs(urlsplit(url).query).get("parent_item_id", [None])[0]
+            children = [item for item in self.items.values() if (item.get("parent") or {}).get("id") == parent]
+            return 200, {}, canonical({"data": children, "size": len(children), "limit": 50})
         if method == "POST":
             batch = payload if parts[-2:] == ["items", "bulk"] else [payload]
             results = []
@@ -61,8 +66,8 @@ class FakeMiro:
                 item_id = "remote-" + str(self.counter)
                 result = copy.deepcopy(entry)
                 result["id"] = item_id
-                result["type"] = "shape" if parts[-1] in ("shapes", "bulk") else "connector"
-                if self.normalize and "data" in result:
+                result["type"] = "shape" if parts[-1] in ("shapes", "bulk") else ("frame" if parts[-1] == "frames" else "connector")
+                if self.normalize and "content" in result.get("data", {}):
                     result["data"]["content"] = result["data"]["content"].replace("<br>", "<br />")
                 if self.normalize and "fontSize" in result.get("style", {}):
                     result["style"]["fontSize"] = float(result["style"]["fontSize"])
@@ -77,6 +82,9 @@ class FakeMiro:
             return 404, {}, b"{}"
         if method == "GET":
             return 200, {}, canonical(self.items[item_id])
+        if method == "DELETE":
+            del self.items[item_id]
+            return 204, {}, b""
         if method == "PATCH":
             for key, value in payload.items():
                 if isinstance(value, dict):

@@ -82,7 +82,7 @@ class ElkWorkflowTests(unittest.TestCase):
             output = layout_preview_run(path, progress=events.append)
             report = sync_run(path, saved["run_id"], dry_run=True)
         graph = read_json(output["graph"])
-        self.assertEqual(graph["presentation_version"], 6)
+        self.assertEqual(graph["presentation_version"], 7)
         self.assertEqual(graph["graph_options"]["connector_style"], "elbowed")
         self.assertEqual(report["layout_metrics"], graph["layout"]["metrics"])
         self.assertEqual(report["connector_style"], "elbowed")

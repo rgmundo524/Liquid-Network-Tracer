@@ -15,6 +15,7 @@ from liquid_tracer.common import TraceError, canonical, digest, read_json, save_
 from liquid_tracer.export import build_graph
 from liquid_tracer.elk_layout import optimize_graph
 from liquid_tracer.miro import make_plan
+from liquid_tracer.miro_frames import activity_frames
 from liquid_tracer.miro import sync as real_sync
 from tests.fixtures import A, B, X, fixture
 from tests.test_miro_sync import FakeMiro
@@ -97,7 +98,7 @@ class PresentationRefreshTests(unittest.TestCase):
             result = sync_run(self.case, "latest", "SYNTHETIC=", max_new_items=0)
             self.assertEqual(result["created"], 0)
             self.assertGreater(result["updated"], 0)
-            self.assertEqual(result["presentation_version"], 6)
+            self.assertEqual(result["presentation_version"], 7)
             self.assertTrue(result["presentation_refreshed"])
             self.assertEqual(result["plan_sha256"], self.current_plan["sha256"])
             self.assertEqual(result["archived_plan_sha256"], self.old_plan["sha256"])
@@ -121,8 +122,8 @@ class PresentationRefreshTests(unittest.TestCase):
         self.assertEqual((repeated["created"], repeated["updated"]), (0, 0))
         self.assertEqual(len(self.remote.writes), writes)
         self.assertEqual(len([call for call in self.remote.calls if call[0] == "POST"]), posts)
-        for method, _, body in self.remote.writes:
-            if method == "PATCH":
+        for method, url, body in self.remote.writes:
+            if method == "PATCH" and "/frames/" not in url:
                 self.assertFalse({"position", "geometry", "startItem", "endItem"} & body.keys())
         self.assertEqual(self.snapshot(self.run), self.archive)
         self.assertEqual(read_json(self.case / "case.json")["latest_run"], latest)
@@ -206,8 +207,9 @@ class PresentationRefreshTests(unittest.TestCase):
         edge["source"] = next(node["id"] for node in moved["nodes"]
                               if node["id"] not in (edge["source"], edge["target"]))
         for changed in (added, changed_type, moved):
+            changed["activity_frames"] = activity_frames(changed)
             with self.subTest(change=changed is added), patch("liquid_tracer.cli.build_graph", return_value=changed), \
-                    patch("liquid_tracer.cli.sync") as sync, self.assertRaisesRegex(TraceError, "topology"):
+                    patch("liquid_tracer.cli.sync") as sync, self.assertRaisesRegex(TraceError, "topology|frame partition"):
                 sync_run(self.case, "latest", "SYNTHETIC=")
             sync.assert_not_called()
         self.assertEqual(self.snapshot(self.run), self.archive)

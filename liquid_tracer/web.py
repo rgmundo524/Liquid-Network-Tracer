@@ -461,7 +461,8 @@ class LocalServer(ThreadingHTTPServer):
         # Never return absolute local paths or raw trace errors to a page. Only
         # known successful report fields and controlled artifact URLs cross here.
         fields = {"run_id", "status", "stop_reason", "include_fees", "board_id", "board_url",
-                  "created", "reused", "name", "visibility", "new_shapes", "new_connectors",
+                  "created", "reused", "name", "visibility", "new_shapes", "new_connectors", "new_frames",
+                  "mapped_frames", "frames_to_remove",
                   "mapped_shapes", "mapped_connectors", "new_items", "updated", "deleted", "moved",
                   "reattached", "dry_run", "reorganize", "presentation_refreshed", "fee_items_to_remove",
                   "existing_items", "items", "runs", "max_items", "remote_preflight_required"}

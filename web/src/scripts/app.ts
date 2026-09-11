@@ -82,6 +82,8 @@ type Result = RenderingMetadata & {
   new_items?: number;
   new_shapes?: number;
   new_connectors?: number;
+  new_frames?: number;
+  frames_to_remove?: number;
   fee_items_to_remove?: number;
   conflicts_count?: number;
   board_url?: string;
@@ -532,6 +534,8 @@ function resultBanner(action: string, result: Result): string {
         ["New items", result.new_items],
         ["New shapes", result.new_shapes],
         ["New connectors", result.new_connectors],
+        ["New frames", result.new_frames],
+        ["Frames to remove", result.frames_to_remove],
         ["Fee items to remove", result.fee_items_to_remove],
       ]
     : [];

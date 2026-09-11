@@ -8,8 +8,9 @@ from .common import (LBTC, TraceError, canonical, digest, match_labels, output_k
                      public_fields, save_json)
 from .trace import TERMINAL
 from .layout import arrange, fee_date, transaction_ranks
+from .miro_frames import activity_frames
 
-PRESENTATION_VERSION = 5
+PRESENTATION_VERSION = 7
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -172,7 +173,7 @@ def build_graph(state, merge_addresses=False, include_fees=False):
     layout = arrange(nodes, edges, state["transactions"], fee_items)
     layout["cycle_groups"] = cycle_groups
     mode = "merged" if merge_addresses else "outpoint_occurrences"
-    return {"schema_version": 2, "presentation_version": PRESENTATION_VERSION,
+    graph = {"schema_version": 2, "presentation_version": PRESENTATION_VERSION,
             "run_id": state["run_id"], "simulated": simulated,
             "namespace": {"case_id": state["case_id"], "source": source, "address_mode": mode},
             "run": {key: state.get(key) for key in ("run_id", "parent_run", "ancestor_runs", "seeds", "started_at", "finished_at",
@@ -186,6 +187,8 @@ def build_graph(state, merge_addresses=False, include_fees=False):
                       "?? marks amounts or assets not available from public data. "
                       "Repeated addresses are separate outpoint occurrences by default.",
             "nodes": list(nodes.values()), "edges": edges}
+    graph["activity_frames"] = activity_frames(graph)
+    return graph
 
 
 def write_csv(path, rows, fields):

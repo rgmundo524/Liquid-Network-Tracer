@@ -46,6 +46,9 @@ def request_credits(method, url, body=None):
         return 100 * len(items)
     if method == "GET":
         return 100 if path.endswith(("/items", "/connectors")) else 50
+    # Frame deletion is Level 3; shape/connector edits use Level 2.
+    if method == "DELETE" and path.rsplit("/", 2)[-2:-1] == ["frames"]:
+        return 500
     return 100
 
 

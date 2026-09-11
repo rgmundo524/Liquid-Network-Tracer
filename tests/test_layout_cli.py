@@ -125,7 +125,7 @@ class LayoutCliTests(unittest.TestCase):
             report = sync_run(self.case, "latest", "SYNTHETIC=", dry_run=True)
         plan = sync.call_args.args[0]
         self.assertTrue(report["include_fees"])
-        self.assertEqual(report["presentation_version"], 6)
+        self.assertEqual(report["presentation_version"], 7)
         self.assertFalse(report["reorganize"])
         self.assertNotIn("reorganize", sync.call_args.kwargs)
         shape_ids = {item["key"] for item in plan["shapes"]}

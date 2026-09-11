@@ -178,6 +178,9 @@ class MiroQuotaTests(unittest.TestCase):
             self.assertEqual(request_credits("GET", "https://api.miro.com/v2/boards/id/" + path), expected)
         self.assertEqual(request_credits("POST", "https://api.miro.com/v2/boards/id/items/bulk", b'[{}, {}, {}]'), 300)
         self.assertEqual(request_credits("PATCH", "url"), 100)
+        self.assertEqual(request_credits("DELETE", "https://api.miro.com/v2/boards/id/frames/frame-id"), 500)
+        self.assertEqual(request_credits("PATCH", "https://api.miro.com/v2/boards/id/frames/frame-id"), 100)
+        self.assertEqual(request_credits("GET", "https://api.miro.com/v2/boards/id/frames/frame-id"), 50)
         for body in (b"{}", b"[]", b"broken", b"[" + b",".join([b"{}"] * 21) + b"]"):
             with self.assertRaises(MiroRequestNotSent):
                 request_credits("POST", "https://api.miro.com/v2/boards/id/items/bulk", body)
