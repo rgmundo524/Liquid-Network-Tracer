@@ -15,6 +15,7 @@ MESSAGES = {
     "updating": "Updating mapped Miro items",
     "removing": "Removing obsolete generated items",
     "framing": "Updating graph export frames",
+    "recovery": "Checking the confirmed-empty Miro board",
     "creating": "Adding new Miro items",
     "waiting": "Waiting before retrying a Miro request",
     "complete": "Miro synchronization completed",

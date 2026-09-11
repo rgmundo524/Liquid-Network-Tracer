@@ -443,7 +443,26 @@ liquid-live trace \
 
 The run and checksums are saved before Miro updates. If sync fails, its run ID and retry details are printed; use `miro-sync` on that saved run without spending more explorer requests. A partial publication retains acknowledged progress.
 
-If a POST times out or returns a server error, its outcome can be uncertain. The publisher records the pending request and pauses to avoid duplicates. Inspect the board and pending state, then reconcile using the state path printed by the preview or sync report:
+If ELK finishes and Miro fails at **Adding new Miro items** with HTTP 500, layout succeeded and the failure occurred during publication. The error alone does not identify the server's underlying cause or demonstrate a graph-size limit. [Miro supports up to 20 items per bulk request](https://developers.miro.com/reference/create-items), which is the default batch size. Creation errors now include the endpoint, item count, and recognized error codes or request IDs when available, without printing submitted board content or raw server messages.
+
+A POST timeout or server error can leave its outcome uncertain. The publisher preserves the pending request to avoid duplicates. Subsequent sync and preview attempts check this state **before running ELK**. Keep the saved investigation and its Miro mapping; deleting the mapping would discard duplicate-prevention information.
+
+For a failed **initial publication**, when no items have been acknowledged and the linked board is empty:
+
+1. Open the linked Miro board after the failed request has finished and inspect it.
+2. In the local web UI, choose **Recover empty-board sync**. Check the confirmation box only if you verified that board is empty.
+3. Recovery checks both the board items and connectors through Miro. If either contains anything, or the response is incomplete, it leaves the pending batch unchanged. A successful check clears that initial pending batch locally and records your confirmation and the API check in the recovery history. It creates or deletes no board objects.
+4. Select the originally failed saved run and choose **Sync to Miro**. Recovery does not start a sync automatically or trace again.
+
+The equivalent terminal command uses the existing SecretSpec/Proton Pass setup:
+
+```bash
+liquid-live miro-recover --case cases/YOUR_CASE_DIRECTORY --confirm-empty
+```
+
+Empty-board recovery switches that board's saved `shape_batch_size` to `1`, so retry uses individual shape requests instead of the bulk endpoint. This is slower but can avoid a bulk-specific server failure. Other boards keep normal batching. HTTP 500 never automatically triggers this switch or repeats a creation request. An empty API read alone cannot prove an earlier request will never finish later, which is why recovery requires your explicit inspection and confirmation. If a request fails again, its endpoint and safe diagnostic identifiers help distinguish the failure.
+
+When objects exist, or the failed request belongs to an existing publication, use per-item reconciliation. Inspect the board and pending state, then reconcile using the state path printed by the preview or sync report:
 
 ```bash
 python3 -m liquid_tracer miro-resolve --state PATH_TO_STATE.json --item-id EXISTING_MIRO_ITEM_ID
@@ -451,7 +470,7 @@ python3 -m liquid_tracer miro-resolve --state PATH_TO_STATE.json --item-id EXIST
 python3 -m liquid_tracer miro-resolve --state PATH_TO_STATE.json --absent
 ```
 
-When several creations have uncertain outcomes, the error lists their logical keys. Reconcile each one with `--key`, matching it to the correct object on the board:
+When several creations have uncertain outcomes, the error shows their count and a few example keys. The complete logical keys are retained under `pending_creations` in the sync state. Reconcile each one with `--key`, matching it to the correct object on the board:
 
 ```bash
 python3 -m liquid_tracer miro-resolve --state PATH_TO_STATE.json --key 'LOGICAL_ITEM_KEY' --item-id EXISTING_MIRO_ITEM_ID

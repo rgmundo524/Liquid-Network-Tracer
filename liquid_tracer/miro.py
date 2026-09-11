@@ -15,6 +15,7 @@ from .api import http
 from .common import TraceError, canonical, digest, now
 from .export import COLORS, edge_color, legend_lines
 from .miro_http import MiroHTTP
+from .miro_errors import creation_error
 from .miro_requests import MiroRequestNotSent, MiroRequests
 from .miro_state import SyncState, load_state
 from .miro_reads import check_empty_frames, preflight, validate_frame_children
@@ -273,7 +274,7 @@ def _namespace(plan):
     return namespace
 
 
-def _load_sync_state(path, board_id, namespace):
+def _load_sync_state(path, board_id, namespace, *, allow_pending=False):
     state = load_state(path, {
         "schema_version": 2, "board_id": board_id, "namespace": copy.deepcopy(namespace),
         "items": {}, "runs": {}, "pending": None, "pending_creations": {}})
@@ -283,6 +284,9 @@ def _load_sync_state(path, board_id, namespace):
         raise TraceError("Miro state belongs to a different board, case, API source, or address mode; use the matching export and state")
     if not isinstance(state.get("items"), dict) or not isinstance(state.get("runs"), dict):
         raise TraceError("Malformed Miro sync state; restore its last intact version")
+    batch_size = state.get("shape_batch_size", 20)
+    if type(batch_size) is not int or not 1 <= batch_size <= 20:
+        raise TraceError("Malformed Miro shape batch size; restore its last intact version")
     ids = []
     for key, record in state["items"].items():
         if (not isinstance(key, str) or not isinstance(record, dict)
@@ -315,11 +319,18 @@ def _load_sync_state(path, board_id, namespace):
         if entry["endpoint"] == "frames" and entry.get("frame_proof") != _frame_proof(key):
             raise TraceError("Malformed pending Miro frame; restore its last intact version")
     unresolved = list(pending_creations)
-    if state.get("pending"):
-        unresolved.append(str(state["pending"].get("key")))
-    if unresolved:
-        raise TraceError("Prior Miro POST outcome is uncertain for " + ", ".join(unresolved) +
-                         "; inspect the board and use miro-resolve --key for each item before retrying")
+    legacy_pending = state.get("pending")
+    if legacy_pending is not None:
+        if (not isinstance(legacy_pending, dict) or not isinstance(legacy_pending.get("key"), str)
+                or not legacy_pending["key"]):
+            raise TraceError("Malformed pending Miro item; restore its last intact version")
+        unresolved.append(legacy_pending["key"])
+    if unresolved and not allow_pending:
+        examples = ", ".join(unresolved[:3]) + (", …" if len(unresolved) > 3 else "")
+        raise TraceError(f"Prior Miro POST outcome is uncertain for {len(unresolved)} item(s): " + examples +
+                         "; inspect the board before retrying. For an initial publication on a confirmed empty board, "
+                         "use Recover empty-board sync or liquid-live miro-recover --case CASE_DIRECTORY --confirm-empty. "
+                         "If objects exist, keep the state and use miro-resolve --key for each inspected item.")
     return state
 
 
@@ -860,11 +871,13 @@ def _same_shape_position(first, second):
         return False
 
 
-def _shape_batches(shapes):
+def _shape_batches(shapes, batch_size=20):
     """Do not put indistinguishable shapes in the same bulk request."""
+    if type(batch_size) is not int or not 1 <= batch_size <= 20:
+        raise TraceError("Miro shape batch size must be an integer between 1 and 20")
     batch = []
     for pending in shapes:
-        if len(batch) == 20 or any(_same_shape_position(pending["body"], other["body"])
+        if len(batch) == batch_size or any(_same_shape_position(pending["body"], other["body"])
                                    for other in batch):
             yield batch
             batch = []
@@ -962,14 +975,15 @@ def _create_items(plan, state, journal, requests, base, headers, positions, mapp
             clear(job)
 
     def accept(job, outcome):
-        (status, _, raw), known_error = outcome
+        (status, response_headers, raw), known_error = outcome
         if not 200 <= status < 300:
             rejected = 400 <= status < 500 and status != 408
             if rejected:
                 clear(job)
             if known_error is not None:
                 raise known_error
-            raise TraceError("Miro POST returned HTTP " + str(status) +
+            raise TraceError(creation_error(status, job["endpoint"], len(job["items"]),
+                                            response_headers, raw, request_headers=headers) +
                              ("; fix the error and rerun sync" if rejected
                               else "; reconcile the pending items before retrying"))
         batch = job["items"]
@@ -998,7 +1012,7 @@ def _create_items(plan, state, journal, requests, base, headers, positions, mapp
     shape_items = (pending_item(item, "shapes") for item in plan["shapes"] if item["key"] not in state["items"])
     # Serial bulk requests already remove almost all shape round trips. Keeping
     # one outstanding bulk makes an uncertain response straightforward to inspect.
-    for batch in _shape_batches(shape_items):
+    for batch in _shape_batches(shape_items, state.get("shape_batch_size", 20)):
         def shape_job():
             yield journal_job(batch, "items/bulk" if len(batch) > 1 else "shapes")
         # The one-job worker batch also distinguishes cancellation while waiting
@@ -1440,7 +1454,9 @@ def publish(plan, board_id, state_path, max_items=750, token=None, transport=htt
                             raise TraceError("Miro rate limited; rerun this command later")
                         time.sleep(delay)
                         continue
-                    raise TraceError("Miro POST returned HTTP " + str(status) + ("; reconcile pending item" if status >= 500 else ""))
+                    raise TraceError(creation_error(status, endpoint, 1, headers, raw,
+                                                     request_headers={"Authorization": "Bearer " + token}) +
+                                     ("; reconcile pending item" if status >= 500 or status == 408 else ""))
                 time.sleep(max(0., interval))
         return {"board_url": "https://miro.com/app/board/" + urllib.parse.quote(board_id, safe="") + "/",
                 "items": len(state["items"]), "state_path": str(state_path)}

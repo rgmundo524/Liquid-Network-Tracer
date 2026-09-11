@@ -220,8 +220,11 @@ class LocalServer(ThreadingHTTPServer):
         if summary["latest_run"] and "latest" not in summary:
             summary["status"] = "Saved run unavailable"
         if detail:
+            from .cli import miro_recovery_status
+
             summary["runs"] = sorted(runs, key=lambda run: (run.get("created_at") or "", run["id"]), reverse=True)
             summary["artifacts"] = self.saved_artifacts(case, metadata, {run["id"] for run in runs})
+            summary["miro_recovery"] = miro_recovery_status(case)
         return summary
 
     def saved_artifacts(self, case, metadata, runs):
@@ -414,7 +417,8 @@ class LocalServer(ThreadingHTTPServer):
                 value = self.public_result(report["result"], action, case, txids)
             with self.job_lock:
                 self.jobs[identity].update(status="succeeded", cancellable=False,
-                                          message="Action completed.", result=value)
+                    message=("Recovery complete. Choose Sync to Miro to resume." if action == "miro-recover"
+                             else "Action completed."), result=value)
         except JobCancelled:
             with self.job_lock:
                 self.jobs[identity].update(status="canceled", cancellable=False,
@@ -468,6 +472,15 @@ class LocalServer(ThreadingHTTPServer):
                   "existing_items", "items", "runs", "max_items", "remote_preflight_required"}
         value = {key: item for key, item in result.items()
                  if key in fields and (item is None or isinstance(item, (str, int, float, bool)))}
+        if action == "miro-recover":
+            value.pop("run_id", None)
+        if action == "miro-recover" and result.get("recovery") == "confirmed_empty_board":
+            recovered = result.get("recovered_items")
+            if (type(recovered) is int and 1 <= recovered <= 20
+                    and type(result.get("shape_batch_size")) is int and result["shape_batch_size"] == 1):
+                value.update(recovery="confirmed_empty_board", recovered_items=recovered, shape_batch_size=1)
+                if isinstance(result.get("run_id"), str) and RUN_ID.fullmatch(result["run_id"]):
+                    value["run_id"] = result["run_id"]
         if isinstance(result.get("conflicts"), (list, dict)):
             value["conflicts_count"] = len(result["conflicts"])
         if isinstance(result.get("stats"), dict):
@@ -500,7 +513,7 @@ class LocalServer(ThreadingHTTPServer):
 
     def action(self, case, metadata, body):
         from .boards import board_options, default_board_name
-        from .cli import resolve_latest, run_path, verify_export
+        from .cli import miro_recovery_status, resolve_latest, run_path, verify_export
 
         action = body.get("action")
         settings = validate_settings(body.get("settings", metadata.get("run_defaults", {})))
@@ -517,6 +530,15 @@ class LocalServer(ThreadingHTTPServer):
             if metadata.get("miro_board"):
                 raise RequestError("A Miro board is already linked. Use Sync to Miro.")
             arguments = ["miro-create-board", "--case", str(case), "--name", name, "--visibility", "private"]
+            live = True
+        elif action == "miro-recover":
+            if body.get("confirm_empty") is not True:
+                raise RequestError("Inspect the linked Miro board and confirm that it is empty first.")
+            if not metadata.get("miro_board"):
+                raise RequestError("Create or link a Miro board in investigation settings first.")
+            if not miro_recovery_status(case)["can_confirm_empty"]:
+                raise RequestError("Empty-board recovery is unavailable. Review the pending Miro items before retrying.")
+            arguments = ["miro-recover", "--case", str(case), "--confirm-empty"]
             live = True
         elif action in ("mermaid", "csv", "layout", "miro-preview", "miro-sync", "miro-organize"):
             selected = resolve_latest(case, selected)

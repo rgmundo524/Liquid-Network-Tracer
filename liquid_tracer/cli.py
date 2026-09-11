@@ -14,7 +14,7 @@ from .common import HEX64, TraceError, digest, load_labels, output_kind, parse_o
 from .export import build_graph, export_run
 from .investigations import read_case, update_case
 from .inspection import inspect_transaction, inspect_transactions, parse_transaction_hashes
-from .miro import _namespace, make_plan, publish, resolve, sync, validate_plan
+from .miro import _load_sync_state, _namespace, make_plan, publish, resolve, sync, validate_plan
 from .progress import ProgressReporter
 from .store import Store
 from .trace import new_state, trace
@@ -145,6 +145,10 @@ def parser():
     group = reconcile.add_mutually_exclusive_group(required=True)
     group.add_argument("--item-id")
     group.add_argument("--absent", action="store_true", help="You verified that the pending item is absent")
+    recover = commands.add_parser("miro-recover", help="Recover an uncertain initial publication after inspecting an empty board")
+    recover.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    recover.add_argument("--confirm-empty", action="store_true", required=True,
+                         help="You inspected the linked board after the failed sync and confirmed it is empty; verify by API before clearing pending items")
     return root
 
 
@@ -331,6 +335,62 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
     return refreshed
 
 
+def miro_recovery_status(case):
+    """Read-only status for the local UI, without exposing journal keys or paths."""
+    from .miro_recovery import initial_pending_batch
+    from .miro_state import load_state
+
+    result = {"pending_count": 0, "can_confirm_empty": False}
+    try:
+        case = Path(case)
+        metadata = read_case(case)
+        if not metadata.get("miro_board"):
+            return result
+        target = board_id(metadata["miro_board"])
+        path = case / "miro" / (digest(target.encode())[:24] + ".json")
+        if not path.exists():
+            return result
+        state = load_state(path)
+        namespace = _namespace(state)
+        if namespace["case_id"] != metadata["case_id"]:
+            raise TraceError("Miro mapping belongs to another investigation")
+        state = _load_sync_state(path, target, namespace, allow_pending=True)
+        result["pending_count"] = len(state.get("pending_creations", {})) + bool(state.get("pending"))
+        if result["pending_count"]:
+            try:
+                initial_pending_batch(state)
+                result["can_confirm_empty"] = True
+            except TraceError:
+                pass
+        return result
+    except (TraceError, OSError, ValueError, TypeError, KeyError, AttributeError):
+        return {**result, "can_confirm_empty": False, "unavailable": True}
+
+
+def recover_miro_run(case, confirmed_empty=False, progress=None):
+    """Recover only the linked board, using the saved investigation namespace."""
+    from .miro_recovery import recover_empty_board
+
+    if confirmed_empty is not True:
+        raise TraceError("Inspect the linked Miro board after the failed sync and confirm it is empty first")
+    case = Path(case)
+    metadata = read_case(case)
+    if not metadata.get("miro_board"):
+        raise TraceError("This investigation has no linked Miro board to recover")
+    target = board_id(metadata["miro_board"])
+    run_id = resolve_latest(case, "latest")
+    archive = run_path(case, run_id)
+    verify_export(archive)
+    plan = read_json(archive / "miro-plan.json")
+    validate_plan(plan)
+    namespace = _namespace(plan)
+    if plan["run_id"] != run_id or namespace["case_id"] != metadata["case_id"]:
+        raise TraceError("Saved plan does not match this investigation")
+    path = case / "miro" / (digest(target.encode())[:24] + ".json")
+    report = recover_empty_board(path, target, namespace, confirmed_empty=True, progress=progress)
+    return {**report, "board_url": "https://miro.com/app/board/" + quote(target, safe="") + "/"}
+
+
 def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_path=None,
              include_fees=None, reorganize=False, progress=None, connector_style=None):
     if plan_path is not None and (include_fees is not None or connector_style is not None):
@@ -347,13 +407,16 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
     if namespace["case_id"] != metadata["case_id"]:
         raise TraceError("Saved plan has no matching case identity; regenerate it with export or create a continuation")
     archived_plan_sha256 = plan["sha256"]
-    if plan_path is None:
-        plan = refresh_presentation(plan, default_plan.parent / "trace.json", include_fee_flows(metadata, include_fees),
-                                    connector_appearance(metadata, connector_style), progress=progress)
     if not isinstance(max_new_items, int) or max_new_items < 0:
         raise TraceError("--max-new-items must be a nonnegative integer")
     target = resolve_board(metadata, board)
     state_path = case / "miro" / (digest(target.encode())[:24] + ".json")
+    # Pending creation outcomes block both preview and publication. Check the
+    # durable mapping before running ELK; sync repeats this under its own lock.
+    _load_sync_state(state_path, target, namespace)
+    if plan_path is None:
+        plan = refresh_presentation(plan, default_plan.parent / "trace.json", include_fee_flows(metadata, include_fees),
+                                    connector_appearance(metadata, connector_style), progress=progress)
     # Validate the mapping, lineage, and item budget locally before saving a selection.
     options = {"reorganize": True} if reorganize else {}
     if progress is not None:
@@ -623,6 +686,8 @@ def main(argv=None, *, progress=None):
         elif args.command == "miro-resolve":
             resolve(args.state, args.item_id, args.absent, key=args.key)
             print("Pending publication reconciled.")
+        elif args.command == "miro-recover":
+            print(json.dumps(recover_miro_run(args.case, args.confirm_empty, progress=progress), indent=2))
         return 0
     except KeyboardInterrupt:
         # Renderer and API cleanup unwinds before reaching this boundary.
