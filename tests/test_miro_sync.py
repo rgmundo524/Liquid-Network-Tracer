@@ -1,6 +1,7 @@
 import copy
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -160,14 +161,21 @@ class MiroSyncTests(unittest.TestCase):
         self.assertEqual(save.call_count, 2)
         self.assertIsNone(read_json(self.state_path)["active_run_id"])
 
-    def test_preflight_reads_use_shorter_pacing_and_writes_keep_original_interval(self):
+    def test_default_pacing_is_shared_across_workers_and_reads_have_shorter_gaps(self):
         self.sync(make_plan(graph()))
-        with patch("liquid_tracer.miro.time.sleep") as sleep:
-            sync(make_plan(graph("two", True)), "board=", self.state_path,
-                 token="test-token", transport=self.remote)
-        delays = [call.args[0] for call in sleep.call_args_list]
-        self.assertEqual(delays[:7], [.05] * 7)
-        self.assertEqual(delays[7:], [.4] * 5)
+        starts = []
+
+        def transport(method, url, *args):
+            starts.append((method, time.monotonic()))
+            return self.remote(method, url, *args)
+
+        sync(make_plan(graph("two", True)), "board=", self.state_path,
+             token="test-token", transport=transport, workers=4)
+        self.assertEqual([method for method, _ in starts], ["GET"] * 7 + ["POST"] * 5)
+        # Request starts share one gate: four workers do not multiply the quota.
+        for (method, before), (_, after) in zip(starts, starts[1:]):
+            minimum_gap = .05 if method == "GET" else .1
+            self.assertGreaterEqual(after - before, minimum_gap * .9)
 
     def test_rate_limited_preflight_reports_wait_and_then_resumes_same_count(self):
         plan = make_plan(graph())
@@ -179,19 +187,18 @@ class MiroSyncTests(unittest.TestCase):
             nonlocal rejected
             if method == "GET" and not rejected:
                 rejected = True
-                return 429, {"Retry-After": "3"}, b"{}"
+                return 429, {"Retry-After": "1"}, b"{}"
             return remote(method, url, *args)
 
-        with patch("liquid_tracer.miro.time.sleep") as sleep:
-            report = sync(plan, "board=", self.state_path, token="test-token",
-                          transport=transport, interval=0, progress=events.append)
+        report = sync(plan, "board=", self.state_path, token="test-token",
+                      transport=transport, interval=0, workers=1, progress=events.append)
         waiting = next(index for index, event in enumerate(events) if event["phase"] == "waiting")
-        self.assertEqual(events[waiting]["retry_after"], 3)
+        self.assertGreater(events[waiting]["retry_after"], 0)
+        self.assertLessEqual(events[waiting]["retry_after"], 1)
         self.assertEqual(events[waiting]["reason"], "rate_limit")
         self.assertEqual((events[waiting]["completed"], events[waiting]["total"]), (0, 7))
         self.assertIn("rate limit", events[waiting]["message"])
         self.assertEqual(events[waiting + 1], events[waiting - 1])
-        self.assertIn(3, [call.args[0] for call in sleep.call_args_list])
         self.assertEqual((report["created"], report["updated"]), (0, 0))
 
     def test_rate_limited_post_reports_wait_without_duplicate_creation(self):
@@ -205,9 +212,8 @@ class MiroSyncTests(unittest.TestCase):
                 return 429, {"Retry-After": "1"}, b"{}"
             return remote(method, url, *args)
 
-        with patch("liquid_tracer.miro.time.sleep"):
-            report = sync(make_plan(graph()), "board=", self.state_path, token="test-token",
-                          transport=transport, interval=0, progress=events.append)
+        report = sync(make_plan(graph()), "board=", self.state_path, token="test-token",
+                      transport=transport, interval=0, workers=1, progress=events.append)
         waiting = [event for event in events if event["phase"] == "waiting"]
         self.assertEqual(len(waiting), 1)
         self.assertEqual((waiting[0]["completed"], waiting[0]["total"]), (0, 7))
@@ -228,9 +234,8 @@ class MiroSyncTests(unittest.TestCase):
                 return 503, {}, b"{}"
             return remote(method, url, *args)
 
-        with patch("liquid_tracer.miro.time.sleep"):
-            sync(make_plan(graph("two", True)), "board=", self.state_path, token="test-token",
-                 transport=transport, interval=0, progress=events.append)
+        sync(make_plan(graph("two", True)), "board=", self.state_path, token="test-token",
+             transport=transport, interval=0, workers=1, progress=events.append)
         waiting = [event for event in events if event["phase"] == "waiting"]
         self.assertEqual(len(waiting), 1)
         self.assertIn("retrying a Miro read", waiting[0]["message"])

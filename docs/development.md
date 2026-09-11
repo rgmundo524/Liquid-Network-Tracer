@@ -106,7 +106,9 @@ One job is active per server at a time. The browser polls its status while work 
 
 Miro sync emits optional phase/count callbacks. The CLI writes throttled progress to stderr, keeping stdout as a single JSON result. The web worker also writes an atomic, mode-0600 progress file in its private temporary job directory; the server polls it while the child runs. Only validated phases, counts, retry reasons, and bounded retry delays reach the browser. Provider output, remote item content, exceptions, and credential values are never used as progress messages. Reporting failures cannot interrupt durable Miro mapping writes. Progress files are disposable, not investigation evidence.
 
-Repeat sync retains the complete remote preflight before mutations. Default reads are paced at 0.05 seconds and writes at 0.4 seconds; API latency and retries add time. HTTP 429 waits and retryable read errors appear explicitly in progress. Unchanged mapped items avoid redundant per-item fsync calls; every acknowledged mutation still saves its mapping before proceeding. This improves repeat-run responsiveness without assuming unchanged remote content or automatically replaying uncertain POSTs.
+Repeat sync retains the complete remote preflight before mutations. Up to four requests overlap while one shared gate spaces request starts: 0.05 seconds for reads and 0.1 seconds for writes by default. This overlaps network latency without multiplying the request allowance per worker. Direct Miro connections are reused; environments using an HTTP proxy keep the existing proxy-aware transport. HTTP 429 waits and retryable read errors appear explicitly in progress, and workers share rate-limit cooldowns. Other Liquid Trace instances can still consume the same Miro user/app allowance.
+
+Existing-item reads and edits can run concurrently. Creation and fee deletion stay serial, with their existing recovery rules. Before edits start, the intended updates are saved locally; each acknowledged mutation is checkpointed by the coordinating thread. If one request fails, already-running acknowledgments are collected and saved before the error is returned. A subsequent sync reads the board again to reconcile incomplete updates. Unchanged mapped items avoid redundant per-item fsync calls. Ordinary sync continues to preserve manual positions and edits; explicit reorganization still reasserts transaction connection points, even when their returned coordinates look unchanged.
 
 Astro builds static interface assets, served locally by the Python backend alongside its restricted action API. Tracing runs through the existing CLI and keeps the same validation, budgets, case locks, and evidence export. The backend binds to `127.0.0.1`, checks Host and Origin, and protects writes with a per-server request token. It serves approved case artifacts through local download routes; the cases directory is not a static website folder. This is a desktop interface, not a shared or publicly deployed investigation service. Runtime frontend assets and fonts do not use a CDN. Miro remains online; local charts use the ELK geometry exporter or the independent Mermaid CLI renderer.
 
@@ -118,6 +120,25 @@ devenv test
 ```
 
 `devenv test` includes the Astro check/build, Python backend and terminal tests, pinned toolchain checks, real synthetic ELK layout calculations, and a genuine synthetic Mermaid render. The suite uses no real API credentials or investigation data. `liquid-test` runs just the Python suite when frontend files have not changed.
+
+## Reproduce the Miro sync benchmark
+
+Run the synthetic benchmark from the repository root:
+
+```bash
+python3 scripts/benchmark_miro_sync.py
+```
+
+It compares one and four workers using the same 12 synthetic transactions, 51 native shapes/connectors, and 150 ms of simulated latency per request. Each timed reorganization reads all 51 items before any write, moves every shape, and reapplies every connector's fixed ports: 51 GETs and 51 PATCHes. Initial board creation is excluded from timing. Actual publication-state writes and fsyncs remain included. JSON output reports elapsed and phase times, maximum simultaneous requests, and checksums proving that both worker counts produced identical board items and request payloads. The script fails if the results differ, preflight overlaps writes, or publication state is incomplete.
+
+For a different latency or an older source checkout:
+
+```bash
+python3 scripts/benchmark_miro_sync.py --workers 1 4 --latency .25
+python3 scripts/benchmark_miro_sync.py --source-root /path/to/older-checkout --workers 1
+```
+
+Omitting `--interval` uses that source version's default pacing; supplying `--interval .1` compares at the same configured write interval. The fake transport is entirely in memory and never opens a network connection or accesses credentials. Timing varies with the machine and filesystem. These measurements isolate request scheduling and state checkpointing; they do not measure ELK calculation, TLS connection reuse, Miro throttling, or the board application's rendering speed. They are a reproducible comparison, not a promise of live-board completion time.
 
 ## Local ELK layout
 

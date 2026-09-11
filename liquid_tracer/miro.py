@@ -8,11 +8,14 @@ import re
 import statistics
 import time
 import urllib.parse
+from contextlib import ExitStack
 from pathlib import Path
 
 from .api import http
 from .common import TraceError, canonical, digest, now, read_json, save_json
 from .export import COLORS, edge_color, legend_lines
+from .miro_http import MiroHTTP
+from .miro_requests import MiroRequestNotSent, MiroRequests
 
 
 def make_plan(graph):
@@ -270,10 +273,38 @@ def _load_sync_state(path, board_id, namespace):
         ids.append(record["id"])
     if len(ids) != len(set(ids)):
         raise TraceError("Miro state maps different objects to the same remote ID; repair the mapping")
+    pending_updates = state.get("pending_updates", {})
+    if not isinstance(pending_updates, dict):
+        raise TraceError("Malformed Miro update journal; restore its last intact version")
+    for key, entry in pending_updates.items():
+        record = state["items"].get(key)
+        if (not isinstance(entry, dict) or record is None
+                or entry.get("id") != record["id"] or entry.get("endpoint") != record["endpoint"]
+                or not isinstance(entry.get("patch"), dict)):
+            raise TraceError("Malformed Miro update journal; restore its last intact version")
     if state.get("pending"):
         raise TraceError("Prior Miro POST outcome is uncertain for " + str(state["pending"].get("key")) +
                          "; inspect the board and use miro-resolve before retrying")
     return state
+
+
+def _recover_updates(state, remote):
+    """Adopt observed successful fields, without replaying an uncertain PATCH.
+
+    A previous value remains eligible for the normal merge. A third value is
+    treated as a manual edit. Layout is always recalculated from live positions;
+    only an explicit reorganization may replace those positions again.
+    """
+    for key, entry in state.get("pending_updates", {}).items():
+        if key not in remote:
+            continue
+        record = state["items"][key]
+        actual = _editable(remote[key], record["endpoint"])
+        for path, desired in _fields(_editable(entry["patch"], record["endpoint"])):
+            current = _get(actual, path)
+            if _same(current, desired, path):
+                _set(record["managed"], path, current)
+                _set(record["intent"], path, desired)
 
 
 def _editable(body, endpoint):
@@ -704,8 +735,8 @@ def _placements(plan, state, remote, removed, reorganize):
     return result, 0
 
 
-def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, interval=.4, dry_run=False,
-         reorganize=False, progress=None):
+def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, interval=.1, dry_run=False,
+         reorganize=False, progress=None, workers=4):
     """Add bounded runs to one board; preserve manually edited fields and geometry.
 
     Official REST references (boards:read and boards:write):
@@ -717,10 +748,11 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
     A dry run is local-only, so it cannot predict remote conflicts or positions.
     The same state file must be reused for every run of this case and board.
     Progress receives generic phase/count dictionaries, without board content.
-    Writes keep the requested interval. Default reads use a .05 second gap:
-    these Level 1 endpoints cost 50 credits, so this default allows at most
-    1,200/minute before network latency (60,000 of 100,000 credits/minute).
-    An explicitly smaller interval also lowers the read gap; zero disables it.
+    Existing reads and PATCHes use at most four workers. Request starts share
+    one pacing gate: .05 seconds for reads and .1 for writes by default. These
+    Level 1/2 endpoints consume at most 60,000 credits/minute at those rates.
+    Creation and fee deletion remain serial. An explicit interval changes the
+    write gap and caps the read gap at .05 seconds; zero disables pacing.
     Shared per-user/app limits still require bounded 429 handling.
     https://developers.miro.com/reference/rate-limiting
     """
@@ -731,8 +763,11 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
         raise TraceError("Provide the Miro board ID, not its full URL")
     if not isinstance(max_items, int) or max_items < 0:
         raise TraceError("max-items must be a nonnegative integer (it limits new items)")
-    if not math.isfinite(interval) or interval < 0:
+    if (isinstance(interval, bool) or not isinstance(interval, (int, float))
+            or not math.isfinite(interval) or interval < 0):
         raise TraceError("Miro interval must be finite and nonnegative")
+    if type(workers) is not int or not 1 <= workers <= 4:
+        raise TraceError("Miro workers must be an integer between 1 and 4")
     if type(reorganize) is not bool:
         raise TraceError("reorganize must be a boolean")
     if progress is not None and not callable(progress):
@@ -778,7 +813,7 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
     if not token:
         raise TraceError("Set MIRO_ACCESS_TOKEN locally (boards:read and boards:write scopes)")
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    with state_path.with_suffix(".lock").open("w") as lock:
+    with state_path.with_suffix(".lock").open("w") as lock, ExitStack() as resources:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -788,19 +823,31 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
         removals = _fee_removals(plan, state)
         base = "https://api.miro.com/v2/boards/" + urllib.parse.quote(board_id, safe="")
         headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json", "Accept": "application/json"}
+        if transport is http:
+            transport = resources.enter_context(MiroHTTP())
+        requests = resources.enter_context(MiroRequests(transport, interval=interval, workers=workers,
+                                                         progress=status_progress))
         remote, missing = {}, []
         preflight_total = len(state["items"])
         status_progress.emit("preflight", 0, preflight_total, "Checking existing board items")
         # Complete all mapped-item GETs before the first POST or PATCH.
-        for checked, (key, record) in enumerate(state["items"].items(), 1):
-            status, _, raw = _request(transport, "GET", _remote_url(base, record), headers,
-                                      interval=min(interval, .05), progress=status_progress)
+        checked = 0
+
+        def read_item(job):
+            _, record = job
+            return requests.request("GET", _remote_url(base, record), headers)
+
+        def accept_read(job, result):
+            nonlocal checked
+            key, record = job
+            status, _, raw = result
+            checked += 1
             if status == 404:
                 status_progress.emit("preflight", checked, preflight_total, "Checking existing board items")
                 if key in removals and state.get("pending_deletions", {}).get(key, {}).get("attempted"):
-                    continue
+                    return
                 missing.append(key + " (" + record["id"] + ")")
-                continue
+                return
             if not 200 <= status < 300:
                 raise TraceError("Miro preflight GET returned HTTP " + str(status) + "; no board writes made")
             item = _response(raw, "preflight GET")
@@ -808,12 +855,14 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
                 raise TraceError("Miro preflight returned the wrong item ID; no board writes made")
             remote[key] = item
             status_progress.emit("preflight", checked, preflight_total, "Checking existing board items")
+        requests.map(state["items"].items(), read_item, accept_read)
         if missing:
             raise TraceError("Miro preflight found missing or inaccessible mapped items: " + ", ".join(missing) +
                              ". No board writes made. Restore the items/access or repair the mapping; they will not be recreated automatically.")
 
         status_progress.emit("layout", 0, 1, "Checking connections and preparing the layout")
         _check_fee_removals(state, remote, removals)
+        _recover_updates(state, remote)
         positions, shift_x = _placements(plan, state, remote, removals, reorganize)
         updates, conflicts, attachment_intents = [], [], {}
         for endpoint, collection in collections:
@@ -865,6 +914,12 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
             state.setdefault("layout_history", []).append(snapshot)
             report["layout_snapshot"] = copy.deepcopy(snapshot)
         state["active_run_id"] = plan["run_id"]
+        # Journal every planned edit before dispatch. On retry, the full live
+        # preflight reconciles these fields instead of blindly replaying them.
+        state["pending_updates"] = {
+            key: {"id": state["items"][key]["id"], "endpoint": state["items"][key]["endpoint"],
+                  "patch": copy.deepcopy(patch)}
+            for key, patch, _, _ in updates if patch}
         pending_deletions = state.setdefault("pending_deletions", {})
         for key, proof in removals.items():
             pending_deletions.setdefault(key, {"id": state["items"][key]["id"], "proof": copy.deepcopy(proof), "attempted": False})
@@ -877,8 +932,7 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
             # the next preflight GET, without tolerating unrelated missing items.
             pending_deletions[key]["attempted"] = True
             save_json(state_path, state)
-            status, _, _ = _request(transport, "DELETE", _remote_url(base, record), headers,
-                                    interval=interval, progress=status_progress)
+            status, _, _ = requests.request("DELETE", _remote_url(base, record), headers)
             if not (200 <= status < 300 or status == 404):
                 raise TraceError("Miro fee DELETE returned HTTP " + str(status) + "; acknowledged progress is saved; rerun with fees excluded")
             del state["items"][key]
@@ -888,14 +942,27 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
             report["deleted"] += 1
             status_progress.emit("removing", report["deleted"], len(removals), "Removing excluded fee items")
         status_progress.emit("updating", 0, len(updates), "Applying changes while preserving manual edits")
-        for checked, (key, patch, managed, intent) in enumerate(updates, 1):
+        checked = 0
+
+        def update_item(job):
+            key, patch, _, _ = job
+            if not patch:
+                return None
+            record = state["items"][key]
+            result = requests.request("PATCH", _remote_url(base, record), headers, patch)
+            status, _, raw = result
+            if not 200 <= status < 300:
+                raise TraceError("Miro PATCH returned HTTP " + str(status) + "; acknowledged progress is saved; rerun sync")
+            response = _response(raw, "PATCH")
+            if response.get("id") != record["id"]:
+                raise TraceError("Miro PATCH returned the wrong item ID; rerun sync to reconcile the saved update journal")
+            return response
+
+        def accept_update(job, response):
+            nonlocal checked
+            key, patch, managed, intent = job
             record = state["items"][key]
             if patch:
-                status, _, raw = _request(transport, "PATCH", _remote_url(base, record), headers, patch,
-                                          interval, progress=status_progress)
-                if not 200 <= status < 300:
-                    raise TraceError("Miro PATCH returned HTTP " + str(status) + "; acknowledged progress is saved; rerun sync")
-                response = _response(raw, "PATCH")
                 actual = _baseline(patch, response, record["endpoint"])
                 for path, value in _fields(_editable(patch, record["endpoint"])):
                     _set(intent, path, value)
@@ -914,8 +981,11 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
             # Unchanged mappings need no per-item rewrite/fsync. Acknowledged
             # PATCHes and refreshed baselines still persist before continuing.
             if patch or changed:
+                state["pending_updates"].pop(key, None)
                 save_json(state_path, state)
+            checked += 1
             status_progress.emit("updating", checked, len(updates), "Applying changes while preserving manual edits")
+        requests.map(updates, update_item, accept_update)
         status_progress.emit("creating", 0, report["new_items"], "Adding new shapes and connections")
         for endpoint, collection in collections:
             for item in collection:
@@ -938,7 +1008,12 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
                 for attempt in range(4):
                     state["pending"] = pending
                     save_json(state_path, state)
-                    status, response_headers, raw = transport("POST", base + "/" + endpoint, headers, canonical(body), 30)
+                    try:
+                        status, response_headers, raw = requests.send("POST", base + "/" + endpoint, headers, canonical(body), 30)
+                    except MiroRequestNotSent:
+                        state["pending"] = None
+                        save_json(state_path, state)
+                        raise
                     if 200 <= status < 300:
                         response = _response(raw, "POST; reconcile the pending item before retrying")
                         item_id = response.get("id")
@@ -963,7 +1038,6 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
                         continue
                     raise TraceError("Miro POST returned HTTP " + str(status) +
                                      ("; reconcile the pending item" if state["pending"] else "; fix the error and rerun sync"))
-                time.sleep(interval)
         summary = state["runs"].setdefault(plan["run_id"], {"first_synced_at": now(), "plan_sha256s": []})
         if plan["sha256"] not in summary["plan_sha256s"]:
             summary["plan_sha256s"].append(plan["sha256"])
