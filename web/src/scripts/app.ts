@@ -42,6 +42,7 @@ type JobProgress = {
   total: number;
   message: string;
   retry_after?: number;
+  elapsed_seconds?: number;
 };
 type Case = {
   id: string;
@@ -88,13 +89,15 @@ type Result = RenderingMetadata & {
 };
 type Job = {
   id: string;
-  status: "running" | "succeeded" | "failed";
+  status: "running" | "cancelling" | "canceled" | "succeeded" | "failed";
   message: string;
   result?: Result;
   action?: string;
   case_id?: string;
   live?: boolean;
   progress?: JobProgress;
+  cancellable?: boolean;
+  started_at?: number;
 };
 type Page = "dashboard" | "new" | "case" | "settings" | "case-settings";
 type ActiveJob = {
@@ -105,6 +108,8 @@ type ActiveJob = {
   message: string;
   live: boolean;
   progress?: JobProgress;
+  cancellable: boolean;
+  cancelling: boolean;
 };
 
 const defaults: Settings = {
@@ -350,26 +355,32 @@ function sidebar(): string {
 
 function jobProgress(): string {
   const progress = state.job?.progress;
-  if (!progress) return "";
+  if (!progress) return '<progress class="job-progress-bar" aria-label="Calculation in progress"></progress>';
   const total = Number.isFinite(progress.total) ? Math.max(0, progress.total) : 0;
   const completed = Number.isFinite(progress.completed)
     ? Math.max(0, Math.min(progress.completed, total))
     : 0;
   const waiting = Number.isFinite(progress.retry_after) && progress.retry_after! > 0;
-  return `<div class="job-progress-meta"><span>Current stage · ${esc(human(progress.phase))}</span>${total > 0 ? `<span>${esc(completed)} / ${esc(total)}</span>` : ""}</div>${total > 0 ? `<progress class="job-progress-bar" max="${total}" value="${completed}" aria-label="${esc(human(progress.phase))}"></progress>` : ""}${waiting ? `<p class="job-retry">Waiting ${esc(progress.retry_after)} seconds before retrying Miro.</p>` : ""}`;
+  const measured = total > 0 && progress.phase !== "optimizing";
+  return `<div class="job-progress-meta"><span>Current stage · ${esc(human(progress.phase))}</span>${measured ? `<span>${esc(completed)} / ${esc(total)}</span>` : ""}</div><progress class="job-progress-bar"${measured ? ` max="${total}" value="${completed}"` : ""} aria-label="${esc(human(progress.phase))}"></progress>${waiting ? `<p class="job-retry">Waiting ${esc(progress.retry_after)} seconds before retrying Miro.</p>` : ""}`;
 }
 
 function jobBanner(): string {
   if (!state.job) return "";
-  return `<div class="job-banner" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><div class="job-details"><strong id="job-message">${esc(state.job.progress?.message || state.job.message || "Working on your request…")}</strong><div id="job-progress">${jobProgress()}</div><p>${state.job.live ? "Keep the launching terminal open. If Proton Pass requests login or unlocking, complete it there." : "Processing local evidence. You can browse saved investigations while this completes."}</p></div><span class="job-time" id="job-elapsed">0s elapsed</span></div>`;
+  return `<div class="job-banner" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><div class="job-details"><strong id="job-message">${esc(state.job.cancelling ? state.job.message : state.job.progress?.message || state.job.message || "Working on your request…")}</strong><div id="job-progress">${jobProgress()}</div><p>${state.job.live ? "Keep the launching terminal open. If Proton Pass requests login or unlocking, complete it there." : "Processing local evidence. You can browse saved investigations while this completes."}</p>${state.job.cancellable || state.job.cancelling ? `<button class="btn small" id="cancel-job" data-action="cancel-job"${disabled(state.job.cancelling)}>${state.job.cancelling ? "Canceling…" : "Cancel calculation"}</button>` : ""}</div><span class="job-time" id="job-elapsed">0s elapsed</span></div>`;
 }
 
 function updateJobProgress(): void {
   const message = document.querySelector("#job-message");
   if (message && state.job)
-    message.textContent = state.job.progress?.message || state.job.message;
+    message.textContent = state.job.cancelling ? state.job.message : state.job.progress?.message || state.job.message;
   const progress = document.querySelector("#job-progress");
   if (progress) progress.innerHTML = jobProgress();
+  const cancel = document.querySelector<HTMLButtonElement>("#cancel-job");
+  if (cancel && state.job) {
+    cancel.disabled = !state.job.cancellable || state.job.cancelling;
+    cancel.textContent = state.job.cancelling ? "Canceling…" : "Cancel calculation";
+  }
 }
 
 function render(focus = false): void {
@@ -432,12 +443,12 @@ function downloadLink(item: Download | undefined, label: string, classes = ""): 
 function fallbackNotice(artifact: RenderingMetadata | undefined): string {
   if (artifact?.renderer === "direct_svg")
     return artifact.fallback_reason === "timeout"
-      ? "Mermaid reached its time limit. This direct SVG fallback includes the full saved graph. Mermaid source is also available."
-      : "This graph exceeds the automatic Mermaid size limit. The direct SVG fallback includes the full saved graph. Mermaid source is also available.";
+      ? "This saved preview was created with the former Mermaid time limit. Its direct SVG fallback and Mermaid source remain available. Generate a new chart to run Mermaid without that limit."
+      : "This saved preview was created with the former Mermaid size limit. Its direct SVG fallback and Mermaid source remain available. Generate a new chart to run Mermaid without that limit.";
   if (artifact?.layout_algorithm === "dependency_layers_v1")
     return artifact.fallback_reason === "timeout"
-      ? "ELK reached its time limit. A dependency layout keeps the full saved graph available; crossings are not optimized."
-      : "This graph exceeds the automatic ELK size limit. A dependency layout keeps the full saved graph available; crossings are not optimized.";
+      ? "This saved preview was created with the former ELK time limit. It uses a dependency layout without crossing optimization. Generate a new ELK preview to use the current engine."
+      : "This saved preview was created with the former ELK size limit. It uses a dependency layout without crossing optimization. Generate a new ELK preview to use the current engine.";
   return "";
 }
 
@@ -474,7 +485,7 @@ function elkGraph(artifact: Artifact | undefined, saved: boolean, settings: Sett
   const fallback = artifact?.layout_algorithm === "dependency_layers_v1";
   const name = fallback ? "Dependency layout fallback" : "ELK layout preview";
   const notice = preview ? fallbackNotice(artifact) : "";
-  return `<section class="panel" id="elk-layout-panel"><div class="panel-head graph-panel-head"><div><h2>${esc(name)}</h2><p>Local placement preview for the selected saved run.</p></div><div class="artifact-actions">${downloadLink(svg, fallback ? "Download SVG" : "Download ELK SVG", "primary")}${preview ? `<a class="btn ghost small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">${icon("external")}Open full view</a>` : '<span class="badge gray">Offline layout</span>'}</div></div>${preview ? `${notice ? `<div class="panel-body artifact-note">${esc(notice)}</div>` : ""}${layoutMetrics(artifact?.layout_metrics, fallback ? "Dependency layout" : "ELK layout")}<iframe class="graph-preview" src="${esc(preview)}#chart" title="${esc(name)} of the selected investigation run" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe><div class="preview-caption"><span>${esc(human(settings.connector_style))} connectors · ${settings.include_fees ? "Fee flows included" : "Fee flows hidden"}</span>${downloadLink(report, "Layout report", "ghost")}</div><div class="panel-body elk-explanation"><p>${fallback ? "The dependency layout calculates placement" : "ELK calculates placement"}; Miro draws the editable graph. This offline preview does not read your live board arrangement. Return connections can remain elbowed with the straight-line setting.</p>${button("Refresh layout preview", "layout", "refresh", "small", !saved || isBusy())}</div>` : `<div class="panel-body"><p class="artifact-note">${artifact && !matches ? "The saved layout preview uses different fee or connector settings. Generate a new preview to match this investigation." : "Inspect the proposed left-to-right layout and estimated crossings before updating Miro. No API credentials are needed."}</p>${button("Create ELK layout preview", "layout", "layers", "", !saved || isBusy())}<p class="small muted elk-hint">Previewing leaves your board unchanged. Sync and reorganize applies a fresh arrangement and the selected run together. Large graphs use a dependency layout automatically.</p></div>`}</section>`;
+  return `<section class="panel" id="elk-layout-panel"><div class="panel-head graph-panel-head"><div><h2>${esc(name)}</h2><p>Local placement preview for the selected saved run.</p></div><div class="artifact-actions">${downloadLink(svg, fallback ? "Download SVG" : "Download ELK SVG", "primary")}${preview ? `<a class="btn ghost small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">${icon("external")}Open full view</a>` : '<span class="badge gray">Offline layout</span>'}</div></div>${preview ? `${notice ? `<div class="panel-body artifact-note">${esc(notice)}</div>` : ""}${layoutMetrics(artifact?.layout_metrics, fallback ? "Dependency layout" : "ELK layout")}<iframe class="graph-preview" src="${esc(preview)}#chart" title="${esc(name)} of the selected investigation run" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe><div class="preview-caption"><span>${esc(human(settings.connector_style))} connectors · ${settings.include_fees ? "Fee flows included" : "Fee flows hidden"}</span>${downloadLink(report, "Layout report", "ghost")}</div><div class="panel-body elk-explanation"><p>${fallback ? "The dependency layout calculates placement" : "ELK calculates placement"}; Miro draws the editable graph. This offline preview does not read your live board arrangement. Return connections can remain elbowed with the straight-line setting.</p>${button("Refresh layout preview", "layout", "refresh", "small", !saved || isBusy())}</div>` : `<div class="panel-body"><p class="artifact-note">${artifact && !matches ? "The saved layout preview uses different fee or connector settings. Generate a new preview to match this investigation." : "Inspect the proposed left-to-right layout and estimated crossings before updating Miro. No API credentials are needed."}</p>${button("Create ELK layout preview", "layout", "layers", "", !saved || isBusy())}<p class="small muted elk-hint">Previewing leaves your board unchanged. Sync and reorganize applies a fresh arrangement and the selected run together. ELK calculations continue until completed or canceled; large graphs can take longer.</p></div>`}</section>`;
 }
 
 function csvDownloads(artifact: Artifact | undefined, saved: boolean, includeFees: boolean): string {
@@ -577,10 +588,12 @@ async function refreshSession(): Promise<void> {
       id: session.active_job,
       action: recovered.action || "recovered",
       caseId: recovered.case_id,
-      started: Date.now(),
+      started: Number.isFinite(recovered.started_at) ? recovered.started_at! * 1000 : Date.now(),
       message: recovered.message || "A local action is still running…",
       live: recovered.live ?? true,
       progress: recovered.progress,
+      cancellable: recovered.cancellable === true,
+      cancelling: recovered.status === "cancelling",
     };
     if (recovered.action === "lookup")
       state.draft.source = recovered.live ? "live" : "demo";
@@ -631,10 +644,12 @@ async function startJob(
       id: job.id,
       action,
       caseId,
-      started: Date.now(),
+      started: Number.isFinite(job.started_at) ? job.started_at! * 1000 : Date.now(),
       message: job.message,
       live,
       progress: job.progress,
+      cancellable: job.cancellable === true,
+      cancelling: job.status === "cancelling",
     };
     state.error = "";
     dialog.close();
@@ -650,20 +665,49 @@ function schedulePoll(delay = 1200): void {
   pollTimer = setTimeout(() => void pollJob(), delay);
 }
 
+async function cancelJob(): Promise<void> {
+  const active = state.job;
+  if (!active || !active.cancellable || active.cancelling) return;
+  active.cancelling = true;
+  active.message = "Canceling the calculation and stopping its renderer…";
+  updateJobProgress();
+  try {
+    const job = await api<Job>(`/api/jobs/${encodeURIComponent(active.id)}/cancel`, {});
+    if (state.job?.id !== active.id) return;
+    active.cancelling = job.status === "cancelling";
+    active.cancellable = job.cancellable === true;
+    active.message = job.message;
+  } catch (error) {
+    if (state.job?.id !== active.id) return;
+    active.cancelling = false;
+    toast(error instanceof Error ? error.message : "Could not request cancellation.", true);
+  }
+  if (state.job?.id === active.id) {
+    updateJobProgress();
+    schedulePoll(150);
+  }
+}
+
 async function pollJob(): Promise<void> {
   const active = state.job;
   if (!active) return;
   try {
     const job = await api<Job>(`/api/jobs/${encodeURIComponent(active.id)}`);
-    if (job.status === "running") {
+    if (state.job?.id !== active.id) return;
+    if (job.status === "running" || job.status === "cancelling") {
       active.message = job.message || active.message;
       active.progress = job.progress;
+      active.cancellable = job.cancellable === true;
+      active.cancelling = job.status === "cancelling";
       updateJobProgress();
       schedulePoll();
       return;
     }
     state.job = null;
-    if (job.status === "failed") {
+    if (job.status === "canceled") {
+      state.error = "";
+      toast(job.message || "Calculation canceled. Saved investigation runs are unchanged.");
+    } else if (job.status === "failed") {
       const progress = job.progress || active.progress;
       const lastStage = progress?.phase
         ? ` Last reported stage: ${human(progress.phase)}${
@@ -770,6 +814,7 @@ function updateJobClock(): void {
   const elapsed = Math.max(
     0,
     Math.floor((Date.now() - state.job.started) / 1000),
+    Number.isFinite(state.job.progress?.elapsed_seconds) ? Math.floor(state.job.progress!.elapsed_seconds!) : 0,
   );
   element.textContent =
     elapsed >= 60
@@ -797,7 +842,7 @@ function openActionDialog(action: string): void {
     "miro-sync":
       "Add the selected saved graph to the linked board. Existing manual arrangements are preserved during normal sync.",
     "miro-organize":
-      "Sync the selected run and apply a fresh layout to the managed graph in one action. ELK is used when the graph fits its local limits; larger graphs use a dependency layout. This replaces existing positions, including arrangements made by hand, and sets transaction inputs on the left and outputs on the right.",
+      "Sync the selected run and apply a fresh layout to the managed graph in one action. ELK calculates the full graph layout before board updates begin. This replaces existing positions, including arrangements made by hand, and sets transaction inputs on the left and outputs on the right.",
     "miro-create":
       "Create an empty private board in your Miro account and link it to this investigation. Publishing the graph is a separate sync action.",
   };
@@ -821,6 +866,10 @@ async function caseAction(action: string): Promise<void> {
 }
 
 async function dispatch(action: string, element?: HTMLElement): Promise<void> {
+  if (action === "cancel-job") {
+    await cancelJob();
+    return;
+  }
   if (action === "dismiss-error") {
     state.error = "";
     render();

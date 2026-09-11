@@ -23,7 +23,7 @@ SENTINEL = "SYNTHETIC-PRIVATE-PROGRESS-SENTINEL"
 
 class ProgressReportTests(unittest.TestCase):
     def test_only_known_progress_fields_reach_the_browser_or_terminal(self):
-        for phase in ("preflight", "layout", "updating", "removing", "creating", "waiting", "complete"):
+        for phase in ("optimizing", "preflight", "layout", "updating", "removing", "creating", "waiting", "complete"):
             with self.subTest(phase=phase):
                 result = public_progress({"phase": phase, "completed": 2, "total": 4,
                                           "message": SENTINEL, "token": SENTINEL,
@@ -79,6 +79,18 @@ class ProgressReportTests(unittest.TestCase):
             self.assertEqual(sorted(item.name for item in Path(directory).iterdir()), ["progress.json"])
             self.assertTrue(stderr.getvalue())
             self.assertNotIn(SENTINEL, stderr.getvalue() + path.read_text())
+
+    def test_elk_heartbeats_report_elapsed_without_inventing_completion_counts(self):
+        event = {"phase": "optimizing", "completed": 0, "total": 0, "elapsed_seconds": 35}
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            ProgressReporter()(event)
+        self.assertEqual(public_progress(event)["elapsed_seconds"], 35)
+        self.assertIn("35s elapsed", stderr.getvalue())
+        self.assertNotIn("(0/0)", stderr.getvalue())
+        for elapsed in (True, -1, float("inf"), float("nan"), 10 ** 400, "30", None):
+            with self.subTest(elapsed=elapsed):
+                self.assertNotIn("elapsed_seconds", public_progress({**event, "elapsed_seconds": elapsed}))
 
     def test_count_updates_are_throttled_but_phase_changes_and_completion_arrive_immediately(self):
         with tempfile.TemporaryDirectory() as directory:

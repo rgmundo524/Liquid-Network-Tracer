@@ -623,6 +623,10 @@ def main(argv=None, *, progress=None):
             resolve(args.state, args.item_id, args.absent)
             print("Pending publication reconciled.")
         return 0
+    except KeyboardInterrupt:
+        # Renderer and API cleanup unwinds before reaching this boundary.
+        print("Action canceled. Saved investigation data remains available.", file=sys.stderr)
+        return 130
     except (TraceError, OSError, ValueError, KeyError) as error:
         print("Error: " + str(error), file=sys.stderr)
         return 1

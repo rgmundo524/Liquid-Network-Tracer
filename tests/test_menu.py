@@ -4,10 +4,12 @@ import importlib.util
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -15,7 +17,7 @@ from unittest.mock import patch
 from liquid_tracer.common import TraceError, read_json, save_json
 from liquid_tracer.investigations import (DEFAULTS, create_investigation, list_investigations,
                                          load_settings, read_case, save_settings, update_case)
-from liquid_tracer.menu import _command, _lookup_reports, _seed_values, create_app, run_menu
+from liquid_tracer.menu import _OfflineCalculation, _command, _lookup_reports, _seed_values, create_app, run_menu
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -23,6 +25,54 @@ HAS_TEXTUAL = importlib.util.find_spec("textual") is not None
 
 
 class MenuCommandTests(unittest.TestCase):
+    def test_cancel_before_worker_starts_does_not_launch_a_process(self):
+        calculation = _OfflineCalculation()
+        calculation.cancel()
+        with patch("liquid_tracer.menu.subprocess.Popen") as process:
+            result = calculation.run([sys.executable, "-c", "raise AssertionError"], cwd=PROJECT, env=os.environ.copy())
+            self.assertEqual(result.returncode, 130)
+            calculation.close()
+        process.assert_not_called()
+
+    @unittest.skipUnless(os.name == "posix", "Process-group cancellation uses POSIX signals")
+    def test_cancel_signals_cli_and_allows_nested_renderer_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ready = Path(directory) / "ready"
+            cleaned = Path(directory) / "cleaned"
+            command = [sys.executable, "-c", """
+import os, signal, subprocess, sys
+from pathlib import Path
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)
+try:
+    Path(sys.argv[1]).write_text(str(child.pid))
+    signal.pause()
+except KeyboardInterrupt:
+    pass
+finally:
+    os.killpg(child.pid, signal.SIGTERM)
+    child.wait()
+    Path(sys.argv[2]).write_text('cleaned')
+""", str(ready), str(cleaned)]
+            calculation = _OfflineCalculation()
+            results = []
+            worker = threading.Thread(target=lambda: results.append(calculation.run(command, cwd=PROJECT, env=os.environ.copy())))
+            worker.start()
+            try:
+                deadline = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(ready.exists(), "Synthetic renderer did not start")
+                calculation.cancel()
+                worker.join(5)
+                self.assertFalse(worker.is_alive(), "Cancellation failed to release the renderer")
+                self.assertTrue(cleaned.is_file(), "The CLI must finish its nested-renderer cleanup")
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(int(ready.read_text()), 0)
+                self.assertEqual(len(results), 1)
+            finally:
+                calculation.cancel()
+                worker.join(5)
+
     def test_live_command_uses_secretspec_and_preserves_literal_arguments(self):
         arguments = ["miro-sync", "--case", "/cases/Case with spaces", "--board", "BOARD=", "--run", "latest"]
         with patch.dict(os.environ, {"LIQUID_TRACER_ROOT": str(PROJECT),
@@ -652,9 +702,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         def render_locally(command, **kwargs):
             self.assertEqual(command, [sys.executable, "-m", "liquid_tracer", "mermaid",
                                       "--case", str(case), "--run", "latest", "--open"])
-            self.assertTrue(kwargs["capture_output"])
-            self.assertTrue(kwargs["text"])
-            self.assertFalse(kwargs["check"])
+            self.assertEqual(kwargs["cwd"], PROJECT)
             started.set()
             if not release.wait(10):
                 raise AssertionError("Mermaid worker was not released")
@@ -662,7 +710,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 "html": str(preview), "browser_opened": False}), "")
 
         app = create_app(self.root)
-        with patch("liquid_tracer.menu.subprocess.run", side_effect=render_locally) as process, \
+        with patch("liquid_tracer.menu._OfflineCalculation.run", side_effect=render_locally) as process, \
                 patch.object(app, "suspend") as suspend:
             async with app.run_test(size=(110, 55)) as pilot:
                 await self.click(app, pilot, "#continue")
@@ -673,7 +721,9 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                     await self.click(app, pilot, "#mermaid")
                     self.assertTrue(started.is_set())
                     self.assertTrue(app.busy)
-                    self.assertTrue(all(button.disabled for button in app.screen.query(Button)))
+                    self.assertTrue(all(button.disabled for button in app.screen.query(Button)
+                                        if button.id != "cancel-calculation"))
+                    self.assertFalse(app.screen.query_one("#cancel-calculation", Button).disabled)
                     app.screen.perform((["mermaid", "--case", str(case)], False))
                     process.assert_called_once()
                 finally:
@@ -708,7 +758,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         preview = case / "previews" / "synthetic-elk" / "graph.html"
         result = subprocess.CompletedProcess([], 0, json.dumps({"html": str(preview), "browser_opened": False}), "")
         app = create_app(self.root)
-        with patch("liquid_tracer.menu.subprocess.run", return_value=result) as process, \
+        with patch("liquid_tracer.menu._OfflineCalculation.run", return_value=result) as process, \
                 patch.object(app, "suspend") as suspend:
             async with app.run_test(size=(80, 24)) as pilot:
                 await self.click(app, pilot, "#continue")
@@ -721,7 +771,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 process.assert_called_once()
                 self.assertEqual(process.call_args.args[0], [sys.executable, "-m", "liquid_tracer", "layout-preview",
                                                             "--case", str(case), "--run", "latest", "--open"])
-                self.assertTrue(process.call_args.kwargs["capture_output"])
+                self.assertEqual(process.call_args.kwargs["cwd"], PROJECT)
                 suspend.assert_not_called()
                 message = str(app.screen.query_one("#action-status", Static).render())
                 self.assertIn("ELK layout preview saved. Miro is unchanged.", message)
@@ -734,6 +784,76 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(str(preview), message)
                 self.assertEqual(snapshot, {p.relative_to(case): p.read_bytes()
                                            for p in case.rglob("*") if p.is_file()})
+
+    @unittest.skipUnless(os.name == "posix", "Process-group cancellation uses POSIX signals")
+    async def test_calculation_cancel_button_keyboard_and_shutdown_reap_process(self):
+        from textual.widgets import Button, Static
+        ready = Path(self.temp.name) / "calculation-ready"
+        cleaned = Path(self.temp.name) / "calculation-cleaned"
+        command = [sys.executable, "-c", """
+import os, signal, sys
+from pathlib import Path
+try:
+    Path(sys.argv[1]).write_text(str(os.getpid()))
+    signal.pause()
+except KeyboardInterrupt:
+    pass
+finally:
+    Path(sys.argv[2]).write_text('cleaned')
+""", str(ready), str(cleaned)]
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu._command", return_value=command):
+            async with app.run_test(size=(80, 24)) as pilot:
+                case = await self.new_demo(app, pilot)
+                snapshot = {p.relative_to(case): p.read_bytes() for p in case.rglob("*") if p.is_file()}
+                for action, key in (("layout-preview", "enter"), ("mermaid", "ctrl+x"), ("layout-preview", None)):
+                    ready.unlink(missing_ok=True)
+                    cleaned.unlink(missing_ok=True)
+                    app.screen.perform(([action, "--case", str(case)], False))
+                    deadline = time.monotonic() + 5
+                    while not ready.exists() and time.monotonic() < deadline:
+                        await pilot.pause(0.02)
+                    self.assertTrue(ready.is_file())
+                    calculation = app.active_calculation
+                    pid = int(ready.read_text())
+                    self.assertTrue(app.busy)
+                    cancel = app.screen.query_one("#cancel-calculation", Button)
+                    self.assertIs(app.focused, cancel)
+                    self.assertFalse(cancel.disabled)
+                    app.screen.update_calculation_status()
+                    self.assertIn("elapsed", str(app.screen.query_one("#action-status", Static).render()))
+                    if key is None:
+                        # Leaving the application must cancel the active child,
+                        # even when the user did not press our Cancel button.
+                        break
+                    await pilot.press(key)
+                    await self.finish_action(app, pilot)
+                    self.assertTrue(calculation.cancelled)
+                    self.assertTrue(cleaned.is_file())
+                    self.assertIn("Calculation cancelled", str(app.screen.query_one("#action-status", Static).render()))
+                    self.assertIsNone(app.active_calculation)
+                    self.assertTrue(cancel.disabled)
+                    self.assertEqual(snapshot, {p.relative_to(case): p.read_bytes()
+                                               for p in case.rglob("*") if p.is_file()})
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(pid, 0)
+            self.assertTrue(calculation.cancelled)
+            self.assertTrue(cleaned.is_file())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+
+    async def test_cancel_calculation_does_not_cancel_live_actions(self):
+        app = create_app(self.root)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await self.new_demo(app, pilot)
+            app.busy = True
+            app.screen.current_action = "miro-sync"
+            with patch("liquid_tracer.menu.os.killpg") as kill:
+                await pilot.press("ctrl+x")
+                kill.assert_not_called()
+                self.assertTrue(app.busy)
+                self.assertIsNone(app.active_calculation)
+            app.busy = False
 
     async def test_global_and_case_settings_are_saved_without_remote_actions(self):
         from textual.widgets import Checkbox, Input, Select, Static

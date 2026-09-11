@@ -1,4 +1,4 @@
-"""Bounded local ELK placement; presentation only, never tracing or attribution.
+"""Local ELK placement; presentation only, never tracing or attribution.
 
 The worker receives opaque IDs, dimensions, dependency partitions and edges. ELK
 chooses layer ordering, port ordering and orthogonal routes. Miro cannot accept
@@ -13,24 +13,21 @@ import os
 import shutil
 import signal
 import subprocess
+import time
 from collections import defaultdict
 from pathlib import Path
 
 from .common import TraceError
+from .processes import defer_cancellation_during_spawn
 
 
 ALGORITHM = "elk_layered_v1"
 ELK_VERSION = "0.12.0"
-TIMEOUT_SECONDS = 30
-MAX_NODES = 10000
-MAX_EDGES = 30000
+# This interval only reports activity. It is never a calculation deadline.
+PROGRESS_INTERVAL_SECONDS = 5
 MAX_COMPARISONS = 250000
 STYLES = {"straight", "elbowed", "curved"}
 _EPS = 1e-7
-
-
-class _LayoutTimeout(TraceError):
-    """A terminated worker, distinct from broken dependencies or bad geometry."""
 
 
 def _finite(value):
@@ -40,8 +37,6 @@ def _finite(value):
 def _point(value):
     if not isinstance(value, dict) or not _finite(value.get("x")) or not _finite(value.get("y")):
         raise TraceError("ELK returned an invalid coordinate; no Miro changes were made")
-    if abs(value["x"]) > 1e8 or abs(value["y"]) > 1e8:
-        raise TraceError("ELK layout exceeds the supported coordinate range")
     return {"x": round(value["x"], 4), "y": round(value["y"], 4)}
 
 
@@ -224,7 +219,18 @@ def layout_metrics(graph, *, routed=True, max_comparisons=MAX_COMPARISONS):
             "labels_measured": False, "curves_approximated": True}
 
 
-def _worker(graph, seeds):
+def _report_progress(progress, message, *, completed=0, elapsed_seconds=None):
+    if progress:
+        event = {"phase": "optimizing", "message": message, "completed": completed, "total": 1 if completed else 0}
+        if elapsed_seconds is not None:
+            event["elapsed_seconds"] = elapsed_seconds
+        try:
+            progress(event)
+        except Exception:
+            pass  # An advisory progress sink must not change layout behavior.
+
+
+def _worker(graph, seeds, progress=None):
     project = Path(os.environ.get("LIQUID_TRACER_ROOT", Path(__file__).resolve().parents[1]))
     runner = project / "layout" / "run.mjs"
     node = os.environ.get("LIQUID_NODE_BIN") or shutil.which("node")
@@ -237,22 +243,38 @@ def _worker(graph, seeds):
     environment = {name: os.environ[name] for name in ("PATH", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT") if name in os.environ}
     process = None
     try:
-        process = subprocess.Popen([node, str(runner)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, text=True, env=environment, start_new_session=True)
-        output, _ = process.communicate(json.dumps({"graph": graph, "seeds": seeds}), timeout=TIMEOUT_SECONDS)
+        with defer_cancellation_during_spawn():
+            process = subprocess.Popen([node, str(runner)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, text=True, env=environment, start_new_session=True)
+        started = time.monotonic()
+        payload = json.dumps({"graph": graph, "seeds": seeds})
+        while True:
+            try:
+                # communicate resumes pipe reads/writes after TimeoutExpired;
+                # passing input again would duplicate the request. Its timeout
+                # only lets us report that this local calculation is active.
+                output, _ = process.communicate(payload, timeout=PROGRESS_INTERVAL_SECONDS)
+                break
+            except subprocess.TimeoutExpired:
+                payload = None
+                elapsed = max(0, int(time.monotonic() - started))
+                _report_progress(progress, f"Calculating local ELK layout ({elapsed:,} seconds elapsed); cancel to stop",
+                                 elapsed_seconds=elapsed)
         if process.returncode:
-            raise TraceError("Local ELK layout failed; no Miro changes were made. Check the layout dependency installation")
-        if len(output) > 64 * 1024 * 1024:
-            raise TraceError("ELK returned an oversized layout")
+            detail = (f"was terminated by signal {-process.returncode}" if process.returncode < 0
+                      else f"failed with exit code {process.returncode}")
+            raise TraceError(f"The local ELK worker {detail}. The calculation could not complete; available memory "
+                             "or an ELK engine error may be responsible. No Miro changes were made")
         result = json.loads(output)
         if not isinstance(result, dict) or result.get("version") != ELK_VERSION or not isinstance(result.get("candidates"), list):
             raise ValueError("invalid worker response")
         if len(result["candidates"]) != len(seeds):
             raise ValueError("missing candidates")
         return result["candidates"]
-    except subprocess.TimeoutExpired as exc:
-        raise _LayoutTimeout("Local ELK layout exceeded its 30-second limit") from exc
-    except (OSError, ValueError, TypeError) as exc:
+    except OSError as exc:
+        raise TraceError("The local ELK worker could not start or communicate; check the Node executable and local system resources. "
+                         "No Miro changes were made") from exc
+    except (ValueError, TypeError) as exc:
         raise TraceError("Local ELK returned an invalid layout; no Miro changes were made") from exc
     finally:
         if process is not None and process.poll() is None:
@@ -325,8 +347,8 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
         node = nodes[raw["id"]]
         if raw.get("width") != node["width"] or raw.get("height") != node["height"]:
             raise TraceError("ELK changed object dimensions; no Miro changes were made")
-        node.update(x=round(point["x"] + node["width"] / 2 + offset_x, 4),
-                    y=round(point["y"] + node["height"] / 2 + offset_y, 4))
+        node.update(_point({"x": point["x"] + node["width"] / 2 + offset_x,
+                            "y": point["y"] + node["height"] / 2 + offset_y}))
         for port in raw.get("ports", []):
             ports[port["id"]] = _port(node, **_point(port))
     route_map = {}
@@ -336,9 +358,7 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
             raise TraceError("ELK returned an unsupported connector route")
         section = sections[0]
         points = [section.get("startPoint"), *section.get("bendPoints", []), section.get("endPoint")]
-        if len(points) > 1000:
-            raise TraceError("ELK returned an oversized connector route")
-        route_map[raw["id"]] = [{"x": point["x"] + offset_x, "y": point["y"] + offset_y}
+        route_map[raw["id"]] = [_point({"x": point["x"] + offset_x, "y": point["y"] + offset_y})
                                 for point in map(_point, points)]
     # Existing fee row x positions already encode confirmed height/time order.
     fees = sorted((nodes[key] for key in fee_ids & nodes.keys()), key=lambda node: (node["x"], node["id"]))
@@ -525,35 +545,19 @@ def fallback_graph(graph, connector_style="straight", reason="size_limit"):
     return result
 
 
-def _fallback_with_progress(graph, connector_style, reason, progress):
-    result = fallback_graph(graph, connector_style=connector_style, reason=reason)
-    if progress:
-        try:
-            progress({"phase": "optimizing", "message": result["layout"]["fallback_notice"],
-                      "completed": 1, "total": 1})
-        except Exception:
-            pass
-    return result
-
-
 def optimize_graph(graph, connector_style="straight", progress=None):
-    """Try bounded ELK optimization, retaining the whole graph on size/timeout."""
+    """Calculate an ELK layout without application size or time ceilings.
+
+    Failed or cancelled calculations leave the graph unchanged. Quality
+    measurement has a separate work budget that never removes graph elements.
+    """
     nodes = _validate_graph(graph, connector_style)
-    if len(nodes) > MAX_NODES or len(graph["edges"]) > MAX_EDGES:
-        return _fallback_with_progress(graph, connector_style, "size_limit", progress)
-    if progress:
-        try:
-            progress({"phase": "optimizing", "message": "Calculating local ELK layout", "completed": 0, "total": 1})
-        except Exception:
-            pass  # An advisory progress sink must not change layout behavior.
+    _report_progress(progress, "Calculating local ELK layout; cancel to stop")
     request, ports, fee_ids = _request_graph(graph)
     seeds = [1, 7, 19] if len(request["children"]) <= 300 else [1]
     before = layout_metrics(graph)
     if request["children"]:
-        try:
-            candidates = _worker(request, seeds)
-        except _LayoutTimeout:
-            return _fallback_with_progress(graph, connector_style, "timeout", progress)
+        candidates = _worker(request, seeds, progress=progress)
     else:
         candidates = [{"seed": 1, "nodes": [], "edges": []}]
     scored = []
@@ -572,10 +576,6 @@ def optimize_graph(graph, connector_style="straight", progress=None):
     result["layout"]["metrics"] = {"before": before, "after": after, "estimated": True,
                                     "candidate_count": len(candidates), "selected_seed": seed,
                                     "routing_exceptions": result["layout"]["routing_exceptions"],
-                                    "miro_routes_exact": False, "time_limit_seconds": TIMEOUT_SECONDS}
-    if progress:
-        try:
-            progress({"phase": "optimizing", "message": "Local ELK layout ready", "completed": 1, "total": 1})
-        except Exception:
-            pass
+                                    "miro_routes_exact": False, "time_limit_seconds": None}
+    _report_progress(progress, "Local ELK layout ready", completed=1)
     return result

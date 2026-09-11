@@ -43,6 +43,9 @@ def public_progress(event):
     delay = event.get("retry_after")
     if type(delay) in (int, float) and 0 <= delay <= 30 and math.isfinite(delay):
         value["retry_after"] = delay
+    elapsed = event.get("elapsed_seconds")
+    if type(elapsed) in (int, float) and 0 <= elapsed <= 2 ** 53 - 1 and math.isfinite(elapsed):
+        value["elapsed_seconds"] = elapsed
     return value
 
 
@@ -65,7 +68,7 @@ class ProgressReporter:
             return
         now = time.monotonic()
         urgent = (value["phase"] != self.previous_phase or value["phase"] == "waiting"
-                  or value["completed"] == value["total"])
+                  or (value["total"] > 0 and value["completed"] == value["total"]))
         self.previous_phase = value["phase"]
         if self.path is not None and (urgent or now - self.file_time >= .1):
             temporary = self.path.with_name(self.path.name + ".tmp")
@@ -80,9 +83,10 @@ class ProgressReporter:
         if urgent or now - self.terminal_time >= 1:
             counts = f" ({value['completed']}/{value['total']})" if value["total"] else ""
             wait = f"; retry in {value['retry_after']:g}s" if "retry_after" in value else ""
+            elapsed = f"; {value['elapsed_seconds']:g}s elapsed" if "elapsed_seconds" in value else ""
             try:
                 prefix = "ELK: " if value["phase"] == "optimizing" else "Miro: "
-                print(prefix + value["message"] + counts + wait, file=sys.stderr, flush=True)
+                print(prefix + value["message"] + counts + wait + elapsed, file=sys.stderr, flush=True)
             except (OSError, ValueError):
                 pass
             self.terminal_time = now

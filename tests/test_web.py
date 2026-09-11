@@ -317,6 +317,85 @@ class LocalWebTests(unittest.TestCase):
         self.assertEqual(self.server.jobs[job["id"]]["status"], "failed")
         self.assertIsNone(self.server.active_job)
 
+    def test_cancel_mermaid_stops_its_separate_renderer_without_changing_saved_runs(self):
+        _, case = self.create()
+        route = "/api/cases/" + case["id"]
+        traced = self.wait(self.success(route + "/actions", {"action": "trace"}, 202))
+        case_path, _ = self.server.case(case["id"])
+        archive = case_path / "runs" / traced["run_id"]
+        before = {str(path.relative_to(archive)): path.read_bytes()
+                  for path in archive.rglob("*") if path.is_file()}
+        pid_file = self.base / "cancel-renderer.pid"
+        renderer = self.base / "cancel-mmdc"
+        renderer.write_text("#!" + sys.executable + "\nimport os, time\nfrom pathlib import Path\n"
+                            + "Path(" + repr(str(pid_file)) + ").write_text(str(os.getpid()))\ntime.sleep(60)\n")
+        renderer.chmod(0o700)
+        with patch.dict(os.environ, {"LIQUID_MERMAID_BIN": str(renderer)}):
+            job = self.success(route + "/actions", {"action": "mermaid"}, 202)
+            self.assertTrue(job["cancellable"])
+            self.assertIsInstance(job["started_at"], float)
+            deadline = time.monotonic() + 10
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(.03)
+            self.assertTrue(pid_file.is_file(), self.server.jobs[job["id"]])
+            cancel = "/api/jobs/" + job["id"] + "/cancel"
+            for headers in ({"X-Liquid-CSRF": "wrong"}, {"Origin": "https://attacker.example"}):
+                self.assertEqual(self.request(cancel, {}, headers=headers)[0], 403)
+            self.assertEqual(self.request("/api/jobs/" + "f" * 32 + "/cancel", {})[0], 404)
+            self.assertEqual(self.success("/api/jobs/" + job["id"])["status"], "running")
+            response = self.success(cancel, {}, 202)
+            self.assertEqual(response["status"], "cancelling")
+            self.assertFalse(response["cancellable"])
+            deadline = time.monotonic() + 12
+            while time.monotonic() < deadline:
+                completed = self.success("/api/jobs/" + job["id"])
+                if completed["status"] not in ("running", "cancelling"):
+                    break
+                time.sleep(.03)
+        self.assertEqual(completed["status"], "canceled", completed)
+        self.assertNotIn("result", completed)
+        self.assertIn("unchanged", completed["message"])
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(pid_file.read_text()), 0)
+        self.assertIsNone(self.server.active_job)
+        self.assertEqual(self.request(cancel, {})[0], 409)
+        verify_export(archive)
+        self.assertEqual(before, {str(path.relative_to(archive)): path.read_bytes()
+                                 for path in archive.rglob("*") if path.is_file()})
+        self.assertEqual(self.success(route)["artifacts"], {})
+
+    def test_cancel_before_launch_is_idempotent_and_cannot_stop_a_different_job(self):
+        with patch("liquid_tracer.web.threading.Thread.start"):
+            job = self.server.start_job([], action="layout")
+        self.server.job_thread = None
+        route = "/api/jobs/" + job["id"] + "/cancel"
+        self.assertEqual(self.success(route, {}, 202)["status"], "cancelling")
+        self.assertEqual(self.success(route, {}, 202)["status"], "cancelling")
+        with patch("liquid_tracer.web.subprocess.Popen") as launch:
+            self.server.run_job(job["id"], [], "layout", False, None, None)
+            launch.assert_not_called()
+        self.assertEqual(self.server.jobs[job["id"]]["status"], "canceled")
+        with patch("liquid_tracer.web.threading.Thread.start"):
+            new = self.server.start_job([], action="layout")
+        self.server.job_thread = None
+        try:
+            self.assertEqual(self.request(route, {})[0], 409)
+            self.assertEqual(self.server.jobs[new["id"]]["status"], "running")
+        finally:
+            self.server.active_job = None
+
+    def test_cancel_rejects_trace_and_miro_mutations_even_for_nonlive_fixtures(self):
+        for action, live in (("trace", False), ("miro-sync", False), ("miro-organize", True)):
+            with self.subTest(action=action), patch("liquid_tracer.web.threading.Thread.start"):
+                job = self.server.start_job([], action=action, live=live)
+            self.server.job_thread = None
+            try:
+                self.assertFalse(job["cancellable"])
+                self.assertEqual(self.request("/api/jobs/" + job["id"] + "/cancel", {})[0], 409)
+                self.assertEqual(self.server.jobs[job["id"]]["status"], "running")
+            finally:
+                self.server.active_job = None
+
     @unittest.skipUnless(os.name == "posix", "The local devenv terminal is POSIX")
     def test_interactive_worker_receives_terminal_and_foreground_is_restored(self):
         master, slave = pty.openpty()

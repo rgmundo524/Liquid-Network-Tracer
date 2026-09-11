@@ -1,13 +1,9 @@
 // A local, data-only worker. No browser, network request, or evidence file access.
 import ELK from 'elkjs/lib/elk.bundled.js';
 
-const MAX_INPUT = 32 * 1024 * 1024;
-let bytes = 0;
 const chunks = [];
 try {
   for await (const chunk of process.stdin) {
-    bytes += chunk.length;
-    if (bytes > MAX_INPUT) throw new Error('Layout input exceeds 32 MiB');
     chunks.push(chunk);
   }
   const request = JSON.parse(Buffer.concat(chunks).toString('utf8'));

@@ -1,13 +1,17 @@
 """Textual investigation interface; secrets are loaded only for live actions."""
 
+import asyncio
 import contextlib
 import json
 import math
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 from .common import LBTC, TraceError, parse_outpoint, read_json
@@ -24,6 +28,52 @@ LIMIT_FIELDS = (
     ("max_new_items", "Maximum new Miro items per sync", int, 0),
 )
 ACTION_ERRORS = (TraceError, OSError, ValueError, KeyError, TypeError)
+
+
+class _OfflineCalculation:
+    """Own one local renderer process until its CLI has cleaned up its children."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._done = threading.Event()
+        self._process = None
+        self.cancelled = False
+
+    def run(self, command, *, cwd, env):
+        try:
+            with self._lock:
+                if self.cancelled:
+                    return subprocess.CompletedProcess(command, 130, "", "")
+                self._process = subprocess.Popen(command, cwd=cwd, env=env, text=True,
+                                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                                 errors="replace",
+                                                 start_new_session=os.name == "posix")
+                process = self._process
+            stdout, stderr = process.communicate()
+            return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        finally:
+            self._done.set()
+
+    def cancel(self):
+        with self._lock:
+            if self.cancelled:
+                return
+            self.cancelled = True
+            process = self._process
+            if process is None:
+                self._done.set()
+            if process is not None and process.poll() is None:
+                # SIGINT lets the CLI unwind renderer cleanup, including children
+                # that it deliberately launches in their own process groups.
+                with contextlib.suppress(ProcessLookupError):
+                    if os.name == "posix":
+                        os.killpg(process.pid, signal.SIGINT)
+                    else:
+                        process.terminate()
+
+    def close(self):
+        self.cancel()
+        self._done.wait()
 
 
 def _project():
@@ -264,7 +314,7 @@ def create_app(root=None):
                     yield Select([("Straight", "straight"), ("Curved", "curved"), ("Elbowed", "elbowed")],
                                  value=self.settings["connector_style"], allow_blank=False, id="connector-style")
                     yield Static("Return connections may use elbows. ELK calculates placement; Miro draws its own routes. "
-                                 "Large graphs use a dependency layout. Mermaid uses its own layout or a direct SVG fallback.", markup=False)
+                                 "Mermaid uses its own layout. Large calculations can take time and can be cancelled.", markup=False)
                 if self.mode in ("preview", "sync", "layout"):
                     text = ("Offline preview. This does not change case settings, saved runs or the Miro board."
                             if self.mode == "preview" else "Updates the existing board and saves its ID with this investigation.")
@@ -278,7 +328,7 @@ def create_app(root=None):
                                      "Saved trace evidence is unchanged.", markup=False)
                     if self.mode == "layout":
                         yield Static("Sync this saved run and arrange the graph's managed items from left to right, keeping transaction inputs "
-                                     "and outputs nearby. ELK is used within its local limits, with a dependency layout for larger graphs. "
+                                     "and outputs nearby using ELK. "
                                      "This replaces their current positions and attaches "
                                      "transaction inputs on the left and outputs on the right. "
                                      "Annotations, item content and dimensions are retained. "
@@ -583,6 +633,7 @@ def create_app(root=None):
                     yield Button("Investigation settings", id="case-settings")
                     yield Button("Back", id="back")
                 yield Static("Ready", id="action-status", markup=False)
+                yield Button("Cancel calculation", id="cancel-calculation", variant="warning", disabled=True)
                 yield RichLog(id="action-log", wrap=True, markup=False, highlight=False)
             yield Footer()
 
@@ -608,11 +659,22 @@ def create_app(root=None):
 
         def on_mount(self):
             self.update_summary()
+            self.set_interval(1, self.update_calculation_status)
+
+        def update_calculation_status(self):
+            calculation = self.app.active_calculation
+            if self is self.app.screen and self.app.busy and calculation is not None and not calculation.cancelled:
+                seconds = int(time.monotonic() - self.calculation_started)
+                self.query_one("#action-status", Static).update(
+                    f"Calculating locally: {seconds // 60}:{seconds % 60:02d} elapsed. Ctrl+X cancels.")
 
         def on_screen_resume(self):
             self.update_summary()
 
         def on_button_pressed(self, event: Button.Pressed):
+            if event.button.id == "cancel-calculation":
+                self.app.action_cancel_calculation()
+                return
             if self.app.busy:
                 return
             try:
@@ -643,7 +705,14 @@ def create_app(root=None):
             self.app.busy = busy
             for button in self.query(Button):
                 button.disabled = busy
+            calculation = self.app.active_calculation
+            cancel = self.query_one("#cancel-calculation", Button)
+            cancel.disabled = not busy or calculation is None or calculation.cancelled
+            cancel.display = busy and calculation is not None
             self.query_one("#action-status", Static).update("Running..." if busy else "Ready")
+            if busy and calculation is not None:
+                self.query_one("#action-status", Static).update("Calculating locally. Large graphs can take time. Ctrl+X cancels.")
+                cancel.focus()
 
         def perform(self, selection):
             if not selection or self.app.busy:
@@ -651,6 +720,9 @@ def create_app(root=None):
             arguments, live = selection
             self.current_action = arguments[0]
             self.reorganizing = "--reorganize" in arguments
+            if not live and self.current_action in ("layout-preview", "mermaid"):
+                self.app.active_calculation = _OfflineCalculation()
+                self.calculation_started = time.monotonic()
             self.set_busy(True)
             if not live:
                 self.offline_action(arguments)
@@ -670,18 +742,31 @@ def create_app(root=None):
 
         @work(thread=True)
         def offline_action(self, arguments):
+            calculation = self.app.active_calculation
             try:
-                result = subprocess.run(_command(arguments), cwd=_project(), env=_environment(),
-                                        check=False, capture_output=True, text=True)
+                if calculation is not None:
+                    result = calculation.run(_command(arguments), cwd=_project(), env=_environment())
+                else:
+                    result = subprocess.run(_command(arguments), cwd=_project(), env=_environment(),
+                                            check=False, capture_output=True, text=True)
                 status, output = result.returncode, result.stdout + result.stderr
             except OSError as error:
                 status, output = 1, "Could not start the offline action: " + str(error)
-            self.app.call_from_thread(self.finished, status, output)
+            if calculation is not None and calculation.cancelled:
+                status = 130
+            # Shutdown still cancels and drains the calculation when Textual has
+            # stopped accepting callbacks from worker threads.
+            with contextlib.suppress(RuntimeError):
+                self.app.call_from_thread(self.finished, status, output)
 
         def finished(self, status, output):
+            cancelled = self.app.active_calculation is not None and self.app.active_calculation.cancelled
+            self.app.active_calculation = None
             self.set_busy(False)
             self.query_one("#action-log", RichLog).write(output)
-            if getattr(self, "current_action", None) == "miro-create-board":
+            if cancelled:
+                message = "Calculation cancelled. Saved investigation evidence remains available."
+            elif getattr(self, "current_action", None) == "miro-create-board":
                 message = ("Miro board saved. Choose Preview Miro, then Sync to Miro to add the traced graph."
                            if status == 0 else "Board creation did not complete. Check the terminal result before retrying.")
             elif getattr(self, "current_action", None) == "mermaid":
@@ -739,6 +824,8 @@ def create_app(root=None):
                            else "Action did not complete successfully. Saved evidence remains available; no automatic retry.")
             self.query_one("#action-status", Static).update(message)
             self.update_summary()
+            if self.app.quit_after_calculation:
+                self.app.exit(0)
 
     class SelectScreen(BaseScreen):
         def compose(self) -> ComposeResult:
@@ -813,7 +900,7 @@ def create_app(root=None):
     class InvestigationApp(App):
         TITLE = "Liquid Network Tracer"
         SUB_TITLE = "Saved investigations"
-        BINDINGS = [("ctrl+q", "quit", "Quit")]
+        BINDINGS = [("ctrl+q", "quit", "Quit"), ("ctrl+x", "cancel_calculation", "Cancel calculation")]
         CSS = """
         Screen { background: $background; }
         .panel, .form-panel { padding: 1 2; width: 100%; height: 1fr; }
@@ -829,6 +916,7 @@ def create_app(root=None):
         #form-error { color: $error; }
         #case-summary { height: auto; margin-bottom: 1; }
         #action-status { height: auto; margin: 1 0; }
+        #cancel-calculation { display: none; width: auto; }
         #action-log { height: 1fr; min-height: 10; border: round $panel; }
         DataTable, #runs { height: 1fr; }
         """
@@ -836,6 +924,8 @@ def create_app(root=None):
         def __init__(self):
             super().__init__()
             self.busy = False
+            self.active_calculation = None
+            self.quit_after_calculation = False
             self.investigation_root = investigation_root
 
         def compose(self) -> ComposeResult:
@@ -869,10 +959,26 @@ def create_app(root=None):
                 self.push_screen(CaseScreen(case))
 
         def action_quit(self):
-            if self.busy:
+            if self.active_calculation is not None:
+                self.quit_after_calculation = True
+                self.action_cancel_calculation()
+            elif self.busy:
                 self.notify("A bounded action is running. Wait for its result before exiting.")
             else:
                 self.exit(0)
+
+        def action_cancel_calculation(self):
+            calculation = self.active_calculation
+            if calculation is None:
+                return
+            calculation.cancel()
+            if isinstance(self.screen, CaseScreen):
+                self.screen.query_one("#cancel-calculation", Button).disabled = True
+                self.screen.query_one("#action-status", Static).update("Cancelling calculation and closing renderer processes...")
+
+        async def on_unmount(self):
+            if self.active_calculation is not None:
+                await asyncio.to_thread(self.active_calculation.close)
 
     return InvestigationApp()
 

@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -38,6 +39,7 @@ PREVIEW_NAMES = {"graph.html", "graph.svg", "graph.mmd", "graph.json",
 LAYOUT_NAMES = {"graph.html", "graph.svg", "graph.json", "layout-report.json"}
 LAYOUT_ALGORITHMS = ("elk_layered_v1", "dependency_layers_v1")
 FALLBACK_REASONS = ("size_limit", "timeout", "mermaid_size_limit", "mermaid_timeout")
+CANCELLABLE_ACTIONS = {"layout", "mermaid"}
 
 
 def public_rendering_metadata(result):
@@ -75,6 +77,28 @@ def public_layout_metrics(metrics):
 class RequestError(Exception):
     def __init__(self, message, status=400):
         self.message, self.status = message, status
+
+
+class JobCancelled(Exception):
+    """A requested cancellation, separate from a CLI or credential error."""
+
+
+def stop_worker(process):
+    """Let the CLI unwind its separate renderer groups before killing it."""
+    if process is None or process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # The worker may exit between the timeout and escalation.
+        process.wait()
 
 
 def safe_path(root, parts):
@@ -307,6 +331,8 @@ class LocalServer(ThreadingHTTPServer):
         identity = secrets.token_hex(16)
         self.jobs[identity] = {"id": identity, "status": "running", "action": action,
                                "case_id": case_id, "live": bool(live),
+                               "started_at": time.time(),
+                               "cancellable": action in CANCELLABLE_ACTIONS and not live,
                                "message": ("Working. Check the launching terminal if Proton Pass needs to unlock."
                                            if live else "Working with saved local evidence…")}
         self.active_job = identity
@@ -318,6 +344,25 @@ class LocalServer(ThreadingHTTPServer):
             args=(identity, arguments, action, live, case, txids), daemon=True)
         self.job_thread.start()
         return dict(self.jobs[identity])
+
+    def cancel_job(self, identity):
+        """Called under job_lock, so only the identified active job can stop."""
+        if not CASE_ID.fullmatch(identity) or identity not in self.jobs:
+            raise RequestError("Job unavailable. Refresh the page to review active work.", 404)
+        job = self.jobs[identity]
+        if self.active_job != identity or job["status"] not in ("running", "cancelling"):
+            raise RequestError("This action has already finished. Refresh the investigation.", 409)
+        if job["action"] not in CANCELLABLE_ACTIONS or job["live"]:
+            raise RequestError("Only local ELK and Mermaid calculations can be canceled here.", 409)
+        if job["status"] == "cancelling":
+            return dict(job)
+        # If completion already won, leave its result available to the browser.
+        if self.process is not None and self.process.poll() is not None:
+            job["cancellable"] = False
+            return dict(job)
+        job.update(status="cancelling", cancellable=False,
+                   message="Canceling the calculation and stopping its renderer…")
+        return dict(job)
 
     def run_job(self, identity, arguments, action, live, case, txids):
         terminal = None
@@ -333,12 +378,22 @@ class LocalServer(ThreadingHTTPServer):
                 with self.job_lock:
                     if self.closing:
                         raise RuntimeError("Server is shutting down")
+                    if self.jobs[identity]["status"] == "cancelling":
+                        raise JobCancelled
                     process = subprocess.Popen(worker_command(request, result, live), cwd=_project(),
                                                env=_environment(), **options)
                     self.process = process
                 terminal = handoff_terminal(process, live)
                 progress_path = Path(directory) / "progress.json"
                 while True:
+                    with self.job_lock:
+                        cancelling = self.jobs[identity]["status"] == "cancelling"
+                        closing = self.closing
+                    if cancelling or closing:
+                        stop_worker(process)
+                        if cancelling:
+                            raise JobCancelled
+                        raise RuntimeError("Server is shutting down")
                     try:
                         status = process.wait(timeout=.25)
                     except subprocess.TimeoutExpired:
@@ -348,6 +403,9 @@ class LocalServer(ThreadingHTTPServer):
                         break
                 restore_terminal(terminal)
                 terminal = None
+                with self.job_lock:
+                    if self.jobs[identity]["status"] == "cancelling":
+                        raise JobCancelled
                 if status != 0:
                     raise RuntimeError("CLI action failed")
                 report = read_json(result)
@@ -355,27 +413,27 @@ class LocalServer(ThreadingHTTPServer):
                     raise RuntimeError("Invalid action result")
                 value = self.public_result(report["result"], action, case, txids)
             with self.job_lock:
-                self.jobs[identity].update(status="succeeded", message="Action completed.", result=value)
+                self.jobs[identity].update(status="succeeded", cancellable=False,
+                                          message="Action completed.", result=value)
+        except JobCancelled:
+            with self.job_lock:
+                self.jobs[identity].update(status="canceled", cancellable=False,
+                    message="Calculation canceled. Saved investigation runs are unchanged.")
         except Exception as error:
             print("Local UI action failed: " + str(error), file=sys.stderr)
             with self.job_lock:
-                self.jobs[identity].update(status="failed", message=(
+                self.jobs[identity].update(status="failed", cancellable=False, message=(
                     "Action failed. Check the launching terminal for credential, API, or saved-file errors. "
                     "Review the investigation before retrying a live action."))
         finally:
-            if process is not None and process.poll() is None:
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                    process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait(timeout=3)
-                except ProcessLookupError:
-                    pass
-            restore_terminal(terminal)
-            with self.job_lock:
-                self.process = None
-                self.active_job = None
+            try:
+                stop_worker(process)
+            finally:
+                restore_terminal(terminal)
+                with self.job_lock:
+                    if self.active_job == identity:
+                        self.process = None
+                        self.active_job = None
 
     def read_progress(self, identity, path):
         try:
@@ -487,18 +545,10 @@ class LocalServer(ThreadingHTTPServer):
     def server_close(self):
         with self.job_lock:
             self.closing = True
-            process = self.process
-        if process is not None and process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait(timeout=3)
-            except ProcessLookupError:
-                pass
+        # The job thread owns process termination. A second SIGTERM from this
+        # thread could interrupt cleanup and orphan a renderer in its own group.
         if self.job_thread is not None:
-            self.job_thread.join(timeout=4)
+            self.job_thread.join()
         super().server_close()
 
 
@@ -578,8 +628,11 @@ class Handler(BaseHTTPRequestHandler):
             if mutation:
                 body = self.body()
                 with self.server.job_lock:
-                    self.server.ensure_idle()
-                    result, status = self.post(parts, body)
+                    if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "cancel":
+                        result, status = self.server.cancel_job(parts[2]), 202
+                    else:
+                        self.server.ensure_idle()
+                        result, status = self.post(parts, body)
                 self.send(status, result)
             else:
                 self.get(parts)

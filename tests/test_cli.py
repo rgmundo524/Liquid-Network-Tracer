@@ -41,6 +41,15 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 0, errors or output)
         return json.loads(output)
 
+    def test_cancelled_layout_returns_interrupt_status_without_a_success_product(self):
+        with patch("liquid_tracer.cli.layout_preview_run", side_effect=KeyboardInterrupt):
+            status, output, errors = self.invoke(["layout-preview", "--case", str(self.case)])
+        self.assertEqual(status, 130)
+        self.assertEqual(output, "")
+        self.assertIn("Action canceled", errors)
+        self.assertNotIn("Traceback", errors)
+        self.assertFalse(self.case.exists())
+
     def test_fetch_configuration_is_inherited_overridden_and_archived(self):
         with patch.dict(os.environ, {"LIQUID_BLOCKSTREAM_API_RPS": "10"}):
             first = self.start("--hops", "0", "--api-workers", "2")

@@ -18,10 +18,6 @@ from .export import COLORS, edge_color, legend_lines
 LAYOUT_NOTICE = "ELK layout; Miro routes may differ. Crossing counts are estimates."
 _COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
 _PERCENT = re.compile(r"(?:\d+(?:\.\d+)?|\.\d+)%\Z")
-_MAX_ITEMS = 50000
-_MAX_COORDINATE = 10000000
-_MAX_ROUTE_POINTS = 1000
-_MAX_TOTAL_ROUTE_POINTS = 250000
 
 
 def layout_title(graph):
@@ -43,12 +39,13 @@ def _number(value, *, positive=False):
     if (isinstance(value, bool) or not isinstance(value, (int, float))
             or (positive and value <= 0)):
         raise TraceError("Local SVG preview contains invalid geometry")
-    if abs(value) > _MAX_COORDINATE:
-        raise TraceError(f"Local SVG preview exceeds the coordinate limit of {_MAX_COORDINATE:,}; "
-                         "export CSV for the complete graph or select an earlier saved run for a smaller preview")
-    if not math.isfinite(value):
+    try:
+        result = float(value)
+    except OverflowError as error:
+        raise TraceError("Local SVG preview contains invalid geometry") from error
+    if not math.isfinite(result):
         raise TraceError("Local SVG preview contains invalid geometry")
-    return float(value)
+    return result
 
 
 def _text(value):
@@ -64,7 +61,9 @@ def _escape(value):
 
 
 def _fmt(value):
-    return format(value, ".3f").rstrip("0").rstrip(".") or "0"
+    # Check derived values too: finite input coordinates can still overflow
+    # when a bounding box, attachment or curved segment is calculated.
+    return format(_number(value), ".3f").rstrip("0").rstrip(".") or "0"
 
 
 def _point(value):
@@ -96,12 +95,14 @@ def _attachment(edge, key, node, other, source):
     # address/event fallback points intersect the actual ellipse/diamond.
     if node["kind"] == "transaction":
         return (node["x"] + node["width"] / 2 * (1 if source else -1), node["y"])
-    dx, dy = other["x"] - node["x"], other["y"] - node["y"]
+    dx, dy = _number(other["x"] - node["x"]), _number(other["y"] - node["y"])
     if dx == dy == 0:
         dx = 1 if source else -1
-    rx, ry = node["width"] / 2, node["height"] / 2
+    direction_scale = max(abs(dx), abs(dy))
+    dx, dy = dx / direction_scale, dy / direction_scale
+    rx, ry = _number(node["width"] / 2, positive=True), _number(node["height"] / 2, positive=True)
     scale = (1 / (abs(dx) / rx + abs(dy) / ry) if node["kind"] == "event"
-             else 1 / math.sqrt((dx / rx) ** 2 + (dy / ry) ** 2))
+             else 1 / math.hypot(dx / rx, dy / ry))
     return (node["x"] + dx * scale, node["y"] + dy * scale)
 
 
@@ -110,10 +111,6 @@ def _geometry(graph):
         raise TraceError("ELK preview requires graph nodes and edges")
     if not graph["nodes"]:
         raise TraceError("Local SVG preview requires a nonempty graph")
-    if len(graph["nodes"]) + len(graph["edges"]) > _MAX_ITEMS:
-        raise TraceError(f"Local SVG preview has {len(graph['nodes']):,} objects and {len(graph['edges']):,} connections; "
-                         f"its display limit is {_MAX_ITEMS:,} combined. Export CSV for the complete graph "
-                         "or select an earlier saved run for a smaller preview; no objects were omitted")
     nodes = {}
     for item in graph["nodes"]:
         if (not isinstance(item, dict) or not isinstance(item.get("id"), str)
@@ -127,7 +124,7 @@ def _geometry(graph):
         if not isinstance(node["color"], str) or not _COLOR.fullmatch(node["color"]):
             raise TraceError("ELK preview contains an invalid node color")
         nodes[node["id"]] = node
-    edges, seen, route_points = [], set(), 0
+    edges, seen = [], set()
     for item in graph["edges"]:
         if (not isinstance(item, dict) or not isinstance(item.get("id"), str)
                 or not item["id"] or item["id"] in seen
@@ -142,11 +139,8 @@ def _geometry(graph):
             raise TraceError("ELK preview contains an unsupported connector appearance")
         route = edge.get("route")
         if route is not None:
-            if not isinstance(route, list) or not 2 <= len(route) <= _MAX_ROUTE_POINTS:
+            if not isinstance(route, list) or len(route) < 2:
                 raise TraceError("ELK preview contains an invalid connector route")
-            route_points += len(route)
-            if route_points > _MAX_TOTAL_ROUTE_POINTS:
-                raise TraceError("ELK preview connector routes exceed the display limit")
             route = [_point(point) for point in route]
         start, end = nodes[edge["source"]], nodes[edge["target"]]
         first = _attachment(edge, "startItem", start, end, True)
@@ -176,20 +170,27 @@ def _path(points, curved=False):
         if not radius:
             parts.append("L " + pair(point))
             continue
-        before = tuple(point[axis] + (previous[axis] - point[axis]) * radius / first for axis in (0, 1))
-        after = tuple(point[axis] + (following[axis] - point[axis]) * radius / second for axis in (0, 1))
+        before = tuple(point[axis] + (previous[axis] - point[axis]) * (radius / first) for axis in (0, 1))
+        after = tuple(point[axis] + (following[axis] - point[axis]) * (radius / second) for axis in (0, 1))
         parts.extend(["L " + pair(before), "Q " + pair(point) + " " + pair(after)])
     parts.append("L " + pair(points[-1]))
     return " ".join(parts)
 
 
 def _midpoint(points):
-    remaining = sum(math.dist(start, end) for start, end in zip(points, points[1:])) / 2
-    for start, end in zip(points, points[1:]):
-        length = math.dist(start, end)
-        if remaining <= length and length:
-            return tuple(start[axis] + (end[axis] - start[axis]) * remaining / length for axis in (0, 1))
-        remaining -= length
+    lengths = [_number(math.dist(start, end)) for start, end in zip(points, points[1:])]
+    longest = max(lengths, default=0)
+    if not longest:
+        return points[0]
+    # Relative lengths avoid overflow in the total for long routes. Compute
+    # the fraction first so interpolation also works at large coordinates.
+    weights = [length / longest for length in lengths]
+    remaining = sum(weights) / 2
+    for start, end, weight in zip(points, points[1:], weights):
+        if remaining <= weight and weight:
+            fraction = remaining / weight
+            return tuple(start[axis] + (end[axis] - start[axis]) * fraction for axis in (0, 1))
+        remaining -= weight
     return points[0]
 
 

@@ -14,7 +14,7 @@ from unittest.mock import patch
 from liquid_tracer.api import Esplora, Limits
 from liquid_tracer.common import TraceError, save_json
 from liquid_tracer.export import COLORS, build_graph
-from liquid_tracer.mermaid import RENDER_TIMEOUT, _render, export_mermaid, mermaid_source
+from liquid_tracer.mermaid import _render, export_mermaid, mermaid_source
 from liquid_tracer.store import Store
 from liquid_tracer.trace import new_state, trace
 from tests.fixtures import A, B, fixture
@@ -175,8 +175,7 @@ class MermaidTests(unittest.TestCase):
         self.assertFalse((self.destination / "graph.html").exists())
 
     def test_renderer_failures_keep_source_without_echoing_case_or_secrets(self):
-        cases = [1,
-                 subprocess.TimeoutExpired([], RENDER_TIMEOUT), FileNotFoundError("PRIVATE PATH")]
+        cases = [1, FileNotFoundError("PRIVATE PATH")]
         for index, outcome in enumerate(cases):
             destination = self.root / f"failed-{index}"
             kwargs = {"side_effect": outcome} if isinstance(outcome, Exception) else {"return_value": outcome}
@@ -214,30 +213,45 @@ class MermaidTests(unittest.TestCase):
         run.assert_not_called()
         self.assertEqual(existing.read_text(), "existing analyst work")
 
-    def test_timeout_terminates_renderer_child_processes(self):
+    def test_cancel_terminates_renderer_child_processes_without_render_deadline(self):
         child_file = self.root / "child.pid"
+        heartbeat = self.root / "child.tick"
         script = (
-            "import subprocess,sys,pathlib; "
-            "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
-            "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); child.wait()"
+            "import subprocess,sys; "
+            "child=subprocess.Popen([sys.executable,'-c',"
+            "'import itertools,os,pathlib,sys,time; p=pathlib.Path(sys.argv[1]); p.write_text(str(os.getpid()))\\n"
+            "for tick in itertools.count(): p.with_suffix(\".tick\").write_text(str(tick)); time.sleep(.01)',"
+            "sys.argv[1]]); child.wait()"
         )
-        with patch("liquid_tracer.mermaid.RENDER_TIMEOUT", 0.5):
-            with self.assertRaises(subprocess.TimeoutExpired):
+        real_popen = subprocess.Popen
+        processes = []
+
+        def cancellable_renderer(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            processes.append(process)
+
+            def cancel(*call_args, **call_kwargs):
+                self.assertEqual(call_args, ())
+                self.assertEqual(call_kwargs, {}, "Rendering must have no application time limit")
+                deadline = time.monotonic() + 2
+                while not heartbeat.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                raise KeyboardInterrupt
+
+            process.communicate = cancel
+            return process
+
+        with patch("liquid_tracer.mermaid.subprocess.Popen", side_effect=cancellable_renderer):
+            with self.assertRaises(KeyboardInterrupt):
                 _render([sys.executable, "-c", script, str(child_file)], self.root)
         self.assertTrue(child_file.is_file(), "Synthetic renderer must have launched its child")
-        child_pid = int(child_file.read_text())
-        status = Path(f"/proc/{child_pid}/stat")
-        # An orphan can briefly remain a zombie until the host init reaps it;
-        # it must no longer be a running Chromium-equivalent process.
-        deadline = time.monotonic() + 1
-        while status.exists() and time.monotonic() < deadline:
-            try:
-                if status.read_text().split(") ", 1)[1].split()[0] == "Z":
-                    return
-            except FileNotFoundError:
-                return
-            time.sleep(0.01)
-        self.assertFalse(status.exists(), "Renderer child survived timeout cleanup")
+        self.assertIsNotNone(processes[0].returncode, "Renderer parent was not reaped")
+        # Check activity directly. Some managed runtimes expose a host /proc
+        # with different PIDs; an orphan zombie also need not be reaped yet.
+        self.assertTrue(heartbeat.is_file(), "Renderer child must have started its heartbeat")
+        tick = heartbeat.read_text()
+        time.sleep(.1)
+        self.assertEqual(heartbeat.read_text(), tick, "Renderer child survived cancellation cleanup")
 
     def test_invalid_graph_cannot_inject_styles_or_drop_missing_endpoints(self):
         for mutation in (lambda graph: graph["nodes"][0].update(color="red;click n0 bad"),
@@ -259,7 +273,7 @@ class MermaidTests(unittest.TestCase):
                                "color": COLORS["address"]})
         # Report renderer diagnostics only for this synthetic fixture. Product
         # errors deliberately avoid echoing private investigation labels. The
-        # spy preserves the actual timeout and process-group cleanup and never
+        # spy preserves process-group cleanup and never
         # runs the renderer a second time merely to recover its stderr.
         diagnostic_output = []
         real_popen = subprocess.Popen

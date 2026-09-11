@@ -3,14 +3,15 @@ import json
 import os
 import random
 import shutil
+import signal
 import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from liquid_tracer.common import TraceError
-from liquid_tracer.elk_layout import (_LayoutTimeout, _worker, attachment_point, fallback_graph, layout_metrics,
-                                     optimize_graph, segment_hits_node, segments_cross)
+from liquid_tracer.elk_layout import (_apply_candidate, _point, _request_graph, _worker, attachment_point,
+                                     fallback_graph, layout_metrics, optimize_graph, segment_hits_node, segments_cross)
 from liquid_tracer.export import build_graph
 from tests.fixtures import fixture
 from tests.test_layout import chain, state_from, txid
@@ -33,6 +34,25 @@ def crossing_graph():
             "edges": [{"id": "ac", "source": "a", "target": "c"},
                       {"id": "bd", "source": "b", "target": "d"}],
             "fee_items": {}, "graph_options": {}, "presentation_version": 5}
+
+
+def synthetic_candidate(request, seeds, **kwargs):
+    """Return exact topology and simple coordinates without claiming ELK performance."""
+    nodes, ports = [], {}
+    for index, child in enumerate(request["children"]):
+        x, y = index * 2000, 0
+        node = {"id": child["id"], "width": child["width"], "height": child["height"],
+                "x": x, "y": y, "ports": []}
+        for port in child["ports"]:
+            px = child["width"] if port["layoutOptions"]["elk.port.side"] == "EAST" else 0
+            py = child["height"] / 2
+            node["ports"].append({"id": port["id"], "x": px, "y": py})
+            ports[port["id"]] = point(x + px, y + py)
+        nodes.append(node)
+    edges = [{"id": edge["id"], "sections": [{"startPoint": ports[edge["sources"][0]],
+                                              "endPoint": ports[edge["targets"][0]]}]}
+             for edge in request["edges"]]
+    return [{"seed": seed, "nodes": nodes, "edges": edges} for seed in seeds]
 
 
 class LayoutGeometryTests(unittest.TestCase):
@@ -121,65 +141,119 @@ class LayoutGeometryTests(unittest.TestCase):
         self.assertEqual(popen.call_args.args[0][0], "/synthetic/node")
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
 
-    def test_timeout_kills_worker_process_group(self):
+    def test_worker_polls_past_the_old_deadline_and_reports_elapsed_activity(self):
         process = Mock(returncode=None, pid=12345)
-        process.communicate.side_effect = [subprocess.TimeoutExpired("node", 30), ("", "")]
+        def communicate(*args, **kwargs):
+            if process.communicate.call_count <= 8:
+                raise subprocess.TimeoutExpired("node", 5)
+            process.returncode = 0
+            return json.dumps({"version": "0.12.0", "candidates": [{}]}), ""
+        process.communicate.side_effect = communicate
+        process.poll.return_value = 0
+        progress = []
+        with patch.dict(os.environ, {"LIQUID_TRACER_ROOT": str(ROOT), "LIQUID_NODE_BIN": "/synthetic/node"}), \
+                patch("pathlib.Path.is_file", return_value=True), \
+                patch("liquid_tracer.elk_layout.subprocess.Popen", return_value=process), \
+                patch("liquid_tracer.elk_layout.time.monotonic", side_effect=range(0, 45, 5)), \
+                patch("liquid_tracer.elk_layout.os.killpg") as kill:
+            self.assertEqual(_worker({"id": "synthetic"}, [1], progress=progress.append), [{}])
+        kill.assert_not_called()
+        self.assertEqual(process.communicate.call_count, 9)
+        self.assertIsInstance(process.communicate.call_args_list[0].args[0], str)
+        self.assertTrue(all(call.args[0] is None for call in process.communicate.call_args_list[1:]))
+        self.assertEqual(progress[-1]["elapsed_seconds"], 40)
+        self.assertTrue(all(event["completed"] == event["total"] == 0 for event in progress))
+
+    def test_keyboard_interrupt_kills_and_reaps_worker_process_group(self):
+        process = Mock(returncode=None, pid=12345)
+        process.communicate.side_effect = [KeyboardInterrupt, ("", "")]
         process.poll.return_value = None
         with patch.dict(os.environ, {"LIQUID_TRACER_ROOT": str(ROOT), "LIQUID_NODE_BIN": "/synthetic/node"}), \
                 patch("pathlib.Path.is_file", return_value=True), \
                 patch("liquid_tracer.elk_layout.subprocess.Popen", return_value=process), \
                 patch("liquid_tracer.elk_layout.os.killpg") as kill:
-            with self.assertRaisesRegex(TraceError, "30-second"):
+            with self.assertRaises(KeyboardInterrupt):
                 _worker({}, [1])
-            kill.assert_called_once()
-            self.assertEqual(kill.call_args.args[0], 12345)
+        kill.assert_called_once_with(12345, signal.SIGKILL)
+        self.assertEqual(process.communicate.call_count, 2)
+
+    def test_worker_accepts_output_over_the_old_64_mib_ceiling(self):
+        process = Mock(returncode=0, pid=12345)
+        process.communicate.return_value = (" " * (64 * 1024 * 1024) + json.dumps({"version": "0.12.0", "candidates": [{}]}), "")
+        process.poll.return_value = 0
+        with patch.dict(os.environ, {"LIQUID_TRACER_ROOT": str(ROOT), "LIQUID_NODE_BIN": "/synthetic/node"}), \
+                patch("pathlib.Path.is_file", return_value=True), \
+                patch("liquid_tracer.elk_layout.subprocess.Popen", return_value=process):
+            self.assertEqual(_worker({}, [1]), [{}])
+
+    def test_worker_failure_reports_exit_status_without_claiming_missing_dependencies(self):
+        process = Mock(returncode=-9, pid=12345)
+        process.communicate.return_value = ("", "SYNTHETIC private data must not appear")
+        process.poll.return_value = -9
+        with patch.dict(os.environ, {"LIQUID_TRACER_ROOT": str(ROOT), "LIQUID_NODE_BIN": "/synthetic/node"}), \
+                patch("pathlib.Path.is_file", return_value=True), \
+                patch("liquid_tracer.elk_layout.subprocess.Popen", return_value=process):
+            with self.assertRaisesRegex(TraceError, "signal 9") as raised:
+                _worker({}, [1])
+        self.assertNotIn("installation", str(raised.exception))
+        self.assertNotIn("SYNTHETIC", str(raised.exception))
 
 
-class LargeGraphFallbackTests(unittest.TestCase):
-    def test_actual_graph_above_10000_nodes_retains_every_relationship_without_worker(self):
-        graph = build_graph(state_from(chain(5000)))
-        self.assertEqual(len(graph["nodes"]), 10001)
-        with patch("liquid_tracer.elk_layout._worker") as worker:
+class UncappedElkTests(unittest.TestCase):
+    def test_over_100000_objects_and_30000_connections_reach_worker_and_return_intact(self):
+        # The worker is synthetic: this verifies pipeline acceptance, topology
+        # preservation and geometry validation, not real ELK speed/capacity.
+        count = 100001
+        graph = {"nodes": [{"id": f"n{index:06d}", "kind": "transaction" if index % 2 == 0 else "address",
+                             "x": index * 2000, "y": 0, "width": 80, "height": 80, "column": index}
+                            for index in range(count)],
+                 "edges": [{"id": f"e{index:06d}", "source": f"n{index:06d}", "target": f"n{index + 1:06d}",
+                             "outpoint": f"synthetic:{index}", "quantity": None} for index in range(count - 1)]}
+        with patch("liquid_tracer.elk_layout._worker", side_effect=synthetic_candidate) as worker, \
+                patch("liquid_tracer.elk_layout.fallback_graph", side_effect=AssertionError("Unexpected fallback")):
             result = optimize_graph(graph)
-        worker.assert_not_called()
-        self.assertEqual(result["nodes"], graph["nodes"])
-        self.assertEqual({edge["id"]: (edge["source"], edge["target"], edge["outpoint"], edge["quantity"])
-                          for edge in result["edges"]},
-                         {edge["id"]: (edge["source"], edge["target"], edge["outpoint"], edge["quantity"])
-                          for edge in graph["edges"]})
-        self.assertEqual(result["layout"]["algorithm"], "dependency_layers_v1")
-        self.assertEqual(result["layout"]["fallback_reason"], "size_limit")
-        self.assertEqual(result["layout"]["placement"], "complete_graph_v1")
-        self.assertIn("10,001 objects", result["layout"]["fallback_notice"])
-        self.assertEqual(result["layout"]["metrics"]["candidate_count"], 0)
-        self.assertNotIn("selected_seed", result["layout"]["metrics"])
-        self.assertFalse(result["layout"]["crossing_optimization"])
-        self.assertNotIn("fallback_reason", graph["layout"])
+        worker.assert_called_once()
+        request = worker.call_args.args[0]
+        self.assertEqual(len(request["children"]), count)
+        self.assertEqual(len(request["edges"]), count - 1)
+        self.assertGreater(len(json.dumps(request)), 32 * 1024 * 1024)
+        self.assertEqual([node["id"] for node in result["nodes"]], [node["id"] for node in graph["nodes"]])
+        self.assertEqual([(edge["id"], edge["source"], edge["target"], edge["outpoint"], edge["quantity"])
+                          for edge in result["edges"]],
+                         [(edge["id"], edge["source"], edge["target"], edge["outpoint"], edge["quantity"])
+                          for edge in graph["edges"]])
+        self.assertEqual(result["layout"]["algorithm"], "elk_layered_v1")
+        self.assertIsNone(result["layout"]["metrics"]["time_limit_seconds"])
+        self.assertNotIn("fallback_reason", result["layout"])
         self.assertTrue(all("attachment" not in edge for edge in graph["edges"]))
+        self.assertGreater(max(node["x"] for node in result["nodes"]), 1e8)
 
-    def test_connection_size_limit_falls_back_but_validation_still_runs_first(self):
-        graph = crossing_graph()
-        with patch("liquid_tracer.elk_layout.MAX_EDGES", 1), \
-                patch("liquid_tracer.elk_layout._worker") as worker:
-            result = optimize_graph(graph)
-            self.assertEqual(result["layout"]["fallback_reason"], "size_limit")
-            graph["edges"][0]["target"] = "missing"
-            with self.assertRaisesRegex(TraceError, "invalid graph connections"):
-                optimize_graph(graph)
-        worker.assert_not_called()
-
-    def test_only_actual_worker_timeout_uses_fallback_and_progress_explains_it(self):
+    def test_worker_failures_do_not_silently_change_layout_engine(self):
         graph = crossing_graph()
         before, progress = copy.deepcopy(graph), []
-        with patch("liquid_tracer.elk_layout._worker", side_effect=_LayoutTimeout("timeout")):
-            result = optimize_graph(graph, progress=progress.append)
-        self.assertEqual(result["layout"]["fallback_reason"], "timeout")
-        self.assertIn("full dependency layout", progress[-1]["message"])
-        self.assertEqual(progress[-1]["completed"], 1)
+        with patch("liquid_tracer.elk_layout._worker", side_effect=TraceError("Local ELK engine failure")), \
+                patch("liquid_tracer.elk_layout.fallback_graph") as fallback:
+            with self.assertRaisesRegex(TraceError, "Local ELK engine failure"):
+                optimize_graph(graph, progress=progress.append)
+        fallback.assert_not_called()
+        self.assertEqual(progress[-1]["completed"], 0)
         self.assertEqual(graph, before)
-        with patch("liquid_tracer.elk_layout._worker", side_effect=TraceError("Missing dependency")):
-            with self.assertRaisesRegex(TraceError, "Missing dependency"):
-                optimize_graph(graph)
+
+    def test_long_connector_routes_and_large_finite_coordinates_remain_valid(self):
+        graph = crossing_graph()
+        request, ports, fees = _request_graph(graph)
+        candidate = synthetic_candidate(request, [1])[0]
+        candidate["edges"][0]["sections"][0]["bendPoints"] = [point(1e9 + index, 100) for index in range(1001)]
+        result = _apply_candidate(graph, candidate, ports, fees, "elbowed")
+        self.assertEqual(len(result["edges"][0]["route"]), 1003)
+        self.assertGreater(result["edges"][0]["route"][1]["x"], 1e8)
+        self.assertEqual(_point(point(1e12, -1e12)), point(1e12, -1e12))
+        for invalid in (float("nan"), float("inf"), -float("inf"), True):
+            with self.assertRaisesRegex(TraceError, "invalid coordinate"):
+                _point(point(invalid, 0))
+
+
+class HistoricalFallbackTests(unittest.TestCase):
 
     def test_fallback_keeps_transaction_sides_fees_evidence_and_seed_colors(self):
         state = state_from({data["txid"]: data for key, data in fixture().items() if not key.endswith("outspends")})
@@ -225,6 +299,17 @@ class LargeGraphFallbackTests(unittest.TestCase):
 
 @unittest.skipUnless(HAS_ELK, "Run liquid-layout-setup to install the pinned local ELK engine")
 class RealElkTests(unittest.TestCase):
+    def test_real_worker_accepts_input_over_the_old_32_mib_ceiling(self):
+        graph = crossing_graph()
+        request, ports, fees = _request_graph(graph)
+        # Padding exercises the real stdin/parser boundary with a small graph;
+        # it does not claim a benchmark of a 33 MiB investigation topology.
+        request["synthetic_padding"] = "x" * (33 * 1024 * 1024)
+        candidate = _worker(request, [1])[0]
+        result = _apply_candidate(graph, candidate, ports, fees, "straight")
+        self.assertEqual({node["id"] for node in result["nodes"]}, {node["id"] for node in graph["nodes"]})
+        self.assertEqual({edge["id"] for edge in result["edges"]}, {edge["id"] for edge in graph["edges"]})
+
     def assert_topology_and_evidence_unchanged(self, before, after):
         before_copy, after_copy = copy.deepcopy(before), copy.deepcopy(after)
         for graph in (before_copy, after_copy):

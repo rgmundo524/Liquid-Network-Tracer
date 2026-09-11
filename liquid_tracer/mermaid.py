@@ -16,12 +16,8 @@ from pathlib import Path
 
 from .common import TraceError, save_json
 from .export import COLORS, edge_color, legend_lines
+from .processes import defer_cancellation_during_spawn
 
-RENDER_TIMEOUT = 120
-# Browser layout becomes expensive well before the direct SVG display limit.
-# These are local scheduling thresholds, not limits of the Mermaid format.
-MAX_RENDER_NODES = 1000
-MAX_RENDER_EDGES = 2000
 _COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
 
 
@@ -132,23 +128,26 @@ summary {{ cursor:pointer; }} li {{ margin:6px 0; }}
 
 def _render(command, directory):
     # Chromium launches child processes. Give this invocation its own process
-    # group so a timeout or interruption cannot leave a browser running after
+    # group so an interruption cannot leave a browser running after
     # the Node entry point exits. The application already requires POSIX.
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               text=True, cwd=directory, start_new_session=True)
+    process = None
     try:
-        process.communicate(timeout=RENDER_TIMEOUT)
+        with defer_cancellation_during_spawn():
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       text=True, cwd=directory, start_new_session=True)
+        process.communicate()
         return process.returncode
     finally:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=5)
-        finally:
-            process.stdout.close()
-            process.stderr.close()
+        if process is not None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=5)
+            finally:
+                process.stdout.close()
+                process.stderr.close()
 
 
 def export_mermaid(graph, directory):
@@ -186,8 +185,6 @@ def export_mermaid(graph, directory):
         raise TraceError(f"Cannot write Mermaid preview files in {directory}") from error
 
     retained = f"Mermaid source saved at {paths['source']}."
-    if len(graph["nodes"]) > MAX_RENDER_NODES or len(graph["edges"]) > MAX_RENDER_EDGES:
-        return _export_fallback(graph, paths, "size_limit", retained)
     executable = os.environ.get("LIQUID_MERMAID_BIN") or shutil.which("mmdc")
     if not executable:
         raise TraceError(f"Mermaid renderer (mmdc) is unavailable. Enter the project's devenv shell and retry. {retained}")
@@ -195,9 +192,6 @@ def export_mermaid(graph, directory):
                "--configFile", str(config_path), "--backgroundColor", "white", "--quiet"]
     try:
         returncode = _render(command, directory)
-    except subprocess.TimeoutExpired:
-        paths["svg"].unlink(missing_ok=True)
-        return _export_fallback(graph, paths, "timeout", retained)
     except OSError as error:
         raise TraceError(f"Cannot start Mermaid renderer. Enter the project's devenv shell and retry. {retained}") from error
     if returncode:
@@ -222,32 +216,3 @@ def export_mermaid(graph, directory):
         paths["html"].unlink(missing_ok=True)
         raise TraceError(f"Mermaid did not produce a usable SVG preview. {retained}") from error
     return {key: str(path) for key, path in paths.items()}
-
-
-def _export_fallback(graph, paths, reason, retained):
-    """Finish a failed/oversized Mermaid request with a clearly identified SVG.
-
-    Reuse the bounded dependency arrangement already produced by build_graph;
-    launching ELK here would just repeat the other expensive layout operation.
-    The complete .mmd and node map still describe the same physical topology.
-    """
-    from .elk_layout import fallback_graph
-    from .layout_preview import render_svg
-
-    temporary = paths["html"].with_name("graph.html.tmp")
-    try:
-        display = fallback_graph(graph, reason="mermaid_" + reason)
-        display["preview"] = {"renderer": "direct_svg", "reason": reason}
-        svg = render_svg(display)
-        save_json(paths["graph"], display)
-        paths["svg"].write_bytes(svg)
-        temporary.write_text(_preview_html(display, svg), encoding="utf-8")
-        temporary.replace(paths["html"])
-    except (OSError, TraceError) as error:
-        paths["svg"].unlink(missing_ok=True)
-        paths["html"].unlink(missing_ok=True)
-        temporary.unlink(missing_ok=True)
-        message = str(error) if isinstance(error, TraceError) else "Cannot write the direct SVG preview"
-        raise TraceError(f"{message}. {retained}") from error
-    return {**{key: str(path) for key, path in paths.items()},
-            "renderer": "direct_svg", "fallback_reason": reason}

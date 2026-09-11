@@ -1,14 +1,17 @@
-"""Fallback previews remain usable across the CLI and a reopened local UI."""
+"""Chosen renderers and historical fallback previews survive local UI restart."""
 
 import json
+import os
 import unittest
 from unittest.mock import patch
 
 from liquid_tracer.cli import layout_preview_run, mermaid_run, verify_export
-from liquid_tracer.common import read_json
+from liquid_tracer.common import read_json, save_json
+from liquid_tracer.elk_layout import fallback_graph
 from liquid_tracer.investigations import read_case
 from liquid_tracer.web import LocalServer
 from tests import test_web as web_tests
+from tests import test_mermaid as mermaid_tests
 
 
 class LargePreviewWorkflowTests(unittest.TestCase):
@@ -19,7 +22,7 @@ class LargePreviewWorkflowTests(unittest.TestCase):
     wait = web_tests.LocalWebTests.wait
     create = web_tests.LocalWebTests.create
 
-    def test_fallback_outputs_are_downloadable_after_restart_without_retracing(self):
+    def test_chosen_renderers_and_historical_outputs_remain_available_without_retracing(self):
         _, case = self.create()
         route = "/api/cases/" + case["id"]
         saved = self.wait(self.success(route + "/actions", {"action": "trace"}, 202))
@@ -30,14 +33,14 @@ class LargePreviewWorkflowTests(unittest.TestCase):
         original_graph = read_json(archive / "graph.json")
         with patch("liquid_tracer.cli.Esplora", side_effect=AssertionError("No explorer calls")), \
                 patch("liquid_tracer.miro._request", side_effect=AssertionError("No Miro calls")), \
-                patch("liquid_tracer.elk_layout.MAX_NODES", 1), \
-                patch("liquid_tracer.mermaid.MAX_RENDER_NODES", 1):
+                patch.dict(os.environ, {"LIQUID_MERMAID_BIN": "/synthetic/mmdc"}), \
+                patch("liquid_tracer.mermaid._render", side_effect=mermaid_tests.MermaidTests.fake_renderer):
             layout = layout_preview_run(path)
             mermaid = mermaid_run(path)
-        self.assertEqual(layout["layout_algorithm"], "dependency_layers_v1")
-        self.assertEqual(layout["fallback_reason"], "size_limit")
-        self.assertEqual(mermaid["renderer"], "direct_svg")
-        self.assertEqual(mermaid["fallback_reason"], "size_limit")
+        self.assertEqual(layout["layout_algorithm"], "elk_layered_v1")
+        self.assertNotIn("fallback_reason", layout)
+        self.assertNotIn("renderer", mermaid)
+        self.assertNotIn("fallback_reason", mermaid)
         for result in (layout, mermaid):
             graph = read_json(result["graph"])
             self.assertEqual({node["id"] for node in graph["nodes"]},
@@ -51,7 +54,7 @@ class LargePreviewWorkflowTests(unittest.TestCase):
             public = self.server.public_result(result, action, path, None)
             product = products[kind]
             self.assertEqual(product["downloads"], public["downloads"])
-            self.assertEqual(product["fallback_reason"], "size_limit")
+            self.assertNotIn("fallback_reason", product)
             for key in ("layout_algorithm", "renderer"):
                 if key in public:
                     self.assertEqual(product[key], public[key])
@@ -65,6 +68,20 @@ class LargePreviewWorkflowTests(unittest.TestCase):
         verify_export(archive)
         self.assertEqual(before, {str(file.relative_to(archive)): file.read_bytes()
                                  for file in archive.rglob("*") if file.is_file()})
+
+        # Seed historical presentation metadata from the previous release.
+        # This affects disposable preview fixtures only, never the archived run.
+        legacy_layout = fallback_graph(read_json(layout["graph"]))
+        save_json(layout["graph"], legacy_layout)
+        legacy_mermaid = read_json(mermaid["graph"])
+        legacy_mermaid["preview"] = {"renderer": "direct_svg", "reason": "size_limit"}
+        save_json(mermaid["graph"], legacy_mermaid)
+        products = reopened.case_summary(path, read_case(path), detail=True)["artifacts"][saved["run_id"]]
+        self.assertEqual(products["elk"]["layout_algorithm"], "dependency_layers_v1")
+        self.assertEqual(products["elk"]["fallback_reason"], "size_limit")
+        self.assertEqual(products["mermaid"]["renderer"], "direct_svg")
+        self.assertEqual(products["mermaid"]["fallback_reason"], "size_limit")
+        verify_export(archive)
 
     def test_browser_only_receives_known_renderer_metadata(self):
         for algorithm in ("elk_layered_v1", "dependency_layers_v1"):

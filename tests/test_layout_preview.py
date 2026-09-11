@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from liquid_tracer.common import TraceError
 from liquid_tracer.export import COLORS
-from liquid_tracer.layout_preview import LAYOUT_NOTICE, export_layout
+from liquid_tracer.layout_preview import LAYOUT_NOTICE, export_layout, render_svg
 
 
 NS = {"s": "http://www.w3.org/2000/svg"}
@@ -171,6 +171,41 @@ class LayoutPreviewTests(unittest.TestCase):
         with self.assertRaisesRegex(TraceError, "symbolic links"):
             export_layout(graph_fixture(), link / "child")
         self.assertFalse((self.destination / "child").exists())
+
+    def test_finite_coordinates_above_previous_limit_remain_renderable(self):
+        graph = graph_fixture()
+        graph["nodes"][1]["x"] = 10 ** 200
+        graph["edges"][0].pop("attachment")
+        # The old squared ellipse-distance formula overflowed even though the
+        # coordinates and the completed SVG geometry are all finite.
+        svg = ET.fromstring(render_svg(graph))
+        self.assertEqual(len(svg.findall(".//s:g[@data-node-id]", NS)), 3)
+        self.assertEqual(len(svg.findall(".//s:path[@data-edge-id]", NS)), 2)
+        self.assertNotRegex(str(svg.attrib), r"(?i)nan|inf")
+
+    def test_arithmetic_overflow_cannot_emit_invalid_svg(self):
+        for mutation in (
+                lambda graph: graph["nodes"][0].update(x=1.7e308, width=1.7e308),
+                lambda graph: (graph["nodes"][0].update(x=-1.7e308),
+                               graph["nodes"][1].update(x=1.7e308)),
+                lambda graph: graph["edges"][1].update(route=[{"x": 1.7e308, "y": 0},
+                    {"x": -1.7e308, "y": 0}, {"x": 1.7e308, "y": 0},
+                    {"x": 0, "y": 0}], connector_shape="curved")):
+            graph = graph_fixture()
+            mutation(graph)
+            with self.subTest(graph=graph), self.assertRaisesRegex(TraceError, "geometry"):
+                export_layout(graph, self.destination)
+            self.assertFalse(self.destination.exists())
+
+    def test_tiny_direction_with_large_finite_shapes_does_not_underflow(self):
+        graph = graph_fixture()
+        graph["edges"] = [graph["edges"][0]]
+        graph["edges"][0].pop("attachment")
+        graph["nodes"] = graph["nodes"][:2]
+        for index, node in enumerate(graph["nodes"]):
+            node.update(kind="address", x=index * 1e-300, y=0, width=1e300, height=1e300)
+        svg = ET.fromstring(render_svg(graph))
+        self.assertEqual(len(svg.findall(".//s:path[@data-edge-id]", NS)), 1)
 
     def test_truncated_metrics_are_displayed_as_lower_bounds(self):
         graph = graph_fixture()
