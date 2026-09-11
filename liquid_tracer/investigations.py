@@ -18,6 +18,7 @@ DEFAULTS = {
     "max_seconds": 60,
     "max_new_items": 750,
     "include_fees": False,
+    "connector_style": "straight",
 }
 
 
@@ -31,6 +32,10 @@ def validate_settings(settings):
         raise TraceError("Run settings must contain only supported tracing limits and graph options")
     result = {**DEFAULTS, **settings}
     for key, value in result.items():
+        if key == "connector_style":
+            if not isinstance(value, str) or value not in ("straight", "curved", "elbowed"):
+                raise TraceError("connector_style must be straight, curved, or elbowed")
+            continue
         if key == "include_fees":
             if type(value) is not bool:
                 raise TraceError("include_fees must be true or false")

@@ -28,6 +28,7 @@
     # Mermaid's Nix wrapper also supplies Chromium on Linux. Rendering uses
     # local files and never needs API credentials or a separate server.
     LIQUID_MERMAID_BIN = "${pkgs.mermaid-cli}/bin/mmdc";
+    LIQUID_NODE_BIN = "${pkgs.nodejs_24}/bin/node";
   };
 
   # SecretSpec's runtime dotenv provider is supported as an alternative to
@@ -43,10 +44,24 @@
     '';
   };
 
+  scripts.liquid-layout-setup = {
+    description = "Install the locked local ELK layout dependency when needed";
+    exec = ''
+      set -euo pipefail
+      cd "$LIQUID_TRACER_ROOT/layout"
+      layout_lock_hash="$(sha256sum package.json package-lock.json | sha256sum | cut -d ' ' -f 1)"
+      if [ ! -f node_modules/.liquid-lock ] || [ "$(cat node_modules/.liquid-lock)" != "$layout_lock_hash" ]; then
+        ${pkgs.nodejs_24}/bin/npm ci --ignore-scripts --no-audit --no-fund
+        printf '%s\n' "$layout_lock_hash" > node_modules/.liquid-lock
+      fi
+    '';
+  };
+
   scripts.liquid-web-build = {
     description = "Install locked Astro dependencies when needed and build the local UI";
     exec = ''
       set -euo pipefail
+      liquid-layout-setup
       cd "$LIQUID_TRACER_ROOT/web"
       web_lock_hash="$(sha256sum package.json package-lock.json | sha256sum | cut -d ' ' -f 1)"
       if [ ! -f node_modules/.liquid-lock ] || [ "$(cat node_modules/.liquid-lock)" != "$web_lock_hash" ]; then
@@ -170,5 +185,10 @@
     liquid-web-build
     ${pkgs.nodejs_24}/bin/npm --prefix "$LIQUID_TRACER_ROOT/web" run check
     liquid-test
+  '';
+
+  # Install before credential-bearing commands. ELK runs entirely offline.
+  enterShell = ''
+    liquid-layout-setup
   '';
 }

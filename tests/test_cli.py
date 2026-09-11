@@ -5,6 +5,7 @@ import functools
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,9 @@ from liquid_tracer.common import TraceError, digest, read_json, save_json
 from liquid_tracer.miro import sync as real_sync
 from tests.test_miro_sync import FakeMiro
 
+
+# Keep the declared local layout tool available while removing credentials.
+NODE_ENV = {"LIQUID_NODE_BIN": os.environ.get("LIQUID_NODE_BIN") or shutil.which("node") or ""}
 
 class CliIntegrationTests(unittest.TestCase):
     def setUp(self):
@@ -64,7 +68,7 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(second["stats"]["transactions_cumulative"], 4)
         self.assertEqual(original, {str(p.relative_to(first_dir)): digest(p.read_bytes()) for p in first_dir.rglob("*") if p.is_file()})
         snapshot = {str(p.relative_to(self.case)): digest(p.read_bytes()) for p in self.case.rglob("*") if p.is_file()}
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, NODE_ENV, clear=True):
             status, output, errors = self.invoke(["miro-sync", "--case", str(self.case), "--run", second["run_id"],
                                                 "--board", "https://miro.com/app/board/DEMO=/?moveToWidget=42", "--dry-run"])
         self.assertEqual(status, 0, errors)
@@ -98,7 +102,7 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertTrue(Path(json.loads(output)["report_file"]).exists())
 
     def test_auto_sync_requires_token_before_explorer(self):
-        with patch.dict(os.environ, {}, clear=True), patch("liquid_tracer.cli.Esplora", side_effect=AssertionError("No credits should be consumed")):
+        with patch.dict(os.environ, NODE_ENV, clear=True), patch("liquid_tracer.cli.Esplora", side_effect=AssertionError("No credits should be consumed")):
             status, _, errors = self.invoke(self.base + ["--seed", "a" * 64 + ":0", "--miro-board", "DEMO="])
         self.assertEqual(status, 1)
         self.assertIn("MIRO_ACCESS_TOKEN", errors)
@@ -156,7 +160,7 @@ class CliIntegrationTests(unittest.TestCase):
             self.assertEqual(json.loads(output)["created"], 0)
 
     def test_environment_defaults_and_explicit_overrides(self):
-        with patch.dict(os.environ, {"LIQUID_CASE_DIR": str(self.case), "LIQUID_MIRO_BOARD": "DEFAULT="}, clear=True):
+        with patch.dict(os.environ, {**NODE_ENV, "LIQUID_CASE_DIR": str(self.case), "LIQUID_MIRO_BOARD": "DEFAULT="}, clear=True):
             args = parser().parse_args(["miro-sync", "--dry-run"])
             self.assertEqual((args.case, args.board, args.run), (self.case, None, "latest"))
             args = parser().parse_args(["miro-sync", "--case", "another-case", "--board", "OVERRIDE=", "--run", "a" * 16])
@@ -173,7 +177,7 @@ class CliIntegrationTests(unittest.TestCase):
                     "--seeds-file", str(self.project / "examples/demo-seeds.txt"), "--hops", "0"])
             self.assertEqual(status, 0, errors or output)
         for environment in ({}, {"LIQUID_CASE_DIR": "", "LIQUID_MIRO_BOARD": ""}):
-            with patch.dict(os.environ, environment, clear=True):
+            with patch.dict(os.environ, {**NODE_ENV, **environment}, clear=True):
                 for arguments in (["trace"], ["export", "--run", "latest", "--out", "export"],
                                   ["miro-sync", "--board", "DEMO="]):
                     with self.subTest(environment=environment, arguments=arguments), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
@@ -185,7 +189,7 @@ class CliIntegrationTests(unittest.TestCase):
         first = self.start("--hops", "1")
         snapshot = {str(p.relative_to(self.case)): digest(p.read_bytes()) for p in self.case.rglob("*") if p.is_file()}
         result = subprocess.run([sys.executable, "-m", "liquid_tracer.cli", "miro-sync", "--dry-run"],
-            cwd=self.project, env={"LIQUID_CASE_DIR": str(self.case), "LIQUID_MIRO_BOARD": "DEMO="},
+            cwd=self.project, env={**NODE_ENV, "LIQUID_CASE_DIR": str(self.case), "LIQUID_MIRO_BOARD": "DEMO="},
             text=True, capture_output=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)
@@ -211,7 +215,7 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(read_json(Path(report["report_file"]))["board_id"], "SAVED=")
         snapshot = {str(p.relative_to(self.case)): digest(p.read_bytes()) for p in self.case.rglob("*") if p.is_file()}
         result = subprocess.run([sys.executable, "-m", "liquid_tracer.cli", "miro-sync", "--dry-run"],
-            cwd=self.project, env={"LIQUID_CASE_DIR": str(self.case), "LIQUID_MIRO_BOARD": "OTHER="},
+            cwd=self.project, env={**NODE_ENV, "LIQUID_CASE_DIR": str(self.case), "LIQUID_MIRO_BOARD": "OTHER="},
             text=True, capture_output=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)
@@ -224,7 +228,7 @@ class CliIntegrationTests(unittest.TestCase):
         metadata = read_json(self.case / "case.json")
         save_json(self.case / "case.json", {**metadata, "miro_board": "SAVED="})
         snapshot = {str(p.relative_to(self.case)): digest(p.read_bytes()) for p in self.case.rglob("*") if p.is_file()}
-        with patch.dict(os.environ, {"LIQUID_MIRO_BOARD": "ENV="}, clear=True), patch("builtins.input", side_effect=AssertionError("Explicit board must not prompt")):
+        with patch.dict(os.environ, {**NODE_ENV, "LIQUID_MIRO_BOARD": "ENV="}, clear=True), patch("builtins.input", side_effect=AssertionError("Explicit board must not prompt")):
             status, output, errors = self.invoke(["miro-sync", "--case", str(self.case), "--board", "EXPLICIT=", "--dry-run"])
         self.assertEqual(status, 0, errors)
         self.assertEqual(json.loads(output)["board_id"], "EXPLICIT=")
@@ -234,7 +238,7 @@ class CliIntegrationTests(unittest.TestCase):
         self.start("--hops", "1")
         snapshot = {str(p.relative_to(self.case)): digest(p.read_bytes()) for p in self.case.rglob("*") if p.is_file()}
         command = ["miro-sync", "--case", str(self.case)]
-        with patch.dict(os.environ, {}, clear=True), patch("sys.stdin.isatty", return_value=True), patch("builtins.input", return_value="PROMPT=") as prompt:
+        with patch.dict(os.environ, NODE_ENV, clear=True), patch("sys.stdin.isatty", return_value=True), patch("builtins.input", return_value="PROMPT=") as prompt:
             status, output, errors = self.invoke(command + ["--dry-run"])
         self.assertEqual(status, 0, errors)
         prompt.assert_called_once_with()
@@ -247,7 +251,7 @@ class CliIntegrationTests(unittest.TestCase):
             self.assertEqual(read_json(self.case / "case.json")["miro_board"], "PROMPT=")
             raise TraceError("simulated network failure")
 
-        with patch.dict(os.environ, {}, clear=True), patch("sys.stdin.isatty", return_value=True), patch("builtins.input", return_value="PROMPT="), patch("liquid_tracer.cli.sync", side_effect=unavailable):
+        with patch.dict(os.environ, NODE_ENV, clear=True), patch("sys.stdin.isatty", return_value=True), patch("builtins.input", return_value="PROMPT="), patch("liquid_tracer.cli.sync", side_effect=unavailable):
             status, _, errors = self.invoke(command)
         self.assertEqual(status, 1)
         self.assertIn("simulated network failure", errors)
@@ -256,7 +260,7 @@ class CliIntegrationTests(unittest.TestCase):
     def test_missing_board_never_prompts_in_noninteractive_execution(self):
         self.start("--hops", "1")
         metadata = (self.case / "case.json").read_bytes()
-        with patch.dict(os.environ, {}, clear=True), patch("sys.stdin.isatty", return_value=False), patch("builtins.input", side_effect=AssertionError("No prompts in scripts")):
+        with patch.dict(os.environ, NODE_ENV, clear=True), patch("sys.stdin.isatty", return_value=False), patch("builtins.input", side_effect=AssertionError("No prompts in scripts")):
             status, _, errors = self.invoke(["miro-sync", "--case", str(self.case), "--dry-run"])
         self.assertEqual(status, 1)
         self.assertIn("supply --board", errors)
@@ -267,7 +271,7 @@ class CliIntegrationTests(unittest.TestCase):
         checkpoint = Path(first["directory"]) / "trace.json"
         checkpoint.write_text(checkpoint.read_text() + "\n")
         metadata = (self.case / "case.json").read_bytes()
-        with patch.dict(os.environ, {}, clear=True), patch("sys.stdin.isatty", return_value=True), patch("builtins.input", side_effect=AssertionError("Verify evidence before prompting")), patch("liquid_tracer.cli.update_case", side_effect=AssertionError("Never save an invalid selection")):
+        with patch.dict(os.environ, NODE_ENV, clear=True), patch("sys.stdin.isatty", return_value=True), patch("builtins.input", side_effect=AssertionError("Verify evidence before prompting")), patch("liquid_tracer.cli.update_case", side_effect=AssertionError("Never save an invalid selection")):
             status, _, errors = self.invoke(["miro-sync", "--case", str(self.case)])
         self.assertEqual(status, 1)
         self.assertIn("checksum mismatch", errors)
@@ -312,7 +316,7 @@ class CliIntegrationTests(unittest.TestCase):
         first = self.start("--hops", "1")
         metadata = (self.case / "case.json").read_bytes()
         destination = Path(self.temp.name) / "export"
-        with patch.dict(os.environ, {"LIQUID_CASE_DIR": str(self.case)}, clear=True):
+        with patch.dict(os.environ, {**NODE_ENV, "LIQUID_CASE_DIR": str(self.case)}, clear=True):
             status, _, errors = self.invoke(["export", "--run", "latest", "--out", str(destination)])
         self.assertEqual(status, 0, errors)
         self.assertEqual(read_json(destination / "trace.json")["run_id"], first["run_id"])

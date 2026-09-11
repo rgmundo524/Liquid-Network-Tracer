@@ -28,6 +28,11 @@ def fee_arguments(command):
                          help="Hide transaction fee flows for this action; retain their evidence")
 
 
+def connector_arguments(command):
+    command.add_argument("--connector-style", choices=("straight", "curved", "elbowed"),
+                         help="Connector appearance (default: investigation setting, otherwise straight)")
+
+
 def parser():
     case_default = os.environ.get("LIQUID_CASE_DIR") or None
     root = argparse.ArgumentParser(description="Bounded Liquid UTXO reachability with saved evidence and Miro export")
@@ -93,6 +98,13 @@ def parser():
     mermaid.add_argument("--out", type=Path, help="New preview directory (default: automatically saved under the case's previews/)")
     mermaid.add_argument("--open", dest="open_browser", action="store_true", help="Open the completed local HTML chart in your browser")
     fee_arguments(mermaid)
+    layout = commands.add_parser("layout-preview", help="Optimize a saved graph locally with ELK and export HTML/SVG without API calls")
+    layout.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    layout.add_argument("--run", default="latest", help="Saved run ID (default: latest)")
+    layout.add_argument("--out", type=Path, help="New preview directory (default: saved under the case's previews/)")
+    layout.add_argument("--open", dest="open_browser", action="store_true", help="Open the completed local layout in your browser")
+    fee_arguments(layout)
+    connector_arguments(layout)
     csv = commands.add_parser("csv-export", help="Export CSV tables from a saved run without API calls")
     csv.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                      help="Case directory (default: LIQUID_CASE_DIR)")
@@ -114,6 +126,7 @@ def parser():
     update.add_argument("--plan", type=Path, help="Use a regenerated miro-plan.json for this run")
     update.add_argument("--dry-run", action="store_true", help="Preview local new/mapped counts without network access or writes")
     fee_arguments(update)
+    connector_arguments(update)
     update.add_argument("--reorganize", action="store_true",
                         help="Apply the current automatic layout to managed graph items, replacing their manual positions")
     update.add_argument("--max-new-items", type=int, default=750)
@@ -256,7 +269,17 @@ def include_fee_flows(metadata, explicit=None):
     return value
 
 
-def refresh_presentation(plan, trace_path, include_fees=False):
+def connector_appearance(metadata, explicit=None):
+    defaults = metadata.get("run_defaults", {})
+    if not isinstance(defaults, dict):
+        raise TraceError("Invalid investigation run defaults; restore case.json")
+    value = explicit if explicit is not None else defaults.get("connector_style", "straight")
+    if not isinstance(value, str) or value not in ("straight", "curved", "elbowed"):
+        raise TraceError("connector_style must be straight, curved, or elbowed")
+    return value
+
+
+def refresh_presentation(plan, trace_path, include_fees=False, connector_style="straight", progress=None):
     """Refresh verified evidence; only proven fee items may change topology."""
     namespace = _namespace(plan)
     state = read_json(trace_path)
@@ -290,7 +313,10 @@ def refresh_presentation(plan, trace_path, include_fees=False):
         if ({item for item in archived if item[0] not in keys} != ordinary
                 or not {item for item in archived if item[0] in keys}.issubset(complete)):
             raise TraceError("Presentation refresh would change saved graph topology beyond fee flows; use an explicit verified --plan or regenerate an export for review")
-    refreshed = full_plan if include_fees else make_plan(build_graph(state, merged, include_fees=False))
+    # Layout is a derivative of verified evidence, never a rewrite of the archive.
+    from .elk_layout import optimize_graph
+    graph = full_graph if include_fees else build_graph(state, merged, include_fees=False)
+    refreshed = make_plan(optimize_graph(graph, connector_style=connector_style, progress=progress))
     validate_plan(refreshed)
     expected = full_topology if include_fees else tuple(
         {item for item in values if item[0] not in keys} for values, keys in zip(full_topology, fee_keys))
@@ -301,9 +327,9 @@ def refresh_presentation(plan, trace_path, include_fees=False):
 
 
 def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_path=None,
-             include_fees=None, reorganize=False, progress=None):
-    if plan_path is not None and include_fees is not None:
-        raise TraceError("--plan cannot be combined with --include-fees or --exclude-fees; regenerate an export with the desired fee setting, then select its plan")
+             include_fees=None, reorganize=False, progress=None, connector_style=None):
+    if plan_path is not None and (include_fees is not None or connector_style is not None):
+        raise TraceError("--plan cannot be combined with --include-fees, --exclude-fees, or --connector-style; select an explicit plan with the desired presentation")
     run_id = resolve_latest(case, run_id)
     default_plan = run_path(case, run_id) / "miro-plan.json"
     verify_export((plan_path or default_plan).parent)
@@ -317,7 +343,8 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
         raise TraceError("Saved plan has no matching case identity; regenerate it with export or create a continuation")
     archived_plan_sha256 = plan["sha256"]
     if plan_path is None:
-        plan = refresh_presentation(plan, default_plan.parent / "trace.json", include_fee_flows(metadata, include_fees))
+        plan = refresh_presentation(plan, default_plan.parent / "trace.json", include_fee_flows(metadata, include_fees),
+                                    connector_appearance(metadata, connector_style), progress=progress)
     if not isinstance(max_new_items, int) or max_new_items < 0:
         raise TraceError("--max-new-items must be a nonnegative integer")
     target = resolve_board(metadata, board)
@@ -466,6 +493,25 @@ def mermaid_run(case, run_id="latest", out=None, include_fees=None, open_browser
     return result
 
 
+def layout_preview_run(case, run_id="latest", out=None, include_fees=None,
+                       connector_style=None, open_browser=False, progress=None):
+    from .elk_layout import optimize_graph
+    from .layout_preview import export_layout
+
+    case = Path(case)
+    run_id, _, graph = saved_graph(case, run_id, include_fees)
+    style = connector_appearance(read_case(case), connector_style)
+    destination = Path(out) if out is not None else case / "previews" / (run_id + "-elk-" + uuid.uuid4().hex[:8])
+    if destination.resolve().is_relative_to((case / "runs").resolve()):
+        raise TraceError("Save ELK previews outside runs/ to preserve archived evidence")
+    graph = optimize_graph(graph, connector_style=style, progress=progress)
+    result = export_layout(graph, destination)
+    result.update({"run_id": run_id, "include_fees": graph["include_fees"], "connector_style": style,
+                   "layout_algorithm": graph["layout"]["algorithm"],
+                   "browser_opened": open_preview(result["html"]) if open_browser else False})
+    return result
+
+
 def csv_run(case, run_id="latest", out=None, include_fees=None):
     from .csv_export import export_csv
 
@@ -542,13 +588,17 @@ def main(argv=None, *, progress=None):
             print(args.out.resolve())
         elif args.command == "mermaid":
             print(json.dumps(mermaid_run(args.case, args.run, args.out, args.include_fees, args.open_browser), indent=2))
+        elif args.command == "layout-preview":
+            print(json.dumps(layout_preview_run(args.case, args.run, args.out, args.include_fees,
+                                                args.connector_style, args.open_browser, progress), indent=2))
         elif args.command == "csv-export":
             print(json.dumps(csv_run(args.case, args.run, args.out, args.include_fees), indent=2))
         elif args.command == "miro-create-board":
             print(json.dumps(create_board(args.case, args.name, args.team_id, args.visibility), indent=2))
         elif args.command == "miro-sync":
             print(json.dumps(sync_run(args.case, args.run, args.board, args.max_new_items, args.dry_run, args.plan,
-                                      args.include_fees, args.reorganize, progress=progress), indent=2))
+                                      args.include_fees, args.reorganize, progress=progress,
+                                      connector_style=args.connector_style), indent=2))
         elif args.command == "miro-publish":
             print(json.dumps(publish(read_json(args.plan), board_id(args.board_id), args.state, args.max_items), indent=2))
         elif args.command == "miro-resolve":

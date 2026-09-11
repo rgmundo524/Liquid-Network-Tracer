@@ -222,7 +222,7 @@ def create_app(root=None):
             titles = {"new": "New investigation", "global": "Settings", "case": "Investigation settings",
                       "run": "Continue latest run" if self.metadata.get("latest_run") else "Start first run",
                       "preview": "Preview Miro changes", "sync": "Sync latest to Miro",
-                      "layout": "Organize Miro graph"}
+                      "layout": "Sync and reorganize Miro graph"}
             yield Header()
             with VerticalScroll(classes="form-panel"):
                 yield Label(titles[self.mode], classes="title")
@@ -260,23 +260,30 @@ def create_app(root=None):
                     yield Checkbox("Include transaction fee flows", value=self.settings["include_fees"], id="include-fees")
                     yield Static("Graph display only. Included fees appear in a chronological row above the graph. "
                                  "Trace evidence always retains fee outputs.", markup=False)
+                    yield Label("Miro connector appearance")
+                    yield Select([("Straight", "straight"), ("Curved", "curved"), ("Elbowed", "elbowed")],
+                                 value=self.settings["connector_style"], allow_blank=False, id="connector-style")
+                    yield Static("Return connections may use elbows. ELK calculates placement; Miro draws its own routes. "
+                                 "Mermaid has an independent layout.", markup=False)
                 if self.mode in ("preview", "sync", "layout"):
                     text = ("Offline preview. This does not change case settings, saved runs or the Miro board."
                             if self.mode == "preview" else "Updates the existing board and saves its ID with this investigation.")
                     yield Static(text, markup=False)
                     yield Static("Transaction fee flows: " + ("included" if self.settings["include_fees"] else "hidden")
                                  + ". Change this in Investigation settings.", id="fee-status", markup=False)
+                    yield Static("Connector appearance: " + self.settings["connector_style"]
+                                 + ". Change this in Investigation settings.", markup=False)
                     if not self.settings["include_fees"]:
                         yield Static("Sync checks previously generated fee items for manual edits before removing them. "
                                      "Saved trace evidence is unchanged.", markup=False)
                     if self.mode == "layout":
-                        yield Static("Arrange the graph's managed items from left to right, keeping transaction inputs "
+                        yield Static("Sync this saved run and use ELK to arrange the graph's managed items from left to right, keeping transaction inputs "
                                      "and outputs nearby. This replaces their current positions and attaches "
                                      "transaction inputs on the left and outputs on the right. "
                                      "Annotations, item content and dimensions are retained. "
                                      "You can still drag items in Miro afterward.", id="layout-notice", markup=False)
                     elif self.mode == "sync":
-                        yield Static("Existing item positions are retained. Choose Organize Miro graph to rearrange them.", markup=False)
+                        yield Static("Existing item positions are retained. Choose Sync and reorganize Miro graph to rearrange and sync in one action.", markup=False)
                 for key, label, converter, _ in LIMIT_FIELDS:
                     if self.mode in ("preview", "sync", "layout") and key != "max_new_items":
                         continue
@@ -288,7 +295,7 @@ def create_app(root=None):
                 yield Button("Cancel", id="cancel")
                 labels = {"new": "Create investigation", "global": "Save defaults", "case": "Save settings",
                           "run": "Run trace", "preview": "Preview (offline)", "sync": "Sync to Miro",
-                          "layout": "Organize graph"}
+                          "layout": "Sync and reorganize"}
                 yield Button(labels[self.mode], id="submit", variant="primary")
             yield Footer()
 
@@ -318,6 +325,7 @@ def create_app(root=None):
                 settings[key] = value
             if self.mode in ("new", "global", "case"):
                 settings["include_fees"] = self.query_one("#include-fees", Checkbox).value
+                settings["connector_style"] = self.query_one("#connector-style", Select).value
             return settings
 
         def on_button_pressed(self, event: Button.Pressed):
@@ -566,8 +574,10 @@ def create_app(root=None):
                     yield Button("Mermaid chart", id="mermaid")
                     yield Button("Export CSV", id="csv")
                 with Horizontal(classes="buttons"):
+                    yield Button("ELK layout preview", id="elk-preview")
+                with Horizontal(classes="buttons"):
                     yield Button("Create Miro board", id="create-board")
-                    yield Button("Organize Miro graph", id="layout")
+                    yield Button("Sync and reorganize Miro graph", id="layout")
                 with Horizontal(classes="buttons"):
                     yield Button("Investigation settings", id="case-settings")
                     yield Button("Back", id="back")
@@ -591,6 +601,7 @@ def create_app(root=None):
                 self.query_one("#layout", Button).disabled = self.app.busy or not (board and metadata.get("latest_run"))
                 self.query_one("#mermaid", Button).disabled = self.app.busy or not metadata.get("latest_run")
                 self.query_one("#csv", Button).disabled = self.app.busy or not metadata.get("latest_run")
+                self.query_one("#elk-preview", Button).disabled = self.app.busy or not metadata.get("latest_run")
             except ACTION_ERRORS as error:
                 self.show_error(error)
 
@@ -614,6 +625,9 @@ def create_app(root=None):
                 elif action == "mermaid":
                     _latest(self.case, read_case(self.case), verify=True)
                     self.perform((["mermaid", "--case", str(self.case), "--run", "latest", "--open"], False))
+                elif action == "elk-preview":
+                    _latest(self.case, read_case(self.case), verify=True)
+                    self.perform((["layout-preview", "--case", str(self.case), "--run", "latest", "--open"], False))
                 elif action == "csv":
                     _latest(self.case, read_case(self.case), verify=True)
                     self.perform((["csv-export", "--case", str(self.case), "--run", "latest"], False))
@@ -681,6 +695,18 @@ def create_app(root=None):
                             message = "Mermaid chart saved. " + action + result["html"]
                     except ValueError:
                         pass
+            elif getattr(self, "current_action", None) == "layout-preview":
+                message = ("ELK layout preview saved. Miro is unchanged. Preview paths and estimated metrics are listed below."
+                           if status == 0 else "ELK layout preview did not complete. Check the result below; saved evidence remains available.")
+                if status == 0:
+                    try:
+                        result = json.loads(output)
+                        if isinstance(result, dict) and isinstance(result.get("html"), str):
+                            action = ("Browser launch requested: " if result.get("browser_opened") is True
+                                      else "Open in your browser: ")
+                            message = "ELK layout preview saved. Miro is unchanged. " + action + result["html"]
+                    except ValueError:
+                        pass
             elif getattr(self, "current_action", None) == "csv-export":
                 message = ("CSV export saved. File paths are listed below." if status == 0
                            else "CSV export did not complete. Check the result below; saved evidence remains available.")
@@ -695,8 +721,8 @@ def create_app(root=None):
                     except ValueError:
                         pass
             elif getattr(self, "reorganizing", False):
-                message = ("Miro graph organized. You can adjust item positions directly in Miro."
-                           if status == 0 else "Graph organization did not complete. Check the terminal result before retrying.")
+                message = ("Miro graph synced and reorganized. You can adjust item positions directly in Miro."
+                           if status == 0 else "Sync and reorganization did not complete. Check the terminal result before retrying.")
             else:
                 message = ("Completed. Saved evidence is available under Review saved runs." if status == 0
                            else "Action did not complete successfully. Saved evidence remains available; no automatic retry.")

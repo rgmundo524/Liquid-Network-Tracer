@@ -57,7 +57,7 @@ def make_plan(graph):
     transaction_keys = {node["id"] for node in graph["nodes"] if node["kind"] == "transaction"}
     for edge in graph["edges"]:
         connector = {"key": edge["id"], "source": edge["source"], "target": edge["target"], "body": {
-            "shape": "curved", "captions": [{"content": html.escape(edge["label"] + " · " + edge["quantity"]), "position": "50%"}],
+            "shape": edge.get("connector_shape", "curved"), "captions": [{"content": html.escape(edge["label"] + " · " + edge["quantity"]), "position": "50%"}],
             "style": {"startStrokeCap": "none", "endStrokeCap": "stealth", "strokeStyle": "normal",
                       "strokeColor": edge_color(edge["role"]),
                       "strokeWidth": "2", "fontSize": "11"}}}
@@ -66,6 +66,8 @@ def make_plan(graph):
             for field, logical, side in (("startItem", "source", "right"), ("endItem", "target", "left")):
                 if edge[logical] in transaction_keys:
                     connector["attachment"][field] = {"snapTo": side}
+        elif graph.get("connector_attachment") == "transaction_ports_v2":
+            connector["attachment"] = copy.deepcopy(edge.get("attachment"))
         connectors.append(connector)
     if graph.get("layout"):
         # The graph supplies its actual top bound, including the optional fee row.
@@ -79,7 +81,7 @@ def make_plan(graph):
             if name in annotations:
                 shape["body"]["position"].update({field: annotations[name][field] for field in ("x", "y")})
     plan = {"schema_version": 2 if incremental else 1, "run_id": graph["run_id"], "shapes": shapes, "connectors": connectors}
-    for key in ("layout", "fee_items", "include_fees", "connector_attachment"):
+    for key in ("layout", "fee_items", "include_fees", "connector_attachment", "graph_options"):
         if key in graph:
             plan[key] = copy.deepcopy(graph[key])
     if "fee_items" in graph:
@@ -140,11 +142,15 @@ def validate_plan(plan):
 
 def _validate_attachments(plan):
     policy = plan.get("connector_attachment")
-    if policy is not None and policy != "transaction_sides_v1":
+    if policy not in (None, "transaction_sides_v1", "transaction_ports_v2"):
         raise TraceError("Unsupported Miro connector attachment policy; regenerate the export")
     transactions = {item["key"] for item in plan["shapes"]
                     if item["key"].startswith("tx:") and item["body"]["data"]["shape"] == "rectangle"}
+    shapes = {item["key"]: item["body"]["data"]["shape"] for item in plan["shapes"]}
     for item in plan["connectors"]:
+        if policy == "transaction_ports_v2":
+            _validate_ports(item, shapes, transactions)
+            continue
         if policy is None:
             if "attachment" in item:
                 raise TraceError("Miro connector attachment needs a declared policy; regenerate the export")
@@ -156,11 +162,56 @@ def _validate_attachments(plan):
             raise TraceError("Miro transaction connector sides disagree with their endpoints; regenerate the export")
 
 
+def _percentage(value):
+    if not isinstance(value, str) or not re.fullmatch(r"(?:\d+(?:\.\d+)?|\.\d+)%", value):
+        raise ValueError
+    number = float(value[:-1])
+    if not math.isfinite(number) or not 0 <= number <= 100:
+        raise ValueError
+    return number
+
+
+def _validate_ports(item, shapes, transactions):
+    """Only layout-relative perimeter coordinates belong in a portable plan."""
+    try:
+        if item["body"].get("shape") not in ("straight", "curved", "elbowed"):
+            raise ValueError
+        if any(field in item["body"] for field in ("startItem", "endItem")):
+            raise ValueError
+        if (item["source"] in transactions) == (item["target"] in transactions):
+            raise ValueError
+        attachments = item["attachment"]
+        if not isinstance(attachments, dict) or set(attachments) != {"startItem", "endItem"}:
+            raise ValueError
+        for field, logical, side in (("startItem", "source", 100), ("endItem", "target", 0)):
+            connection = attachments[field]
+            if not isinstance(connection, dict) or set(connection) != {"position"}:
+                raise ValueError
+            position = connection["position"]
+            if not isinstance(position, dict) or set(position) != {"x", "y"}:
+                raise ValueError
+            x, y = (_percentage(position[axis]) for axis in ("x", "y"))
+            if item[logical] in transactions:
+                if x != side:
+                    raise ValueError
+            elif shapes[item[logical]] == "circle":
+                if abs(((x - 50) / 50) ** 2 + ((y - 50) / 50) ** 2 - 1) > .002:
+                    raise ValueError
+            elif shapes[item[logical]] == "rhombus":
+                if abs(abs(x - 50) + abs(y - 50) - 50) > .05:
+                    raise ValueError
+            else:
+                raise ValueError
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise TraceError("Invalid Miro layout ports or connector topology; regenerate the export") from None
+
+
 def _connection_body(item, source_id, target_id):
     """Add remote IDs only at the API boundary; plans never choose remote targets.
 
     Miro REST accepts exactly one of snapTo or position on an attachment.
-    snapTo selects the side midpoint; the address/event end stays automatic.
+    Legacy snapTo selects a side midpoint. ELK plans supply explicit percentage
+    positions for both endpoints, including ports along transaction sides.
     https://developers.miro.com/reference/create-connector-1
     https://github.com/miroapp/api-clients/blob/main/packages/miro-api/model/itemConnectionCreationData.ts
     """
@@ -173,9 +224,18 @@ def _attachment_patch(item, remote):
     # Even after we applied a fixed side, a manual reset to auto can coincide
     # with that midpoint. Explicit organization reasserts ambiguous settings;
     # ordinary sync never calls this helper or changes attachment routing.
+    def same_attachment(actual, desired):
+        if "snapTo" in desired:
+            return actual.get("snapTo") == desired["snapTo"]
+        # Percentage coordinates are returned for both fixed and automatic
+        # attachment modes. Even matching percentages cannot prove the port is
+        # fixed. Explicit reorganization reasserts the requested mode; ordinary
+        # sync never reaches this helper.
+        return False
+
     return {field: {"id": remote[field]["id"], **desired}
             for field, desired in item.get("attachment", {}).items()
-            if remote[field].get("snapTo") != desired["snapTo"]}
+            if not same_attachment(remote[field], desired)}
 
 
 def _namespace(plan):
@@ -572,6 +632,21 @@ def _placements(plan, state, remote, removed, reorganize):
             previous_right = x + width / 2
         place_group(keys, 0, dy, upward=True)
 
+    if reorganize and plan.get("layout", {}).get("algorithm") == "elk_layered_v1":
+        # ELK layer members can have different center x coordinates because
+        # their widths differ. Repacking every distinct center as a column
+        # destroys its layering and crossing reduction. Retain its complete
+        # layout, expanding uniformly only for larger live geometry.
+        scale = max([1.] + [max(existing[key][axis] / planned[key][axis] for axis in (2, 3))
+                            for key in targets & set(existing)])
+        for key in targets:
+            x, y, width, height = planned[key]
+            planned[key] = (x * scale, y * scale, width, height)
+        # Old run summaries not present in this cumulative plan stay put.
+        # Translate the whole group around them, keeping ELK's internal order.
+        place_group(sorted(targets), 0, 0)
+        return result, 0
+
     if reorganize:
         # Preserve resized/rotated geometry while expanding columns just enough
         # to keep forward flow and remove overlap between larger shapes.
@@ -673,6 +748,12 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
         report = {"dry_run": dry_run, "board_url": "https://miro.com/app/board/" + urllib.parse.quote(board_id, safe="") + "/",
                   "run_id": plan["run_id"], "namespace": namespace, "state_path": str(state_path), "max_items": max_items,
                   "reorganize": reorganize, "fee_items_to_remove": len(removals)}
+        if plan.get("layout", {}).get("algorithm") == "elk_layered_v1":
+            report["layout_algorithm"] = "elk_layered_v1"
+            report["connector_style"] = plan.get("graph_options", {}).get("connector_style", "straight")
+            report["layout_metrics"] = copy.deepcopy(plan["layout"].get("metrics", {}))
+            report["layout_metrics_notice"] = ("Estimated for the local proposed layout. Miro routes connectors itself; "
+                                               "preserved positions and live size adjustments can change crossings.")
         for endpoint, collection in collections:
             for item in collection:
                 record = current["items"].get(item["key"])
@@ -755,6 +836,9 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
                 if reorganize and endpoint == "connectors" and item.get("attachment"):
                     patch.update(_attachment_patch(item, remote[key]))
                     attachment_intents[key] = copy.deepcopy(item["attachment"])
+                    if (plan.get("connector_attachment") == "transaction_ports_v2"
+                            and remote[key].get("shape") != item["body"]["shape"]):
+                        patch["shape"] = item["body"]["shape"]
                 conflicts.extend(item_conflicts)
                 updates.append((key, patch, managed, intent))
         status_progress.emit("layout", 1, 1, "Checking connections and preparing the layout")
@@ -770,9 +854,14 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
                                           for field in ("startItem", "endItem") if field in patch},
                                "after": {field: copy.deepcopy(patch[field]) for field in ("startItem", "endItem") if field in patch}}
                               for key, patch, _, _ in updates if "startItem" in patch or "endItem" in patch]
-        if changes or attachment_changes:
+        connector_shapes = [{"key": key, "item_id": state["items"][key]["id"],
+                             "before": remote[key].get("shape"), "after": patch["shape"]}
+                            for key, patch, _, _ in updates if "shape" in patch]
+        if changes or attachment_changes or connector_shapes:
             snapshot = {"recorded_at": now(), "run_id": plan["run_id"], "plan_sha256": plan["sha256"],
                         "positions": changes, "attachments": attachment_changes}
+            if connector_shapes:
+                snapshot["connector_shapes"] = connector_shapes
             state.setdefault("layout_history", []).append(snapshot)
             report["layout_snapshot"] = copy.deepcopy(snapshot)
         state["active_run_id"] = plan["run_id"]

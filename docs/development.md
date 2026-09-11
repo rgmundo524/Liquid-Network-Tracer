@@ -1,6 +1,6 @@
 # Local development and API secrets
 
-The project uses **one main `devenv.nix`** to define Python, the Textual terminal interface, Node.js 24 for the Astro browser interface, Mermaid CLI, commands, and nonsecret environment defaults. `secretspec.toml` declares credential names. Proton Pass stores their values. Investigation names, board IDs, run limits, and the latest-run reference belong in the saved investigation files.
+The project uses **one main `devenv.nix`** to define Python, the Textual terminal interface, Node.js 24 for the Astro interface and local ELK layout engine, Mermaid CLI, commands, and nonsecret environment defaults. `secretspec.toml` declares credential names. Proton Pass stores their values. Investigation names, board IDs, run limits, and the latest-run reference belong in the saved investigation files.
 
 Entering the environment and opening the interface do not access a secret provider. Selecting a live output lookup, trace, Miro board creation, or Miro sync retrieves credentials through SecretSpec for that action. The offline demo trace, navigation, and local previews need no credentials.
 
@@ -31,15 +31,17 @@ A case normally keeps the same board as its graph grows. If no board is linked, 
 
 Board selection, run limits, and the **Include transaction fee flows** checkbox are saved with the case, so you do not need a board environment variable or a separate Nix file. Fees are excluded by default, including for older cases without that setting. The top-level Settings screen changes defaults for future investigations. Existing cases retain their saved settings.
 
+**ELK layout preview** uses the selected saved run and current display settings to calculate an arrangement without contacting a secret provider or any API. It opens a self-contained HTML/SVG view with estimated before/after quality counts and full graph details. The default Miro plan uses the same local layout engine. This is a preview of proposed geometry; it does not read the board's current positions.
+
 **Mermaid chart** creates a local preview from the latest verified run without opening the secret provider. It is enabled once a run has been saved and does not require a Miro board. Rendering runs in the interface's background worker and opens the generated HTML in your browser; the result also shows its path. Each click creates `previews/<run-id>-mermaid-<id>/` inside the case, containing `graph.mmd`, genuine Mermaid-rendered `graph.svg`, a self-contained `graph.html`, full `graph.json` details, a node-ID mapping, and renderer configuration. The saved address mode and current fee choice apply; archived runs and Miro publication state are not modified.
 
 Mermaid provides its own automatic left-to-right layout. It retains the graph's directions and styling, including starting-transaction color priority and recorded dates, but does not copy Miro positions, fixed connection sides, or its chronological fee row. The local chart is a quick view; use Miro for interactive arrangement and annotations.
 
 **Export CSV**, beside **Mermaid chart**, saves seven CSV tables from the latest run into a new `exports/<run-id>-csv-<id>/` directory in the case. The menu displays the directory and every CSV path. It uses the same offline worker and saved-run selection, requires no board or secret-provider session, and leaves the original archive and case settings unchanged. The original run's CSVs remain available under `runs/<run-id>/` as well.
 
-Choose **Organize Miro graph** to apply the current left-to-right layout to an existing board. The confirmation form explains that managed positions and transaction connector attachment sides will change; cancelling makes no API call. Normal syncing preserves manual positions and existing connector attachments. The layout uses actual recorded transaction dependencies, groups nearby input/output nodes, and places included fees chronologically in a separate row above the flow. Repeated addresses appear as separate UTXO occurrences by default; merged address cycles can require return edges.
+Choose **Sync and reorganize graph** to sync the selected saved run and apply an ELK arrangement to existing and new managed objects together. It changes positions, connector appearance, and attachment points; cancelling makes no API call. Normal sync preserves manual positions and connector choices and can stop before writes if those anchors leave no space for the continuation. Reorganization does not require a separate sync afterward or reserve space for an untraced future run. Included fees remain chronological in a separate row above the flow. Repeated addresses appear as separate UTXO occurrences by default; merged address cycles can require return edges.
 
-Starting transaction squares are purple, determined by membership in the saved seed transaction set rather than hop depth. A provided transaction keeps that color even when another provided transaction leads to it. Subsequent transaction squares are blue. Horizontal columns use 360-unit spacing; rows use at least 240 units between centers. Transaction inputs attach to the left edge and outputs to the right edge, regardless of connected address positions. The same convention is used by the SVG preview and new Miro connectors.
+Starting transaction squares are purple, determined by membership in the saved seed transaction set rather than hop depth. A provided transaction keeps that color even when another provided transaction leads to it. Subsequent transaction squares are blue. ELK Layered calculates spacing and orders distinct connection points along transaction sides: inputs attach on the left and outputs on the right. The same ports appear in the ELK SVG preview and new Miro connectors. **Connector appearance** is saved as `connector_style`, with `straight` as the default and `curved` or `elbowed` as alternatives. Backward or obstructed straight connections use routed exceptions where needed; exact Miro paths may differ.
 
 For a command without entering an interactive shell:
 
@@ -54,13 +56,15 @@ Use a current devenv release. The project supplies its own pinned SecretSpec and
 | --- | --- |
 | `liquid-trace` or `liquid-trace menu` | Opens the investigation interface. Retrieves credentials only for a selected live action. |
 | `liquid-web` | Builds and opens the local Astro interface at `http://127.0.0.1:4321`, using the same investigations and secrets workflow. |
-| `liquid-web-build` | Installs locked frontend dependencies when needed and builds the local interface without starting its server. |
+| `liquid-web-build` | Installs locked ELK/frontend dependencies when needed and builds the local interface without starting its server. |
+| `liquid-layout-setup` | Installs the locked local ELK dependency when absent or its manifest/lockfile changes. |
+| `liquid-trace layout-preview --case CASE --run latest --open` | Creates and opens an offline SVG/HTML preview of the proposed ELK arrangement. |
 | `liquid-trace SUBCOMMAND ...` | Runs an explicit command using the existing process environment. |
 | `liquid-live SUBCOMMAND ...` | Resolves project credentials through SecretSpec, then runs an explicit command. |
 | `liquid-live inspect-tx --txid HASH` | Looks up one live transaction and prints its output numbers, addresses, and available public quantities as JSON. Does not trace spends or create a case. |
 | `liquid-live inspect-txs --txids 'HASH1,HASH2'` | Looks up a batch through one API client and shared limits, returning outputs grouped by transaction. |
 | `liquid-live miro-create-board --case CASE` | Creates an empty Miro board and saves it with the investigation. Uses the case name and private visibility by default. |
-| `liquid-live miro-sync --case CASE --reorganize` | Applies the current graph layout to managed board items, retaining dimensions and manual content. |
+| `liquid-live miro-sync --case CASE --reorganize` | Syncs the selected saved run and applies ELK positions and connector choices, retaining dimensions and manual content. |
 | `liquid-secrets-setup [all\|blockstream\|miro]` | Prompts for selected credentials and stores them in the configured provider; defaults to all three. |
 | `liquid-toolchain-check` | Reports the pinned SecretSpec/Proton CLI versions and checks support for `info`, without accessing a vault. |
 | `liquid-secrets-check [--service blockstream\|miro\|all]` | Loads project secrets and reports presence only; defaults to Blockstream. No Blockstream or Miro calls. |
@@ -79,7 +83,7 @@ From the same devenv shell, start the alternative browser interface with:
 liquid-web
 ```
 
-The launcher installs frontend dependencies with `npm ci` when the installation is absent or the package manifest or lockfile changes, then builds the Astro assets before starting the Python server. The initial installation needs package-registry access; subsequent launches reuse installed dependencies. Node.js 24 and npm come from the existing pinned devenv input, and the frontend's package lock is committed. No additional `devenv.nix` or per-case environment variables are needed.
+The launcher runs `liquid-layout-setup` for the local ELK worker, installs frontend dependencies with `npm ci` when absent or the package manifest/lockfile changes, then builds the Astro assets before starting the Python server. The initial installation needs package-registry access; subsequent launches reuse installed dependencies. Node.js 24 and npm come from the existing pinned devenv input, and the frontend's package lock is committed. No additional `devenv.nix` or per-case environment variables are needed.
 
 The default address is [http://127.0.0.1:4321](http://127.0.0.1:4321). Keep the terminal running while using the browser. Launch options are:
 
@@ -92,9 +96,9 @@ liquid-web --help
 
 `--no-open` leaves browser launch to you; `--help` returns without installing packages or building. The root defaults to the same `LIQUID_INVESTIGATIONS_DIR` used by the terminal interface. Cases, global defaults, run limits, seeds, latest-run pointers, immutable archives, exports, and Miro mappings use the existing Python formats. Switching interfaces requires no migration.
 
-The browser supports new live or synthetic-demo investigations, comma-separated transaction lookup and grouped UTXO selection, bounded tracing and continuation, saved-run review, Mermaid previews, CSV downloads, and Miro board creation, plan preview, sync, and organization. Case settings retain the board and fee-flow checkbox; global settings apply to future cases. A historical run selection controls review and exports. Continuation follows the case's latest saved run so it extends the current lineage.
+The browser supports new live or synthetic-demo investigations, comma-separated transaction lookup and grouped UTXO selection, bounded tracing and continuation, saved-run review, ELK and Mermaid previews, CSV downloads, and Miro board creation, plan preview, sync, and reorganization. Case settings retain the board, fee-flow checkbox, and connector appearance; global settings apply to future cases. A historical run selection controls review and exports. Continuation follows the case's latest saved run so it extends the current lineage.
 
-Mermaid's **Download SVG** and source download links live outside the sandboxed preview iframe. CSV tables each have a download button. The case-detail endpoint rediscovers the newest complete product of each kind for each saved run, checking the case/run identity and allowed nonsymlink files. Partial rendering attempts cannot hide a completed product. Downloads survive browser or server restarts; a changed fee selection is shown as a mismatch with a regenerate action. Artifacts remain in their original `previews/` and `exports/` directories, and immutable run archives are untouched.
+ELK and Mermaid **Download SVG** buttons, layout reports, and Mermaid source links live outside the sandboxed preview iframe. CSV tables each have a download button. The case-detail endpoint rediscovers the newest complete product of each kind for each saved run, checking the case/run identity and allowed nonsymlink files. Partial rendering attempts cannot hide a completed product. Downloads survive browser or server restarts; changed display settings are shown as a mismatch with a regenerate action. Artifacts remain in their original `previews/` and `exports/` directories, and immutable run archives are untouched.
 
 Opening the browser and performing local actions do not resolve secrets. Live jobs invoke the same SecretSpec command, project manifest, provider, and profile as the terminal workflow. Proton Pass login or unlock prompts appear in the launching terminal. API credentials are never form fields or frontend build variables. A demo trace is offline; publishing its results to Miro still requires a Miro token and network access.
 
@@ -104,7 +108,7 @@ Miro sync emits optional phase/count callbacks. The CLI writes throttled progres
 
 Repeat sync retains the complete remote preflight before mutations. Default reads are paced at 0.05 seconds and writes at 0.4 seconds; API latency and retries add time. HTTP 429 waits and retryable read errors appear explicitly in progress. Unchanged mapped items avoid redundant per-item fsync calls; every acknowledged mutation still saves its mapping before proceeding. This improves repeat-run responsiveness without assuming unchanged remote content or automatically replaying uncertain POSTs.
 
-Astro builds static interface assets, served locally by the Python backend alongside its restricted action API. Tracing runs through the existing CLI and keeps the same validation, budgets, case locks, and evidence export. The backend binds to `127.0.0.1`, checks Host and Origin, and protects writes with a per-server request token. It serves approved case artifacts through local download routes; the cases directory is not a static website folder. This is a desktop interface, not a shared or publicly deployed investigation service. Runtime frontend assets and fonts do not use a CDN. Miro remains online; local charts use the existing Mermaid CLI renderer.
+Astro builds static interface assets, served locally by the Python backend alongside its restricted action API. Tracing runs through the existing CLI and keeps the same validation, budgets, case locks, and evidence export. The backend binds to `127.0.0.1`, checks Host and Origin, and protects writes with a per-server request token. It serves approved case artifacts through local download routes; the cases directory is not a static website folder. This is a desktop interface, not a shared or publicly deployed investigation service. Runtime frontend assets and fonts do not use a CDN. Miro remains online; local charts use the ELK geometry exporter or the independent Mermaid CLI renderer.
 
 After editing the frontend, stop the server and run `liquid-web` again to rebuild and reopen it. Build without starting the server, then run the full checks with:
 
@@ -113,11 +117,33 @@ liquid-web-build
 devenv test
 ```
 
-`devenv test` includes the Astro check/build, Python backend and terminal tests, pinned toolchain checks, and a genuine synthetic Mermaid render. The suite uses no real API credentials or investigation data. `liquid-test` runs just the Python suite when frontend files have not changed.
+`devenv test` includes the Astro check/build, Python backend and terminal tests, pinned toolchain checks, real synthetic ELK layout calculations, and a genuine synthetic Mermaid render. The suite uses no real API credentials or investigation data. `liquid-test` runs just the Python suite when frontend files have not changed.
+
+## Local ELK layout
+
+`layout/package-lock.json` pins **elkjs 0.12.0**. The single devenv provides Node.js and runs `liquid-layout-setup` on shell entry and before browser builds, installing only when its package manifest/lockfile changes. Installation needs registry access once; layout calculations run locally with no network calls or secrets. To install outside devenv, use Node.js 22.12 or newer and run this from the repository root:
+
+```bash
+npm --prefix layout ci --ignore-scripts
+```
+
+After pulling changes into an already open devenv shell, run `liquid-layout-setup` or re-enter the shell. The ELK worker has a 30-second process timeout and graph-size limits. It calculates three deterministic candidates for graphs of at most 300 objects, or one for larger graphs, and selects by object overlaps, lines through objects, line crossings, then total connection length. These are bounded estimates, not a guarantee of a global optimum. Truncated counts are lower bounds and appear with `≥` in the local preview.
+
+ELK controls layering, connection-point ordering, and proposed routes. Transaction inputs use left-side ports and outputs use right-side ports. Fees are ordered by saved chain chronology in a row above the main flow. Straight is the default connector appearance; returns and obstructed connections may use elbowed exceptions. Miro receives native shapes, endpoint positions, and connector appearance, but controls its own automatic route between those endpoints. Label overlaps and exact Miro curves are not scored.
+
+The quality report compares the verified saved graph's baseline layout with the proposed ELK result, not the live board. An explicit reorganization can expand or shift the proposed arrangement after reading resized or rotated mapped objects. Merely opening a preview never changes Miro. Normal sync preserves the existing arrangement; **Sync and reorganize graph** applies the selected saved run and rearranges its managed objects in one operation.
+
+Create a portable local preview directly:
+
+```bash
+liquid-trace layout-preview --case cases/theft-liquid --run latest --open
+```
+
+The command writes `graph.html`, `graph.svg`, `graph.json`, and `layout-report.json` under a fresh `previews/<run-id>-elk-<id>/`. HTML is published last as the completion marker. `--run`, `--out`, fee flags, and `--connector-style` allow a different saved snapshot or presentation. Existing destinations and output paths under `runs/` are rejected. SVG retains separate physical connections; full identifiers and metadata remain in graph JSON. The archive's original graph, evidence, and checksums remain unchanged. CSV exports and Mermaid use their existing independent presentation paths and do not require ELK to render.
 
 ## Saved investigations and settings
 
-The main environment defines `LIQUID_INVESTIGATIONS_DIR` as `${config.devenv.root}/cases`. The interface stores run limits and fee visibility defaults for future investigations in `cases/settings.json`. Each newly named investigation receives its own unique subdirectory.
+The main environment defines `LIQUID_INVESTIGATIONS_DIR` as `${config.devenv.root}/cases`. The interface stores run limits, fee visibility, and connector appearance defaults for future investigations in `cases/settings.json`. Each newly named investigation receives its own unique subdirectory.
 
 | Path within an investigation | Purpose |
 | --- | --- |
@@ -130,13 +156,13 @@ The main environment defines `LIQUID_INVESTIGATIONS_DIR` as `${config.devenv.roo
 
 Run IDs are saved references, not variables you must remember or re-enter. The latest pointer advances after the exports finish successfully, including saved runs paused by a budget or an error. It does not depend on shell history or directory timestamps. A continuation preserves its parent and records a new snapshot. Settings or a new board chosen later do not rewrite completed run exports.
 
-Default Miro preview/sync verifies the archived export, then rebuilds its presentation in memory from `trace.json` using the saved address mode and current fee setting. It checks that the case, source, run, and all non-fee graph identities and endpoints still match before contacting Miro. Only fee representations proven from the saved outputs may be added or excluded. Completed run files stay byte-for-byte unchanged; sync reports record both plan hashes, presentation version, and applied display options. Explicit `--plan` uses the supplied verified export without rebuilding it.
+Default Miro preview/sync verifies the archived export, then rebuilds its presentation in memory from `trace.json` using the saved address mode, current fee setting, and connector appearance, and runs the local ELK optimizer. It checks that the case, source, run, and all non-fee graph identities and endpoints still match before contacting Miro. Only fee representations proven from the saved outputs may be added or excluded. Completed run files stay byte-for-byte unchanged; sync reports record both plan hashes, presentation version, and applied display options. Explicit `--plan` uses the supplied verified export without rebuilding it.
 
 Fee removal applies only to mapped generated fee connectors and diamonds. The publisher checks their managed fields before removal and saves deletion intent for recovery if interrupted. Other graph objects remain intact. Fees still appear in the full outputs, events, and raw evidence, and can be included again by changing the checkbox and syncing.
 
-The explicit reorganization action records previous positions and any changed connector attachments before updating items. It changes positions using the layout and applies fixed transaction attachment sides while preserving current dimensions and manual annotations. Normal sync anchors new graph items near connected mapped items without relocating existing ones. Mapped items must use canvas coordinates; unrelated board content is not included in collision checks.
+The explicit reorganization action records previous positions and changed connector appearance/attachments before updating items. It applies the proposed ELK positions and ports, uniformly expanding the arrangement when current resized or rotated objects need more space. Manual text and color annotations are preserved; metrics still describe the proposed local layout. It replaces manual positions and connector routing choices. Normal sync anchors new graph items near connected mapped items without relocating existing ones. Mapped items must use canvas coordinates; unrelated board content is not included in collision checks.
 
-Miro can return an attachment's percentage coordinates without revealing whether its mode is automatic or fixed. **Organize Miro graph** reasserts the fixed side when the mode is unknown, including after a manual reset to automatic attachment at the same point. Repeating this explicit action can therefore repeat connector updates; it does not create duplicate objects. Ordinary sync still retains existing attachment choices.
+Miro can return an attachment's percentage coordinates without revealing whether its mode is automatic or fixed. **Sync and reorganize graph** reasserts the fixed side when the mode is unknown, including after a manual reset to automatic attachment at the same point. Repeating this explicit action can therefore repeat connector updates; it does not create duplicate objects. Ordinary sync still retains existing attachment choices.
 
 All initial UTXOs share one tracing budget and board. A continuation extends the saved seed set; it does not add new starting transactions. To trace a different starting set, create a new investigation and paste the complete comma-separated transaction list.
 
@@ -158,7 +184,7 @@ liquid-live trace --case cases/theft-liquid \
   --max-transactions 20 --max-outpoints 100 --max-requests 30 --max-seconds 60
 ```
 
-`trace`, `export`, `mermaid`, `csv-export`, and `miro-sync` accept `--include-fees` and `--exclude-fees`. These are presentation overrides; the underlying trace and fee evidence are unchanged. Without a flag, the case's `run_defaults.include_fees` applies, defaulting to `false`. A verified explicit `--plan` cannot be combined with a fee override; regenerate an export when a different selection is needed.
+`trace`, `export`, `mermaid`, `layout-preview`, `csv-export`, and `miro-sync` accept `--include-fees` and `--exclude-fees`. These are presentation overrides; the underlying trace and fee evidence are unchanged. Without a flag, the case's `run_defaults.include_fees` applies, defaulting to `false`. `layout-preview` and `miro-sync` also accept `--connector-style straight|curved|elbowed`. A verified explicit `--plan` cannot be combined with fee or connector-style overrides; regenerate a plan when a different selection is needed.
 
 Export CSV tables without querying an API or reading the case database:
 

@@ -23,9 +23,9 @@ The graph legend uses the same palette as its nodes and connectors:
 
 Starting-transaction color comes from the saved seed transaction hashes, independently of hop depth, and remains purple across continuations. Where circle roles overlap, attribution takes precedence over seed, then candidate, then context. This also applies when addresses are merged. Colors describe graph roles; they do not establish ownership or allocate stolen value. Run notes show counts of starting outputs and transactions while the full seed list stays in the saved run data.
 
-The default layout follows recorded transaction dependencies from left to right, including related transactions selected together as starting points. Inputs sit to the left of their transaction and outputs to the right, with connected items grouped into nearby rows. Columns are spaced 360 units apart and rows have at least 240 units between node centers, leaving more room around 160-unit nodes. Separate components use separate lanes. Reused addresses remain distinct UTXO occurrences by default; merging them can introduce return edges that cannot all point right.
+Miro presentations now use **ELK Layered**, a layout engine running locally through the pinned `elkjs` library. It places transactions and nearby inputs/outputs from left to right, orders connection points to reduce crossings, and separates disconnected components. Reused addresses remain distinct UTXO occurrences by default; merging them can introduce return edges that cannot all point right. The evidence archive retains its original baseline layout; ELK calculates a separate presentation without changing the recorded relationships.
 
-Transaction connectors attach to fixed sides: inputs enter the left and outputs leave the right, including outputs connected to the fee row. These attachment sides remain the same when a related address is moved above, below, or behind the transaction. New connectors use this convention automatically. Choose **Organize Miro graph** to apply it to existing connectors; normal sync preserves their existing attachment choices.
+Transaction connectors attach to fixed sides: inputs enter the left and outputs leave the right, with separate attachment points ordered by ELK. **Connector appearance** in settings defaults to **Straight**; **Curved** and **Elbowed** are also available. Straight connections that return backward or would pass through objects use elbowed routes where needed. Miro controls the final connector paths, so the local preview estimates its appearance. New connectors use the selected setting; choose **Sync and reorganize graph** to apply the calculated positions and connector appearance to an existing graph. Normal sync preserves manual positions and connector choices.
 
 **Include transaction fee flows** is a checkbox in investigation settings and the defaults for new investigations. It starts unchecked. When included, fees appear in a horizontal row above the main flow, ordered by available chain chronology with deterministic tie handling. Excluding fees changes the graph only: fee amounts, events, and API observations remain in the evidence exports.
 
@@ -56,9 +56,11 @@ When a button is highlighted, use **↑ ↓ ← →** to move between buttons an
 4. Review the saved run summary and exported file locations. If the case has no board, choose **Create Miro board**, review its name and visibility, and create it. Then choose **Preview Miro** and **Sync to Miro** to publish the saved run.
 5. Next time, launch `liquid-trace`, choose **Continue investigation**, and select the saved case. Continue its latest run with another bounded hop allowance, or review and sync what is already saved.
 
-The investigation settings let you change its name, board, run limits, and fee visibility. Top-level **Settings** changes defaults for new investigations. Existing investigations keep their own saved defaults. Creating a board saves its ID with the case and shows its URL in the investigation menu. It creates an empty board; publishing the traced graph is a separate **Sync to Miro** action. A completed run can be synced after creating or linking a board without tracing again.
+The investigation settings let you change its name, board, run limits, fee visibility, and connector appearance. Top-level **Settings** changes defaults for new investigations. Existing investigations keep their own saved defaults. Creating a board saves its ID with the case and shows its URL in the investigation menu. It creates an empty board; publishing the traced graph is a separate **Sync to Miro** action. A completed run can be synced after creating or linking a board without tracing again.
 
-For a quick local view, choose **Mermaid chart** in the investigation menu after saving a run. The button creates a Mermaid source file, renders an SVG, and opens an HTML preview in your browser. It uses the latest saved run and current fee setting, needs no API credentials or Miro board, and saves each preview in a new directory under the investigation's `previews/`. The menu shows the file path if a browser cannot be opened. Miro remains the editable investigation board.
+Choose **ELK layout preview** after saving a run to inspect the proposed positions and routes locally, compare estimated crossings and overlaps, and download its SVG. It needs no credentials or board. The preview uses the same ELK calculation as the default Miro plan, while actual Miro routes and existing manual arrangements can differ.
+
+For an independent local view, choose **Mermaid chart** in the investigation menu after saving a run. The button creates a Mermaid source file, renders an SVG, and opens an HTML preview in your browser. It uses the latest saved run and current fee setting, needs no API credentials or Miro board, and saves each preview in a new directory under the investigation's `previews/`. The menu shows the file path if a browser cannot be opened. Miro remains the editable investigation board.
 
 Choose **Export CSV** beside **Mermaid chart** to save tables from the latest run. Each click creates a new directory under the investigation's `exports/` and displays its file paths. This offline action requires a saved run, with no Miro board or secret-provider session. Completed runs already contain CSVs; the menu action makes a separate export for review or use in another application.
 
@@ -85,18 +87,18 @@ The browser and terminal interfaces share the same `cases/`, defaults, run histo
 
 1. Open a saved investigation, or create a new live or synthetic-demo investigation. For live cases, paste comma-separated transaction hashes, load their outputs, and select the relevant UTXOs grouped by transaction.
 2. Review the bounded run limits and start tracing. A later run continues the investigation's latest saved snapshot.
-3. Select a saved run to review it, create a local Mermaid chart, or export CSV tables. Use **Download SVG** beside the chart or the individual CSV download buttons. Mermaid source and supporting files are also available. Downloads remain available after reopening the investigation; selecting a different run shows that run's products. If the fee setting has changed, the interface asks you to regenerate the product before presenting it as current.
-4. Create a private Miro board or link an existing board in the investigation settings. Preview the saved run, then sync it to Miro. Organizing an existing graph is a separate action because it changes managed positions and connector attachments.
+3. Select a saved run to review it, create an **ELK layout preview** or Mermaid chart, or export CSV tables. Use **Download SVG** beside either chart or the individual CSV download buttons. Layout reports, Mermaid source, and supporting files are also available. Downloads remain available after reopening the investigation; selecting a different run shows that run's products. Changed display settings are identified so you can regenerate the affected product.
+4. Create a private Miro board or link an existing board in the investigation settings. Preview the saved run, then sync it to Miro. **Sync and reorganize graph** is a separate action because it can move existing managed objects and change their connector appearance and attachment points.
 
-The investigation settings include run limits and the fee-flow checkbox; global settings provide defaults for new investigations. The synthetic demo, saved-run review, Mermaid rendering, CSV export, and Miro plan preview need no API credentials. Miro board creation, sync, and organization still contact Miro, including for demo cases.
+The investigation settings include run limits, the fee-flow checkbox, and connector appearance; global settings provide defaults for new investigations. The synthetic demo, saved-run review, ELK and Mermaid previews, CSV export, and Miro plan preview need no API credentials. Miro board creation, sync, and organization still contact Miro, including for demo cases.
 
-The usual cycle is **Trace → Create or link a board once → Preview Miro → Sync to Miro → Continue run → Sync to Miro**. Keep the same investigation and board. Normal sync preserves your arrangement and adds the continuation; use **Organize Miro graph** only when you want the program to rearrange managed items. You may also tidy the native shapes in Miro by hand.
+The usual cycle is **Trace → Create or link a board once → Preview Miro → Sync to Miro → Continue run → Sync to Miro**. Keep the same investigation and board. Normal sync preserves your arrangement and adds the continuation. If the existing positions leave no room, or you want a fresh arrangement, choose **Sync and reorganize graph**. This action both adds the selected saved run and rearranges the managed graph; no separate sync or new trace is required afterward. It cannot reserve space for a future run that has not been traced. You may also tidy the native shapes in Miro by hand.
 
 During sync, the browser and launching terminal show the current stage and completed/total item counts. Existing-item checks finish before any board changes, so the board itself may initially appear unchanged. The display distinguishes checking, layout preparation, updates, new items, and temporary API retry waits. Counts belong to the current stage, not a predicted completion time. A failed action retains its last stage; consult the terminal for the specific API or mapping error before retrying.
 
 Live actions retrieve credentials through the existing SecretSpec/Proton Pass setup. If Proton Pass needs login or unlocking, respond in the **launching terminal**; do not enter API keys in the browser. Only one job runs at a time in each local server. Closing a browser tab does not cancel its job: reopen the address to see progress. **Ctrl+C** stops the server and its active offline worker. While a live action owns the terminal for provider prompts, the first Ctrl+C cancels that action; press it again after the prompt returns to stop the server. Restart `liquid-web` to reopen saved investigations from disk.
 
-Astro supplies the local interface; Python serves it and runs the existing tracer commands. The built interface and Mermaid previews need no CDN or hosted frontend. This does not provide an offline copy of Miro: use Mermaid for the local chart and Miro for online editing and collaboration. See [local browser development](docs/development.md#local-astro-interface) for build and test commands.
+Astro supplies the local interface; Python serves it and runs the existing tracer commands. The built interface and ELK/Mermaid previews need no CDN or hosted frontend. Use the local previews to review layouts and Miro for online editing and collaboration. See [local browser development](docs/development.md#local-astro-interface) for build and test commands.
 
 ## Where investigations and runs are saved
 
@@ -108,9 +110,10 @@ liquid-trace menu --investigations-dir /absolute/path/to/investigations
 
 | Location | Contents |
 | --- | --- |
-| `cases/settings.json` | Run limits and fee visibility defaults for new investigations. |
+| `cases/settings.json` | Run limits, fee visibility, and connector appearance defaults for new investigations. |
 | `cases/<investigation>/case.json` | Investigation name, seeds, source, board selection, run defaults, and latest exported run ID. |
 | `cases/<investigation>/runs/<run-id>/` | A separate evidence and export directory for each run. |
+| `cases/<investigation>/previews/<run-id>-elk-<id>/` | Local ELK SVG/HTML preview, complete graph geometry, and layout quality report. |
 | `cases/<investigation>/previews/<run-id>-mermaid-<id>/` | Local Mermaid source, SVG/HTML preview, graph details, and node identifiers. |
 | `cases/<investigation>/exports/<run-id>-csv-<id>/` | CSV tables with export provenance and checksums. |
 | `cases/<investigation>/miro/` | Saved mapping between graph objects and items on each Miro board. |
@@ -151,6 +154,18 @@ liquid-demo-sync
 A new independent root cannot overwrite an already published graph's lineage. The interactive menu avoids this manual selection by offering continuation within the saved investigation.
 
 If needed, add `--offline-preview` to `trace` or `export` to also save an HTML inspector and SVG. These are optional inspection files; normal runs use Miro for visual review.
+
+To inspect the ELK layout for a saved run:
+
+```bash
+liquid-trace layout-preview --case cases/theft-liquid --run latest --open
+```
+
+This offline action saves `graph.html`, `graph.svg`, `graph.json`, and `layout-report.json` in a new `previews/<run-id>-elk-<id>/` directory. Optional `--connector-style straight|curved|elbowed`, `--include-fees`/`--exclude-fees`, `--run RUN_ID`, and `--out NEW_DIRECTORY` override the selected preview without changing its archive or case settings.
+
+The report compares the saved graph's baseline arrangement with the proposed ELK arrangement, **not the current live Miro board**. It estimates line crossings, object overlaps, and lines through unrelated objects. Counts marked `≥` are lower bounds when the comparison limit is reached. Labels and Miro's automatic curves are not measured; zero estimated crossings does not guarantee a collision-free board. For smaller graphs ELK tries three deterministic alternatives; larger graphs use one, and the layout worker stops after 30 seconds. Optimization makes no external layout requests and uses no secrets.
+
+The single devenv installs the locked ELK dependency when entering the shell or building the browser interface. After pulling changes, re-enter `devenv shell`; `liquid-layout-setup` can also refresh the installation. Outside devenv, install Node.js 22.12 or newer and run `npm --prefix layout ci --ignore-scripts` from the project root. The [elkjs library](https://github.com/kieler/elkjs) calculates layout; Miro remains the renderer and editable board.
 
 To create a Mermaid chart directly from a saved investigation:
 
@@ -334,11 +349,11 @@ liquid-live miro-sync --case cases/theft-liquid
 
 A configured board alone does not publish anything during tracing; run sync after reviewing the exports.
 
-Normal **Preview Miro** and **Sync to Miro** rebuild the current graph presentation in memory from the verified saved trace and current fee setting. This applies display changes without another Blockstream request or changes to archived run files. Live sync updates managed labels and colors while retaining manual edits and positions. Reports record the archived and rendered plan hashes and presentation version. An explicit `--plan` continues to use that verified plan as supplied.
+Normal **Preview Miro** and **Sync to Miro** rebuild the current graph presentation in memory from the verified saved trace, current fee setting, and connector appearance, then calculate the ELK layout locally. This applies display changes without another Blockstream request or changes to archived run files. Live sync updates managed labels and colors while retaining manual edits and positions. Reports record the archived and rendered plan hashes and presentation version. An explicit `--plan` continues to use that verified plan as supplied.
 
 Transaction squares show the recorded block date as `YYYY-MM-DD UTC`, using Esplora's saved `status.block_time` for confirmed transactions. This is the containing block's date, not an exact transaction creation time. Unconfirmed transactions show `Unconfirmed`; missing or invalid confirmed dates show `Date ??`. These labels reflect the saved observation. To add dates to an existing board, reopen the investigation and choose **Sync to Miro**; no new trace is needed. Manually edited transaction labels are preserved and reported as conflicts instead of being overwritten.
 
-To reorganize an existing board, choose **Organize Miro graph** from the investigation menu. Review the action and confirm it to arrange the managed graph from left to right using the saved run. This explicitly changes positions and transaction connector attachment sides; normal sync preserves your manual arrangement. Existing dimensions and manual annotations remain intact. Previous coordinates and changed connector attachments are recorded with the sync state for review. The operation considers mapped items; it cannot guarantee separation from unrelated content elsewhere on the board.
+To add the selected saved run and rearrange the board together, choose **Sync and reorganize graph**. After confirmation, it applies an ELK arrangement to existing and new managed objects and updates their connector appearance and attachment points. This replaces manual positions and connector routing choices; existing dimensions and manual text/color annotations remain intact. Previous coordinates and changed connector choices are recorded with the sync state for review. The operation considers mapped items; unrelated board content is not an obstacle in its calculations.
 
 The equivalent direct command is:
 
@@ -351,9 +366,9 @@ liquid-live miro-sync --case cases/theft-liquid --reorganize
 Use the **same case directory and board** for later runs. Sync creates native [shapes](https://developers.miro.com/reference/create-shape-item-1) and [connectors](https://developers.miro.com/reference/create-connector-1), checks existing items, and updates compatible managed fields. It does not call Blockstream. A per-board state file under `case/miro/` maps stable graph IDs to remote item IDs, and `case/miro/reports/` retains sync reports separately from immutable run exports.
 
 - Repeating the same run creates no duplicate acknowledged objects. A newer continuation adds new objects and a run note; already mapped circles and squares are reused.
-- Normal sync preserves existing positions, dimensions, and connector attachment choices. New items from the current layout are placed relative to connected mapped items and avoid mapped shape bounds. Explicit **Organize Miro graph** changes managed positions and applies the current plan's transaction attachment sides while preserving dimensions. Legacy plans retain their original placement and attachment behavior.
+- Normal sync preserves existing positions, dimensions, and manual connector choices. New items are placed relative to connected mapped items and avoid mapped shape bounds. If those anchors cannot accommodate a continuation, sync stops before writes and offers reorganization. **Sync and reorganize graph** changes managed positions, connector appearance, and attachment points while preserving dimensions. Explicit legacy plans retain their original placement and attachment behavior.
 - Keep mapped shapes on the board canvas. Items with frame/group-relative coordinates stop sync before writes; nested layouts are not supported in this version.
-- Existing content, captions and styles are updated only where the current value still matches the program's saved baseline. Analyst edits are retained and listed as conflicts in the report. Avoid simultaneous content/style edits during a live sync: the API check and update are separate requests.
+- Existing content, captions and styles are updated only where the current value still matches the program's saved baseline. Analyst edits are retained and listed as conflicts in the report, except for positions and connector appearance/attachments explicitly replaced by reorganization. Avoid simultaneous content/style edits during a live sync: the API check and update are separate requests.
 - Excluding fees removes only generated fee connectors and diamonds identified from the saved trace. Edited fee labels, captions, or managed styles stop removal before board writes. Extra comments and unmapped connectors attached to fee diamonds are outside those checks; retain fees when these annotations need to remain attached. Enabling fees again recreates their representations. Other mapped objects are retained; an unexpectedly missing object or changed connector endpoint stops sync for inspection. Interrupted fee removals retain recovery state.
 - A board mapping is bound to one case, API source, and address mode. After a run has been synced, extend that run (or a later descendant). Older snapshots, sibling branches and independent roots cannot overwrite newer graph classifications. You may skip intermediate unpublished runs.
 - Finish an interrupted sync before switching to another run. Resolving a pending creation alone does not finish that sync.
@@ -426,6 +441,6 @@ Evidence is retrieved explorer JSON, not independently verified raw transaction 
 python3 -m unittest discover -v
 ```
 
-Tests cover seed precision, hop boundaries, split/merge paths, continuation, budgets, spend-status freshness, confidential fields, event stops, reference validation, labeling, graph identity, evidence checksums, OAuth refresh, board creation and persistence, incremental Miro updates, manual-edit preservation, retries, and uncertain creation recovery. Automated API checks use synthetic fixtures and mock transports. Live authentication and publication are verified locally with the operator's credentials.
+Tests cover seed precision, hop boundaries, split/merge paths, continuation, budgets, spend-status freshness, confidential fields, event stops, reference validation, labeling, graph identity, evidence checksums, OAuth refresh, board creation and persistence, incremental Miro updates, manual-edit preservation, local ELK placement and route estimates, offline SVG export, retries, and uncertain creation recovery. Automated API checks use synthetic fixtures and mock transports. Live authentication and publication are verified locally with the operator's credentials.
 
 Source separates the API client, evidence store, tracing engine, export, Miro publication, command parsing, and interactive investigation workflow. The CLI is separate from tracing, so a notebook or case-management interface can call the same engine later.

@@ -245,8 +245,8 @@ class MiroPortTests(unittest.TestCase):
         old_ids = {key: record["id"] for key, record in read_json(self.state_path)["items"].items()}
         refreshed = refresh_presentation(read_json(archived), trace_path)
         report = sync(refreshed, "board=", self.state_path, reorganize=True, **options)
-        self.assertEqual(refreshed["presentation_version"], PRESENTATION_VERSION)
-        self.assertEqual(refreshed["connector_attachment"], "transaction_sides_v1")
+        self.assertEqual(refreshed["presentation_version"], 6)
+        self.assertEqual(refreshed["connector_attachment"], "transaction_ports_v2")
         self.assertGreater(report["reattached"], 0)
         self.assertEqual(report["created"], 0)
         for txid in (A, B):
@@ -256,7 +256,7 @@ class MiroPortTests(unittest.TestCase):
             for field, logical, side in (("startItem", "source", "right"), ("endItem", "target", "left")):
                 self.assertEqual(item[field]["id"], old_ids[connector[logical]])
                 if connector[logical].startswith("tx:"):
-                    self.assertEqual(item[field]["snapTo"], side)
+                    self.assertEqual(item[field]["position"]["x"], "100%" if side == "right" else "0%")
         self.assertEqual(old_ids, {key: record["id"] for key, record in read_json(self.state_path)["items"].items()})
         self.assertEqual(before, {path: path.read_bytes() for path in before})
 

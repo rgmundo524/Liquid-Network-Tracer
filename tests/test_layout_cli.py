@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +17,9 @@ from liquid_tracer.investigations import update_case
 from liquid_tracer.miro import make_plan
 from tests.fixtures import A, fixture
 
+
+# Keep the declared local layout tool available while removing credentials.
+NODE_ENV = {"LIQUID_NODE_BIN": os.environ.get("LIQUID_NODE_BIN") or shutil.which("node") or ""}
 
 class LayoutCliTests(unittest.TestCase):
     def setUp(self):
@@ -115,13 +119,13 @@ class LayoutCliTests(unittest.TestCase):
         self.start()
         self.set_fees(True)
         before = self.snapshot(self.case)
-        with patch.dict(os.environ, {}, clear=True), \
+        with patch.dict(os.environ, NODE_ENV, clear=True), \
                 patch("liquid_tracer.cli.Esplora", side_effect=AssertionError("Must not retrace")), \
                 patch("liquid_tracer.cli.sync", return_value={"dry_run": True}) as sync:
             report = sync_run(self.case, "latest", "SYNTHETIC=", dry_run=True)
         plan = sync.call_args.args[0]
         self.assertTrue(report["include_fees"])
-        self.assertEqual(report["presentation_version"], PRESENTATION_VERSION)
+        self.assertEqual(report["presentation_version"], 6)
         self.assertFalse(report["reorganize"])
         self.assertNotIn("reorganize", sync.call_args.kwargs)
         shape_ids = {item["key"] for item in plan["shapes"]}

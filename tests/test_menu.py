@@ -453,7 +453,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         with patch("liquid_tracer.menu.subprocess.run") as process:
             async with app.run_test(size=(80, 24)) as pilot:
                 case = await self.new_demo(app, pilot, board="")
-                for selector in ("#mermaid", "#csv", "#layout"):
+                for selector in ("#mermaid", "#csv", "#elk-preview", "#layout"):
                     self.assertTrue(app.screen.query_one(selector, Button).disabled)
                 run = app.screen.query_one("#run", Button)
                 run.focus()
@@ -689,8 +689,42 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(snapshot, {p.relative_to(case): p.read_bytes()
                                             for p in case.rglob("*") if p.is_file()})
 
+    async def test_elk_preview_uses_offline_worker_without_a_miro_board(self):
+        from textual.widgets import Button, Static
+        from liquid_tracer.cli import main
+        fixture = PROJECT / "examples" / "demo-api.json"
+        case = create_investigation(self.root, "Synthetic ELK case", fixture=str(fixture))
+        with contextlib.redirect_stdout(io.StringIO()):
+            status = main(["trace", "--case", str(case), "--fixture", str(fixture),
+                           "--seeds-file", str(PROJECT / "examples" / "demo-seeds.txt"), "--hops", "1"])
+        self.assertEqual(status, 0)
+        snapshot = {p.relative_to(case): p.read_bytes() for p in case.rglob("*") if p.is_file()}
+        preview = case / "previews" / "synthetic-elk" / "graph.html"
+        result = subprocess.CompletedProcess([], 0, json.dumps({"html": str(preview), "browser_opened": False}), "")
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run", return_value=result) as process, \
+                patch.object(app, "suspend") as suspend:
+            async with app.run_test(size=(80, 24)) as pilot:
+                await self.click(app, pilot, "#continue")
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertFalse(app.screen.query_one("#elk-preview", Button).disabled)
+                self.assertTrue(app.screen.query_one("#layout", Button).disabled)
+                await self.click(app, pilot, "#elk-preview")
+                await self.finish_action(app, pilot)
+                process.assert_called_once()
+                self.assertEqual(process.call_args.args[0], [sys.executable, "-m", "liquid_tracer", "layout-preview",
+                                                            "--case", str(case), "--run", "latest", "--open"])
+                self.assertTrue(process.call_args.kwargs["capture_output"])
+                suspend.assert_not_called()
+                message = str(app.screen.query_one("#action-status", Static).render())
+                self.assertIn("ELK layout preview saved. Miro is unchanged.", message)
+                self.assertIn(str(preview), message)
+                self.assertEqual(snapshot, {p.relative_to(case): p.read_bytes()
+                                           for p in case.rglob("*") if p.is_file()})
+
     async def test_global_and_case_settings_are_saved_without_remote_actions(self):
-        from textual.widgets import Checkbox, Input, Static
+        from textual.widgets import Checkbox, Input, Select, Static
         app = create_app(self.root)
         with patch("liquid_tracer.menu.subprocess.run", side_effect=AssertionError("Settings are local")):
             async with app.run_test(size=(110, 55)) as pilot:
@@ -699,15 +733,21 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 app.screen.query_one("#max_requests", Input).value = "12"
                 self.assertFalse(app.screen.query_one("#include-fees", Checkbox).value)
                 app.screen.query_one("#include-fees", Checkbox).value = True
+                self.assertEqual(app.screen.query_one("#connector-style", Select).value, "straight")
+                app.screen.query_one("#connector-style", Select).value = "curved"
                 await self.click(app, pilot, "#submit")
+                self.assertEqual(load_settings(self.root)["connector_style"], "curved")
                 self.assertEqual(load_settings(self.root)["hops"], 3)
                 self.assertIs(load_settings(self.root)["include_fees"], True)
                 case = await self.new_demo(app, pilot)
                 self.assertEqual(read_case(case)["run_defaults"]["max_requests"], 12)
+                self.assertEqual(read_case(case)["run_defaults"]["connector_style"], "curved")
                 self.assertIs(read_case(case)["run_defaults"]["include_fees"], True)
                 self.assertIn("Transaction fee flows: included", str(app.screen.query_one("#case-summary", Static).render()))
                 await self.click(app, pilot, "#case-settings")
                 self.assertTrue(app.screen.query_one("#include-fees", Checkbox).value)
+                self.assertEqual(app.screen.query_one("#connector-style", Select).value, "curved")
+                app.screen.query_one("#connector-style", Select).value = "elbowed"
                 app.screen.query_one("#include-fees", Checkbox).value = False
                 app.screen.query_one("#case-name", Input).value = "Renamed investigation"
                 app.screen.query_one("#board", Input).value = "https://miro.com/app/board/UPDATED%3D/"
@@ -717,6 +757,8 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(saved["name"], "Renamed investigation")
                 self.assertEqual(saved["miro_board"], "UPDATED=")
                 self.assertEqual(saved["run_defaults"]["max_requests"], 8)
+                self.assertEqual(saved["run_defaults"]["connector_style"], "elbowed")
+                self.assertEqual(load_settings(self.root)["connector_style"], "curved")
                 self.assertIs(saved["run_defaults"]["include_fees"], False)
                 self.assertIn("Transaction fee flows: hidden", str(app.screen.query_one("#case-summary", Static).render()))
                 self.assertEqual(load_settings(self.root)["max_requests"], 12)
@@ -730,6 +772,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 await self.click(restarted, pilot, "#case-settings")
                 self.assertFalse(restarted.screen.query_one("#include-fees", Checkbox).value)
+                self.assertEqual(restarted.screen.query_one("#connector-style", Select).value, "elbowed")
                 process.assert_not_called()
 
     async def test_new_case_fee_checkbox_and_legacy_settings_ignore_later_global_defaults(self):
@@ -820,7 +863,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                     "--board", "DEMO=", "--max-new-items", "750", "--reorganize"])
                 for field in ("capture_output", "stdout", "stderr"):
                     self.assertNotIn(field, process.call_args.kwargs)
-                self.assertIn("Miro graph organized", str(app.screen.query_one("#action-status", Static).render()))
+                self.assertIn("Miro graph synced and reorganized", str(app.screen.query_one("#action-status", Static).render()))
                 self.assertFalse(app.busy)
                 self.assertEqual(read_case(case)["latest_run"], before["latest_run"])
                 self.assertEqual(run_files, {p.relative_to(case): p.read_bytes()

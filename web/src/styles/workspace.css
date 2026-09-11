@@ -1044,3 +1044,56 @@ dialog::backdrop {
     flex-wrap: wrap;
   }
 }
+
+.layout-metrics {
+  overflow-x: auto;
+  border-bottom: 1px solid #e5eceb;
+}
+.layout-metrics table {
+  width: 100%;
+  min-width: 0;
+}
+.layout-metrics caption {
+  text-align: left;
+  padding: 16px 22px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #3b5660;
+}
+.layout-metrics th,
+.layout-metrics td {
+  padding: 10px 22px;
+  font-size: 11px;
+  white-space: normal;
+}
+.layout-metrics th[scope="row"] {
+  text-align: left;
+  font-weight: 500;
+}
+.layout-metrics td {
+  font-variant-numeric: tabular-nums;
+}
+.elk-explanation p,
+.elk-hint {
+  color: #738992;
+  font-size: 11px;
+  line-height: 1.7;
+  margin-bottom: 14px;
+}
+.elk-hint {
+  margin-top: 14px;
+  margin-bottom: 0;
+}
+@media (max-width: 560px) {
+  .layout-metrics th,
+  .layout-metrics td {
+    padding: 10px 12px;
+  }
+}
+
+.layout-metrics-note {
+  padding: 0 22px 14px;
+  color: #738992;
+  font-size: 10px;
+  line-height: 1.65;
+}

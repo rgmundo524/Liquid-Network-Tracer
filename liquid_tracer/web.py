@@ -30,11 +30,32 @@ from .progress import public_progress
 MAX_BODY = 64 * 1024
 CASE_ID = re.compile(r"[0-9a-f]{32}")
 RUN_ID = re.compile(r"[a-zA-Z0-9]{16}")
-ARTIFACT_DIR = re.compile(r"[a-zA-Z0-9]{16}-(?:csv|mermaid)-[0-9a-f]{8}")
+ARTIFACT_DIR = re.compile(r"[a-zA-Z0-9]{16}-(?:csv|mermaid|elk)-[0-9a-f]{8}")
 EXPORT_NAMES = {"nodes.csv", "edges.csv", "inputs.csv", "outputs.csv", "spends.csv",
                 "events.csv", "frontier.csv", "export.json", "SHA256SUMS"}
 PREVIEW_NAMES = {"graph.html", "graph.svg", "graph.mmd", "graph.json",
                  "mermaid-node-map.json", "mermaid-config.json"}
+LAYOUT_NAMES = {"graph.html", "graph.svg", "graph.json", "layout-report.json"}
+
+
+def public_layout_metrics(metrics):
+    """Expose counts only, never copy arbitrary saved report fields to the UI."""
+    if not isinstance(metrics, dict):
+        return None
+    result = {"estimated": True}
+    for phase in ("before", "after"):
+        values = metrics.get(phase)
+        if not isinstance(values, dict):
+            return None
+        counts = {}
+        for key in ("crossings", "node_overlaps", "node_intersections"):
+            value = values.get(key)
+            if type(value) is not int or not 0 <= value <= 2 ** 53 - 1:
+                return None
+            counts[key] = value
+        counts["truncated"] = values.get("truncated") is True
+        result[phase] = counts
+    return result
 
 
 class RequestError(Exception):
@@ -174,6 +195,7 @@ class LocalServer(ThreadingHTTPServer):
         artifacts, newest = {}, {}
         for folder, kind, names, metadata_file in (
             ("previews", "mermaid", PREVIEW_NAMES, "graph.json"),
+            ("previews", "elk", LAYOUT_NAMES, "graph.json"),
             ("exports", "csv", EXPORT_NAMES, "export.json"),
         ):
             try:
@@ -195,7 +217,7 @@ class LocalServer(ThreadingHTTPServer):
                     info = read_json(files[metadata_file])
                     if not isinstance(info, dict) or info.get("run_id") != run_id:
                         continue
-                    namespace = info.get("namespace", {}) if kind == "mermaid" else info
+                    namespace = info if kind == "csv" else info.get("namespace", {})
                     if not isinstance(namespace, dict) or namespace.get("case_id") != metadata["case_id"]:
                         continue
                     options = info.get("graph_options", {})
@@ -206,12 +228,22 @@ class LocalServer(ThreadingHTTPServer):
                         continue
                     # Completion file is written last. A partial later attempt
                     # cannot hide a previous complete, downloadable product.
-                    finished = files["graph.html" if kind == "mermaid" else "SHA256SUMS"].stat().st_mtime_ns
+                    finished = files["SHA256SUMS" if kind == "csv" else "graph.html"].stat().st_mtime_ns
                     order = (finished, directory.name)
                     if order <= newest.get((run_id, kind), (-1, "")):
                         continue
                     product = self.artifact_links(case, [folder, directory.name], names)
                     product["include_fees"] = fees
+                    if kind == "elk":
+                        style = options.get("connector_style")
+                        layout = info.get("layout")
+                        if (not isinstance(style, str) or style not in ("straight", "curved", "elbowed")
+                                or not isinstance(layout, dict) or layout.get("algorithm") != "elk_layered_v1"):
+                            continue
+                        product["connector_style"] = style
+                        metrics = public_layout_metrics(layout.get("metrics"))
+                        if metrics is not None:
+                            product["layout_metrics"] = metrics
                     artifacts.setdefault(run_id, {})[kind] = product
                     newest[(run_id, kind)] = order
                 except (RequestError, OSError, ValueError, TypeError):
@@ -359,10 +391,17 @@ class LocalServer(ThreadingHTTPServer):
         if isinstance(result.get("stats"), dict):
             value["stats"] = {key: item for key, item in result["stats"].items()
                               if isinstance(item, (int, float)) and not isinstance(item, bool)}
-        if action in ("mermaid", "csv"):
+        if result.get("connector_style") in ("straight", "curved", "elbowed"):
+            value["connector_style"] = result["connector_style"]
+        if result.get("layout_algorithm") == "elk_layered_v1":
+            value["layout_algorithm"] = "elk_layered_v1"
+        metrics = public_layout_metrics(result.get("layout_metrics"))
+        if metrics is not None:
+            value["layout_metrics"] = metrics
+        if action in ("mermaid", "csv", "layout"):
             directory = Path(result["directory"])
             relative = directory.relative_to(case)
-            names = PREVIEW_NAMES if action == "mermaid" else EXPORT_NAMES
+            names = {"mermaid": PREVIEW_NAMES, "csv": EXPORT_NAMES, "layout": LAYOUT_NAMES}[action]
             value.update(self.artifact_links(case, relative.parts, names))
         return value
 
@@ -370,7 +409,10 @@ class LocalServer(ThreadingHTTPServer):
     def artifact(case, parts):
         if len(parts) != 3 or parts[0] not in ("previews", "exports") or not ARTIFACT_DIR.fullmatch(parts[1]):
             raise RequestError("File not found", 404)
-        expected = PREVIEW_NAMES if parts[0] == "previews" else EXPORT_NAMES
+        kind = parts[1].split("-")[1]
+        if (parts[0] == "exports") != (kind == "csv"):
+            raise RequestError("File not found", 404)
+        expected = {"mermaid": PREVIEW_NAMES, "csv": EXPORT_NAMES, "elk": LAYOUT_NAMES}[kind]
         if parts[2] not in expected:
             raise RequestError("File not found", 404)
         return safe_path(case, parts)
@@ -395,13 +437,14 @@ class LocalServer(ThreadingHTTPServer):
                 raise RequestError("A Miro board is already linked. Use Sync to Miro.")
             arguments = ["miro-create-board", "--case", str(case), "--name", name, "--visibility", "private"]
             live = True
-        elif action in ("mermaid", "csv", "miro-preview", "miro-sync", "miro-organize"):
+        elif action in ("mermaid", "csv", "layout", "miro-preview", "miro-sync", "miro-organize"):
             selected = resolve_latest(case, selected)
             archive = run_path(case, selected)
             safe_path(case, ["runs", selected, "trace.json"])
             verify_export(archive)
-            if action in ("mermaid", "csv"):
-                arguments = ["mermaid" if action == "mermaid" else "csv-export", "--case", str(case), "--run", selected]
+            if action in ("mermaid", "csv", "layout"):
+                arguments = [{"mermaid": "mermaid", "csv": "csv-export", "layout": "layout-preview"}[action],
+                             "--case", str(case), "--run", selected]
             else:
                 if not metadata.get("miro_board"):
                     raise RequestError("Create or link a Miro board in investigation settings first.")
@@ -413,6 +456,8 @@ class LocalServer(ThreadingHTTPServer):
                     arguments.append("--reorganize")
                 live = action != "miro-preview"
             arguments.append("--include-fees" if settings["include_fees"] else "--exclude-fees")
+            if action not in ("mermaid", "csv"):
+                arguments.extend(["--connector-style", settings["connector_style"]])
         else:
             raise RequestError("Choose a supported investigation action.")
         return self.start_job(arguments, action=action, live=live, case=case)

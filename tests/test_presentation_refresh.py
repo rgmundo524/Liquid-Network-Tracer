@@ -4,6 +4,7 @@ import functools
 import io
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,11 +12,16 @@ from unittest.mock import patch
 
 from liquid_tracer.cli import main, sync_run, verify_export
 from liquid_tracer.common import TraceError, canonical, digest, read_json, save_json
-from liquid_tracer.export import PRESENTATION_VERSION, build_graph
+from liquid_tracer.export import build_graph
+from liquid_tracer.elk_layout import optimize_graph
+from liquid_tracer.miro import make_plan
 from liquid_tracer.miro import sync as real_sync
 from tests.fixtures import A, B, X, fixture
 from tests.test_miro_sync import FakeMiro
 
+
+# Keep the declared local layout tool available while removing credentials.
+NODE_ENV = {"LIQUID_NODE_BIN": os.environ.get("LIQUID_NODE_BIN") or shutil.which("node") or ""}
 
 class PresentationRefreshTests(unittest.TestCase):
     """Old saved exports stay evidence while existing board items get new labels."""
@@ -38,6 +44,7 @@ class PresentationRefreshTests(unittest.TestCase):
         self.state_path = self.case / "miro" / (digest(b"SYNTHETIC=")[:24] + ".json")
         self.current_plan = read_json(self.run / "miro-plan.json")
         self.old_plan = copy.deepcopy(self.current_plan)
+        self.current_plan = make_plan(optimize_graph(build_graph(read_json(self.run / "trace.json"))))
         self.old_plan.pop("presentation_version", None)
         for item in self.old_plan["shapes"]:
             if item["key"] == "legend":
@@ -90,7 +97,7 @@ class PresentationRefreshTests(unittest.TestCase):
             result = sync_run(self.case, "latest", "SYNTHETIC=", max_new_items=0)
             self.assertEqual(result["created"], 0)
             self.assertGreater(result["updated"], 0)
-            self.assertEqual(result["presentation_version"], PRESENTATION_VERSION)
+            self.assertEqual(result["presentation_version"], 6)
             self.assertTrue(result["presentation_refreshed"])
             self.assertEqual(result["plan_sha256"], self.current_plan["sha256"])
             self.assertEqual(result["archived_plan_sha256"], self.old_plan["sha256"])
@@ -143,7 +150,7 @@ class PresentationRefreshTests(unittest.TestCase):
         self.populate_old_board()
         before = self.snapshot(self.case)
         calls = len(self.remote.calls)
-        with patch.dict(os.environ, {}, clear=True), patch("liquid_tracer.cli.sync", self.adapter):
+        with patch.dict(os.environ, NODE_ENV, clear=True), patch("liquid_tracer.cli.sync", self.adapter):
             report = sync_run(self.case, "latest", "SYNTHETIC=", dry_run=True)
         self.assertTrue(report["dry_run"])
         self.assertTrue(report["presentation_refreshed"])
