@@ -79,7 +79,7 @@ def parser():
     run.add_argument("--tx-cache-seconds", type=float, default=86400)
     run.add_argument("--api-workers", type=int, default=8, help="Concurrent explorer requests, from 1 to 8 (default: 8)")
     run.add_argument("--api-rate-limit", type=float,
-                     help="Verified account requests/second; use 95%% of this limit (default: LIQUID_BLOCKSTREAM_API_RPS, otherwise a conservative 4 requests/second)")
+                     help="Verified account requests/second; use 95%% of this limit (default: LIQUID_BLOCKSTREAM_API_RPS, otherwise the enterprise target of 49 requests/second or 4 for other endpoints)")
     run.add_argument("--min-interval", type=float,
                      help="Additional minimum seconds between requests; cannot exceed the configured rate ceiling")
     run.add_argument("--merge-addresses", action="store_true", default=None, help="Merge circles by address; continuation otherwise inherits its parent's mode")

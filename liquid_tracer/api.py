@@ -18,24 +18,33 @@ MAX_BODY = 32 * 1024 * 1024
 
 
 def default_min_interval(base=ENTERPRISE, advertised_rps=None):
-    """Use 95% of a verified allowance, otherwise retain the prior 4 RPS cap.
+    """Use a verified allowance, or the selected endpoint's operating target.
 
-    Enterprise allowances depend on the account. No public Esplora deployment
-    configuration is treated as a published enterprise entitlement.
+    The paid endpoint defaults to the user's chosen 49 RPS, not a claim about
+    Blockstream's published quota. Other endpoints retain the prior 4 RPS cap.
     """
     if advertised_rps is None:
         advertised_rps = os.getenv("LIQUID_BLOCKSTREAM_API_RPS") or None
+    factor = .95
+    label = "Advertised Blockstream requests per second"
     if advertised_rps is None:
-        return .25
+        if urllib.parse.urlsplit(base).hostname != "enterprise.blockstream.info":
+            return .25
+        advertised_rps = os.getenv("LIQUID_BLOCKSTREAM_ENTERPRISE_RPS") or "49"
+        factor = 1.
+        label = "Blockstream enterprise target requests per second"
     try:
         advertised_rps = float(advertised_rps)
     except (ValueError, TypeError):
-        raise TraceError("Advertised Blockstream requests per second must be a positive number") from None
+        raise TraceError(label + " must be a positive number") from None
     if not math.isfinite(advertised_rps) or advertised_rps <= 0:
-        raise TraceError("Advertised Blockstream requests per second must be a positive number")
-    interval = 1. / (advertised_rps * .95)
+        raise TraceError(label + " must be a positive number")
+    effective_rps = advertised_rps * factor
+    if effective_rps == 0:
+        raise TraceError(label + " is too small")
+    interval = 1. / effective_rps
     if not math.isfinite(interval):
-        raise TraceError("Advertised Blockstream requests per second is too small")
+        raise TraceError(label + " is too small")
     return interval
 
 
@@ -119,7 +128,9 @@ class Esplora:
         floor = default_min_interval(self.base, configured_rps)
         self.advertised_rps = float(configured_rps) if configured_rps is not None else None
         self.effective_rps = 1. / floor
-        self.rate_limit_source = "advertised" if self.advertised_rps is not None else "conservative_default"
+        self.rate_limit_source = ("advertised" if self.advertised_rps is not None else
+                                 "enterprise_target" if urllib.parse.urlsplit(self.base).hostname == "enterprise.blockstream.info"
+                                 else "conservative_default")
         self.min_interval = floor if min_interval is None else min_interval
         self.last_call = 0.
         self.token = None

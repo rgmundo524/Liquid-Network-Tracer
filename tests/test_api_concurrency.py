@@ -158,6 +158,25 @@ class ApiConcurrencyTests(unittest.TestCase):
         self.assertTrue(all(b - a >= api.min_interval - .004
                             for a, b in zip(starts, starts[1:])), starts)
 
+    def test_enterprise_operating_target_is_49_shared_across_workers(self):
+        lock, starts = threading.Lock(), []
+
+        def transport(*args):
+            with lock:
+                starts.append(time.monotonic())
+            time.sleep(.03)
+            return 200, {}, b'{}'
+
+        with patch.dict(os.environ, {'LIQUID_BLOCKSTREAM_ENTERPRISE_RPS': '49'}, clear=True):
+            api = self.client(transport, advertised_rps=None, workers=8)
+            api.prefetch(['/tx/' + str(index) for index in range(8)])
+        self.assertIsNone(api.advertised_rps)
+        self.assertAlmostEqual(api.effective_rps, 49)
+        self.assertAlmostEqual(api.min_interval, 1 / 49)
+        self.assertEqual(api.rate_limit_source, 'enterprise_target')
+        self.assertTrue(all(b - a >= api.min_interval - .004
+                            for a, b in zip(starts, starts[1:])), starts)
+
     def test_single_initial_oauth_and_single_generation_refresh(self):
         lock = threading.Lock()
         expired = threading.Barrier(4)
@@ -332,18 +351,32 @@ class ApiConcurrencyTests(unittest.TestCase):
 
     def test_rate_defaults_environment_and_validation(self):
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(default_min_interval(), .25)
+            self.assertEqual(default_min_interval(), 1 / 49)
             api = Esplora(self.store, 'default', Limits(), auth='none', min_interval=0)
             self.clients.append(api)
             self.assertIsNone(api.advertised_rps)
-            self.assertEqual(api.effective_rps, 4)
-            self.assertEqual(api.min_interval, .25)
-            self.assertEqual(api.rate_limit_source, 'conservative_default')
+            self.assertAlmostEqual(api.effective_rps, 49)
+            self.assertEqual(api.min_interval, 1 / 49)
+            self.assertEqual(api.rate_limit_source, 'enterprise_target')
+            slower = self.client(lambda *args: None, advertised_rps=None, min_interval=.25)
+            self.assertEqual(slower.effective_rps, 4)
+        with patch.dict(os.environ, {'LIQUID_BLOCKSTREAM_ENTERPRISE_RPS': '25'}, clear=True):
+            self.assertEqual(default_min_interval(), 1 / 25)
+            self.assertEqual(default_min_interval('https://enterprise.blockstream.info/liquidtestnet/api'), 1 / 25)
+            for base in ('https://blockstream.info/liquid/api', 'https://other.example/liquid/api'):
+                self.assertEqual(default_min_interval(base), .25)
+                public = self.client(lambda *args: None, base=base, advertised_rps=None)
+                self.assertEqual(public.effective_rps, 4)
+                self.assertEqual(public.rate_limit_source, 'conservative_default')
+            self.assertAlmostEqual(default_min_interval(advertised_rps=50), 1 / 47.5)
         with patch.dict(os.environ, {'LIQUID_BLOCKSTREAM_API_RPS': '20'}):
             self.assertAlmostEqual(default_min_interval(), 1 / 19)
         for rate in (0, -1, 'invalid', float('nan'), float('inf')):
             with self.subTest(rate=rate), self.assertRaises(TraceError):
                 Esplora(self.store, 'bad', Limits(), advertised_rps=rate)
+            with patch.dict(os.environ, {'LIQUID_BLOCKSTREAM_ENTERPRISE_RPS': str(rate)}, clear=True):
+                with self.subTest(enterprise_target=rate), self.assertRaises(TraceError):
+                    self.client(lambda *args: self.fail('Invalid rate must not send a request'), advertised_rps=None)
         for workers in (0, 9, True, 1.5):
             with self.subTest(workers=workers), self.assertRaises(TraceError):
                 self.client(lambda *args: None, workers=workers)
