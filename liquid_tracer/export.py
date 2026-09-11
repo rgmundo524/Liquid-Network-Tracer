@@ -10,7 +10,7 @@ from .trace import TERMINAL
 from .layout import arrange, fee_date, transaction_ranks
 from .miro_frames import activity_frames
 
-PRESENTATION_VERSION = 7
+PRESENTATION_VERSION = 8
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -19,13 +19,14 @@ PALETTE = {
     "address": ("Light gray", "#f5f6f8"),
     "seed": ("Red", "#f16c7f"),
     "candidate": ("Yellow", "#fff9b1"),
+    "unspent_endpoint": ("Orange", "#fdba74"),
     "event": ("Pink", "#ea94bb"),
     "attributed": ("Green", "#d5f692"),
     "traced_edge": ("Dark teal", "#155e75"),
     "context_edge": ("Gray", "#9ca3af"),
 }
 COLORS = {key: value[1] for key, value in PALETTE.items()}
-_ADDRESS_PRIORITY = {"address": 0, "candidate": 1, "seed": 2, "attributed": 3}
+_ADDRESS_PRIORITY = {"address": 0, "candidate": 1, "seed": 2, "unspent_endpoint": 3, "attributed": 4}
 
 
 def legend_lines():
@@ -36,9 +37,11 @@ def legend_lines():
         f"{name('event')} diamonds: events. Transaction inputs enter on the left; outputs leave on the right.",
         f"Circles: {name('seed').lower()} = selected seed outputs; {name('candidate').lower()} = reachable candidate outputs.",
         f"Circles: {name('address').lower()} = context; {name('attributed').lower()} = analyst attribution (read confidence).",
+        f"{name('unspent_endpoint')} circles: traced branch ends at a UTXO observed unspent. Unchecked or hop-limited outputs do not qualify.",
         f"Arrows: {name('traced_edge').lower()} = traced UTXO links; {name('context_edge').lower()} = context only.",
         "Captions: vin/vout number · amount asset. ?? = not publicly available. Known amounts are in base units.",
-        "Overlapping circle roles: attribution > seed > candidate > context. Arrows do not allocate stolen value.",
+        "Circle priority: attribution > unspent endpoint > seed > candidate > context. Unspent labels also appear on attributed circles.",
+        "Unspent refers to tracked outputs at their last check, not all funds or inactivity at that address. Arrows do not allocate stolen value.",
     ]
 
 
@@ -75,8 +78,29 @@ def transaction_date(transaction):
     return "Date ??"
 
 
+def _unspent_endpoints(state):
+    """Traced stop reasons backed by an outspend observation, not address balances.
+
+    Continuation can retain an older observation while changing the stop reason.
+    A saved spending input also overrides stale unspent evidence, even when that
+    spending transaction was reached through another seed or a context branch.
+    """
+    spent = set(state["links"])
+    for record in state["transactions"].values():
+        for vin in record["data"]["vin"]:
+            if not vin.get("is_pegin") and not vin.get("is_coinbase"):
+                spent.add(f"{vin.get('txid')}:{vin.get('vout')}")
+    return {key for key, item in state["outputs"].items()
+            if key not in spent and item.get("status") == "unspent_at_observation"
+            and isinstance(item.get("observed_spend"), dict)
+            and item["observed_spend"].get("spent") is False
+            and ((type(item.get("spend_observation_id")) is int and item["spend_observation_id"] > 0)
+                 or (isinstance(item.get("spend_observation_id"), str) and item["spend_observation_id"].strip()))}
+
+
 def build_graph(state, merge_addresses=False, include_fees=False):
     nodes, edges, fee_items = {}, [], {}
+    unspent_endpoints = _unspent_endpoints(state)
     starting_transactions = {seed.rsplit(":", 1)[0] for seed in state["seeds"]}
     ranks, cycle_groups = transaction_ranks(state["transactions"])
     source = state["source"]
@@ -114,6 +138,8 @@ def build_graph(state, merge_addresses=False, include_fees=False):
                 role = "candidate"
             if key in state["seeds"]:
                 role = "seed"
+            if key in unspent_endpoints:
+                role = "unspent_endpoint"
             if matches:
                 role = "attributed"
         url = None if simulated or not addr or network != "liquid" else explorer + "/address/" + addr
@@ -169,6 +195,16 @@ def build_graph(state, merge_addresses=False, include_fees=False):
             edges.append({"id": "out:" + key, "source": txnode, "target": output_node,
                           "role": role, "outpoint": key, "label": "vout " + str(index),
                           "quantity": graph_quantity(output), "details": public_fields(output)})
+
+    for node in nodes.values():
+        if node["kind"] != "address" or node["details"].get("network") != "liquid":
+            continue
+        endpoints = sorted({item["outpoint"] for item in node["details"]["occurrences"]
+                            if item["outpoint"] in unspent_endpoints})
+        if endpoints:
+            node["details"]["unspent_endpoints"] = endpoints
+            node["label"] += "\n" + ("Unspent endpoint" if len(endpoints) == 1
+                                      else f"Unspent endpoints: {len(endpoints)}")
 
     layout = arrange(nodes, edges, state["transactions"], fee_items)
     layout["cycle_groups"] = cycle_groups
@@ -258,7 +294,8 @@ def svg_graph(graph):
     bounds = [(n["x"] - n["width"] / 2, n["y"] - n["height"] / 2) for n in lookup.values()]
     bounds += [(n["x"] + n["width"] / 2, n["y"] + n["height"] / 2) for n in lookup.values()]
     bounds += [point for _, (_, _, points) in routes for point in points]
-    header_top = min((y for _, y in bounds), default=160) - 170
+    legend = legend_lines()
+    header_top = min((y for _, y in bounds), default=160) - max(170, 24 + len(legend) * 18 + 30)
     min_x = min(0, min((x for x, _ in bounds), default=0) - 30)
     min_y = min(0, header_top - 30)
     width = max(1100, max((x for x, _ in bounds), default=500) + 80) - min_x
@@ -269,7 +306,7 @@ def svg_graph(graph):
         '<g font-family="Arial, sans-serif">',
         f'<text x="40" y="{header_top}" font-size="24" font-weight="bold">Liquid UTXO trace' + (' · SYNTHETIC DEMO' if graph["simulated"] else '') + '</text>']
     chunks.extend(f'<text x="40" y="{header_top + 24 + index * 18}" font-size="13">{html.escape(line)}</text>'
-                  for index, line in enumerate(legend_lines()))
+                  for index, line in enumerate(legend))
     for edge, (path, (label_x, label_y), _) in routes:
         context = edge["role"].startswith("context")
         color = edge_color(edge["role"])

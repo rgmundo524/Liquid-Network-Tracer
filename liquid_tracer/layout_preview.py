@@ -4,7 +4,6 @@ This renderer consumes display geometry only. It never traces, contacts Miro,
 or changes an archived graph. Each physical edge remains a separate SVG path.
 """
 
-import base64
 import html
 import math
 import os
@@ -18,6 +17,22 @@ from .export import COLORS, edge_color, legend_lines
 LAYOUT_NOTICE = "ELK layout; Miro routes may differ. Crossing counts are estimates."
 _COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
 _PERCENT = re.compile(r"(?:\d+(?:\.\d+)?|\.\d+)%\Z")
+_EXPLORER_URL = re.compile(
+    r"https://blockstream\.info/(?:liquid|liquidtestnet)/"
+    r"(?:tx/[0-9a-fA-F]{64}|address/[a-zA-Z0-9]{1,200})\Z"
+)
+
+
+def _explorer_url(graph, node):
+    # Display data is not trusted HTML. Permit only the exact public explorer
+    # routes emitted by build_graph, with no credentials, query, or fragments.
+    # Fixtures and synthetic event nodes never link to unrelated live evidence.
+    url = node.get("url")
+    if (graph.get("simulated") or node["kind"] not in ("transaction", "address")
+            or not isinstance(url, str) or not _EXPLORER_URL.fullmatch(url)):
+        return None
+    expected = "/tx/" if node["kind"] == "transaction" else "/address/"
+    return url if expected in url else None
 
 
 def layout_title(graph):
@@ -194,13 +209,14 @@ def _midpoint(points):
     return points[0]
 
 
-def _short_lines(value, width, height, kind):
+def _short_lines(value, width, height, kind, reserved_lines=0):
     # Shorten visible labels instead of changing their forensic source values.
     # Titles and graph.json retain the complete original text.
     font = 12
     usable = width * (.58 if kind == "event" else .72 if kind == "address" else .85)
     chars = max(1, min(120, int(usable / (font * .63))))
-    limit = max(1, min(12, int(height * (.45 if kind == "event" else .68) / 16)))
+    vertical = .45 if kind == "event" else .56 if kind == "address" else .68
+    limit = max(1, min(12, int(height * vertical / 16)) - reserved_lines)
     original = _text(value).replace("\t", " ").splitlines() or [""]
     lines = [line if len(line) <= chars else line[:max(0, chars - 1)] + "…" for line in original[:limit]]
     if len(original) > limit:
@@ -222,10 +238,13 @@ def _svg(graph, nodes, edges):
     margin = 180  # Includes abbreviated line captions at the outermost edges.
     x, y = left - margin, top - margin
     width, height = max(800, right - left + margin * 2), bottom - top + margin * 2
-    lines = [f'<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc" '
+    lines = [f'<svg xmlns="http://www.w3.org/2000/svg" role="group" aria-labelledby="title desc" '
              f'width="{_fmt(width)}" height="{_fmt(height)}" viewBox="{_fmt(x)} {_fmt(y)} {_fmt(width)} {_fmt(height)}">',
              '<title id="title">Liquid trace · ' + _escape(layout_title(graph)) + '</title>',
              '<desc id="desc">' + _escape(layout_notice(graph) + " " + str(graph.get("notice", ""))) + '</desc>',
+             '<style>.explorer-link { cursor:pointer; } '
+             '.explorer-link:focus-visible > g > rect, .explorer-link:focus-visible > g > ellipse '
+             '{ stroke:#0f766e; stroke-width:4; }</style>',
              '<defs>']
     for key, color in (("traced", COLORS["traced_edge"]), ("context", COLORS["context_edge"])):
         lines.append(f'<marker id="arrow-{key}" markerWidth="9" markerHeight="7" refX="8" refY="3.5" '
@@ -245,7 +264,14 @@ def _svg(graph, nodes, edges):
     for index, node in enumerate(nodes):
         cx, cy, width, height = node["x"], node["y"], node["width"], node["height"]
         style = f'fill="{node["color"]}" stroke="#334155" stroke-width="2"'
-        lines.append(f'<g id="node-{index}" data-node-id="{_escape(node["id"])}"><title>{_escape(node.get("label", ""))}</title>')
+        url = _explorer_url(graph, node)
+        title = str(node.get("label", ""))
+        if url:
+            title += "\nOpen Blockstream explorer in a new tab"
+            lines.append(f'<a class="explorer-link" href="{_escape(url)}" target="_blank" '
+                         f'rel="noopener noreferrer" referrerpolicy="no-referrer" tabindex="0" '
+                         f'aria-label="{_escape(title)}">')
+        lines.append(f'<g id="node-{index}" data-node-id="{_escape(node["id"])}"><title>{_escape(title)}</title>')
         if node["kind"] == "transaction":
             shape = f'<rect x="{_fmt(cx - width / 2)}" y="{_fmt(cy - height / 2)}" width="{_fmt(width)}" height="{_fmt(height)}" {style}/>'
         elif node["kind"] == "address":
@@ -260,11 +286,21 @@ def _svg(graph, nodes, edges):
         lines.append(f'<clipPath id="label-clip-{index}"><rect x="{_fmt(cx - width / 2 + inset_x)}" '
                      f'y="{_fmt(cy - height / 2 + inset_y)}" width="{_fmt(width - inset_x * 2)}" '
                      f'height="{_fmt(height - inset_y * 2)}"/></clipPath><g clip-path="url(#label-clip-{index})">')
-        labels = _short_lines(node.get("label", ""), width, height, node["kind"])
+        # Reserve a label row inside the existing shape rather than changing
+        # ELK geometry or putting link text over a neighboring connector.
+        show_link_label = bool(url and width - inset_x * 2 >= 64 and height - inset_y * 2 >= 36)
+        labels = _short_lines(node.get("label", ""), width, height, node["kind"], int(show_link_label))
+        row_count = len(labels) + int(show_link_label)
         for offset, label in enumerate(labels):
-            baseline = cy - (len(labels) - 1) * 8 + offset * 16 + 4
+            baseline = cy - (row_count - 1) * 8 + offset * 16 + 4
             lines.append(f'<text x="{_fmt(cx)}" y="{_fmt(baseline)}" font-size="12">{_escape(label)}</text>')
+        if show_link_label:
+            baseline = cy + (row_count - 1) * 8 + 4
+            lines.append(f'<text x="{_fmt(cx)}" y="{_fmt(baseline)}" font-size="11" '
+                         'fill="#155e75" text-decoration="underline">Explorer</text>')
         lines.append('</g></g>')
+        if url:
+            lines.append('</a>')
     lines.append('</g><g id="captions" font-family="sans-serif" font-size="11" text-anchor="middle" fill="#334155">')
     for edge in edges:
         caption = _text(edge.get("label", "")) + (" · " + _text(edge["quantity"]) if edge.get("quantity") else "")
@@ -299,7 +335,9 @@ def _metrics_table(metrics, title="ELK layout"):
 
 
 def _preview_html(graph, svg, metrics):
-    encoded = base64.b64encode(svg).decode("ascii")
+    # SVG anchors are disabled inside an <img>. Inline only our escaped,
+    # allowlisted renderer output so links work offline and in the local UI.
+    inline_svg = svg.decode("utf-8")
     legend = "".join("<li>" + _escape(line) + "</li>" for line in legend_lines())
     simulated = " · Synthetic demonstration data" if graph.get("simulated") else ""
     fees = "included" if graph.get("include_fees") else "hidden"
@@ -314,18 +352,18 @@ h1 {{ font-size:22px; margin:0 0 8px; }} p {{ margin:6px 0; }} a {{ color:#155e7
 table {{ border-collapse:collapse; font-size:13px; }} caption {{ text-align:left; font-weight:600; margin-bottom:4px; }}
 th,td {{ padding:3px 12px 3px 0; text-align:left; }} td {{ text-align:right; }} tbody th {{ font-weight:400; }}
 details {{ margin-top:8px; }} summary {{ cursor:pointer; }} li {{ margin:4px 0; }}
-.chart {{ overflow:auto; background:white; }} .chart img {{ display:block; max-width:none; }}
+.chart {{ overflow:auto; background:white; }} .chart svg {{ display:block; max-width:none; }}
 body:has(#chart:target) header {{ display:none; }}
-#chart:target img {{ width:100%; height:auto; }}
+#chart:target svg {{ width:100%; height:auto; }}
 </style></head><body><header><div class="summary"><div><h1>Liquid trace · {_escape(layout_title(graph))}</h1>
 <p>Run {_escape(graph.get('run_id', ''))} · {len(graph['nodes'])} nodes · {len(graph['edges'])} links · Fees {fees}{simulated}</p>
-<p>{_escape(layout_notice(graph))}</p><p>Scroll to explore; use your browser zoom to adjust the scale.</p>
+<p>{_escape(layout_notice(graph))}</p><p>Scroll to explore; use your browser zoom to adjust the scale. Select Explorer on a transaction or address to open Blockstream in a new tab.</p>
 <p><a href="graph.svg" download>Download SVG</a> · <a href="graph.json" download>Graph details</a> ·
 <a href="layout-report.json" download>Layout report</a></p></div>{_metrics_table(metrics, layout_title(graph))}</div>
 <details><summary>Legend and evidence notes</summary><p>{_escape(graph.get('notice', ''))}</p>
 <p>Before uses the saved graph's baseline layout, not live Miro positions. Labels and Miro's automatic curves are not measured.
 Counts prefixed with ≥ are lower bounds because the comparison limit was reached.</p><ul>{legend}</ul></details></header>
-<main id="chart" class="chart"><img alt="Directed Liquid Network transaction graph · {_escape(layout_title(graph))}" src="data:image/svg+xml;base64,{encoded}"></main>
+<main id="chart" class="chart">{inline_svg}</main>
 </body></html>\n'''
 
 

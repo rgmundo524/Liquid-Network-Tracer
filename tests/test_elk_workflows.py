@@ -49,6 +49,11 @@ class ElkWorkflowTests(unittest.TestCase):
             if file["name"] == "graph.svg":
                 self.assertIn(b"<svg", data)
                 self.assertIn("attachment", response.getheader("Content-Disposition"))
+            if file["name"] in ("graph.html", "graph.svg"):
+                policy = response.getheader("Content-Security-Policy")
+                self.assertIn("sandbox allow-popups allow-popups-to-escape-sandbox;", policy)
+                self.assertNotIn("allow-scripts", policy)
+                self.assertNotIn("allow-same-origin", policy)
             if file["name"] == "graph.json":
                 self.assertEqual(data["layout"]["algorithm"], "elk_layered_v1")
         second = self.wait(self.success(route + "/actions", {"action": "trace"}, 202))
@@ -82,7 +87,7 @@ class ElkWorkflowTests(unittest.TestCase):
             output = layout_preview_run(path, progress=events.append)
             report = sync_run(path, saved["run_id"], dry_run=True)
         graph = read_json(output["graph"])
-        self.assertEqual(graph["presentation_version"], 7)
+        self.assertEqual(graph["presentation_version"], 8)
         self.assertEqual(graph["graph_options"]["connector_style"], "elbowed")
         self.assertEqual(report["layout_metrics"], graph["layout"]["metrics"])
         self.assertEqual(report["connector_style"], "elbowed")

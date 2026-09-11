@@ -165,6 +165,8 @@ class LocalWebTests(unittest.TestCase):
         status, content, response = self.request(svg["url"])
         self.assertEqual(status, 200)
         self.assertEqual(content, b"SYNTHETIC DOWNLOAD")
+        self.assertIn("sandbox;", response.getheader("Content-Security-Policy"))
+        self.assertNotIn("allow-popups", response.getheader("Content-Security-Policy"))
         self.assertEqual(response.getheader("Content-Disposition"), 'attachment; filename="graph.svg"')
         self.assertTrue(product["preview_url"].endswith("/graph.html"))
         self.assertFalse(product["include_fees"])

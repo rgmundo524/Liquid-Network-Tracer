@@ -33,7 +33,7 @@ def make_plan(graph):
         + "<br>".join(html.escape(line) for line in legend_lines())
         + "</p><p>" + html.escape(graph["notice"]) + "</p>"},
         "position": {"x": 700, "y": -160, "origin": "center"}, "geometry": {"width": 1300, "height": 260},
-        "style": {"fillColor": COLORS["address"], "fontSize": "16", "textAlign": "left"}}})
+        "style": {"fillColor": COLORS["address"], "fontSize": "14", "textAlign": "left"}}})
     if incremental:
         details = graph.get("run", {})
         lines = ["Run: " + graph["run_id"]]

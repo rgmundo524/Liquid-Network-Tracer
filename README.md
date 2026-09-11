@@ -16,12 +16,17 @@ The graph legend uses the same palette as its nodes and connectors:
 | Blue squares | Subsequent transactions outside the provided starting set. |
 | Red circles | Selected starting outputs. |
 | Yellow circles | Reachable candidate outputs. |
+| Orange circles | A traced branch ends at an output observed unspent. |
 | Light gray circles | Context addresses. |
 | Green circles | Analyst attribution; read its confidence label. |
 | Pink diamonds | Fees, unspendable outputs, or peg-out requests. |
 | Dark teal / gray arrows | Traced UTXO links / context connections. |
 
-Starting-transaction color comes from the saved seed transaction hashes, independently of hop depth, and remains purple across continuations. Where circle roles overlap, attribution takes precedence over seed, then candidate, then context. This also applies when addresses are merged. Colors describe graph roles; they do not establish ownership or allocate stolen value. Run notes show counts of starting outputs and transactions while the full seed list stays in the saved run data.
+Starting-transaction color comes from the saved seed transaction hashes, independently of hop depth, and remains purple across continuations. Where circle roles overlap, attribution takes precedence over unspent endpoint, then seed, candidate, and context. This also applies when addresses are merged. Colors describe graph roles; they do not establish ownership or allocate stolen value. Run notes show counts of starting outputs and transactions while the full seed list stays in the saved run data.
+
+**Unspent endpoint** marks the specific traced UTXO where a branch stops because the explorer reported it unspent. It does not highlight an address merely because it holds other unspent outputs. Hop limits, errors, analyst stops, and unselected outputs do not qualify. The output needs a recorded spending-status observation, and a known spending input in the saved graph overrides stale unspent evidence. Attribution colors retain priority, with the endpoint label still shown. In merged-address mode, the label identifies how many displayed tracked endpoints qualify; it does not imply the whole address is dormant.
+
+The status refers to the saved observation, not a real-time balance or a minimum inactivity period. Continuing and rechecking that branch can remove its orange color when it is spent. Regenerating a preview or syncing to Miro uses existing saved evidence and makes no extra explorer requests. Detailed graph/CSV data retains the qualifying outpoints. See [Esplora's spending-status endpoints](https://github.com/Blockstream/esplora/blob/master/API.md#get-txtxidoutspendvout).
 
 Miro presentations now use **ELK Layered**, a layout engine running locally through the pinned `elkjs` library. It places transactions and nearby inputs/outputs from left to right, orders connection points to reduce crossings, and separates disconnected components. Reused addresses remain distinct UTXO occurrences by default; merging them can introduce return edges that cannot all point right. The evidence archive retains its original baseline layout; ELK calculates a separate presentation without changing the recorded relationships.
 
@@ -162,6 +167,8 @@ liquid-trace layout-preview --case cases/theft-liquid --run latest --open
 ```
 
 This offline action saves `graph.html`, `graph.svg`, `graph.json`, and `layout-report.json` in a new `previews/<run-id>-elk-<id>/` directory. Optional `--connector-style straight|curved|elbowed`, `--include-fees`/`--exclude-fees`, `--run RUN_ID`, and `--out NEW_DIRECTORY` override the selected preview without changing its archive or case settings.
+
+In the ELK preview, click a transaction or address node, or focus it with Tab and press Enter, to open its **Explorer** link in a new tab. These links also work when the downloaded SVG is opened directly in a browser. They are limited to Blockstream's Liquid and Liquid testnet explorers; synthetic demonstrations and special event nodes have no live links. Opening a link is the only action that contacts the explorer. Saved previews remain self-contained and render offline. Choose **Refresh layout preview** to add links and current presentation colors to an older saved run.
 
 The report compares the saved graph's baseline arrangement with the proposed ELK arrangement, **not the current live Miro board**. It estimates line crossings, object overlaps, and lines through unrelated objects. Counts marked `≥` are lower bounds when the comparison limit is reached. Labels and Miro's automatic curves are not measured; zero estimated crossings does not guarantee a collision-free board. For smaller graphs ELK tries three deterministic alternatives; larger graphs use one. The comparison budget limits quality measurement work, never the accepted graph size or number of rendered objects. Optimization makes no external layout requests and uses no secrets.
 

@@ -577,7 +577,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.headers.get_content_type() != "application/json":
                 raise RequestError("Send an application/json request.", 415)
 
-    def send(self, status, data, content_type="application/json; charset=utf-8", *, preview=False, download=None):
+    def send(self, status, data, content_type="application/json; charset=utf-8", *, preview=False, download=None,
+             explorer_links=False):
         raw = json.dumps(data).encode("utf-8") if content_type.startswith("application/json") and not isinstance(data, bytes) else data
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -586,8 +587,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        preview_sandbox = "sandbox allow-popups allow-popups-to-escape-sandbox" if explorer_links else "sandbox"
         self.send_header("Content-Security-Policy", (
-            "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; frame-ancestors 'self'"
+            preview_sandbox + "; default-src 'none'; img-src data:; style-src 'unsafe-inline'; frame-ancestors 'self'"
             if preview else "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data:; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'"))
         if download:
@@ -666,7 +668,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise RequestError("File not found", 404)
             content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             self.send(200, path.read_bytes(), content_type, preview=path.suffix in (".html", ".svg"),
-                      download=None if path.suffix == ".html" else path.name)
+                      download=None if path.suffix == ".html" else path.name,
+                      explorer_links=parts[3].split("-")[1] == "elk" and path.suffix in (".html", ".svg"))
         else:
             path = safe_path(self.server.assets, ["index.html"] if parts == [""] else parts)
             if not path.is_file():

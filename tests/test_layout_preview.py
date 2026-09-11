@@ -1,4 +1,3 @@
-import base64
 import copy
 import json
 import re
@@ -122,15 +121,110 @@ class LayoutPreviewTests(unittest.TestCase):
         self.assertIn("<th>Baseline layout</th><th>ELK layout</th>", page)
         self.assertIn('<main id="chart"', page)
         self.assertIn('body:has(#chart:target) header { display:none; }', page)
-        self.assertIn('#chart:target img { width:100%; height:auto; }', page)
+        self.assertIn('#chart:target svg { width:100%; height:auto; }', page)
         self.assertIn("Line crossings</th><td>3</td><td>0</td>", page)
-        encoded = re.search(r'data:image/svg\+xml;base64,([^\"]+)', page).group(1)
-        self.assertEqual(base64.b64decode(encoded), Path(result["svg"]).read_bytes())
-        svg = ET.fromstring(base64.b64decode(encoded))
+        inline = re.search(r'<main id="chart" class="chart">(.*?)</main>', page, re.S).group(1)
+        self.assertEqual(inline.encode(), Path(result["svg"]).read_bytes())
+        svg = ET.fromstring(inline)
         self.assertIsNone(svg.find(".//s:script", NS))
         self.assertIsNone(svg.find(".//s:image", NS))
         self.assertFalse(any("onload" in item.attrib for item in svg.iter()))
         self.assertEqual(json.loads(Path(result["graph"]).read_text())["notice"], hostile)
+
+    def test_explorer_links_are_active_inline_and_in_downloaded_svg(self):
+        for network in ("liquid", "liquidtestnet"):
+            with self.subTest(network=network):
+                graph = graph_fixture()
+                graph["simulated"] = False
+                graph["nodes"][0]["url"] = f"https://blockstream.info/{network}/tx/" + "a" * 64
+                graph["nodes"][1]["url"] = f"https://blockstream.info/{network}/address/ex1syntheticaddress"
+                result = export_layout(graph, self.root / network)
+                page = Path(result["html"]).read_text()
+                standalone = Path(result["svg"]).read_text()
+                inline = re.search(r'<main id="chart" class="chart">(.*?)</main>', page, re.S).group(1)
+                self.assertEqual(inline, standalone)
+                self.assertNotIn("<img", page)
+                self.assertNotIn("<object", page)
+                self.assertNotIn("<script", page)
+                svg = ET.fromstring(standalone)
+                anchors = svg.findall(".//s:a", NS)
+                self.assertEqual([item.get("href") for item in anchors],
+                                 [graph["nodes"][1]["url"], graph["nodes"][0]["url"]])
+                for anchor in anchors:
+                    self.assertEqual(anchor.get("target"), "_blank")
+                    self.assertEqual(anchor.get("rel"), "noopener noreferrer")
+                    self.assertEqual(anchor.get("referrerpolicy"), "no-referrer")
+                    self.assertEqual(anchor.get("tabindex"), "0")
+                    self.assertIn("Open Blockstream explorer in a new tab", anchor.get("aria-label"))
+                    self.assertEqual(len(anchor.findall(".//s:text[.='Explorer']", NS)), 1)
+                    self.assertIsNotNone(anchor.find("./s:g[@data-node-id]", NS))
+
+    def test_explorer_links_reject_unsafe_urls_and_do_not_link_simulated_events(self):
+        valid_tx = "https://blockstream.info/liquid/tx/" + "a" * 64
+        invalid = [None, 3, {}, "", "javascript:alert(1)", "data:text/html,<script>alert(1)</script>",
+                   "//blockstream.info/liquid/tx/" + "a" * 64,
+                   valid_tx.replace("https:", "http:"),
+                   valid_tx.replace("blockstream.info", "blockstream.info.evil.invalid"),
+                   valid_tx.replace("blockstream.info", "blockstream.info@evil.invalid"),
+                   valid_tx.replace("blockstream.info", "secret@blockstream.info"),
+                   valid_tx.replace("blockstream.info", "blockstream.info:443"),
+                   valid_tx + "?token=secret", valid_tx + "#fragment", valid_tx + "\n",
+                   valid_tx + '\" onload="alert(1)', valid_tx.replace("/tx/", "/address/../tx/"),
+                   valid_tx.replace("/tx/", "/%74x/"), valid_tx.replace("/liquid/", "/bitcoin/"),
+                   valid_tx[:-1], "https://blockstream.info/liquid/address/ex1address"]
+        for url in invalid:
+            with self.subTest(url=url):
+                graph = graph_fixture()
+                graph["simulated"] = False
+                graph["nodes"][0]["url"] = url
+                svg = ET.fromstring(render_svg(graph))
+                self.assertEqual(svg.findall(".//s:a", NS), [])
+        graph = graph_fixture()
+        for node in graph["nodes"]:
+            node["url"] = valid_tx
+        self.assertEqual(ET.fromstring(render_svg(graph)).findall(".//s:a", NS), [])
+        graph["simulated"] = False
+        graph["nodes"][0].pop("url")
+        # Event URLs and mismatched address/transaction routes are inert.
+        self.assertEqual(ET.fromstring(render_svg(graph)).findall(".//s:a", NS), [])
+
+    def test_link_labels_stay_within_shapes_without_changing_geometry(self):
+        graph = graph_fixture()
+        graph["simulated"] = False
+        baseline = ET.fromstring(render_svg(graph))
+        for node in graph["nodes"][:2]:
+            node["label"] = "\n".join("A long label " + str(index) for index in range(12))
+        graph["nodes"][0]["url"] = "https://blockstream.info/liquid/tx/" + "a" * 64
+        graph["nodes"][1]["url"] = "https://blockstream.info/liquid/address/ex1syntheticaddress"
+        before = copy.deepcopy(graph)
+        svg = ET.fromstring(render_svg(graph))
+        self.assertEqual(graph, before)
+        self.assertEqual(svg.attrib, baseline.attrib)
+        for kind in ("rect", "ellipse", "polygon"):
+            original_shapes = baseline.findall(f".//s:g[@data-node-id]/s:{kind}", NS)
+            linked_shapes = svg.findall(f".//s:g[@data-node-id]/s:{kind}", NS)
+            self.assertEqual([item.attrib for item in linked_shapes], [item.attrib for item in original_shapes])
+        self.assertEqual([item.attrib for item in svg.findall(".//s:path[@data-edge-id]", NS)],
+                         [item.attrib for item in baseline.findall(".//s:path[@data-edge-id]", NS)])
+        for anchor in svg.findall(".//s:a", NS):
+            clip = anchor.find(".//s:clipPath/s:rect", NS)
+            minimum = float(clip.get("y"))
+            maximum = minimum + float(clip.get("height"))
+            for label in anchor.findall(".//s:text", NS):
+                # Twelve-pixel labels fit between their ascent and descender.
+                self.assertGreaterEqual(float(label.get("y")) - 12, minimum)
+                self.assertLessEqual(float(label.get("y")) + 3, maximum)
+
+    def test_tiny_nodes_keep_clickable_anchor_without_overflowing_explorer_label(self):
+        graph = graph_fixture()
+        graph["simulated"] = False
+        graph["nodes"][0].update(width=20, height=20,
+                                  url="https://blockstream.info/liquid/tx/" + "a" * 64)
+        svg = ET.fromstring(render_svg(graph))
+        anchor = svg.find(".//s:a", NS)
+        self.assertIsNotNone(anchor)
+        self.assertEqual(anchor.findall(".//s:text[.='Explorer']", NS), [])
+        self.assertIn("Open Blockstream explorer", anchor.find(".//s:title", NS).text)
 
     def test_rejects_invalid_geometry_and_identifiers_before_creating_directory(self):
         variants = []
