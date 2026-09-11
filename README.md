@@ -160,6 +160,29 @@ A new independent root cannot overwrite an already published graph's lineage. Th
 
 If needed, add `--offline-preview` to `trace` or `export` to also save an HTML inspector and SVG. These are optional inspection files; normal runs use Miro for visual review.
 
+To review address activity and record suspected services, open an investigation and choose **Address review** in either the local browser or terminal interface. Search addresses already observed in a selected saved run, or paste an address. The list is paginated; opening a review reads saved data and does not fetch every address automatically.
+
+1. Choose **Refresh activity** (the terminal calls it **Refresh address activity**). This explicitly retrieves statistics and bounded confirmed history through the existing Blockstream client and Proton Pass workflow. Defaults are five history pages, ten HTTP attempts including authentication/retries, and sixty seconds.
+2. Review confirmed transaction count, separate mempool count, confirmed unspent-output count, mempool output delta, combined general unspent-output count, and confirmed activity dates. These output counts include all indexed assets at the address. They are not an L-BTC balance or a count of only the investigation's UTXOs.
+3. Check history coverage. Transaction counts come from the explorer's address statistics without scanning every transaction. The first confirmed activity date is shown only when the complete paginated history agrees with those statistics. Otherwise, the oldest retrieved activity is explicitly partial. Block dates describe observed confirmed activity, not when a wallet or address was created. Statistics and history are separate observations, not an atomic chain snapshot.
+4. If your analysis supports the decision, enable **Suspected service / stop tracing**, enter an optional name and your reasoning, and save. This records your candidate assessment; the program does not infer ownership from activity counts or turn it into verified attribution.
+5. Continue the investigation. A designated address stops forward traversal before fetching its spend. If an earlier run already expanded beyond it, downstream frontier reachable only through that boundary is held too. Independent starting outputs and other unblocked paths remain eligible, subject to their currently permitted hop depths. Historical transactions, links, depths and observations stay intact.
+6. Refresh the local preview or use normal Miro sync to apply the new cyan **Suspected service** labels to existing address occurrences. Current decisions also appear in fresh CSV graph tables. Existing non-service analyst attribution retains color priority. Disable the designation later to allow subsequent continuation again; its rationale and revision history are retained.
+
+Decisions are saved in `services.json` with an audit history, separately from archived tracing runs. Each new run snapshots the current rules without copying the full decision history. Rules cannot change during an active trace. Address reviews are immutable, checksum-referenced JSON reports under `address-reviews/`; their raw API responses remain in `evidence.sqlite`. Refreshes create new observations and retain older reviews. Graph previews can reflect current decisions without rewriting the archived evidence. Service boundaries do not erase previously plotted downstream activity or classify that activity's owners.
+
+The same controls are available directly:
+
+```bash
+liquid-trace address-list --case cases/theft-liquid --query exchange
+liquid-live address-inspect --case cases/theft-liquid --address ADDRESS
+liquid-trace service-set --case cases/theft-liquid --address ADDRESS \
+  --name "Possible exchange" --rationale "Investigator's reasons"
+liquid-trace service-set --case cases/theft-liquid --address ADDRESS --disable
+```
+
+`address-inspect --run RUN_ID` uses that saved snapshot's API source. To inspect more history, explicitly increase `--max-pages`, `--max-requests`, and `--max-seconds`; every HTTP attempt still consumes the existing budget and rate controls. Increasing the page budget does not trace those transactions or add them to the funds-flow graph. Address spellings are not ownership clusters: use the address shown by the explorer/graph, because confidential and unconfidential representations are not automatically linked.
+
 To inspect the ELK layout for a saved run:
 
 ```bash

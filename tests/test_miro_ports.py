@@ -246,7 +246,7 @@ class MiroPortTests(unittest.TestCase):
         old_ids = {key: record["id"] for key, record in read_json(self.state_path)["items"].items()}
         refreshed = refresh_presentation(read_json(archived), trace_path)
         report = sync(refreshed, "board=", self.state_path, reorganize=True, **options)
-        self.assertEqual(refreshed["presentation_version"], 8)
+        self.assertEqual(refreshed["presentation_version"], PRESENTATION_VERSION)
         self.assertEqual(refreshed["connector_attachment"], "transaction_ports_v2")
         self.assertGreater(report["reattached"], 0)
         self.assertEqual(report["created"], 0)

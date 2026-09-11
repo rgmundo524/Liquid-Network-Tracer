@@ -1,6 +1,7 @@
 import csv
 import html
 import json
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,7 +11,7 @@ from .trace import TERMINAL
 from .layout import arrange, fee_date, transaction_ranks
 from .miro_frames import activity_frames
 
-PRESENTATION_VERSION = 8
+PRESENTATION_VERSION = 9
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -20,13 +21,18 @@ PALETTE = {
     "seed": ("Red", "#f16c7f"),
     "candidate": ("Yellow", "#fff9b1"),
     "unspent_endpoint": ("Orange", "#fdba74"),
+    "suspected_service": ("Cyan", "#a5f3fc"),
     "event": ("Pink", "#ea94bb"),
     "attributed": ("Green", "#d5f692"),
     "traced_edge": ("Dark teal", "#155e75"),
     "context_edge": ("Gray", "#9ca3af"),
 }
 COLORS = {key: value[1] for key, value in PALETTE.items()}
-_ADDRESS_PRIORITY = {"address": 0, "candidate": 1, "seed": 2, "unspent_endpoint": 3, "attributed": 4}
+_ADDRESS_PRIORITY = {"address": 0, "candidate": 1, "seed": 2, "unspent_endpoint": 3,
+                     "suspected_service": 4, "attributed": 5}
+NODE_CSV_FIELDS = ("id", "kind", "label", "url", "color", "details", "role", "classification",
+                   "service_name", "service_rationale", "service_source", "service_confidence",
+                   "service_observed_at", "stop_tracing")
 
 
 def legend_lines():
@@ -37,10 +43,11 @@ def legend_lines():
         f"{name('event')} diamonds: events. Transaction inputs enter on the left; outputs leave on the right.",
         f"Circles: {name('seed').lower()} = selected seed outputs; {name('candidate').lower()} = reachable candidate outputs.",
         f"Circles: {name('address').lower()} = context; {name('attributed').lower()} = analyst attribution (read confidence).",
+        f"{name('suspected_service')} circles: investigator-designated suspected service; not confirmed ownership. Tracing stops at designated addresses.",
         f"{name('unspent_endpoint')} circles: traced branch ends at a UTXO observed unspent. Unchecked or hop-limited outputs do not qualify.",
         f"Arrows: {name('traced_edge').lower()} = traced UTXO links; {name('context_edge').lower()} = context only.",
         "Captions: vin/vout number · amount asset. ?? = not publicly available. Known amounts are in base units.",
-        "Circle priority: attribution > unspent endpoint > seed > candidate > context. Unspent labels also appear on attributed circles.",
+        "Circle priority: attribution > suspected service > unspent endpoint > seed > candidate > context. Unspent evidence retains its label.",
         "Unspent refers to tracked outputs at their last check, not all funds or inactivity at that address. Arrows do not allocate stolen value.",
     ]
 
@@ -140,7 +147,9 @@ def build_graph(state, merge_addresses=False, include_fees=False):
                 role = "seed"
             if key in unspent_endpoints:
                 role = "unspent_endpoint"
-            if matches:
+            if any(m.get("classification") == "suspected_service" for m in matches):
+                role = "suspected_service"
+            if any(m.get("classification") != "suspected_service" for m in matches):
                 role = "attributed"
         url = None if simulated or not addr or network != "liquid" else explorer + "/address/" + addr
         node_id = add_node(node_key, "address", label, column,
@@ -154,8 +163,23 @@ def build_graph(state, merge_addresses=False, include_fees=False):
         if occurrence not in node["details"]["occurrences"]:
             node["details"]["occurrences"].append(occurrence)
         attributions = sorted({m["entity"] + " (" + m["confidence"] + ")"
-                               for item in node["details"]["occurrences"] for m in item["labels"]})
-        node["label"] = label + ("\n" + ", ".join(attributions) if attributions else "")
+                               for item in node["details"]["occurrences"] for m in item["labels"]
+                               if m.get("classification") != "suspected_service"})
+        services = {canonical(m): m for item in node["details"]["occurrences"] for m in item["labels"]
+                    if m.get("classification") == "suspected_service"}
+        parts = [label]
+        if services:
+            # Keep uncertainty visible even when a separate attribution has
+            # higher color priority. Full names and rationale stay in evidence.
+            parts.append("Suspected service")
+            names = sorted({short(m["entity"]) for m in services.values()
+                            if m["entity"] != "Suspected service"})
+            if names:
+                parts.append(", ".join(names))
+            node["details"]["suspected_services"] = [services[key] for key in sorted(services)]
+        if attributions:
+            parts.append(", ".join(attributions))
+        node["label"] = "\n".join(parts)
         return node_id
 
     for txid, record in sorted(state["transactions"].items(), key=lambda item: (ranks[item[0]], item[0])):
@@ -223,6 +247,10 @@ def build_graph(state, merge_addresses=False, include_fees=False):
                       "?? marks amounts or assets not available from public data. "
                       "Repeated addresses are separate outpoint occurrences by default.",
             "nodes": list(nodes.values()), "edges": edges}
+    if "service_controls" in state:
+        # A refreshed preview may use current investigator designations over an
+        # older archived run. Record that presentation snapshot independently.
+        graph["service_controls"] = deepcopy(state["service_controls"])
     graph["activity_frames"] = activity_frames(graph)
     return graph
 
@@ -236,6 +264,28 @@ def write_csv(path, rows, fields):
             # Keep spreadsheet programs from interpreting externally supplied labels as formulas.
             values = {k: "'" + v if isinstance(v, str) and v.startswith(("=", "+", "-", "@")) else v for k, v in values.items()}
             writer.writerow(values)
+
+
+def node_csv_rows(graph):
+    """Append reviewable service fields without replacing original node columns.
+
+    A merged address can carry multiple independent designations. Use a JSON
+    array for each service field in that case, in the same deterministic order,
+    so names remain associated with their rationale and confidence.
+    """
+    fields = {"service_name": "entity", "service_rationale": "rationale",
+              "service_source": "source", "service_confidence": "confidence",
+              "service_observed_at": "observed_at"}
+    for node in graph["nodes"]:
+        services = node.get("details", {}).get("suspected_services", [])
+        row = dict(node)
+        if services:
+            row["classification"] = "suspected_service"
+            row["stop_tracing"] = any(service.get("stop") is True for service in services)
+            for field, key in fields.items():
+                values = [service.get(key, "") for service in services]
+                row[field] = values[0] if len(values) == 1 else values
+        yield row
 
 
 def _svg_edge_route(start, end):
@@ -367,8 +417,7 @@ def export_run(store, state, destination, merge_addresses=False, offline_preview
         svg = svg_graph(graph)
         (destination / "graph.svg").write_text(svg, encoding="utf-8")
         (destination / "graph.html").write_text(html_graph(graph, svg), encoding="utf-8")
-    write_csv(destination / "nodes.csv", graph["nodes"],
-        ["id", "kind", "label", "url", "color", "details"])
+    write_csv(destination / "nodes.csv", node_csv_rows(graph), NODE_CSV_FIELDS)
     write_csv(destination / "edges.csv", graph["edges"],
         ["id", "source", "target", "role", "outpoint", "label", "quantity", "details"])
     rows, events, inputs = [], [], []

@@ -1097,3 +1097,40 @@ dialog::backdrop {
   font-size: 10px;
   line-height: 1.65;
 }
+
+.address-review-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  align-items: start;
+  gap: 22px;
+}
+.address-detail { display: grid; gap: 22px; min-width: 0; }
+.address-full { overflow-wrap: anywhere; max-width: 680px; }
+.address-search { margin-top: 15px; }
+.address-open { border-top: 1px solid #e6eded; padding-top: 20px; margin-top: 20px; }
+.address-list { border-top: 1px solid #e6eded; }
+.address-row {
+  display: block; width: 100%; padding: 15px 20px; border: 0;
+  border-bottom: 1px solid #edf1f1; text-align: left; background: #fff;
+  color: #294551; cursor: pointer; line-height: 1.7;
+}
+.address-row .mono { display: block; overflow-wrap: anywhere; font-size: 11px; }
+.address-row small { display: block; color: #738992; font-size: 10px; }
+.address-row.selected { background: #edf7f3; box-shadow: inset 3px 0 #438978; }
+.address-row:hover:not(:disabled) { background: #f4f8f7; }
+.address-row:disabled { cursor: wait; }
+.address-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 16px 20px; font-size: 11px; }
+.address-pagination > div { display: flex; gap: 6px; }
+.address-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 14px; margin-bottom: 18px; }
+.address-stats > div { background: #f4f8f7; padding: 14px; border-radius: 8px; }
+.address-stats span { display: block; color: #738992; font-size: 11px; line-height: 1.6; }
+.address-stats strong { display: block; font-size: 24px; color: #294551; margin-top: 4px; }
+.address-note { color: #687f88; font-size: 12px; line-height: 1.8; margin: 12px 0; }
+.address-note.warning { color: #976415; }
+.address-dates { display: grid; gap: 15px; margin: 24px 0; }
+.address-dates dt { color: #738992; font-size: 11px; margin-bottom: 5px; }
+.address-dates dd { color: #294551; font-size: 12px; margin: 0; }
+@media (max-width: 1000px) {
+  .address-review-grid { grid-template-columns: 1fr; }
+  .address-list { max-height: 380px; overflow-y: auto; }
+}

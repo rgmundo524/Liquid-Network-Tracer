@@ -4,10 +4,10 @@ import json
 from pathlib import Path
 
 from .common import HEX64, TraceError, digest, save_json
-from .export import write_csv
+from .export import NODE_CSV_FIELDS, node_csv_rows, write_csv
 
 _DETAIL_FILES = ("inputs.csv", "outputs.csv", "spends.csv", "events.csv", "frontier.csv")
-_NODE_FIELDS = ("id", "kind", "label", "url", "color", "details")
+_NODE_FIELDS = NODE_CSV_FIELDS
 _EDGE_FIELDS = ("id", "source", "target", "role", "outpoint", "label", "quantity", "details")
 
 
@@ -71,7 +71,7 @@ def export_csv(graph, archive, directory):
         directory.mkdir(parents=True, exist_ok=False)
     except FileExistsError as error:
         raise TraceError("CSV export directory already exists; choose a new directory") from error
-    write_csv(directory / "nodes.csv", graph["nodes"], _NODE_FIELDS)
+    write_csv(directory / "nodes.csv", node_csv_rows(graph), _NODE_FIELDS)
     write_csv(directory / "edges.csv", graph["edges"], _EDGE_FIELDS)
     for name in _DETAIL_FILES:
         (directory / name).write_bytes(captured[name])
@@ -85,6 +85,7 @@ def export_csv(graph, archive, directory):
         "address_mode": graph.get("address_mode"),
         "presentation_version": graph.get("presentation_version"),
         "graph_options": graph.get("graph_options", {}),
+        **({"service_controls": graph["service_controls"]} if "service_controls" in graph else {}),
         "notice": "Graph tables use the selected presentation. Detailed tables retain all saved fees. "
                   "These checksums detect byte changes; they are not signatures or independent timestamps.",
     })

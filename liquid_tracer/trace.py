@@ -8,6 +8,7 @@ from pathlib import Path
 from . import __version__
 from .common import (HEX64, StopRun, TraceError, digest, match_labels, now,
                      output_kind, parse_outpoint, save_json)
+from .services import ServiceScope, is_service_stop
 
 TERMINAL = {"spent", "fee", "pegout", "provably_unspendable"}
 
@@ -63,6 +64,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None):
     labels = state["labels"]
     state["include_unconfirmed"] = include_unconfirmed
     state["selected_frontier"] = sorted(only) if only is not None else None
+    scope = ServiceScope(state)
 
     def add(txid, index, depth, origin):
         key = f"{txid}:{index}"
@@ -70,19 +72,32 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None):
         if existing is None:
             state["outputs"][key] = {"outpoint": key, "txid": txid, "vout": index,
                 "depth": depth, "origin": origin, "status": "pending"}
-            heapq.heappush(queue, (depth, key))
+            scope.register(key)
+            scope.admit(key, depth)
+            if not scope.blocked(key):
+                heapq.heappush(queue, (depth, key))
+        elif scope.active and (key not in scope.reachable or depth < scope.depth(existing)):
+            existing["depth"] = min(existing["depth"], depth)
+            for released in scope.admit(key, depth):
+                item = state["outputs"][released]
+                if item["status"] not in TERMINAL:
+                    item["status"] = "pending"
+                    heapq.heappush(queue, (scope.depth(item), released))
         elif depth < existing["depth"]:
             existing["depth"] = depth
-            existing["status"] = "pending"
-            heapq.heappush(queue, (depth, key))
+            if not scope.blocked(key):
+                existing["status"] = "pending"
+                heapq.heappush(queue, (depth, key))
 
     if state["parent_run"]:
         available = {key for key, item in state["outputs"].items() if item["status"] not in TERMINAL}
         if only is not None and not set(only).issubset(available):
             raise TraceError("Selected outpoint is not on the saved frontier")
         for key in sorted(available if only is None else only):
+            if scope.blocked(key):
+                continue
             state["outputs"][key]["status"] = "pending"
-            heapq.heappush(queue, (state["outputs"][key]["depth"], key))
+            heapq.heappush(queue, (scope.depth(state["outputs"][key]), key))
     else:
         for seed in state["seeds"]:
             txid, index = parse_outpoint(seed)
@@ -95,6 +110,16 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None):
             "transactions_cumulative": len(state["transactions"]),
             "outputs_cumulative": len(state["outputs"]),
             "frontier_count": sum(item["status"] not in TERMINAL for item in state["outputs"].values())}
+        if scope.active:
+            state["stats"]["service_stopped_outputs"] = sum(
+                item.get("trace_control", {}).get("reason") == "suspected_service_stop"
+                for item in state["outputs"].values())
+            state["stats"]["held_behind_service_outputs"] = sum(
+                item.get("trace_control", {}).get("reason") == "held_behind_service"
+                for item in state["outputs"].values())
+            state["stats"]["active_frontier_count"] = sum(
+                item["status"] not in TERMINAL and not item.get("trace_control")
+                for item in state["outputs"].values())
         save_json(checkpoint, state)
 
     def get_tx(txid, depth):
@@ -132,7 +157,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None):
         seen = set()
         for candidate_depth, key in heapq.nsmallest(min(workers, limits.max_outpoints - count), queue):
             item = state["outputs"][key]
-            if (candidate_depth != depth or candidate_depth != item["depth"]
+            if (candidate_depth != depth or candidate_depth != scope.depth(item)
                     or item["status"] != "pending" or key in seen):
                 continue
             seen.add(key)
@@ -211,7 +236,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None):
             prepare_frontier()
             depth, key = heapq.heappop(queue)
             current = state["outputs"][key]
-            if depth != current["depth"] or current["status"] != "pending":
+            if depth != scope.depth(current) or current["status"] != "pending":
                 continue
             count += 1
             tx = get_tx(current["txid"], depth)
@@ -222,6 +247,8 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None):
             current["labels"] = match_labels(labels, key, output)
             if kind != "spendable":
                 current["status"] = kind
+            elif any(is_service_stop(label) for label in current["labels"]):
+                scope.mark_stop(current, output.get("scriptpubkey_address"))
             elif any(label.get("stop") for label in current["labels"]):
                 current["status"] = "analyst_stop"
             elif not include_unconfirmed and not tx.get("status", {}).get("confirmed"):

@@ -102,7 +102,23 @@ type Job = {
   cancellable?: boolean;
   started_at?: number;
 };
-type Page = "dashboard" | "new" | "case" | "settings" | "case-settings";
+type ServiceRule = { address: string; classification: "suspected_service"; name: string; rationale: string; enabled: boolean; updated_at: string };
+type AddressActivity = {
+  address: string;
+  confirmed_tx_count: number | null; mempool_tx_count: number | null;
+  confirmed_unspent_output_count: number | null; mempool_unspent_output_delta: number | null;
+  unspent_output_count: number | null; output_counts_consistent: boolean;
+  observed_at: string | null; completed_at: string | null;
+  history_pages: number; max_pages: number; history_transactions_seen: number;
+  history_complete: boolean; history_stop_reason: string;
+  first_confirmed_activity: { txid: string; date_utc: string | null } | null;
+  oldest_observed_confirmed_activity: { txid: string; date_utc: string | null } | null;
+  latest_confirmed_activity: { txid: string; date_utc: string | null } | null;
+  warnings: string[]; observation_ids: number[];
+};
+type AddressRow = { address: string; run_output_count?: number; service: ServiceRule | null; activity: AddressActivity | null };
+type AddressPage = { run_id: string; rows: AddressRow[]; total: number; offset: number; limit: number };
+type Page = "dashboard" | "new" | "case" | "settings" | "case-settings" | "addresses";
 type ActiveJob = {
   id: string;
   action: string;
@@ -132,6 +148,11 @@ const state = {
   page: "dashboard" as Page,
   activeCase: null as Case | null,
   selectedRun: "latest",
+  addressReview: {
+    query: "", suspectedOnly: false, data: null as AddressPage | null,
+    selected: null as AddressRow | null, loading: false,
+    name: "", rationale: "", enabled: false, pasted: "",
+  },
   job: null as ActiveJob | null,
   error: "",
   demoTxids: [] as string[],
@@ -340,7 +361,7 @@ function sidebar(): string {
   ]
     .map(
       ([page, label, symbol]) =>
-        `<button class="nav-button${state.page === page || (page === "dashboard" && ["case", "case-settings"].includes(state.page)) ? " active" : ""}" data-page="${page}"${state.page === page ? ' aria-current="page"' : ""}>${icon(symbol)}<span>${label}</span></button>`,
+        `<button class="nav-button${state.page === page || (page === "dashboard" && ["case", "case-settings", "addresses"].includes(state.page)) ? " active" : ""}" data-page="${page}"${state.page === page ? ' aria-current="page"' : ""}>${icon(symbol)}<span>${label}</span></button>`,
     )
     .join(
       "",
@@ -393,8 +414,9 @@ function render(focus = false): void {
     case: state.activeCase?.name || "Investigation",
     settings: "Workspace settings",
     "case-settings": "Investigation settings",
+    addresses: "Address review",
   };
-  app.innerHTML = `<div class="layout">${sidebar()}<div class="main-shell"><header class="topbar"><div class="breadcrumb">${icon("folder")}<span>Workspace</span>${icon("chevron")}<strong>${esc(names[state.page])}</strong></div><div class="topbar-right"><span class="local-pill">${icon("lock")} LOCAL SESSION</span><span class="avatar" aria-label="Investigation workspace">LT</span></div></header><main id="main" class="content" tabindex="-1">${jobBanner()}${state.error ? `<div class="alert error" role="alert">${icon("info")}<div><strong>Unable to complete the action</strong><p>${esc(state.error)}</p></div><button class="dismiss" data-action="dismiss-error" aria-label="Dismiss error">${icon("close")}</button></div>` : ""}${state.page === "dashboard" ? dashboard() : state.page === "new" ? newCase() : state.page === "case" ? workspace() : settingsPage()}</main></div></div>`;
+  app.innerHTML = `<div class="layout">${sidebar()}<div class="main-shell"><header class="topbar"><div class="breadcrumb">${icon("folder")}<span>Workspace</span>${icon("chevron")}<strong>${esc(names[state.page])}</strong></div><div class="topbar-right"><span class="local-pill">${icon("lock")} LOCAL SESSION</span><span class="avatar" aria-label="Investigation workspace">LT</span></div></header><main id="main" class="content" tabindex="-1">${jobBanner()}${state.error ? `<div class="alert error" role="alert">${icon("info")}<div><strong>Unable to complete the action</strong><p>${esc(state.error)}</p></div><button class="dismiss" data-action="dismiss-error" aria-label="Dismiss error">${icon("close")}</button></div>` : ""}${state.page === "dashboard" ? dashboard() : state.page === "new" ? newCase() : state.page === "case" ? workspace() : state.page === "addresses" ? addressReviewPage() : settingsPage()}</main></div></div>`;
   updateJobClock();
   if (focus)
     document
@@ -518,7 +540,111 @@ function workspace(): string {
         `<option value="${esc(item.id)}"${(state.selectedRun === "latest" ? detail.latest_run : state.selectedRun) === item.id ? " selected" : ""}>${esc(item.id)}${item.id === detail.latest_run ? " · Latest" : ""}</option>`,
     )
     .join("");
-  return `<div class="page-heading case-heading"><div><div class="eyebrow">Investigation workspace</div><h1 id="page-title" tabindex="-1">${esc(detail.name)}</h1><div class="workspace-meta"><span class="badge ${detail.fixture ? "purple" : ""}">${detail.fixture ? "Synthetic demo" : "Live Liquid"}</span><span class="badge gray">${(detail.runs || []).length} saved run${detail.runs?.length === 1 ? "" : "s"}</span><span class="mono">${esc(short(detail.id, 8))}</span></div></div><div class="heading-actions">${button("Settings", "case-settings", "settings", "", isBusy())}${button(saved ? "Continue investigation" : "Start first run", "trace-dialog", "play", "primary", isBusy())}</div></div>${last ? resultBanner(last.action, last.result) : ""}<div class="workspace-grid"><div class="workspace-main"><section class="panel"><div class="panel-head"><div><h2>${saved ? "Saved run" : "Ready to trace"}</h2><p>${saved ? "Select a snapshot to review, render, or export." : "Your starting outputs and limits are saved."}</p></div>${saved ? `<label class="run-picker">Snapshot<select class="input" id="run-picker" aria-label="Saved run snapshot">${runOptions}</select></label>` : '<span class="badge gray">No runs yet</span>'}</div>${saved ? `<div class="run-summary"><div><span>Tracked transactions</span><strong>${esc(run?.transaction_count ?? "—")}</strong></div><div><span>Unfinished branches</span><strong>${esc(run?.frontier_count ?? "—")}</strong></div><div><span>Run status</span><strong class="text-value">${esc(human(run?.status || "saved"))}</strong></div></div><div class="run-note">${icon("clock")}<span>${esc(formatDate(run?.created_at))}${run?.stop_reason ? ` · ${esc(human(run.stop_reason))}` : ""}</span></div>` : `<div class="empty-state" style="padding:31px 24px"><div class="empty-icon">${icon("graph")}</div><h2>${detail.seed_count ?? detail.seeds?.length ?? "Your"} starting output${(detail.seed_count ?? detail.seeds?.length) === 1 ? "" : "s"} selected</h2><p>Run the first trace to record exact output spends and build your investigation graph.</p>${button("Review run limits", "trace-dialog", "play", "primary", isBusy())}</div>`}</section>${elkGraph(artifacts.elk, saved, settings)}${localGraph(artifacts.mermaid, saved, settings.include_fees)}${csvDownloads(artifacts.csv, saved, settings.include_fees)}<section class="panel"><div class="panel-head"><div><h2>Run history</h2><p>Every continuation preserves the preceding snapshot.</p></div><span class="badge gray">${(detail.runs || []).length} runs</span></div>${detail.runs?.length ? `<div class="table-wrap"><table class="run-list"><thead><tr><th>Run</th><th>Recorded</th><th>Status</th><th>Transactions</th></tr></thead><tbody>${detail.runs.map((item) => `<tr class="${item.id === run?.id ? "selected" : ""}"><td><button data-run="${esc(item.id)}">${esc(short(item.id, 8))}</button>${item.id === detail.latest_run ? '<div class="muted">Latest</div>' : ""}</td><td><span class="muted">${esc(formatDate(item.created_at))}</span></td><td><span class="badge ${item.status === "error" ? "red" : "gray"}">${esc(human(item.status))}</span></td><td>${esc(item.transaction_count ?? "—")}</td></tr>`).join("")}</tbody></table></div>` : '<div class="panel-body small muted">Your first completed or bounded run will appear here.</div>'}</section></div><aside class="workspace-aside"><section class="panel"><div class="panel-body"><div class="action-card-head"><span class="action-icon">${icon("board")}</span><div><h3>Miro board</h3><p>Your editable investigation graph</p></div></div><p class="action-description">Preview changes locally, then sync the selected snapshot to your board.</p>${detail.miro_board ? `<a class="board-link" href="${esc(boardUrl(detail.miro_board))}" target="_blank" rel="noopener noreferrer">Open linked board ${icon("external")}</a>` : '<p class="board-empty">No board linked yet. Create one or add its URL in settings.</p>'}${miroRecoveryNotice(detail)}<div class="action-buttons">${button("Preview changes", "miro-preview", "search", "wide", !saved || !detail.miro_board || isBusy())}${button("Sync to Miro", "miro-sync-dialog", "refresh", "", !saved || !detail.miro_board || Boolean(detail.miro_recovery?.pending_count) || isBusy())}${button("Sync and reorganize", "miro-organize-dialog", "graph", "wide", !saved || !detail.miro_board || Boolean(detail.miro_recovery?.pending_count) || isBusy())}${detail.miro_recovery?.can_confirm_empty ? button("Recover empty-board sync", "miro-recover-dialog", "refresh", "wide", !detail.miro_board || isBusy()) : ""}${!detail.miro_board ? button("Create Miro board", "miro-create-dialog", "plus", "wide", isBusy()) : ""}</div></div></section><section class="panel"><div class="panel-body local-tools"><div class="action-card-head"><span class="action-icon teal">${icon("download")}</span><div><h3>Local outputs</h3><p>From the selected snapshot</p></div></div>${button("ELK layout preview <span>Layout</span>", "layout", "layers", "", !saved || isBusy())}${button("Mermaid chart <span>Graph</span>", "mermaid", "graph", "", !saved || isBusy())}${button("Create CSV export <span>7 tables</span>", "csv", "table", "", !saved || isBusy())}<p class="small muted" style="margin-top:13px;font-size:10px">New exports are saved with the investigation. Archived evidence stays intact.</p></div></section><section class="panel"><div class="panel-body"><div class="action-card-head"><span class="action-icon blue">${icon("shield")}</span><div><h3>Bounded by design</h3><p>Saved defaults for this investigation</p></div></div><dl class="saved-settings"><div><dt>Additional hops</dt><dd>${settings.hops}</dd></div><div><dt>Transactions</dt><dd>${settings.max_transactions}</dd></div><div><dt>API attempts</dt><dd>${settings.max_requests}</dd></div><div><dt>Time limit</dt><dd>${settings.max_seconds}s</dd></div><div><dt>Fee flows</dt><dd>${settings.include_fees ? "Included" : "Hidden"}</dd></div><div><dt>Connectors</dt><dd>${esc(human(settings.connector_style))}</dd></div><div><dt>New Miro items</dt><dd>${settings.max_new_items}</dd></div></dl><div class="settings-divider"></div><p class="small muted" style="font-size:10px;line-height:1.75">Graph paths show UTXO reachability. They do not determine ownership or allocate a hidden value.</p></div></section></aside></div>`;
+  return `<div class="page-heading case-heading"><div><div class="eyebrow">Investigation workspace</div><h1 id="page-title" tabindex="-1">${esc(detail.name)}</h1><div class="workspace-meta"><span class="badge ${detail.fixture ? "purple" : ""}">${detail.fixture ? "Synthetic demo" : "Live Liquid"}</span><span class="badge gray">${(detail.runs || []).length} saved run${detail.runs?.length === 1 ? "" : "s"}</span><span class="mono">${esc(short(detail.id, 8))}</span></div></div><div class="heading-actions">${button("Address review", "addresses", "search", "", isBusy())}${button("Settings", "case-settings", "settings", "", isBusy())}${button(saved ? "Continue investigation" : "Start first run", "trace-dialog", "play", "primary", isBusy())}</div></div>${last ? resultBanner(last.action, last.result) : ""}<div class="workspace-grid"><div class="workspace-main"><section class="panel"><div class="panel-head"><div><h2>${saved ? "Saved run" : "Ready to trace"}</h2><p>${saved ? "Select a snapshot to review, render, or export." : "Your starting outputs and limits are saved."}</p></div>${saved ? `<label class="run-picker">Snapshot<select class="input" id="run-picker" aria-label="Saved run snapshot">${runOptions}</select></label>` : '<span class="badge gray">No runs yet</span>'}</div>${saved ? `<div class="run-summary"><div><span>Tracked transactions</span><strong>${esc(run?.transaction_count ?? "—")}</strong></div><div><span>Unfinished branches</span><strong>${esc(run?.frontier_count ?? "—")}</strong></div><div><span>Run status</span><strong class="text-value">${esc(human(run?.status || "saved"))}</strong></div></div><div class="run-note">${icon("clock")}<span>${esc(formatDate(run?.created_at))}${run?.stop_reason ? ` · ${esc(human(run.stop_reason))}` : ""}</span></div>` : `<div class="empty-state" style="padding:31px 24px"><div class="empty-icon">${icon("graph")}</div><h2>${detail.seed_count ?? detail.seeds?.length ?? "Your"} starting output${(detail.seed_count ?? detail.seeds?.length) === 1 ? "" : "s"} selected</h2><p>Run the first trace to record exact output spends and build your investigation graph.</p>${button("Review run limits", "trace-dialog", "play", "primary", isBusy())}</div>`}</section>${elkGraph(artifacts.elk, saved, settings)}${localGraph(artifacts.mermaid, saved, settings.include_fees)}${csvDownloads(artifacts.csv, saved, settings.include_fees)}<section class="panel"><div class="panel-head"><div><h2>Run history</h2><p>Every continuation preserves the preceding snapshot.</p></div><span class="badge gray">${(detail.runs || []).length} runs</span></div>${detail.runs?.length ? `<div class="table-wrap"><table class="run-list"><thead><tr><th>Run</th><th>Recorded</th><th>Status</th><th>Transactions</th></tr></thead><tbody>${detail.runs.map((item) => `<tr class="${item.id === run?.id ? "selected" : ""}"><td><button data-run="${esc(item.id)}">${esc(short(item.id, 8))}</button>${item.id === detail.latest_run ? '<div class="muted">Latest</div>' : ""}</td><td><span class="muted">${esc(formatDate(item.created_at))}</span></td><td><span class="badge ${item.status === "error" ? "red" : "gray"}">${esc(human(item.status))}</span></td><td>${esc(item.transaction_count ?? "—")}</td></tr>`).join("")}</tbody></table></div>` : '<div class="panel-body small muted">Your first completed or bounded run will appear here.</div>'}</section></div><aside class="workspace-aside"><section class="panel"><div class="panel-body"><div class="action-card-head"><span class="action-icon">${icon("board")}</span><div><h3>Miro board</h3><p>Your editable investigation graph</p></div></div><p class="action-description">Preview changes locally, then sync the selected snapshot to your board.</p>${detail.miro_board ? `<a class="board-link" href="${esc(boardUrl(detail.miro_board))}" target="_blank" rel="noopener noreferrer">Open linked board ${icon("external")}</a>` : '<p class="board-empty">No board linked yet. Create one or add its URL in settings.</p>'}${miroRecoveryNotice(detail)}<div class="action-buttons">${button("Preview changes", "miro-preview", "search", "wide", !saved || !detail.miro_board || isBusy())}${button("Sync to Miro", "miro-sync-dialog", "refresh", "", !saved || !detail.miro_board || Boolean(detail.miro_recovery?.pending_count) || isBusy())}${button("Sync and reorganize", "miro-organize-dialog", "graph", "wide", !saved || !detail.miro_board || Boolean(detail.miro_recovery?.pending_count) || isBusy())}${detail.miro_recovery?.can_confirm_empty ? button("Recover empty-board sync", "miro-recover-dialog", "refresh", "wide", !detail.miro_board || isBusy()) : ""}${!detail.miro_board ? button("Create Miro board", "miro-create-dialog", "plus", "wide", isBusy()) : ""}</div></div></section><section class="panel"><div class="panel-body local-tools"><div class="action-card-head"><span class="action-icon teal">${icon("download")}</span><div><h3>Local outputs</h3><p>From the selected snapshot</p></div></div>${button("ELK layout preview <span>Layout</span>", "layout", "layers", "", !saved || isBusy())}${button("Mermaid chart <span>Graph</span>", "mermaid", "graph", "", !saved || isBusy())}${button("Create CSV export <span>7 tables</span>", "csv", "table", "", !saved || isBusy())}<p class="small muted" style="margin-top:13px;font-size:10px">New exports are saved with the investigation. Archived evidence stays intact.</p></div></section><section class="panel"><div class="panel-body"><div class="action-card-head"><span class="action-icon blue">${icon("shield")}</span><div><h3>Bounded by design</h3><p>Saved defaults for this investigation</p></div></div><dl class="saved-settings"><div><dt>Additional hops</dt><dd>${settings.hops}</dd></div><div><dt>Transactions</dt><dd>${settings.max_transactions}</dd></div><div><dt>API attempts</dt><dd>${settings.max_requests}</dd></div><div><dt>Time limit</dt><dd>${settings.max_seconds}s</dd></div><div><dt>Fee flows</dt><dd>${settings.include_fees ? "Included" : "Hidden"}</dd></div><div><dt>Connectors</dt><dd>${esc(human(settings.connector_style))}</dd></div><div><dt>New Miro items</dt><dd>${settings.max_new_items}</dd></div></dl><div class="settings-divider"></div><p class="small muted" style="font-size:10px;line-height:1.75">Graph paths show UTXO reachability. They do not determine ownership or allocate a hidden value.</p></div></section></aside></div>`;
+}
+
+function saveAddressDraft(): void {
+  const form = document.querySelector<HTMLFormElement>("#service-form");
+  if (!form) return;
+  const data = new FormData(form);
+  state.addressReview.name = String(data.get("service_name") || "");
+  state.addressReview.rationale = String(data.get("service_rationale") || "");
+  state.addressReview.enabled = data.get("service_enabled") === "on";
+}
+
+function selectAddress(row: AddressRow): void {
+  state.addressReview.selected = row;
+  state.addressReview.name = row.service?.name || "";
+  state.addressReview.rationale = row.service?.rationale || "";
+  state.addressReview.enabled = row.service?.enabled === true;
+}
+
+async function loadAddresses(offset: number): Promise<void> {
+  const detail = state.activeCase;
+  if (!detail || isBusy()) return;
+  saveAddressDraft();
+  const generation = ++pageGeneration;
+  state.page = "addresses";
+  state.error = "";
+  state.addressReview.loading = true;
+  history.replaceState(null, "", `#case/${encodeURIComponent(detail.id)}`);
+  render();
+  try {
+    const result = await api<AddressPage>(`/api/cases/${encodeURIComponent(detail.id)}/addresses`, {
+      run_id: state.selectedRun, query: state.addressReview.query, offset, limit: 25,
+      suspected_only: state.addressReview.suspectedOnly,
+    });
+    if (generation !== pageGeneration) return;
+    state.addressReview.data = result;
+  } finally {
+    if (generation === pageGeneration) {
+      state.addressReview.loading = false;
+      render();
+    }
+  }
+}
+
+async function saveService(enabled?: boolean): Promise<void> {
+  const detail = state.activeCase, review = state.addressReview;
+  if (!detail || !review.selected || isBusy()) return;
+  saveAddressDraft();
+  const address = review.selected.address;
+  const generation = pageGeneration;
+  submitting = true;
+  render();
+  try {
+    const result = await api<{ service: ServiceRule; revision: number }>(`/api/cases/${encodeURIComponent(detail.id)}/services`, {
+      address, name: review.name, rationale: review.rationale, enabled: enabled ?? review.enabled,
+    });
+    if (generation !== pageGeneration || state.activeCase?.id !== detail.id) return;
+    if (review.selected?.address === address) selectAddress({ ...review.selected, service: result.service });
+    const row = review.data?.rows.find(item => item.address === address);
+    if (row) row.service = result.service;
+    toast(result.service.enabled ? "Suspected-service stop saved. It applies when you continue the investigation." : "Service stop removed. Its history remains saved; continuation can follow this address again.");
+  } finally {
+    submitting = false;
+    render();
+  }
+}
+
+function addressActivity(summary: AddressActivity | null): string {
+  if (!summary) return '<p class="address-note">No activity lookup has been saved for this address. Refresh activity to retrieve its counts and a bounded history.</p>';
+  const first = summary.history_complete ? summary.first_confirmed_activity : summary.oldest_observed_confirmed_activity;
+  const activityDate = (activity: AddressActivity["first_confirmed_activity"]): string =>
+    activity?.date_utc ? esc(formatDate(activity.date_utc)) : "Unavailable";
+  const delta = summary.mempool_unspent_output_delta;
+  return `<div class="address-stats">
+    <div><span>Confirmed transactions</span><strong>${esc(summary.confirmed_tx_count ?? "??")}</strong></div>
+    <div><span>Mempool transactions</span><strong>${esc(summary.mempool_tx_count ?? "??")}</strong></div>
+    <div><span>General unspent outputs</span><strong>${esc(summary.unspent_output_count ?? "??")}</strong></div>
+    <div><span>Confirmed unspent outputs</span><strong>${esc(summary.confirmed_unspent_output_count ?? "??")}</strong></div>
+    <div><span>Mempool output change</span><strong>${delta === null ? "??" : esc(delta > 0 ? `+${delta}` : delta)}</strong></div>
+  </div><p class="address-note">General unspent outputs cover all indexed assets at this address, including outputs outside this trace. They are not an L-BTC balance. The total includes the mempool change and may change before confirmation. These are counts, not asset values.</p>
+  <dl class="address-dates"><div><dt>${summary.history_complete ? "First confirmed activity" : "Oldest activity in reviewed history"}</dt><dd>${activityDate(first)}</dd></div>
+    <div><dt>Latest confirmed activity</dt><dd>${activityDate(summary.latest_confirmed_activity)}</dd></div>
+    <div><dt>Statistics observed</dt><dd>${summary.observed_at ? esc(formatDate(summary.observed_at)) : "Unavailable"}</dd></div></dl>
+  <p class="address-note"><strong>${summary.history_complete ? "Confirmed history complete." : "Partial confirmed history."}</strong> Reviewed ${esc(summary.history_transactions_seen)} transactions across ${esc(summary.history_pages)} pages.${summary.history_complete ? " These dates describe confirmed on-chain activity, not address creation." : ` The oldest reviewed date is not the address's first use. Stopped: ${esc(human(summary.history_stop_reason))}.`}</p>
+  <p class="address-note">Statistics and history are observed separately and may change during lookup.</p>
+  ${summary.warnings.map(warning => `<p class="address-note warning">${esc(warning)}</p>`).join("")}`;
+}
+
+function addressReviewPage(): string {
+  const detail = state.activeCase;
+  if (!detail) return dashboard();
+  const review = state.addressReview, data = review.data, selected = review.selected;
+  const busy = isBusy() || review.loading;
+  const options = (detail.runs || []).map(run => `<option value="${esc(run.id)}"${run.id === (state.selectedRun === "latest" ? detail.latest_run : state.selectedRun) ? " selected" : ""}>${esc(run.id)}${run.id === detail.latest_run ? " · Latest" : ""}</option>`).join("");
+  return `<div class="page-heading"><div><div class="eyebrow">${esc(detail.name)}</div><h1 id="page-title" tabindex="-1">Address review</h1><p>Review activity, record your assessment, and choose where future tracing stops.</p></div>${button("Back to investigation", "back-case", "arrow")}</div>
+    <div class="address-review-grid"><section class="panel"><div class="panel-head"><div><h2>Saved addresses</h2><p>Selected run, saved reviews, and service assessments</p></div></div>
+    <div class="panel-body"><label class="field"><span>Saved run</span><select id="address-run-picker"${disabled(busy)}>${options || '<option value="latest">No saved run yet</option>'}</select></label>
+    <form id="address-search-form"><label class="field"><span>Search address or service name</span><input name="address_query" maxlength="256" value="${esc(review.query)}"${disabled(busy)}/></label>
+    <label class="check-line"><input name="suspected_only" type="checkbox"${review.suspectedOnly ? " checked" : ""}${disabled(busy)}/><span>Suspected services only</span></label>
+    <button class="btn address-search" type="submit"${disabled(busy)}>${icon("search")}Search</button></form>
+    <form id="address-open-form" class="address-open"><label class="field"><span>Or paste an address</span><input name="pasted_address" required maxlength="200" value="${esc(review.pasted)}" placeholder="Liquid address"${disabled(busy)}/><small>You can review an address before it appears in a trace.</small></label><button class="btn" type="submit"${disabled(busy)}>Open address</button></form></div>
+    <div class="address-list" aria-live="polite">${review.loading ? '<p class="panel-body muted">Loading saved addresses…</p>' : data?.rows.length ? data.rows.map(row => `<button class="address-row${selected?.address === row.address ? " selected" : ""}" data-action="address-select" data-address="${esc(row.address)}"${disabled(busy)}><span class="mono">${esc(row.address)}</span><small>${row.service?.enabled ? `<strong>Suspected service${row.service.name ? ": " + esc(row.service.name) : ""}</strong> · ` : ""}${esc(row.run_output_count ?? 0)} outputs in saved run${row.activity ? " · Activity saved" : ""}</small></button>`).join("") : '<p class="panel-body muted">No matching addresses in this run.</p>'}</div>
+    <div class="address-pagination"><span>${data?.total ? `${data.offset + 1}–${Math.min(data.offset + data.limit, data.total)} of ${data.total}` : "0 addresses"}</span><div>${button("Previous", "address-prev", "", "small", busy || !data || data.offset === 0)}${button("Next", "address-next", "", "small", busy || !data || data.offset + data.limit >= data.total)}</div></div></section>
+    <div class="address-detail">${selected ? `<section class="panel"><div class="panel-head"><div><h2 id="address-detail-title" tabindex="-1">Address activity</h2><p class="mono address-full">${esc(selected.address)}</p></div>${button("Refresh activity", "address-inspect", "refresh", "", busy)}</div><div class="panel-body">${addressActivity(selected.activity)}<p class="address-note">Each refresh checks this address only, with up to 5 history pages, 10 API attempts, and 60 seconds.${detail.fixture ? " Uses the synthetic fixture." : " Uses your Blockstream credits. Proton Pass prompts appear in the launching terminal."}</p></div></section>
+    <section class="panel"><div class="panel-head"><div><h2>Investigator assessment</h2><p>Your designation applies to this investigation.</p></div></div><form id="service-form" class="panel-body"><label class="check-line"><input type="checkbox" name="service_enabled"${review.enabled ? " checked" : ""}${disabled(busy)}/><span><strong>Suspected service: stop tracing through this address</strong><small>This records an investigative assessment. Activity counts do not establish ownership.</small></span></label><div class="settings-divider"></div><label class="field"><span>Service name (optional)</span><input name="service_name" maxlength="120" value="${esc(review.name)}"${disabled(busy)}/></label><label class="field"><span>Reason for your assessment (optional)</span><textarea name="service_rationale" maxlength="4000" rows="4"${disabled(busy)}>${esc(review.rationale)}</textarea></label><p class="address-note">The next continuation stops at this address, including downstream branches reachable only through it. Other independently reachable branches continue. Prior run evidence stays saved.</p><div class="form-actions"><button type="submit" class="btn primary"${disabled(busy)}>Save assessment</button>${selected.service?.enabled ? button("Remove service stop", "service-remove", "", "", busy) : ""}</div>${selected.service ? `<p class="address-note">Last saved ${esc(formatDate(selected.service.updated_at))}. Changes remain in the investigation's assessment history.</p>` : ""}</form></section>` : '<section class="panel"><div class="empty-state"><div class="empty-icon">' + icon("search") + '</div><h2>Select an address</h2><p>Choose an address from the saved run, or paste one to review it. Activity is fetched only when you select Refresh activity.</p></div></section>'}</div></div>`;
 }
 
 function miroRecoveryNotice(detail: Case): string {
@@ -528,7 +654,7 @@ function miroRecoveryNotice(detail: Case): string {
 }
 
 function resultBanner(action: string, result: Result): string {
-  if (["csv", "mermaid", "layout"].includes(action)) return "";
+  if (["csv", "mermaid", "layout", "address-inspect"].includes(action)) return "";
   const titles: Record<string, string> = {
     trace: "Run saved",
     "miro-preview": "Miro change preview",
@@ -620,6 +746,8 @@ async function openCase(id: string): Promise<void> {
   if (generation !== pageGeneration) return;
   saveDraft();
   state.activeCase = detail;
+  state.addressReview = { query: "", suspectedOnly: false, data: null, selected: null,
+    loading: false, name: "", rationale: "", enabled: false, pasted: "" };
   state.selectedRun = "latest";
   state.page = "case";
   state.error = "";
@@ -757,6 +885,15 @@ async function pollJob(): Promise<void> {
             state.selectedRun = result.run_id;
           }
         }
+        if (active.action === "address-inspect" && state.activeCase?.id === active.caseId) {
+          const address = String(result.address || "");
+          const inspected = await api<AddressRow>(`/api/cases/${encodeURIComponent(active.caseId)}/address`,
+            { address, run_id: state.selectedRun });
+          const selected = state.addressReview.selected;
+          if (selected?.address === address) selected.activity = inspected.activity;
+          const row = state.addressReview.data?.rows.find(item => item.address === address);
+          if (row) row.activity = inspected.activity;
+        }
         const key = `${active.caseId}:${result.run_id || detail.latest_run || "latest"}`;
         state.results.set(active.caseId, { action: active.action, result });
         if (["mermaid", "csv", "layout"].includes(active.action)) {
@@ -778,6 +915,7 @@ async function pollJob(): Promise<void> {
           (
             {
               trace: "Bounded run saved.",
+              "address-inspect": "Address activity saved. Review the history coverage before drawing conclusions.",
               mermaid: result.renderer === "direct_svg" ? "Direct SVG fallback is ready. " + fallbackNotice(result) : "Mermaid chart is ready.",
               layout: result.layout_algorithm === "dependency_layers_v1" ? "Dependency layout fallback is ready. " + fallbackNotice(result) : "ELK layout preview is ready.",
               csv: "CSV export is ready to download.",
@@ -921,6 +1059,34 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
     await openCase(element.dataset.id);
     return;
   }
+  if (action === "addresses") {
+    await loadAddresses(0);
+    return;
+  }
+  if (action === "address-prev" || action === "address-next") {
+    const page = state.addressReview.data;
+    if (page) await loadAddresses(Math.max(0, page.offset + (action === "address-next" ? page.limit : -page.limit)));
+    return;
+  }
+  if (action === "address-select" && element?.dataset.address) {
+    const row = state.addressReview.data?.rows.find(item => item.address === element.dataset.address);
+    if (row) selectAddress(row);
+    render();
+    document.querySelector<HTMLHeadingElement>("#address-detail-title")?.focus();
+    return;
+  }
+  if (action === "address-inspect") {
+    const detail = state.activeCase, selected = state.addressReview.selected;
+    if (!detail || !selected) return;
+    saveAddressDraft();
+    await startJob(`/api/cases/${encodeURIComponent(detail.id)}/actions`,
+      { action, address: selected.address, run_id: state.selectedRun }, action, !detail.fixture, detail.id);
+    return;
+  }
+  if (action === "service-remove") {
+    await saveService(false);
+    return;
+  }
   if (action === "case-settings") {
     navigate("case-settings");
     return;
@@ -990,6 +1156,16 @@ app.addEventListener("click", (event) => {
 
 app.addEventListener("change", (event) => {
   const element = event.target as HTMLInputElement | HTMLSelectElement;
+  if (element.name === "suspected_only") {
+    state.addressReview.suspectedOnly = (element as HTMLInputElement).checked;
+    return;
+  }
+  if (element.id === "address-run-picker") {
+    state.selectedRun = element.value;
+    state.addressReview.selected = null;
+    void loadAddresses(0).catch(handleError);
+    return;
+  }
   if (element.id === "run-picker") {
     state.selectedRun = element.value;
     render();
@@ -1018,6 +1194,9 @@ app.addEventListener("change", (event) => {
 // discard names, notes, or limit edits typed in the meantime.
 app.addEventListener("input", (event) => {
   if ((event.target as Element).closest("#new-case-form")) saveDraft();
+  if ((event.target as Element).closest("#service-form")) saveAddressDraft();
+  if ((event.target as HTMLInputElement).name === "address_query") state.addressReview.query = (event.target as HTMLInputElement).value;
+  if ((event.target as HTMLInputElement).name === "pasted_address") state.addressReview.pasted = (event.target as HTMLInputElement).value;
 });
 
 app.addEventListener("submit", (event) => {
@@ -1025,7 +1204,23 @@ app.addEventListener("submit", (event) => {
   const form = event.target as HTMLFormElement;
   if (isBusy() || !form.reportValidity()) return;
   void (async () => {
-    if (form.id === "new-case-form") {
+    if (form.id === "address-search-form") {
+      const data = new FormData(form);
+      state.addressReview.query = String(data.get("address_query") || "");
+      state.addressReview.suspectedOnly = data.get("suspected_only") === "on";
+      await loadAddresses(0);
+    } else if (form.id === "address-open-form") {
+      const address = String(new FormData(form).get("pasted_address") || "").trim();
+      const detail = state.activeCase;
+      if (!detail) return;
+      const generation = pageGeneration;
+      const row = await api<AddressRow>(`/api/cases/${encodeURIComponent(detail.id)}/address`, { address, run_id: state.selectedRun });
+      if (generation !== pageGeneration || state.activeCase?.id !== detail.id) return;
+      selectAddress(row);
+      render();
+    } else if (form.id === "service-form") {
+      await saveService();
+    } else if (form.id === "new-case-form") {
       saveDraft();
       const seeds = [
         ...new Set([

@@ -18,6 +18,7 @@ from .miro import _load_sync_state, _namespace, make_plan, publish, resolve, syn
 from .progress import ProgressReporter
 from .store import Store
 from .trace import new_state, trace
+from .services import apply_service_labels, disable_service, load_services, set_service
 
 
 def fee_arguments(command):
@@ -58,6 +59,26 @@ def parser():
     batch.add_argument("--max-seconds", type=float, help="Shared lookup duration limit (default: 30 seconds per distinct transaction)")
     batch.add_argument("--base-url", default=ENTERPRISE)
     batch.add_argument("--auth", choices=["blockstream", "none"], default="blockstream")
+    activity = commands.add_parser("address-inspect", help="Save a bounded address activity lookup using the investigation's API source")
+    activity.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    activity.add_argument("--address", required=True)
+    activity.add_argument("--run", default="latest", help="Saved run whose API source to inspect (default: latest)")
+    activity.add_argument("--max-pages", type=int, default=5, help="Maximum confirmed history pages, 25 transactions per page")
+    activity.add_argument("--max-requests", type=int, default=10, help="Maximum HTTP attempts including authentication and retries")
+    activity.add_argument("--max-seconds", type=float, default=60)
+    addresses = commands.add_parser("address-list", help="Review saved addresses and cached activity without API requests")
+    addresses.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    addresses.add_argument("--run", default="latest")
+    addresses.add_argument("--query", default="")
+    addresses.add_argument("--offset", type=int, default=0)
+    addresses.add_argument("--limit", type=int, default=25)
+    addresses.add_argument("--suspected-only", action="store_true")
+    service = commands.add_parser("service-set", help="Save or remove an investigator-designated suspected-service stop")
+    service.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    service.add_argument("--address", required=True)
+    service.add_argument("--name", default="", help="Optional suspected service name")
+    service.add_argument("--rationale", default="", help="Investigator's reasoning; not verified ownership")
+    service.add_argument("--disable", action="store_true", help="Disable this designation so future continuation can resume its branches")
     run = commands.add_parser("trace", help="Start or extend a bounded run")
     run.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                      help="Case directory (default: LIQUID_CASE_DIR)")
@@ -288,7 +309,8 @@ def connector_appearance(metadata, explicit=None):
     return value
 
 
-def refresh_presentation(plan, trace_path, include_fees=False, connector_style="straight", progress=None):
+def refresh_presentation(plan, trace_path, include_fees=False, connector_style="straight", progress=None,
+                         service_settings=None):
     """Refresh verified evidence; only proven fee items may change topology."""
     namespace = _namespace(plan)
     state = read_json(trace_path)
@@ -296,6 +318,9 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
             or state.get("case_id") != namespace["case_id"]
             or state.get("source") != namespace["source"]):
         raise TraceError("Saved trace does not match the Miro plan's run, case, or API source")
+    if service_settings is not None:
+        state["labels"] = apply_service_labels(state["labels"], service_settings)
+        state["service_controls"] = {key: value for key, value in service_settings.items() if key != "history"}
     try:
         merged = namespace["address_mode"] == "merged"
         full_graph = build_graph(state, merged, include_fees=True)
@@ -416,7 +441,8 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
     _load_sync_state(state_path, target, namespace)
     if plan_path is None:
         plan = refresh_presentation(plan, default_plan.parent / "trace.json", include_fee_flows(metadata, include_fees),
-                                    connector_appearance(metadata, connector_style), progress=progress)
+                                    connector_appearance(metadata, connector_style), progress=progress,
+                                    service_settings=load_services(case))
     # Validate the mapping, lineage, and item budget locally before saving a selection.
     options = {"reorganize": True} if reorganize else {}
     if progress is not None:
@@ -480,6 +506,8 @@ def run_trace(args, progress=None):
         limits = Limits(hops, args.max_transactions, args.max_outpoints, args.max_requests, args.max_seconds)
         limits.validate()
         labels = load_labels(args.labels) if args.labels else (parent["labels"] if parent else [])
+        service_settings = load_services(args.case)
+        labels = apply_service_labels(labels, service_settings)
         merge_addresses = bool(args.merge_addresses or (parent and parent.get("address_mode") == "merged"))
         store = Store(args.case)
         api = None
@@ -488,6 +516,7 @@ def run_trace(args, progress=None):
                           args.tx_cache_seconds, args.min_interval, workers=args.api_workers,
                           advertised_rps=args.api_rate_limit)
             state = new_state(seeds, api.base, limits, labels, parent, case_id=identity)
+            state["service_controls"] = {key: value for key, value in service_settings.items() if key != "history"}
             state["fetch_options"] = {"workers": api.workers,
                                       "advertised_rps": api.advertised_rps,
                                       "effective_rps": api.effective_rps,
@@ -554,6 +583,9 @@ def saved_graph(case, run_id="latest", include_fees=None):
         raise TraceError("Saved trace does not match the selected run")
     if state.get("case_id") != metadata["case_id"]:
         raise TraceError("The saved run belongs to a different case")
+    service_settings = load_services(case)
+    state["labels"] = apply_service_labels(state["labels"], service_settings)
+    state["service_controls"] = {key: value for key, value in service_settings.items() if key != "history"}
     fees = include_fee_flows(metadata, include_fees)
     graph = build_graph(state, merge_addresses=state.get("address_mode") == "merged", include_fees=fees)
     return run_id, archive, graph
@@ -617,6 +649,24 @@ def main(argv=None, *, progress=None):
         args = parser().parse_args(argv)
         if args.command == "credentials-check":
             return check_credentials(args.service)
+        if args.command == "address-inspect":
+            from .address_review import inspect_case_address
+            print(json.dumps(inspect_case_address(args.case, args.address, max_pages=args.max_pages,
+                                                 run_id=args.run, max_requests=args.max_requests,
+                                                 max_seconds=args.max_seconds), indent=2))
+            return 0
+        if args.command == "address-list":
+            from .address_review import list_addresses
+            print(json.dumps(list_addresses(args.case, args.run, args.query, args.offset,
+                                           args.limit, args.suspected_only), indent=2))
+            return 0
+        if args.command == "service-set":
+            settings = (disable_service(args.case, args.address) if args.disable else
+                        set_service(args.case, args.address, name=args.name, rationale=args.rationale))
+            from .address_activity import validate_address
+            print(json.dumps({"revision": settings["revision"],
+                              "service": settings["rules"][validate_address(args.address)]}, indent=2))
+            return 0
         if args.command in ("inspect-tx", "inspect-txs"):
             # Invalid hashes go directly to inspect_transaction's validation,
             # before any filesystem checks. Preflight valid lookups before they
@@ -661,6 +711,9 @@ def main(argv=None, *, progress=None):
                 if state.get("case_id", identity) != identity:
                     raise TraceError("The saved run belongs to a different case")
                 state["case_id"] = identity
+                service_settings = load_services(args.case)
+                state["labels"] = apply_service_labels(state["labels"], service_settings)
+                state["service_controls"] = {key: value for key, value in service_settings.items() if key != "history"}
                 state["graph_options"] = {**state.get("graph_options", {}),
                                           "include_fees": include_fee_flows(read_case(args.case), args.include_fees)}
                 merged = bool(args.merge_addresses or state.get("address_mode") == "merged")

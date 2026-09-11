@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from liquid_tracer.cli import main, sync_run, verify_export
 from liquid_tracer.common import TraceError, canonical, digest, read_json, save_json
-from liquid_tracer.export import build_graph
+from liquid_tracer.export import PRESENTATION_VERSION, build_graph
 from liquid_tracer.elk_layout import optimize_graph
 from liquid_tracer.miro import make_plan
 from liquid_tracer.miro_frames import activity_frames
@@ -98,7 +98,7 @@ class PresentationRefreshTests(unittest.TestCase):
             result = sync_run(self.case, "latest", "SYNTHETIC=", max_new_items=0)
             self.assertEqual(result["created"], 0)
             self.assertGreater(result["updated"], 0)
-            self.assertEqual(result["presentation_version"], 8)
+            self.assertEqual(result["presentation_version"], PRESENTATION_VERSION)
             self.assertTrue(result["presentation_refreshed"])
             self.assertEqual(result["plan_sha256"], self.current_plan["sha256"])
             self.assertEqual(result["archived_plan_sha256"], self.old_plan["sha256"])

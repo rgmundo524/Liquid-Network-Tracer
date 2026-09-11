@@ -188,6 +188,44 @@ def _trace_arguments(case, metadata, settings):
     return arguments, not bool(fixture)
 
 
+def _address_activity_text(summary):
+    """Describe an API snapshot without turning partial history into address age."""
+    if summary is None:
+        return "No saved activity snapshot. Choose Refresh address activity to fetch bounded address history."
+
+    def count(field):
+        value = summary.get(field)
+        return f"{value:,}" if type(value) is int else "??"
+
+    def date(field):
+        activity = summary.get(field)
+        if not isinstance(activity, dict):
+            return "??"
+        return activity.get("date_utc") or "??"
+
+    lines = [f"Activity snapshot (UTC): {summary.get('observed_at') or '??'}",
+             f"Transactions: {count('confirmed_tx_count')} confirmed; {count('mempool_tx_count')} in mempool",
+             f"General unspent outputs: {count('unspent_output_count')} "
+             f"({count('confirmed_unspent_output_count')} confirmed; "
+             f"mempool change {count('mempool_unspent_output_delta')})",
+             "General unspent outputs cover all indexed assets at the address, including outputs outside this investigation. "
+             "This is an output count, not an L-BTC balance. It does not mean a traced trail ended there."]
+    if summary.get("first_confirmed_activity") is not None and summary.get("history_complete") is True:
+        lines.append("First confirmed activity (UTC): " + date("first_confirmed_activity"))
+    else:
+        lines.append("Oldest observed confirmed activity (UTC): " + date("oldest_observed_confirmed_activity")
+                     + ". First use has not been established.")
+    lines.append("Latest confirmed activity (UTC): " + date("latest_confirmed_activity"))
+    lines.append("History: " + ("complete for this snapshot" if summary.get("history_complete") is True else "partial")
+                 + f"; {count('history_pages')} page(s), {count('history_transactions_seen')} transaction(s) examined.")
+    if summary.get("history_stop_reason"):
+        lines.append("History stopped: " + str(summary["history_stop_reason"]).replace("_", " "))
+    lines.append("Activity dates describe confirmed on-chain use, not when an address was created.")
+    for warning in summary.get("warnings") or []:
+        lines.append("Note: " + str(warning))
+    return "\n".join(lines)
+
+
 def create_app(root=None):
     """Construct the optional TUI lazily so ordinary CLI commands stay dependency-free."""
     from textual import work
@@ -554,6 +592,191 @@ def create_app(root=None):
                     return
                 self.dismiss(sorted(self.selected))
 
+    class AddressScreen(BaseScreen):
+        """Review cached activity and investigator-defined stops without live lookups."""
+
+        def __init__(self, case):
+            super().__init__()
+            self.case = case
+            self.page_offset = 0
+            self.page_size = 25
+            self.selected_address = None
+
+        def compose(self) -> ComposeResult:
+            yield Header()
+            with VerticalScroll(classes="form-panel"):
+                yield Label("Address review", classes="title")
+                yield Static("Review saved address activity, then decide whether an address is a suspected service. "
+                             "Opening this screen does not call Blockstream.", markup=False)
+                yield Input(placeholder="Search addresses or service names", id="address-search")
+                yield Checkbox("Show suspected services only", id="address-suspected-only")
+                with Horizontal(classes="buttons"):
+                    yield Button("Search", id="address-find")
+                    yield Button("Previous", id="address-previous", disabled=True)
+                    yield Button("Next", id="address-next", disabled=True)
+                yield Static("", id="address-page", markup=False)
+                yield DataTable(id="addresses", cursor_type="row")
+                yield Label("Address (select a row with Enter, or paste one)")
+                yield Input(placeholder="Liquid address", id="address-value")
+                yield Button("Review saved activity", id="address-select")
+                yield Static("Select or paste an address to review it.", id="address-activity", markup=False)
+                yield Label("Maximum history pages per refresh")
+                yield Input("5", id="address-pages", type="integer")
+                yield Static("Refresh allows at most 10 API attempts and 60 seconds. It may use Blockstream credits. "
+                             "Proton Pass prompts appear in the terminal. Activity is a dated snapshot; "
+                             "partial history cannot establish an address's first on-chain use.", markup=False)
+                yield Button("Refresh address activity", id="address-refresh", disabled=True)
+                yield Checkbox("Suspected service: stop tracing through this address", id="service-enabled")
+                yield Label("Service name (optional)")
+                yield Input(id="service-name", max_length=120)
+                yield Label("Investigator rationale (optional, up to 4,000 characters)")
+                yield TextArea(id="service-rationale")
+                yield Static("This is your designation, not automatic ownership attribution. "
+                             "Saved stops apply when the next run starts, including continuations. "
+                             "Existing evidence is retained. Uncheck and save to permit tracing again.", markup=False)
+                yield Static("", id="address-error", markup=False)
+            with Horizontal(classes="buttons form-actions"):
+                yield Button("Back", id="address-back")
+                yield Button("Save service decision", id="service-save", variant="primary", disabled=True)
+            yield Footer()
+
+        def on_mount(self):
+            self.query_one("#addresses", DataTable).add_columns("Address", "Run outputs", "Service stop", "Activity")
+            try:
+                self.load_page()
+            except ACTION_ERRORS as error:
+                self.query_one("#address-error", Static).update(str(error))
+            self.query_one("#address-search", Input).focus()
+
+        def load_page(self):
+            from .address_review import list_addresses
+            report = list_addresses(self.case, query=self.query_one("#address-search", Input).value.strip(),
+                                    offset=self.page_offset, limit=self.page_size,
+                                    suspected_only=self.query_one("#address-suspected-only", Checkbox).value)
+            table = self.query_one("#addresses", DataTable)
+            table.clear()
+            for row in report["rows"]:
+                service = row.get("service") or {}
+                table.add_row(Text(row["address"]), str(row["run_output_count"]),
+                              Text(service.get("name") or "Suspected service") if service.get("enabled") else "No",
+                              "Saved" if row.get("activity") else "Not fetched", key=row["address"])
+            total = report["total"]
+            count = len(report["rows"])
+            self.query_one("#address-page", Static).update(
+                f"Addresses {self.page_offset + 1 if count else 0} to {self.page_offset + count} of {total}. "
+                "Enter selects the highlighted row.")
+            self.query_one("#address-previous", Button).disabled = self.page_offset == 0
+            self.query_one("#address-next", Button).disabled = self.page_offset + count >= total
+
+        def select_address(self):
+            from .address_review import saved_activity
+            from .services import load_services, validate_address
+            address = validate_address(self.query_one("#address-value", Input).value)
+            rule = load_services(self.case)["rules"].get(address) or {}
+            summary = saved_activity(self.case, address)
+            self.selected_address = address
+            self.query_one("#address-value", Input).value = address
+            self.query_one("#service-enabled", Checkbox).value = rule.get("enabled", False)
+            self.query_one("#service-name", Input).value = rule.get("name", "")
+            self.query_one("#service-rationale", TextArea).text = rule.get("rationale", "")
+            self.query_one("#address-activity", Static).update(_address_activity_text(summary))
+            self.query_one("#address-refresh", Button).disabled = False
+            self.query_one("#service-save", Button).disabled = False
+            self.query_one("#address-error", Static).update("")
+
+        def require_selected_address(self):
+            from .services import validate_address
+            address = validate_address(self.query_one("#address-value", Input).value)
+            if address != self.selected_address:
+                raise TraceError("Choose Review saved activity for the changed address before refreshing or saving.")
+            return address
+
+        def on_data_table_row_selected(self, event: DataTable.RowSelected):
+            if event.data_table.id != "addresses":
+                return
+            self.query_one("#address-value", Input).value = event.row_key.value
+            try:
+                self.select_address()
+            except ACTION_ERRORS as error:
+                self.query_one("#address-error", Static).update(str(error))
+
+        def on_input_submitted(self, event: Input.Submitted):
+            if self.app.busy:
+                return
+            try:
+                if event.input.id == "address-search":
+                    self.page_offset = 0
+                    self.load_page()
+                elif event.input.id == "address-value":
+                    self.select_address()
+            except ACTION_ERRORS as error:
+                self.query_one("#address-error", Static).update(str(error))
+
+        def on_button_pressed(self, event: Button.Pressed):
+            event.stop()
+            if self.app.busy:
+                return
+            try:
+                action = event.button.id
+                if action == "address-back":
+                    self.action_back()
+                elif action in ("address-find", "address-previous", "address-next"):
+                    self.page_offset = (max(0, self.page_offset - self.page_size) if action == "address-previous" else
+                                   self.page_offset + self.page_size if action == "address-next" else 0)
+                    self.load_page()
+                elif action == "address-select":
+                    self.select_address()
+                elif action == "address-refresh":
+                    self.refresh_activity()
+                elif action == "service-save":
+                    from .services import set_service
+                    address = self.require_selected_address()
+                    enabled = self.query_one("#service-enabled", Checkbox).value
+                    set_service(self.case, address, enabled=enabled,
+                                name=self.query_one("#service-name", Input).value,
+                                rationale=self.query_one("#service-rationale", TextArea).text)
+                    self.load_page()
+                    self.query_one("#address-error", Static).update(
+                        "Suspected-service stop saved. It applies to the next run." if enabled else
+                        "Service stop disabled. Future runs may trace through this address.")
+            except ACTION_ERRORS as error:
+                self.query_one("#address-error", Static).update(str(error))
+
+        def refresh_activity(self):
+            from .address_review import saved_activity
+            address = self.require_selected_address()
+            try:
+                pages = int(self.query_one("#address-pages", Input).value)
+                if pages < 1:
+                    raise ValueError
+            except ValueError:
+                raise TraceError("Maximum history pages must be a whole number of at least 1.") from None
+            live = not bool(read_case(self.case).get("fixture"))
+            arguments = ["address-inspect", "--case", str(self.case), "--address", address,
+                         "--max-pages", str(pages), "--max-requests", "10", "--max-seconds", "60"]
+            self.app.busy = True
+            error_field = self.query_one("#address-error", Static)
+            try:
+                # The CLI persists the activity report. Live credential prompts
+                # retain the terminal; no tokens or secrets pass through widgets.
+                with self.app.suspend() if live else contextlib.nullcontext():
+                    options = {} if live else {"capture_output": True, "text": True}
+                    result = subprocess.run(_command(arguments, live=live), cwd=_project(), env=_environment(),
+                                            check=False, **options)
+                if result.returncode:
+                    raise TraceError("Address refresh failed. Check the terminal for credential or API errors. "
+                                     "Previously saved activity and your service decision remain unchanged." if live else
+                                     "Address refresh failed for this fixture. Previously saved activity remains available.")
+                self.query_one("#address-activity", Static).update(_address_activity_text(saved_activity(self.case, address)))
+                self.load_page()
+                error_field.update("Address activity snapshot saved. Service decisions require Save service decision.")
+            except FileNotFoundError:
+                error_field.update("SecretSpec is unavailable. Reopen the project's devenv shell and try again.")
+            except KeyboardInterrupt:
+                error_field.update("Address refresh interrupted. Previously saved activity remains available.")
+            finally:
+                self.app.busy = False
+
     class CreateBoardScreen(BaseScreen):
         def __init__(self, case):
             super().__init__()
@@ -626,6 +849,7 @@ def create_app(root=None):
                     yield Button("Export CSV", id="csv")
                 with Horizontal(classes="buttons"):
                     yield Button("ELK layout preview", id="elk-preview")
+                    yield Button("Address review", id="addresses-review")
                 with Horizontal(classes="buttons"):
                     yield Button("Create Miro board", id="create-board")
                     yield Button("Sync and reorganize Miro graph", id="layout")
@@ -698,6 +922,8 @@ def create_app(root=None):
                     self.app.push_screen(FormScreen(action, self.case), self.perform)
                 elif action == "review":
                     self.app.push_screen(ReviewScreen(self.case))
+                elif action == "addresses-review":
+                    self.app.push_screen(AddressScreen(self.case))
             except ACTION_ERRORS as error:
                 self.show_error(error)
 
@@ -913,7 +1139,9 @@ def create_app(root=None):
         .form-panel Label { margin-top: 1; height: auto; }
         .form-panel Static { height: auto; margin-top: 1; }
         TextArea { height: 6; }
-        #form-error { color: $error; }
+        #form-error, #address-error { color: $error; }
+        #addresses { height: 10; margin-top: 1; }
+        #address-activity { border: round $panel; padding: 1; }
         #case-summary { height: auto; margin-bottom: 1; }
         #action-status { height: auto; margin: 1 0; }
         #cancel-calculation { display: none; width: auto; }

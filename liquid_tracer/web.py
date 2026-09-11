@@ -42,6 +42,51 @@ FALLBACK_REASONS = ("size_limit", "timeout", "mermaid_size_limit", "mermaid_time
 CANCELLABLE_ACTIONS = {"layout", "mermaid"}
 
 
+def public_service(rule):
+    """Expose only the investigator's designation, never settings/audit internals."""
+    if not isinstance(rule, dict):
+        return None
+    return {key: rule[key] for key in ("address", "classification", "name", "rationale", "enabled",
+                                      "created_at", "updated_at") if key in rule}
+
+
+def public_address_activity(summary):
+    """Whitelist successful observations; exclude raw API bodies, errors and paths."""
+    from .address_activity import validate_address
+
+    value = {"address": validate_address(summary.get("address")), "schema_version": 1}
+    for key in ("confirmed_tx_count", "mempool_tx_count", "confirmed_unspent_output_count",
+                "unspent_output_count", "history_pages", "max_pages", "history_transactions_seen"):
+        count = summary.get(key)
+        value[key] = count if type(count) is int and 0 <= count <= 2 ** 53 - 1 else None
+    delta = summary.get("mempool_unspent_output_delta")
+    value["mempool_unspent_output_delta"] = delta if type(delta) is int and abs(delta) <= 2 ** 53 - 1 else None
+    for key in ("history_complete", "output_counts_consistent"):
+        value[key] = summary.get(key) is True
+    for key in ("observed_at", "completed_at"):
+        stamp = summary.get(key)
+        value[key] = stamp if isinstance(stamp, str) and re.fullmatch(r"[0-9TtZz:+. -]{10,40}", stamp) else None
+    reasons = {"complete", "page_limit", "no_confirmed_transactions", "request_limit", "time_limit",
+               "server_retry_later", "interrupted", "lookup_limit", "repeated_history", "snapshot_inconsistent"}
+    value["history_stop_reason"] = summary.get("history_stop_reason") if summary.get("history_stop_reason") in reasons else "unavailable"
+    for key in ("first_confirmed_activity", "oldest_observed_confirmed_activity", "latest_confirmed_activity"):
+        activity = summary.get(key)
+        value[key] = None
+        if isinstance(activity, dict) and isinstance(activity.get("txid"), str) and re.fullmatch(r"[0-9a-f]{64}", activity["txid"]):
+            stamp = activity.get("date_utc")
+            value[key] = {"txid": activity["txid"], "date_utc": stamp if isinstance(stamp, str)
+                          and re.fullmatch(r"[0-9TtZz:+. -]{10,40}", stamp) else None}
+    value["observation_ids"] = [item for item in summary.get("observation_ids", [])
+                                if type(item) is int and 0 < item <= 2 ** 53 - 1]
+    warnings = {
+        "Address statistics are inconsistent; negative derived output counts are unavailable.",
+        "Confirmed history and statistics may have changed during lookup; the first confirmed activity is unverified.",
+        "Some confirmed transactions have no block timestamp; their dates are unavailable.",
+    }
+    value["warnings"] = [item for item in summary.get("warnings", []) if isinstance(item, str) and item in warnings]
+    return value
+
+
 def public_rendering_metadata(result):
     """Only controlled renderer names and reasons may cross the browser boundary."""
     value = {}
@@ -452,6 +497,8 @@ class LocalServer(ThreadingHTTPServer):
             pass
 
     def public_result(self, result, action, case, txids):
+        if action == "address-inspect":
+            return public_address_activity(result)
         if action == "lookup":
             # inspect-txs always uses a transactions wrapper, including one hash.
             report = result.get("transactions", [])
@@ -524,6 +571,19 @@ class LocalServer(ThreadingHTTPServer):
                 raise RequestError("Continue from the latest saved run.")
             arguments, live = _trace_arguments(case, metadata, settings)
             update_case(case, {"run_defaults": settings})
+        elif action == "address-inspect":
+            from .address_activity import validate_address
+
+            address = validate_address(body.get("address"))
+            if not isinstance(selected, str) or (selected != "latest" and not RUN_ID.fullmatch(selected)):
+                raise RequestError("Choose a saved run for this address review.")
+            if selected != "latest" or metadata.get("latest_run"):
+                selected = resolve_latest(case, selected)
+                safe_path(case, ["runs", selected, "trace.json"])
+                verify_export(run_path(case, selected))
+            arguments = ["address-inspect", "--case", str(case), "--address", address, "--run", selected,
+                         "--max-pages", "5", "--max-requests", "10", "--max-seconds", "60"]
+            live = not bool(metadata.get("fixture"))
         elif action == "miro-create":
             name = body.get("name") or default_board_name(metadata)
             board_options(name, visibility="private")
@@ -725,6 +785,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.server.case_summary(case, read_case(case), detail=True), 201
         if len(parts) == 4 and parts[:2] == ["api", "cases"]:
             case, metadata = self.server.case(parts[2])
+            if parts[3] in ("addresses", "address", "services"):
+                return self.address_request(parts[3], case, body), 200
             if parts[3] == "settings":
                 updates = {"name": body.get("name", metadata.get("name")),
                            "miro_board": body.get("board", metadata.get("miro_board")) or None,
@@ -733,6 +795,44 @@ class Handler(BaseHTTPRequestHandler):
             if parts[3] == "actions":
                 return self.server.action(case, metadata, body), 202
         raise RequestError("Route not found", 404)
+
+    def address_request(self, route, case, body):
+        from .address_activity import validate_address
+        from .address_review import list_addresses, saved_activity
+        from .services import load_services, set_service
+
+        if route == "addresses":
+            selected = body.get("run_id", "latest")
+            query = body.get("query", "")
+            offset, limit = body.get("offset", 0), body.get("limit", 25)
+            suspected = body.get("suspected_only", False)
+            if (not isinstance(selected, str) or (selected != "latest" and not RUN_ID.fullmatch(selected))
+                    or not isinstance(query, str) or len(query) > 256
+                    or type(offset) is not int or not 0 <= offset <= 2 ** 53 - 1
+                    or type(limit) is not int or not 1 <= limit <= 100
+                    or type(suspected) is not bool):
+                raise RequestError("Choose a saved run, a short search, and a page of 1 to 100 addresses.")
+            result = list_addresses(case, run_id=selected, query=query, offset=offset,
+                                    limit=limit, suspected_only=suspected)
+            return {**{key: result[key] for key in ("run_id", "total", "offset", "limit")},
+                    "rows": [{"address": row["address"], "run_output_count": row["run_output_count"],
+                              "service": public_service(row.get("service")),
+                              "activity": public_address_activity(row["activity"]) if row.get("activity") else None}
+                             for row in result["rows"]]}
+        address = validate_address(body.get("address"))
+        if route == "address":
+            selected = body.get("run_id", "latest")
+            if not isinstance(selected, str) or (selected != "latest" and not RUN_ID.fullmatch(selected)):
+                raise RequestError("Choose a saved run for this address review.")
+            activity = saved_activity(case, address, run_id=selected)
+            service = load_services(case)["rules"].get(address)
+            return {"address": address, "service": public_service(service),
+                    "activity": public_address_activity(activity) if activity else None}
+        if type(body.get("enabled")) is not bool:
+            raise RequestError("Choose whether this suspected-service stop is enabled.")
+        settings = set_service(case, address, name=body.get("name", ""),
+                               rationale=body.get("rationale", ""), enabled=body["enabled"])
+        return {"service": public_service(settings["rules"][address]), "revision": settings["revision"]}
 
 
 def _interrupt(*_):
