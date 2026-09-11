@@ -268,7 +268,7 @@ class MiroFrameSyncTests(unittest.TestCase):
         for method, url, body in self.remote.calls:
             if method == "POST" and url.endswith(("/shapes", "/bulk")):
                 for item in body if isinstance(body, list) else [body]:
-                    self.assertEqual(item["parent"], {"id": None})
+                    self.assertNotIn("parent", item)
 
     def test_unmanaged_attached_note_stops_before_any_writes(self):
         self.sync()

@@ -40,7 +40,8 @@ class FrameTransport(PageTransport):
             self.calls.append((method, url))
             assert method == "GET"
             query = parse_qs(parsed.query)
-            assert query.get("limit") in (["1"], ["50"])
+            if query.get("limit") not in (["10"], ["50"]):
+                return 400, {}, b'{"code":"badRequest","message":"limit must be between 10 and 50"}'
             response = self.child_pages[query["parent_item_id"][0]]
             if isinstance(response, dict) and "pages" in response:
                 response = response["pages"][query.get("cursor", [""])[0]]
@@ -198,7 +199,7 @@ class MiroFrameReadsTests(unittest.TestCase):
         method, url = transport.calls[0]
         self.assertEqual(method, "GET")
         self.assertTrue(url.startswith(BASE + "/items?"))
-        self.assertEqual(parse_qs(urlsplit(url).query), {"parent_item_id": [FRAME_ID], "limit": ["1"]})
+        self.assertEqual(parse_qs(urlsplit(url).query), {"parent_item_id": [FRAME_ID], "limit": ["10"]})
 
     def test_adopted_managed_or_manual_items_block_frame_mutations(self):
         for item_id in ("shape/0", "unrelated-investigator-note"):

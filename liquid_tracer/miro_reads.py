@@ -14,6 +14,11 @@ import urllib.parse
 from .common import TraceError
 
 
+# Miro's item, frame-child, and connector lists accept 10–50 results per page.
+# https://developers.miro.com/reference/get-items-1
+# https://developers.miro.com/reference/get-items-within-frame
+# https://developers.miro.com/reference/get-connectors-1
+MIN_PAGE_SIZE = 10
 PAGE_SIZE = 50
 
 
@@ -167,7 +172,7 @@ def check_empty_frames(requests, base, headers, frame_records):
     """
     def read(job):
         _, record = job
-        query = urllib.parse.urlencode({"parent_item_id": record["id"], "limit": 1})
+        query = urllib.parse.urlencode({"parent_item_id": record["id"], "limit": MIN_PAGE_SIZE})
         return requests.request("GET", base + "/items?" + query, headers)
 
     def accept(job, result):

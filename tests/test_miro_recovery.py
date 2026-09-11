@@ -8,7 +8,7 @@ import unittest
 from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import Mock, patch
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from liquid_tracer.common import TraceError, canonical, save_json
 from liquid_tracer.miro import make_plan, sync
@@ -32,6 +32,9 @@ class EmptyBoard:
         if method != "GET":
             raise AssertionError("Recovery attempted a board write")
         self.assert_headers = headers
+        query = parse_qs(urlsplit(url).query)
+        if query != {"limit": ["10"]}:
+            return 400, {}, canonical({"code": "badRequest", "message": "limit must be between 10 and 50"})
         return self.responses[urlsplit(url).path.rsplit("/", 1)[-1]]
 
 
@@ -79,7 +82,7 @@ class MiroRecoveryTests(unittest.TestCase):
         expected = {**self.initial, "pending_creations": {}, "shape_batch_size": 1,
                     "recovery_history": recovered["recovery_history"]}
         self.assertEqual(recovered, expected)
-        self.assertEqual(self.remote.calls, [("GET", "https://api.miro.com/v2/boards/synthetic-board%3D/items?limit=1", None),
+        self.assertEqual(self.remote.calls, [("GET", "https://api.miro.com/v2/boards/synthetic-board%3D/items?limit=10", None),
                                             ("GET", "https://api.miro.com/v2/boards/synthetic-board%3D/connectors?limit=10", None)])
         self.assertEqual([event["completed"] for event in events], [0, 1, 2])
         self.assertNotIn("synthetic-token", json.dumps(recovered))
@@ -164,6 +167,34 @@ class MiroRecoveryTests(unittest.TestCase):
             self.assertNotIn("sensitive", str(caught.exception))
             self.assertEqual(len(self.remote.calls), 4 if status in (429, 500) else 1)
             self.assert_unchanged()
+
+    def test_read_diagnostics_identify_collection_without_exposing_content_or_credentials(self):
+        request_id = "11111111-2222-4333-8444-555555555555"
+        for collection in ("items", "connectors"):
+            self.remote = EmptyBoard()
+            self.remote.responses[collection] = (400, {"X-Request-Id": request_id}, canonical({
+                "code": "badRequest", "message": "private board title synthetic-token",
+                "context": {"Authorization": "Bearer synthetic-token"},
+            }))
+            with self.subTest(collection=collection), self.assertRaisesRegex(TraceError, "HTTP 400") as caught:
+                self.recover()
+            message = str(caught.exception)
+            self.assertIn(collection, message)
+            self.assertIn("code=badRequest", message)
+            self.assertIn("request_id=" + request_id, message)
+            self.assertNotIn("private board title", message)
+            self.assertNotIn("synthetic-token", message)
+            self.assertIn("pending items remain unchanged", message)
+            self.assertTrue(all(method == "GET" for method, _, _ in self.remote.calls))
+            self.assert_unchanged()
+
+    def test_read_diagnostics_suppress_credentials_even_when_shaped_like_request_ids(self):
+        token = "11111111-2222-4333-8444-555555555555"
+        self.remote.responses["items"] = (400, {"X-Request-Id": token}, canonical({"code": "badRequest"}))
+        with self.assertRaisesRegex(TraceError, "HTTP 400") as caught:
+            self.recover(token=token)
+        self.assertNotIn(token, str(caught.exception))
+        self.assert_unchanged()
 
     def test_transport_failure_keeps_pending(self):
         def interrupted(*args):

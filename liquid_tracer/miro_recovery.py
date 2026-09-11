@@ -18,8 +18,10 @@ from pathlib import Path
 from .api import http
 from .common import TraceError, now
 from .miro import _load_sync_state, _namespace, _SyncProgress
+from .miro_errors import read_error
 from .miro_http import MiroHTTP
 from .miro_quota import SharedMiroQuota
+from .miro_reads import MIN_PAGE_SIZE
 from .miro_requests import MiroRequests
 from .miro_state import SyncState
 
@@ -33,7 +35,7 @@ def initial_pending_batch(state):
         raise TraceError("Empty-board recovery requires an initial publication with no mapped items or completed runs; use miro-resolve for individual items.")
     if state.get("pending") is not None:
         raise TraceError("Empty-board recovery cannot clear a legacy pending item; use miro-resolve.")
-    for field in ("pending_updates", "pending_deletions", "pending_frame_deletions"):
+    for field in ("pending_updates", "pending_deletions", "pending_frame_deletions", "pending_creation_detaches"):
         if state.get(field, {}) != {}:
             raise TraceError("Empty-board recovery cannot clear other pending Miro operations; preserve the sync state.")
     entries = state.get("pending_creations", {})
@@ -74,10 +76,11 @@ def initial_pending_batch(state):
     return entries
 
 
-def _verify_empty(result, collection):
-    status, _, raw = result
+def _verify_empty(result, collection, request_headers=None):
+    status, response_headers, raw = result
     if not 200 <= status < 300:
-        raise TraceError("Miro empty-board check returned HTTP " + str(status) + "; pending items remain unchanged.")
+        raise TraceError(read_error(status, collection, response_headers, raw, request_headers) +
+                         "; pending items remain unchanged.")
     try:
         body = json.loads(raw)
     except (TypeError, ValueError, UnicodeError, RecursionError):
@@ -138,10 +141,11 @@ def recover_empty_board(state_path, board_id, namespace, *, confirmed_empty=Fals
         requests = resources.enter_context(MiroRequests(transport, interval=interval, workers=1,
                                                          progress=status_progress, quota=quota))
         status_progress.emit("recovery", 0, 2, "Checking the confirmed-empty Miro board")
-        # The official connector client documents a page limit of 10:
-        # https://github.com/miroapp/api-clients/blob/main/packages/miro-api/api/apis.ts
-        for index, (collection, limit) in enumerate((("items", 1), ("connectors", 10)), start=1):
-            _verify_empty(requests.request("GET", base + "/" + collection + "?limit=" + str(limit), headers), collection)
+        # Both collections require at least 10 results per page, even when we
+        # only need an emptiness check. The read never authorizes a board write.
+        for index, collection in enumerate(("items", "connectors"), start=1):
+            _verify_empty(requests.request("GET", base + "/" + collection + "?limit=" + str(MIN_PAGE_SIZE), headers),
+                          collection, headers)
             status_progress.emit("recovery", index, 2, "Checking the confirmed-empty Miro board")
         keys = sorted(entries)
         audit = {"recovery": "confirmed_empty_board", "checked_at": now(), "board_id": board_id,

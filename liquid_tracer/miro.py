@@ -21,6 +21,8 @@ from .miro_state import SyncState, load_state
 from .miro_reads import check_empty_frames, preflight, validate_frame_children
 from .miro_quota import SharedMiroQuota
 from .miro_frames import frame_bodies, validate_activity_frames
+from .miro_creation_parents import (normalize_created_shapes, validate_creation_detaches,
+                                    finish_creation_detaches)
 
 
 def make_plan(graph):
@@ -318,6 +320,7 @@ def _load_sync_state(path, board_id, namespace, *, allow_pending=False):
             raise TraceError("Malformed Miro creation journal; restore its last intact version")
         if entry["endpoint"] == "frames" and entry.get("frame_proof") != _frame_proof(key):
             raise TraceError("Malformed pending Miro frame; restore its last intact version")
+    validate_creation_detaches(state)
     unresolved = list(pending_creations)
     legacy_pending = state.get("pending")
     if legacy_pending is not None:
@@ -926,8 +929,9 @@ def _create_items(plan, state, journal, requests, base, headers, positions, mapp
         body = copy.deepcopy(item["body"])
         if endpoint == "shapes":
             body["position"].update(dict(zip(("x", "y"), positions[key])))
-            if "activity_frames" in plan:
-                body["parent"] = {"id": None}
+            # Keep creation requests compatible with the pre-frame API path.
+            # Any automatic frame assignment is normalized after acknowledgement.
+            body.pop("parent", None)
         elif endpoint == "connectors":
             body.update(_connection_body(item, state["items"][item["source"]]["id"],
                                          state["items"][item["target"]]["id"]))
@@ -987,20 +991,34 @@ def _create_items(plan, state, journal, requests, base, headers, positions, mapp
                              ("; fix the error and rerun sync" if rejected
                               else "; reconcile the pending items before retrying"))
         batch = job["items"]
+        detaches = {}
         if job["endpoint"] == "items/bulk":
-            records = _bulk_records(batch, raw, mapped_ids)
+            response = _response(raw, "bulk POST; reconcile the pending items before retrying")
+            returned = response.get("data")
+            if not isinstance(returned, list) or len(returned) != len(batch):
+                raise TraceError("Miro bulk POST returned an incomplete item list; reconcile the pending items")
+            normalized, detaches = normalize_created_shapes(returned, requests, base, headers)
+            records = _bulk_records(batch, canonical({"data": normalized}), mapped_ids)
         else:
             response = _response(raw, "POST; reconcile the pending item before retrying")
             item_id = response.get("id")
             if not isinstance(item_id, str) or not item_id or item_id in mapped_ids:
                 raise TraceError("Miro POST returned an invalid or already mapped ID; reconcile the pending item")
             pending = batch[0]
+            if job["endpoint"] == "shapes":
+                normalized, detaches = normalize_created_shapes([response], requests, base, headers)
+                response = normalized[0]
+                if detaches and (response.get("type") != "shape" or not _same_shape_position(pending["body"], response)):
+                    raise TraceError("Miro created shape has unexpected canvas coordinates; reconcile the pending item")
             records = {pending["key"]: _record_pending(pending, item_id, response)}
         # Atomically record the entire acknowledged batch before its connector
         # IDs can be used. Invalid response matching never saves partial guesses.
-        journal.commit(sets=[(("items", key), record) for key, record in records.items()],
+        journal.commit(sets=[(("items", key), record) for key, record in records.items()] +
+                       [(("pending_creation_detaches", key), detaches[record["id"]])
+                        for key, record in records.items() if record["id"] in detaches],
                        deletes=[("pending_creations", pending["key"]) for pending in batch])
         mapped_ids.update(record["id"] for record in records.values())
+        finish_creation_detaches(state, journal, requests, base, headers)
         for _ in batch:
             report["created"] += 1
             if job["endpoint"] == "frames":
@@ -1138,7 +1156,12 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
             transport = resources.enter_context(MiroHTTP())
         requests = resources.enter_context(MiroRequests(transport, interval=interval, workers=workers,
                                                          progress=status_progress, quota=quota))
-        # The complete live preflight must succeed before any state or board writes.
+        # Resume only acknowledged creation detaches before ordinary frame
+        # preflight. This never replays POST or changes a parent frame.
+        if state.get("pending_creation_detaches"):
+            with SyncState(state_path, state) as recovery_journal:
+                finish_creation_detaches(state, recovery_journal, requests, base, headers)
+        # The complete live preflight must succeed before new sync writes.
         remote = preflight(requests, base, headers, state, {**removals, **frame_removals}, progress=status_progress)
         live_frame_records = {key: record for key, record in state["items"].items()
                               if record["endpoint"] == "frames" and key in remote}
@@ -1420,8 +1443,8 @@ def publish(plan, board_id, state_path, max_items=750, token=None, transport=htt
                 if key in state["items"]:
                     continue
                 body = dict(item["body"])
-                if endpoint == "shapes" and "activity_frames" in plan:
-                    body["parent"] = {"id": None}
+                if endpoint == "shapes":
+                    body.pop("parent", None)
                 if endpoint == "connectors":
                     body.update(_connection_body(item, state["items"][item["source"]], state["items"][item["target"]]))
                 for attempt in range(4):

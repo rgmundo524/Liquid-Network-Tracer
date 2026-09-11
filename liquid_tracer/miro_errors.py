@@ -10,7 +10,7 @@ import json
 import re
 
 
-_ENDPOINTS = {"items/bulk", "shapes", "connectors", "frames"}
+_ENDPOINTS = {"items", "items/bulk", "shapes", "connectors", "frames"}
 _ERROR_CODES = {
     "badrequest", "invalidparameters", "invalidparameter", "validationerror",
     "unauthorized", "accessdenied", "forbidden", "notfound", "conflict",
@@ -28,7 +28,7 @@ _ID_HEADERS = {
 }
 
 
-def creation_error(status, endpoint, count, response_headers, raw, *, request_headers=None):
+def _request_error(method, status, endpoint, count, response_headers, raw, *, request_headers=None):
     """Describe the operation without printing headers, request data, or errors.
 
 Only recognized error codes and UUID/128-bit hexadecimal request identifiers
@@ -36,8 +36,10 @@ are displayed. In particular, transaction hashes, URLs, HTML, arbitrary server
 messages, credentials, and oversized/malformed response bodies are not logged.
 """
     operation = endpoint if endpoint in _ENDPOINTS else "items"
-    number = count if type(count) is int and 1 <= count <= 20 else 1
-    details = [operation, f"{number} item" + ("s" if number != 1 else "")]
+    details = [operation]
+    if count is not None:
+        number = count if type(count) is int and 1 <= count <= 20 else 1
+        details.append(f"{number} item" + ("s" if number != 1 else ""))
     secrets = []
     for key, value in (request_headers or {}).items():
         if str(key).lower() == "authorization" and isinstance(value, str):
@@ -68,4 +70,12 @@ messages, credentials, and oversized/malformed response bodies are not logged.
         if safe(value, _CORRELATION):
             identifiers.setdefault(name, value)
     details.extend(name + "=" + value for name, value in identifiers.items())
-    return "Miro POST returned HTTP " + str(status) + " (" + "; ".join(details) + ")"
+    return "Miro " + method + " returned HTTP " + str(status) + " (" + "; ".join(details) + ")"
+
+
+def creation_error(status, endpoint, count, response_headers, raw, *, request_headers=None):
+    return _request_error("POST", status, endpoint, count, response_headers, raw, request_headers=request_headers)
+
+
+def read_error(status, endpoint, response_headers, raw, request_headers=None):
+    return _request_error("GET", status, endpoint, None, response_headers, raw, request_headers=request_headers)
