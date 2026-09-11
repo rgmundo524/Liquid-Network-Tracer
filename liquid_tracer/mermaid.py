@@ -195,7 +195,12 @@ def export_mermaid(graph, directory):
         if (root.tag != "{http://www.w3.org/2000/svg}svg" or not len(root)
                 or root.get("aria-roledescription") == "error"):
             raise ValueError("Not a graph SVG")
-        paths["html"].write_text(_preview_html(graph, svg), encoding="utf-8")
+        # Discovery treats graph.html as the completion marker. Publish its
+        # name only after the entire preview is written, so interruption cannot
+        # make an incomplete new preview hide a previous complete one.
+        temporary = paths["html"].with_name("graph.html.tmp")
+        temporary.write_text(_preview_html(graph, svg), encoding="utf-8")
+        temporary.replace(paths["html"])
     except (OSError, ET.ParseError, ValueError) as error:
         paths["svg"].unlink(missing_ok=True)
         paths["html"].unlink(missing_ok=True)

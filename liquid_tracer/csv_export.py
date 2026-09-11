@@ -89,8 +89,12 @@ def export_csv(graph, archive, directory):
                   "These checksums detect byte changes; they are not signatures or independent timestamps.",
     })
     files = ("nodes.csv", "edges.csv", *_DETAIL_FILES)
-    (directory / "SHA256SUMS").write_text(
+    # The manifest marks a complete bundle for local download discovery. Its
+    # final name must never expose a partial write after interruption.
+    temporary = directory / "SHA256SUMS.tmp"
+    temporary.write_text(
         "".join(digest((directory / name).read_bytes()) + "  " + name + "\n"
                 for name in sorted((*files, "export.json"))), encoding="utf-8")
+    temporary.replace(directory / "SHA256SUMS")
     return {"directory": str(directory.resolve()),
             "files": [str((directory / name).resolve()) for name in files]}

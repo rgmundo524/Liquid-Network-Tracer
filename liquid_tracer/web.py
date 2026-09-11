@@ -25,6 +25,7 @@ from .inspection import parse_transaction_hashes
 from .investigations import (create_investigation, default_root, load_settings,
                              read_case, save_settings, update_case, validate_settings)
 from .menu import _command, _environment, _lookup_reports, _project, _seed_values, _trace_arguments
+from .progress import public_progress
 
 MAX_BODY = 64 * 1024
 CASE_ID = re.compile(r"[0-9a-f]{32}")
@@ -161,7 +162,73 @@ class LocalServer(ThreadingHTTPServer):
             summary["status"] = "Saved run unavailable"
         if detail:
             summary["runs"] = sorted(runs, key=lambda run: (run.get("created_at") or "", run["id"]), reverse=True)
+            summary["artifacts"] = self.saved_artifacts(case, metadata, {run["id"] for run in runs})
         return summary
+
+    def saved_artifacts(self, case, metadata, runs):
+        """Rediscover complete local products without relying on browser memory.
+
+        Check identities and expected files, skipping partial exports and links.
+        Never return absolute paths from an export's provenance metadata.
+        """
+        artifacts, newest = {}, {}
+        for folder, kind, names, metadata_file in (
+            ("previews", "mermaid", PREVIEW_NAMES, "graph.json"),
+            ("exports", "csv", EXPORT_NAMES, "export.json"),
+        ):
+            try:
+                parent = safe_path(case, [folder])
+                directories = list(parent.iterdir()) if parent.is_dir() else []
+            except (RequestError, OSError):
+                continue
+            for directory in directories:
+                if (not ARTIFACT_DIR.fullmatch(directory.name) or directory.is_symlink()
+                        or not directory.is_dir() or f"-{kind}-" not in directory.name):
+                    continue
+                run_id = directory.name[:16]
+                if run_id not in runs:
+                    continue
+                try:
+                    files = {name: self.artifact(case, [folder, directory.name, name]) for name in names}
+                    if not all(path.is_file() for path in files.values()):
+                        continue
+                    info = read_json(files[metadata_file])
+                    if not isinstance(info, dict) or info.get("run_id") != run_id:
+                        continue
+                    namespace = info.get("namespace", {}) if kind == "mermaid" else info
+                    if not isinstance(namespace, dict) or namespace.get("case_id") != metadata["case_id"]:
+                        continue
+                    options = info.get("graph_options", {})
+                    if not isinstance(options, dict):
+                        continue
+                    fees = info.get("include_fees", options.get("include_fees", True))
+                    if type(fees) is not bool:
+                        continue
+                    # Completion file is written last. A partial later attempt
+                    # cannot hide a previous complete, downloadable product.
+                    finished = files["graph.html" if kind == "mermaid" else "SHA256SUMS"].stat().st_mtime_ns
+                    order = (finished, directory.name)
+                    if order <= newest.get((run_id, kind), (-1, "")):
+                        continue
+                    product = self.artifact_links(case, [folder, directory.name], names)
+                    product["include_fees"] = fees
+                    artifacts.setdefault(run_id, {})[kind] = product
+                    newest[(run_id, kind)] = order
+                except (RequestError, OSError, ValueError, TypeError):
+                    continue
+        return artifacts
+
+    def artifact_links(self, case, relative, names):
+        product = {"downloads": []}
+        case_id = read_case(case)["case_id"]
+        for name in sorted(names):
+            parts = [*relative, name]
+            if self.artifact(case, parts).is_file():
+                url = "/files/" + case_id + "/" + "/".join(map(quote, parts))
+                product["downloads"].append({"name": name, "url": url})
+                if name == "graph.html":
+                    product["preview_url"] = url
+        return product
 
     def session(self):
         cases = []
@@ -215,7 +282,15 @@ class LocalServer(ThreadingHTTPServer):
                                                env=_environment(), **options)
                     self.process = process
                 terminal = handoff_terminal(process, live)
-                status = process.wait()
+                progress_path = Path(directory) / "progress.json"
+                while True:
+                    try:
+                        status = process.wait(timeout=.25)
+                    except subprocess.TimeoutExpired:
+                        self.read_progress(identity, progress_path)
+                    else:
+                        self.read_progress(identity, progress_path)
+                        break
                 restore_terminal(terminal)
                 terminal = None
                 if status != 0:
@@ -247,6 +322,18 @@ class LocalServer(ThreadingHTTPServer):
                 self.process = None
                 self.active_job = None
 
+    def read_progress(self, identity, path):
+        try:
+            # The worker writes atomically inside its private temporary folder.
+            if not path.is_file() or path.is_symlink() or path.stat().st_size > 4096:
+                return
+            value = public_progress(read_json(path))
+            if value is not None:
+                with self.job_lock:
+                    self.jobs[identity]["progress"] = value
+        except (OSError, ValueError, TypeError):
+            pass
+
     def public_result(self, result, action, case, txids):
         if action == "lookup":
             # inspect-txs always uses a transactions wrapper, including one hash.
@@ -276,16 +363,7 @@ class LocalServer(ThreadingHTTPServer):
             directory = Path(result["directory"])
             relative = directory.relative_to(case)
             names = PREVIEW_NAMES if action == "mermaid" else EXPORT_NAMES
-            downloads = []
-            for name in sorted(names):
-                parts = [*relative.parts, name]
-                path = self.artifact(case, parts)
-                if path.is_file():
-                    url = "/files/" + read_case(case)["case_id"] + "/" + "/".join(map(quote, parts))
-                    downloads.append({"name": name, "url": url})
-                    if name == "graph.html":
-                        value["preview_url"] = url
-            value["downloads"] = downloads
+            value.update(self.artifact_links(case, relative.parts, names))
         return value
 
     @staticmethod

@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from liquid_tracer.api import Esplora, Limits
 from liquid_tracer.common import TraceError, digest, save_json
@@ -82,9 +83,30 @@ class CSVExportTests(unittest.TestCase):
         for line in manifest:
             checksum, name = line.split("  ", 1)
             self.assertEqual(checksum, digest((self.destination / name).read_bytes()))
+        self.assertFalse((self.destination / "SHA256SUMS.tmp").exists())
         after = {str(path.relative_to(self.archive)): path.read_bytes()
                  for path in self.archive.rglob("*") if path.is_file()}
         self.assertEqual(after, before)
+
+    def test_interrupted_final_manifest_write_does_not_publish_completion_name(self):
+        before = {str(path.relative_to(self.archive)): path.read_bytes()
+                  for path in self.archive.rglob("*") if path.is_file()}
+        write_text = Path.write_text
+
+        def interrupt(path, text, *args, **kwargs):
+            if path.name in ("SHA256SUMS", "SHA256SUMS.tmp"):
+                write_text(path, text[:20], *args, **kwargs)
+                raise KeyboardInterrupt
+            return write_text(path, text, *args, **kwargs)
+
+        with patch.object(Path, "write_text", new=interrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                export_csv(self.graph, self.archive, self.destination)
+        self.assertFalse((self.destination / "SHA256SUMS").exists())
+        self.assertEqual((self.destination / "SHA256SUMS.tmp").stat().st_size, 20)
+        self.assertTrue((self.destination / "export.json").is_file())
+        self.assertEqual(before, {str(path.relative_to(self.archive)): path.read_bytes()
+                                 for path in self.archive.rglob("*") if path.is_file()})
 
     def test_current_graph_fee_setting_does_not_remove_raw_fee_evidence(self):
         for fees in (False, True):

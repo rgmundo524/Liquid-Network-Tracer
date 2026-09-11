@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from liquid_tracer.cli import verify_export
-from liquid_tracer.common import read_json
+from liquid_tracer.common import read_json, save_json
 from liquid_tracer.web import LocalServer, worker_command
 
 
@@ -137,7 +137,49 @@ class LocalWebTests(unittest.TestCase):
         self.addCleanup(reopened.server_close)
         self.assertEqual(reopened.session()["cases"][0]["latest_run"], second["run_id"])
         self.assertIsNone(reopened.active_job)
+        saved = reopened.case_summary(path, read_json(path / "case.json"), detail=True)["artifacts"]
+        self.assertEqual(saved[initial["run_id"]]["csv"]["downloads"], csv["downloads"])
+        self.assertFalse(saved[initial["run_id"]]["csv"]["include_fees"])
+        self.assertNotIn(second["run_id"], saved)
+        self.assertNotIn(str(path), json.dumps(saved))
         self.assertEqual(read_json(path / "case.json")["run_defaults"]["hops"], 1)
+
+    def test_saved_downloads_skip_incomplete_wrong_case_and_linked_products(self):
+        _, case = self.create()
+        route = "/api/cases/" + case["id"]
+        traced = self.wait(self.success(route + "/actions", {"action": "trace"}, 202))
+        path, metadata = self.server.case(case["id"])
+        run_id = traced["run_id"]
+        preview = path / "previews" / (run_id + "-mermaid-" + "a" * 8)
+        preview.mkdir(parents=True)
+        graph = read_json(path / "runs" / run_id / "graph.json")
+        for name in ("graph.svg", "graph.mmd", "mermaid-node-map.json", "mermaid-config.json"):
+            (preview / name).write_text("SYNTHETIC DOWNLOAD")
+        save_json(preview / "graph.json", graph)
+        # A renderer failure leaves source/metadata, but not a usable preview.
+        self.assertEqual(self.success(route)["artifacts"], {})
+        (preview / "graph.html").write_text("<!doctype html><title>Synthetic preview</title>")
+        product = self.success(route)["artifacts"][run_id]["mermaid"]
+        self.assertEqual(len(product["downloads"]), 6)
+        svg = next(file for file in product["downloads"] if file["name"] == "graph.svg")
+        status, content, response = self.request(svg["url"])
+        self.assertEqual(status, 200)
+        self.assertEqual(content, b"SYNTHETIC DOWNLOAD")
+        self.assertEqual(response.getheader("Content-Disposition"), 'attachment; filename="graph.svg"')
+        self.assertTrue(product["preview_url"].endswith("/graph.html"))
+        self.assertFalse(product["include_fees"])
+        later = path / "previews" / (run_id + "-mermaid-" + "b" * 8)
+        later.mkdir()
+        for file in preview.iterdir():
+            (later / file.name).write_bytes(file.read_bytes())
+        graph["namespace"]["case_id"] = "f" * 32
+        save_json(later / "graph.json", graph)
+        self.assertEqual(self.success(route)["artifacts"][run_id]["mermaid"], product)
+        graph["namespace"]["case_id"] = metadata["case_id"]
+        save_json(later / "graph.json", graph)
+        (later / "graph.svg").unlink()
+        (later / "graph.svg").symlink_to(preview / "graph.svg")
+        self.assertEqual(self.success(route)["artifacts"][run_id]["mermaid"], product)
 
     def test_actions_serialize_and_validate_before_starting_jobs(self):
         _, case = self.create()

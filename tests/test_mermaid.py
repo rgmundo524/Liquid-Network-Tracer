@@ -134,6 +134,26 @@ class MermaidTests(unittest.TestCase):
         config = json.loads((self.destination / "mermaid-config.json").read_text())
         self.assertEqual(config["securityLevel"], "strict")
         self.assertFalse(config["htmlLabels"])
+        self.assertFalse((self.destination / "graph.html.tmp").exists())
+
+    def test_interrupted_final_preview_write_does_not_publish_completion_name(self):
+        write_text = Path.write_text
+
+        def interrupt(path, text, *args, **kwargs):
+            if path.name in ("graph.html", "graph.html.tmp"):
+                write_text(path, text[:20], *args, **kwargs)
+                raise KeyboardInterrupt
+            return write_text(path, text, *args, **kwargs)
+
+        with patch.dict(os.environ, {"LIQUID_MERMAID_BIN": "/synthetic/mmdc"}), \
+                patch("liquid_tracer.mermaid._render", side_effect=self.fake_renderer), \
+                patch.object(Path, "write_text", new=interrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                export_mermaid(tiny_graph(), self.destination)
+        self.assertFalse((self.destination / "graph.html").exists())
+        self.assertEqual((self.destination / "graph.html.tmp").stat().st_size, 20)
+        self.assertTrue((self.destination / "graph.mmd").is_file())
+        self.assertTrue((self.destination / "graph.svg").is_file())
 
     def test_large_graph_config_preserves_edges_above_mermaid_default(self):
         graph = tiny_graph()

@@ -17,6 +17,20 @@ type Run = {
   transaction_count?: number;
   frontier_count?: number;
 };
+type Download = { name: string; url: string };
+type Artifact = {
+  downloads: Download[];
+  preview_url?: string;
+  include_fees: boolean;
+};
+type RunArtifacts = { mermaid?: Artifact; csv?: Artifact };
+type JobProgress = {
+  phase: string;
+  completed: number;
+  total: number;
+  message: string;
+  retry_after?: number;
+};
 type Case = {
   id: string;
   name: string;
@@ -29,6 +43,7 @@ type Case = {
   seed_count?: number;
   created_at?: string;
   runs?: Run[];
+  artifacts?: Record<string, RunArtifacts>;
 };
 type Output = {
   vout: number;
@@ -43,7 +58,8 @@ type Output = {
 };
 type Report = { txid: string; outputs: Output[] };
 type Result = {
-  downloads?: { name: string; url: string }[];
+  downloads?: Download[];
+  include_fees?: boolean;
   preview_url?: string;
   transactions?: Report[];
   run_id?: string;
@@ -64,6 +80,7 @@ type Job = {
   action?: string;
   case_id?: string;
   live?: boolean;
+  progress?: JobProgress;
 };
 type Page = "dashboard" | "new" | "case" | "settings" | "case-settings";
 type ActiveJob = {
@@ -73,6 +90,7 @@ type ActiveJob = {
   started: number;
   message: string;
   live: boolean;
+  progress?: JobProgress;
 };
 
 const defaults: Settings = {
@@ -95,8 +113,7 @@ const state = {
   error: "",
   demoTxids: [] as string[],
   results: new Map<string, { action: string; result: Result }>(),
-  previews: new Map<string, string>(),
-  downloads: new Map<string, { name: string; url: string }[]>(),
+  artifacts: new Map<string, RunArtifacts>(),
   draft: {
     name: "",
     source: "demo",
@@ -309,9 +326,28 @@ function sidebar(): string {
   }</div><div class="sidebar-bottom"><div class="local-status"><span class="status-dot"></span><div><strong>Running on your computer</strong><p>Local files · Same tracing engine</p></div></div><div class="sidebar-foot">LIQUID NETWORK · UTXO TRACING<br/><span style="display:block;margin-top:7px;letter-spacing:0">Arrows between buttons · Enter to select</span></div></div></aside>`;
 }
 
+function jobProgress(): string {
+  const progress = state.job?.progress;
+  if (!progress) return "";
+  const total = Number.isFinite(progress.total) ? Math.max(0, progress.total) : 0;
+  const completed = Number.isFinite(progress.completed)
+    ? Math.max(0, Math.min(progress.completed, total))
+    : 0;
+  const waiting = Number.isFinite(progress.retry_after) && progress.retry_after! > 0;
+  return `<div class="job-progress-meta"><span>Current stage · ${esc(human(progress.phase))}</span>${total > 0 ? `<span>${esc(completed)} / ${esc(total)}</span>` : ""}</div>${total > 0 ? `<progress class="job-progress-bar" max="${total}" value="${completed}" aria-label="${esc(human(progress.phase))}"></progress>` : ""}${waiting ? `<p class="job-retry">Waiting ${esc(progress.retry_after)} seconds before retrying Miro.</p>` : ""}`;
+}
+
 function jobBanner(): string {
   if (!state.job) return "";
-  return `<div class="job-banner" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><div><strong id="job-message">${esc(state.job.message || "Working on your request…")}</strong><p>${state.job.live ? "Keep the launching terminal open. If Proton Pass requests login or unlocking, complete it there." : "Processing local evidence. You can browse saved investigations while this completes."}</p></div><span class="job-time" id="job-elapsed">0s elapsed</span></div>`;
+  return `<div class="job-banner" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><div class="job-details"><strong id="job-message">${esc(state.job.progress?.message || state.job.message || "Working on your request…")}</strong><div id="job-progress">${jobProgress()}</div><p>${state.job.live ? "Keep the launching terminal open. If Proton Pass requests login or unlocking, complete it there." : "Processing local evidence. You can browse saved investigations while this completes."}</p></div><span class="job-time" id="job-elapsed">0s elapsed</span></div>`;
+}
+
+function updateJobProgress(): void {
+  const message = document.querySelector("#job-message");
+  if (message && state.job)
+    message.textContent = state.job.progress?.message || state.job.message;
+  const progress = document.querySelector("#job-progress");
+  if (progress) progress.innerHTML = jobProgress();
 }
 
 function render(focus = false): void {
@@ -366,6 +402,29 @@ function safeLocalUrl(url: string | undefined): string {
     : "";
 }
 
+function downloadLink(item: Download | undefined, label: string, classes = ""): string {
+  if (!item || !safeLocalUrl(item.url)) return "";
+  return `<a class="btn small ${classes}" href="${esc(item.url)}" download="${esc(item.name)}">${icon("download")}${esc(label)}</a>`;
+}
+
+function localGraph(artifact: Artifact | undefined, saved: boolean, includeFees: boolean): string {
+  const matches = artifact?.include_fees === includeFees;
+  const preview = matches ? safeLocalUrl(artifact?.preview_url) : "";
+  const svg = matches ? artifact?.downloads.find((item) => item.name === "graph.svg") : undefined;
+  const source = matches ? artifact?.downloads.find((item) => item.name === "graph.mmd") : undefined;
+  const mismatch = artifact && !matches;
+  return `<section class="panel"><div class="panel-head graph-panel-head"><div><h2>Local graph</h2><p>Mermaid preview of the selected saved run.</p></div><div class="artifact-actions">${downloadLink(svg, "Download SVG", "primary")}${preview ? `<a class="btn ghost small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">${icon("external")}Open full view</a>` : '<span class="badge gray">Offline renderer</span>'}</div></div>${preview ? `<iframe class="graph-preview" src="${esc(preview)}" title="Mermaid chart of the selected investigation run" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe><div class="preview-caption"><span>Generated from saved evidence · ${includeFees ? "Fee flows included" : "Fee flows hidden"}</span>${downloadLink(source, "Mermaid source (.mmd)", "ghost")}</div>` : `<div class="graph-placeholder"><div class="mini-flow" aria-hidden="true"><span class="mini-node">${icon("folder")}</span><span class="mini-connection"></span><span class="mini-node tx">${icon("layers")}</span><span class="mini-connection"></span><span class="mini-node out">${icon("folder")}</span></div><h3>${mismatch ? "Update the chart’s fee display" : "Your trace, in perspective"}</h3><p>${mismatch ? "The saved chart uses a different fee setting. Create another chart to match this investigation’s current settings." : saved ? "Create a quick local chart from this snapshot, then download the SVG or Mermaid source." : "After your first run, create a local chart or send the flow to an editable Miro board."}</p>${button("Create Mermaid chart", "mermaid", "graph", "", !saved || isBusy())}</div>`}</section>`;
+}
+
+function csvDownloads(artifact: Artifact | undefined, saved: boolean, includeFees: boolean): string {
+  const matches = artifact?.include_fees === includeFees;
+  const downloads = matches ? artifact.downloads.filter((item) => safeLocalUrl(item.url)) : [];
+  const tables = downloads.filter((item) => item.name.endsWith(".csv"));
+  const provenance = downloads.filter((item) => !item.name.endsWith(".csv"));
+  const mismatch = artifact && !matches;
+  return `<section class="panel"><div class="panel-head"><div><h2>CSV downloads</h2><p>${tables.length ? "Download individual tables from the selected saved run." : "Export verified tables and provenance for this snapshot."}</p></div>${tables.length ? '<span class="badge">Saved locally</span>' : ""}</div>${tables.length ? `<div class="downloads">${tables.map((item) => downloadLink(item, `Download ${item.name}`, "download-link")).join("")}</div><div class="export-footer"><span class="small muted">${includeFees ? "Fee flows included" : "Fee flows hidden"} in graph tables · Evidence tables retain all recorded outputs.</span>${provenance.length ? `<details class="provenance-downloads"><summary>Export provenance</summary><div class="artifact-actions">${provenance.map((item) => downloadLink(item, item.name, "ghost")).join("")}</div></details>` : ""}</div>` : `<div class="panel-body"><p class="artifact-note">${mismatch ? "The saved export uses a different fee setting. Create a new export to match the current settings." : "Create the CSV export once, then download the files individually whenever you reopen this investigation."}</p>${button("Create CSV export", "csv", "table", "", !saved || isBusy())}</div>`}</section>`;
+}
+
 function workspace(): string {
   const detail = state.activeCase;
   if (!detail)
@@ -373,8 +432,9 @@ function workspace(): string {
   const run = currentRun();
   const saved = !!detail.latest_run;
   const key = resultKey(detail.id);
-  const preview = safeLocalUrl(state.previews.get(key));
-  const downloads = state.downloads.get(key) || [];
+  const cachedArtifacts = state.artifacts.get(key);
+  const savedArtifacts = run ? detail.artifacts?.[run.id] : undefined;
+  const artifacts = { ...cachedArtifacts, ...savedArtifacts };
   const last = state.results.get(detail.id);
   const settings = { ...defaults, ...detail.run_defaults };
   const runOptions = (detail.runs || [])
@@ -383,17 +443,7 @@ function workspace(): string {
         `<option value="${esc(item.id)}"${(state.selectedRun === "latest" ? detail.latest_run : state.selectedRun) === item.id ? " selected" : ""}>${esc(item.id)}${item.id === detail.latest_run ? " · Latest" : ""}</option>`,
     )
     .join("");
-  return `<div class="page-heading case-heading"><div><div class="eyebrow">Investigation workspace</div><h1 id="page-title" tabindex="-1">${esc(detail.name)}</h1><div class="workspace-meta"><span class="badge ${detail.fixture ? "purple" : ""}">${detail.fixture ? "Synthetic demo" : "Live Liquid"}</span><span class="badge gray">${(detail.runs || []).length} saved run${detail.runs?.length === 1 ? "" : "s"}</span><span class="mono">${esc(short(detail.id, 8))}</span></div></div><div class="heading-actions">${button("Settings", "case-settings", "settings", "", isBusy())}${button(saved ? "Continue investigation" : "Start first run", "trace-dialog", "play", "primary", isBusy())}</div></div>${last ? resultBanner(last.action, last.result) : ""}<div class="workspace-grid"><div class="workspace-main"><section class="panel"><div class="panel-head"><div><h2>${saved ? "Saved run" : "Ready to trace"}</h2><p>${saved ? "Select a snapshot to review, render, or export." : "Your starting outputs and limits are saved."}</p></div>${saved ? `<label class="run-picker">Snapshot<select class="input" id="run-picker" aria-label="Saved run snapshot">${runOptions}</select></label>` : '<span class="badge gray">No runs yet</span>'}</div>${saved ? `<div class="run-summary"><div><span>Tracked transactions</span><strong>${esc(run?.transaction_count ?? "—")}</strong></div><div><span>Unfinished branches</span><strong>${esc(run?.frontier_count ?? "—")}</strong></div><div><span>Run status</span><strong class="text-value">${esc(human(run?.status || "saved"))}</strong></div></div><div class="run-note">${icon("clock")}<span>${esc(formatDate(run?.created_at))}${run?.stop_reason ? ` · ${esc(human(run.stop_reason))}` : ""}</span></div>` : `<div class="empty-state" style="padding:31px 24px"><div class="empty-icon">${icon("graph")}</div><h2>${detail.seed_count ?? detail.seeds?.length ?? "Your"} starting output${(detail.seed_count ?? detail.seeds?.length) === 1 ? "" : "s"} selected</h2><p>Run the first trace to record exact output spends and build your investigation graph.</p>${button("Review run limits", "trace-dialog", "play", "primary", isBusy())}</div>`}</section><section class="panel"><div class="panel-head"><div><h2>Local graph</h2><p>Mermaid preview of the selected saved run.</p></div>${preview ? `<a class="btn ghost small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">${icon("external")}Open full view</a>` : '<span class="badge gray">Offline renderer</span>'}</div>${preview ? `<iframe class="graph-preview" src="${esc(preview)}" title="Mermaid chart of the selected investigation run" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe><div class="preview-caption">Generated from saved evidence · ${settings.include_fees ? "Fee flows included" : "Fee flows hidden"} · Editable graph available in Miro</div>` : `<div class="graph-placeholder"><div class="mini-flow" aria-hidden="true"><span class="mini-node">${icon("folder")}</span><span class="mini-connection"></span><span class="mini-node tx">${icon("layers")}</span><span class="mini-connection"></span><span class="mini-node out">${icon("folder")}</span></div><h3>Your trace, in perspective</h3><p>${saved ? "Create a quick local chart from this snapshot. No Miro board or API credentials are needed." : "After your first run, create a local chart or send the flow to an editable Miro board."}</p>${button("Create Mermaid chart", "mermaid", "graph", "", !saved || isBusy())}</div>`}</section>${
-    downloads.length
-      ? `<section class="panel"><div class="panel-head"><div><h2>CSV export</h2><p>Download the verified tables and provenance from this export.</p></div><span class="badge">Saved locally</span></div><div class="downloads">${downloads
-          .filter((item) => safeLocalUrl(item.url))
-          .map(
-            (item) =>
-              `<a class="download-link" href="${esc(item.url)}" download>${icon("download")}${esc(item.name)}</a>`,
-          )
-          .join("")}</div></section>`
-      : ""
-  }<section class="panel"><div class="panel-head"><div><h2>Run history</h2><p>Every continuation preserves the preceding snapshot.</p></div><span class="badge gray">${(detail.runs || []).length} runs</span></div>${detail.runs?.length ? `<div class="table-wrap"><table class="run-list"><thead><tr><th>Run</th><th>Recorded</th><th>Status</th><th>Transactions</th></tr></thead><tbody>${detail.runs.map((item) => `<tr class="${item.id === run?.id ? "selected" : ""}"><td><button data-run="${esc(item.id)}">${esc(short(item.id, 8))}</button>${item.id === detail.latest_run ? '<div class="muted">Latest</div>' : ""}</td><td><span class="muted">${esc(formatDate(item.created_at))}</span></td><td><span class="badge ${item.status === "error" ? "red" : "gray"}">${esc(human(item.status))}</span></td><td>${esc(item.transaction_count ?? "—")}</td></tr>`).join("")}</tbody></table></div>` : '<div class="panel-body small muted">Your first completed or bounded run will appear here.</div>'}</section></div><aside class="workspace-aside"><section class="panel"><div class="panel-body"><div class="action-card-head"><span class="action-icon">${icon("board")}</span><div><h3>Miro board</h3><p>Your editable investigation graph</p></div></div><p class="action-description">Preview changes locally, then sync the selected snapshot to your board.</p>${detail.miro_board ? `<a class="board-link" href="${esc(boardUrl(detail.miro_board))}" target="_blank" rel="noopener noreferrer">Open linked board ${icon("external")}</a>` : '<p class="board-empty">No board linked yet. Create one or add its URL in settings.</p>'}<div class="action-buttons">${button("Preview changes", "miro-preview", "search", "wide", !saved || !detail.miro_board || isBusy())}${button("Sync to Miro", "miro-sync-dialog", "refresh", "", !saved || !detail.miro_board || isBusy())}${button("Organize graph", "miro-organize-dialog", "graph", "", !saved || !detail.miro_board || isBusy())}${!detail.miro_board ? button("Create Miro board", "miro-create-dialog", "plus", "wide", isBusy()) : ""}</div></div></section><section class="panel"><div class="panel-body local-tools"><div class="action-card-head"><span class="action-icon teal">${icon("download")}</span><div><h3>Local outputs</h3><p>From the selected snapshot</p></div></div>${button("Mermaid chart <span>Graph</span>", "mermaid", "graph", "", !saved || isBusy())}${button("Export CSV <span>7 tables</span>", "csv", "table", "", !saved || isBusy())}<p class="small muted" style="margin-top:13px;font-size:10px">New exports are saved with the investigation. Archived evidence stays intact.</p></div></section><section class="panel"><div class="panel-body"><div class="action-card-head"><span class="action-icon blue">${icon("shield")}</span><div><h3>Bounded by design</h3><p>Saved defaults for this investigation</p></div></div><dl class="saved-settings"><div><dt>Additional hops</dt><dd>${settings.hops}</dd></div><div><dt>Transactions</dt><dd>${settings.max_transactions}</dd></div><div><dt>API attempts</dt><dd>${settings.max_requests}</dd></div><div><dt>Time limit</dt><dd>${settings.max_seconds}s</dd></div><div><dt>Fee flows</dt><dd>${settings.include_fees ? "Included" : "Hidden"}</dd></div><div><dt>New Miro items</dt><dd>${settings.max_new_items}</dd></div></dl><div class="settings-divider"></div><p class="small muted" style="font-size:10px;line-height:1.75">Graph paths show UTXO reachability. They do not determine ownership or allocate a hidden value.</p></div></section></aside></div>`;
+  return `<div class="page-heading case-heading"><div><div class="eyebrow">Investigation workspace</div><h1 id="page-title" tabindex="-1">${esc(detail.name)}</h1><div class="workspace-meta"><span class="badge ${detail.fixture ? "purple" : ""}">${detail.fixture ? "Synthetic demo" : "Live Liquid"}</span><span class="badge gray">${(detail.runs || []).length} saved run${detail.runs?.length === 1 ? "" : "s"}</span><span class="mono">${esc(short(detail.id, 8))}</span></div></div><div class="heading-actions">${button("Settings", "case-settings", "settings", "", isBusy())}${button(saved ? "Continue investigation" : "Start first run", "trace-dialog", "play", "primary", isBusy())}</div></div>${last ? resultBanner(last.action, last.result) : ""}<div class="workspace-grid"><div class="workspace-main"><section class="panel"><div class="panel-head"><div><h2>${saved ? "Saved run" : "Ready to trace"}</h2><p>${saved ? "Select a snapshot to review, render, or export." : "Your starting outputs and limits are saved."}</p></div>${saved ? `<label class="run-picker">Snapshot<select class="input" id="run-picker" aria-label="Saved run snapshot">${runOptions}</select></label>` : '<span class="badge gray">No runs yet</span>'}</div>${saved ? `<div class="run-summary"><div><span>Tracked transactions</span><strong>${esc(run?.transaction_count ?? "—")}</strong></div><div><span>Unfinished branches</span><strong>${esc(run?.frontier_count ?? "—")}</strong></div><div><span>Run status</span><strong class="text-value">${esc(human(run?.status || "saved"))}</strong></div></div><div class="run-note">${icon("clock")}<span>${esc(formatDate(run?.created_at))}${run?.stop_reason ? ` · ${esc(human(run.stop_reason))}` : ""}</span></div>` : `<div class="empty-state" style="padding:31px 24px"><div class="empty-icon">${icon("graph")}</div><h2>${detail.seed_count ?? detail.seeds?.length ?? "Your"} starting output${(detail.seed_count ?? detail.seeds?.length) === 1 ? "" : "s"} selected</h2><p>Run the first trace to record exact output spends and build your investigation graph.</p>${button("Review run limits", "trace-dialog", "play", "primary", isBusy())}</div>`}</section>${localGraph(artifacts.mermaid, saved, settings.include_fees)}${csvDownloads(artifacts.csv, saved, settings.include_fees)}<section class="panel"><div class="panel-head"><div><h2>Run history</h2><p>Every continuation preserves the preceding snapshot.</p></div><span class="badge gray">${(detail.runs || []).length} runs</span></div>${detail.runs?.length ? `<div class="table-wrap"><table class="run-list"><thead><tr><th>Run</th><th>Recorded</th><th>Status</th><th>Transactions</th></tr></thead><tbody>${detail.runs.map((item) => `<tr class="${item.id === run?.id ? "selected" : ""}"><td><button data-run="${esc(item.id)}">${esc(short(item.id, 8))}</button>${item.id === detail.latest_run ? '<div class="muted">Latest</div>' : ""}</td><td><span class="muted">${esc(formatDate(item.created_at))}</span></td><td><span class="badge ${item.status === "error" ? "red" : "gray"}">${esc(human(item.status))}</span></td><td>${esc(item.transaction_count ?? "—")}</td></tr>`).join("")}</tbody></table></div>` : '<div class="panel-body small muted">Your first completed or bounded run will appear here.</div>'}</section></div><aside class="workspace-aside"><section class="panel"><div class="panel-body"><div class="action-card-head"><span class="action-icon">${icon("board")}</span><div><h3>Miro board</h3><p>Your editable investigation graph</p></div></div><p class="action-description">Preview changes locally, then sync the selected snapshot to your board.</p>${detail.miro_board ? `<a class="board-link" href="${esc(boardUrl(detail.miro_board))}" target="_blank" rel="noopener noreferrer">Open linked board ${icon("external")}</a>` : '<p class="board-empty">No board linked yet. Create one or add its URL in settings.</p>'}<div class="action-buttons">${button("Preview changes", "miro-preview", "search", "wide", !saved || !detail.miro_board || isBusy())}${button("Sync to Miro", "miro-sync-dialog", "refresh", "", !saved || !detail.miro_board || isBusy())}${button("Organize graph", "miro-organize-dialog", "graph", "", !saved || !detail.miro_board || isBusy())}${!detail.miro_board ? button("Create Miro board", "miro-create-dialog", "plus", "wide", isBusy()) : ""}</div></div></section><section class="panel"><div class="panel-body local-tools"><div class="action-card-head"><span class="action-icon teal">${icon("download")}</span><div><h3>Local outputs</h3><p>From the selected snapshot</p></div></div>${button("Mermaid chart <span>Graph</span>", "mermaid", "graph", "", !saved || isBusy())}${button("Create CSV export <span>7 tables</span>", "csv", "table", "", !saved || isBusy())}<p class="small muted" style="margin-top:13px;font-size:10px">New exports are saved with the investigation. Archived evidence stays intact.</p></div></section><section class="panel"><div class="panel-body"><div class="action-card-head"><span class="action-icon blue">${icon("shield")}</span><div><h3>Bounded by design</h3><p>Saved defaults for this investigation</p></div></div><dl class="saved-settings"><div><dt>Additional hops</dt><dd>${settings.hops}</dd></div><div><dt>Transactions</dt><dd>${settings.max_transactions}</dd></div><div><dt>API attempts</dt><dd>${settings.max_requests}</dd></div><div><dt>Time limit</dt><dd>${settings.max_seconds}s</dd></div><div><dt>Fee flows</dt><dd>${settings.include_fees ? "Included" : "Hidden"}</dd></div><div><dt>New Miro items</dt><dd>${settings.max_new_items}</dd></div></dl><div class="settings-divider"></div><p class="small muted" style="font-size:10px;line-height:1.75">Graph paths show UTXO reachability. They do not determine ownership or allocate a hidden value.</p></div></section></aside></div>`;
 }
 
 function resultBanner(action: string, result: Result): string {
@@ -469,6 +519,7 @@ async function refreshSession(): Promise<void> {
       started: Date.now(),
       message: recovered.message || "A local action is still running…",
       live: recovered.live ?? true,
+      progress: recovered.progress,
     };
     if (recovered.action === "lookup")
       state.draft.source = recovered.live ? "live" : "demo";
@@ -522,6 +573,7 @@ async function startJob(
       started: Date.now(),
       message: job.message,
       live,
+      progress: job.progress,
     };
     state.error = "";
     dialog.close();
@@ -544,16 +596,23 @@ async function pollJob(): Promise<void> {
     const job = await api<Job>(`/api/jobs/${encodeURIComponent(active.id)}`);
     if (job.status === "running") {
       active.message = job.message || active.message;
-      const text = document.querySelector("#job-message");
-      if (text) text.textContent = active.message;
+      active.progress = job.progress;
+      updateJobProgress();
       schedulePoll();
       return;
     }
     state.job = null;
     if (job.status === "failed") {
+      const progress = job.progress || active.progress;
+      const lastStage = progress?.phase
+        ? ` Last reported stage: ${human(progress.phase)}${
+            Number.isFinite(progress.completed) && Number.isFinite(progress.total) && progress.total > 0
+              ? ` (${progress.completed} / ${progress.total})`
+              : ""
+          }.`
+        : "";
       state.error =
-        job.message ||
-        "The action did not complete. Check the launching terminal.";
+        (job.message || "The action did not complete. Check the launching terminal.") + lastStage;
       toast(state.error, true);
     } else {
       const result = job.result || {};
@@ -576,10 +635,16 @@ async function pollJob(): Promise<void> {
         }
         const key = `${active.caseId}:${result.run_id || detail.latest_run || "latest"}`;
         state.results.set(active.caseId, { action: active.action, result });
-        if (active.action === "mermaid" && safeLocalUrl(result.preview_url))
-          state.previews.set(key, result.preview_url!);
-        if (active.action === "csv")
-          state.downloads.set(key, result.downloads || []);
+        if (active.action === "mermaid" || active.action === "csv") {
+          state.artifacts.set(key, {
+            ...state.artifacts.get(key),
+            [active.action]: {
+              downloads: result.downloads || [],
+              preview_url: safeLocalUrl(result.preview_url) || undefined,
+              include_fees: result.include_fees ?? detail.run_defaults.include_fees,
+            },
+          });
+        }
         toast(
           (
             {
@@ -619,8 +684,8 @@ async function pollJob(): Promise<void> {
       render();
     } else if (state.job) {
       state.job.message = "Waiting to reconnect to the local server…";
-      const text = document.querySelector("#job-message");
-      if (text) text.textContent = state.job.message;
+      state.job.progress = undefined;
+      updateJobProgress();
       schedulePoll(3500);
     } else {
       state.error =
@@ -878,9 +943,6 @@ app.addEventListener("submit", (event) => {
         state.activeCase = await api<Case>(
           `/api/cases/${encodeURIComponent(caseId)}`,
         );
-        // A display-setting change invalidates previews made with the prior setting.
-        for (const key of state.previews.keys())
-          if (key.startsWith(`${caseId}:`)) state.previews.delete(key);
       } else {
         await api("/api/settings", { settings });
         state.draft.settings = { ...settings };
@@ -922,7 +984,7 @@ dialog.addEventListener("submit", (event) => {
   });
 });
 
-// Arrow keys move between buttons; text inputs, selectors, and checkboxes keep
+// Arrow keys move between buttons and download links; other controls keep
 // their browser-native behavior. Tab and Shift+Tab still visit every control.
 document.addEventListener("keydown", (event) => {
   if (
@@ -933,10 +995,13 @@ document.addEventListener("keydown", (event) => {
   )
     return;
   const current = document.activeElement;
-  if (!(current instanceof HTMLButtonElement)) return;
+  if (!(current instanceof HTMLButtonElement) &&
+      !(current instanceof HTMLAnchorElement && current.matches(".btn[href]"))) return;
   const scope = dialog.open ? dialog : app;
   const buttons = [
-    ...scope.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"),
+    ...scope.querySelectorAll<HTMLButtonElement | HTMLAnchorElement>(
+      "button:not(:disabled), a.btn[href]",
+    ),
   ].filter(
     (item) =>
       item !== current &&

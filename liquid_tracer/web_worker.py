@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from .cli import main as cli_main
+from .progress import ProgressReporter
 
 
 def _interrupt(*_):
@@ -27,7 +28,7 @@ def main(argv=None):
         payload = json.loads(request.read_text(encoding="utf-8"))
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            status = cli_main(payload["arguments"])
+            status = cli_main(payload["arguments"], progress=ProgressReporter(request.parent / "progress.json"))
         # Errors and provider diagnostics go to the actual terminal, never an API
         # response. Only a successful CLI JSON document crosses this boundary.
         if status != 0 and output.getvalue():

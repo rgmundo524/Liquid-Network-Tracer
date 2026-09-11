@@ -544,7 +544,42 @@ select.input {
   border: 0;
   background: white;
 }
+.graph-panel-head {
+  flex-wrap: wrap;
+}
+.artifact-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.artifact-note {
+  margin: 0 0 15px;
+  font-size: 11px;
+  line-height: 1.75;
+  color: #67847c;
+}
+.export-footer {
+  padding: 0 20px 20px;
+}
+.provenance-downloads {
+  margin-top: 12px;
+  font-size: 11px;
+  color: #547970;
+}
+.provenance-downloads summary {
+  cursor: pointer;
+  width: fit-content;
+}
+.provenance-downloads .artifact-actions {
+  margin-top: 10px;
+}
 .preview-caption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
   padding: 12px 22px;
   font-size: 10px;
   color: #8a9ea4;
@@ -557,6 +592,9 @@ select.input {
   padding: 20px;
 }
 .download-link {
+  justify-content: flex-start;
+  min-width: 0;
+  overflow-wrap: anywhere;
   display: flex;
   align-items: center;
   gap: 9px;

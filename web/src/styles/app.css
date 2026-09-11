@@ -736,6 +736,45 @@ td .case-title:hover {
   border-radius: 11px;
   margin-bottom: 25px;
 }
+.job-details {
+  flex: 1;
+  min-width: 0;
+}
+.job-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 10px;
+  font-size: 10px;
+  color: #476f65;
+}
+.job-progress-bar {
+  display: block;
+  width: 100%;
+  height: 6px;
+  margin: 7px 0 10px;
+  border: 0;
+  border-radius: 4px;
+  overflow: hidden;
+  accent-color: #367969;
+  background: #d2e8e0;
+}
+.job-progress-bar::-webkit-progress-bar {
+  background: #d2e8e0;
+}
+.job-progress-bar::-webkit-progress-value {
+  background: #367969;
+  border-radius: 4px;
+}
+.job-progress-bar::-moz-progress-bar {
+  background: #367969;
+  border-radius: 4px;
+}
+.job-banner .job-retry {
+  margin-bottom: 8px;
+  font-weight: 600;
+}
 .job-banner .spinner {
   margin-top: 3px;
   flex: none;

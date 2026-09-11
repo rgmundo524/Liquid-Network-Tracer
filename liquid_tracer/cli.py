@@ -15,6 +15,7 @@ from .export import build_graph, export_run
 from .investigations import read_case, update_case
 from .inspection import inspect_transaction, inspect_transactions, parse_transaction_hashes
 from .miro import _namespace, make_plan, publish, resolve, sync, validate_plan
+from .progress import ProgressReporter
 from .store import Store
 from .trace import new_state, trace
 
@@ -300,7 +301,7 @@ def refresh_presentation(plan, trace_path, include_fees=False):
 
 
 def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_path=None,
-             include_fees=None, reorganize=False):
+             include_fees=None, reorganize=False, progress=None):
     if plan_path is not None and include_fees is not None:
         raise TraceError("--plan cannot be combined with --include-fees or --exclude-fees; regenerate an export with the desired fee setting, then select its plan")
     run_id = resolve_latest(case, run_id)
@@ -323,6 +324,8 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
     state_path = case / "miro" / (digest(target.encode())[:24] + ".json")
     # Validate the mapping, lineage, and item budget locally before saving a selection.
     options = {"reorganize": True} if reorganize else {}
+    if progress is not None:
+        options["progress"] = progress
     result = sync(plan, target, state_path, max_items=max_new_items, dry_run=True, **options)
     if not dry_run:
         update_case(case, {"miro_board": target})
@@ -342,7 +345,7 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
     return report
 
 
-def run_trace(args):
+def run_trace(args, progress=None):
     if args.miro_board:
         args.miro_board = board_id(args.miro_board)
         if args.max_new_items < 0:
@@ -407,7 +410,7 @@ def run_trace(args):
             if args.miro_board:
                 try:
                     summary["miro"] = sync_run(args.case, state["run_id"], args.miro_board, args.max_new_items,
-                                               include_fees=state["graph_options"]["include_fees"])
+                                               include_fees=state["graph_options"]["include_fees"], progress=progress)
                 except (TraceError, OSError, ValueError, KeyError) as error:
                     summary["miro_error"] = str(error)
                     summary["miro_retry"] = {"command": "miro-sync", "case": str(args.case.resolve()),
@@ -476,8 +479,9 @@ def csv_run(case, run_id="latest", out=None, include_fees=None):
     return result
 
 
-def main(argv=None):
+def main(argv=None, *, progress=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    progress = progress if progress is not None else ProgressReporter()
     try:
         if not argv and sys.stdin.isatty():
             from .menu import run_menu
@@ -514,7 +518,7 @@ def main(argv=None):
             from .menu import run_menu
             return run_menu(args.investigations_dir)
         if args.command == "trace":
-            return run_trace(args)
+            return run_trace(args, progress=progress)
         if args.command == "export":
             if args.out.exists():
                 raise TraceError("Choose a new export directory to preserve earlier evidence")
@@ -544,7 +548,7 @@ def main(argv=None):
             print(json.dumps(create_board(args.case, args.name, args.team_id, args.visibility), indent=2))
         elif args.command == "miro-sync":
             print(json.dumps(sync_run(args.case, args.run, args.board, args.max_new_items, args.dry_run, args.plan,
-                                      args.include_fees, args.reorganize), indent=2))
+                                      args.include_fees, args.reorganize, progress=progress), indent=2))
         elif args.command == "miro-publish":
             print(json.dumps(publish(read_json(args.plan), board_id(args.board_id), args.state, args.max_items), indent=2))
         elif args.command == "miro-resolve":

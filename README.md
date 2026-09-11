@@ -85,10 +85,14 @@ The browser and terminal interfaces share the same `cases/`, defaults, run histo
 
 1. Open a saved investigation, or create a new live or synthetic-demo investigation. For live cases, paste comma-separated transaction hashes, load their outputs, and select the relevant UTXOs grouped by transaction.
 2. Review the bounded run limits and start tracing. A later run continues the investigation's latest saved snapshot.
-3. Select a saved run to review it, create a local Mermaid chart, or export CSV tables. The browser provides links to the generated files.
+3. Select a saved run to review it, create a local Mermaid chart, or export CSV tables. Use **Download SVG** beside the chart or the individual CSV download buttons. Mermaid source and supporting files are also available. Downloads remain available after reopening the investigation; selecting a different run shows that run's products. If the fee setting has changed, the interface asks you to regenerate the product before presenting it as current.
 4. Create a private Miro board or link an existing board in the investigation settings. Preview the saved run, then sync it to Miro. Organizing an existing graph is a separate action because it changes managed positions and connector attachments.
 
 The investigation settings include run limits and the fee-flow checkbox; global settings provide defaults for new investigations. The synthetic demo, saved-run review, Mermaid rendering, CSV export, and Miro plan preview need no API credentials. Miro board creation, sync, and organization still contact Miro, including for demo cases.
+
+The usual cycle is **Trace → Create or link a board once → Preview Miro → Sync to Miro → Continue run → Sync to Miro**. Keep the same investigation and board. Normal sync preserves your arrangement and adds the continuation; use **Organize Miro graph** only when you want the program to rearrange managed items. You may also tidy the native shapes in Miro by hand.
+
+During sync, the browser and launching terminal show the current stage and completed/total item counts. Existing-item checks finish before any board changes, so the board itself may initially appear unchanged. The display distinguishes checking, layout preparation, updates, new items, and temporary API retry waits. Counts belong to the current stage, not a predicted completion time. A failed action retains its last stage; consult the terminal for the specific API or mapping error before retrying.
 
 Live actions retrieve credentials through the existing SecretSpec/Proton Pass setup. If Proton Pass needs login or unlocking, respond in the **launching terminal**; do not enter API keys in the browser. Only one job runs at a time in each local server. Closing a browser tab does not cancel its job: reopen the address to see progress. **Ctrl+C** stops the server and its active offline worker. While a live action owns the terminal for provider prompts, the first Ctrl+C cancels that action; press it again after the prompt returns to stop the server. Restart `liquid-web` to reopen saved investigations from disk.
 
@@ -354,6 +358,8 @@ Use the **same case directory and board** for later runs. Sync creates native [s
 - A board mapping is bound to one case, API source, and address mode. After a run has been synced, extend that run (or a later descendant). Older snapshots, sibling branches and independent roots cannot overwrite newer graph classifications. You may skip intermediate unpublished runs.
 - Finish an interrupted sync before switching to another run. Resolving a pending creation alone does not finish that sync.
 - The default cap is **750 new shapes plus connectors per sync**, not total board size. Use `--max-new-items` to change it. Existing-object checks can still take time on a large graph.
+
+Repeat sync checks all mapped items so it can preserve analyst edits and detect missing objects before writing. It uses a 0.05-second default gap for these reads and retains a 0.4-second gap for writes, plus network latency. Unchanged mapping records no longer cause a full file rewrite and fsync per item. Miro's [REST rate limits](https://developers.miro.com/reference/rate-limiting) are shared by each user/application combination, so another instance can consume the same allowance. Bounded retries display their waiting state and respect the rate-reset header when `Retry-After` is absent. A requested wait above 30 seconds stops with an actionable terminal error; the sync can be retried later using the same saved run and mapping.
 
 Keep **`case.json` and the entire `miro/` directory** with the case. Losing or replacing the mapping can cause duplicates; do not delete state as a retry mechanism. Live sync changes board content, without changing board sharing or inviting people.
 
