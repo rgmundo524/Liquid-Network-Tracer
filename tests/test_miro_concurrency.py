@@ -7,7 +7,7 @@ from pathlib import Path
 
 from liquid_tracer.common import TraceError, read_json, save_json
 from liquid_tracer.miro import make_plan, sync
-from test_miro_sync import FakeMiro, graph
+from tests.test_miro_sync import FakeMiro, graph
 
 
 class ObservedMiro(FakeMiro):
