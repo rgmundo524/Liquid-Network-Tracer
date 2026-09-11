@@ -130,6 +130,7 @@ class LayoutGeometryTests(unittest.TestCase):
         process.poll.return_value = 0
         with patch.dict(os.environ, {"LIQUID_TRACER_ROOT": str(ROOT), "MIRO_ACCESS_TOKEN": "SYNTHETIC-secret",
                                      "BLOCKSTREAM_CLIENT_SECRET": "SYNTHETIC-secret", "NODE_OPTIONS": "--eval=bad",
+                                     "LIQUID_RENDER_HEAP_MB": "32768",
                                      "LIQUID_NODE_BIN": "/synthetic/node"}), \
                 patch("pathlib.Path.is_file", return_value=True), \
                 patch("liquid_tracer.elk_layout.subprocess.Popen", return_value=process) as popen:
@@ -138,8 +139,42 @@ class LayoutGeometryTests(unittest.TestCase):
         self.assertNotIn("MIRO_ACCESS_TOKEN", env)
         self.assertNotIn("BLOCKSTREAM_CLIENT_SECRET", env)
         self.assertNotIn("NODE_OPTIONS", env)
+        self.assertNotIn("LIQUID_RENDER_HEAP_MB", env)
         self.assertEqual(popen.call_args.args[0][0], "/synthetic/node")
+        self.assertEqual(popen.call_args.args[0][1], "--max-old-space-size=32768")
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
+
+    def test_invalid_heap_budget_fails_before_launching_the_worker(self):
+        for value in ("-1", "0", "16 --require=untrusted.js"):
+            with self.subTest(value=value), \
+                    patch.dict(os.environ, {"LIQUID_TRACER_ROOT": str(ROOT), "LIQUID_NODE_BIN": "/synthetic/node",
+                                            "LIQUID_RENDER_HEAP_MB": value}), \
+                    patch("pathlib.Path.is_file", return_value=True), \
+                    patch("liquid_tracer.elk_layout.subprocess.Popen") as popen:
+                with self.assertRaisesRegex(TraceError, "LIQUID_RENDER_HEAP_MB"):
+                    _worker({}, [1])
+                popen.assert_not_called()
+
+    def test_worker_heap_failure_reports_graph_size_and_budget_without_raw_stderr(self):
+        process = Mock(returncode=-6, pid=12345)
+        process.communicate.return_value = ("", "FATAL ERROR: Reached heap limit Allocation failed - "
+                                                  "JavaScript heap out of memory\nSYNTHETIC-private-content")
+        process.poll.return_value = -6
+        progress = []
+        with patch.dict(os.environ, {"LIQUID_TRACER_ROOT": str(ROOT), "LIQUID_NODE_BIN": "/synthetic/node",
+                                     "LIQUID_RENDER_HEAP_MB": "8192"}), \
+                patch("pathlib.Path.is_file", return_value=True), \
+                patch("liquid_tracer.elk_layout.subprocess.Popen", return_value=process):
+            with self.assertRaises(TraceError) as raised:
+                _worker({"children": [{}, {}, {}], "edges": [{}, {}]}, [1], progress=progress.append)
+        message = str(raised.exception)
+        self.assertIn("heap", message.lower())
+        self.assertIn("3 objects, 2 connections", message)
+        self.assertIn("8,192 MiB", message)
+        self.assertIn("No Miro changes were made", message)
+        self.assertNotIn("SYNTHETIC-private-content", message)
+        self.assertIn("3 objects, 2 connections", progress[0]["message"])
+        self.assertIn("8,192 MiB", progress[0]["message"])
 
     def test_worker_polls_past_the_old_deadline_and_reports_elapsed_activity(self):
         process = Mock(returncode=None, pid=12345)

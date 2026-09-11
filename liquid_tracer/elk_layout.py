@@ -19,6 +19,7 @@ from pathlib import Path
 
 from .common import TraceError
 from .processes import defer_cancellation_during_spawn
+from .render_runtime import renderer_failure, renderer_heap_mb
 
 
 ALGORITHM = "elk_layered_v1"
@@ -238,13 +239,19 @@ def _worker(graph, seeds, progress=None):
         raise TraceError("LIQUID_NODE_BIN must be an absolute path to the pinned Node executable")
     if not node or not runner.is_file() or not (runner.parent / "node_modules" / "elkjs" / "package.json").is_file():
         raise TraceError("Local ELK dependencies are unavailable. Enter the project devenv shell and run liquid-layout-setup")
+    heap_mb = renderer_heap_mb()
+    node_count, edge_count = len(graph.get("children", [])), len(graph.get("edges", []))
+    graph_size = f"{node_count:,} objects, {edge_count:,} connections"
+    context = f"{graph_size}; Node heap budget {heap_mb:,} MiB"
     # Explicit allowlist strips API credentials, NODE_OPTIONS, preload hooks,
     # proxy variables, and secrets-provider state from this pure calculation.
     environment = {name: os.environ[name] for name in ("PATH", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT") if name in os.environ}
     process = None
     try:
+        _report_progress(progress, f"Calculating local ELK layout ({context}); cancel to stop")
         with defer_cancellation_during_spawn():
-            process = subprocess.Popen([node, str(runner)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            process = subprocess.Popen([node, f"--max-old-space-size={heap_mb}", str(runner)],
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE, text=True, env=environment, start_new_session=True)
         started = time.monotonic()
         payload = json.dumps({"graph": graph, "seeds": seeds})
@@ -253,18 +260,16 @@ def _worker(graph, seeds, progress=None):
                 # communicate resumes pipe reads/writes after TimeoutExpired;
                 # passing input again would duplicate the request. Its timeout
                 # only lets us report that this local calculation is active.
-                output, _ = process.communicate(payload, timeout=PROGRESS_INTERVAL_SECONDS)
+                output, errors = process.communicate(payload, timeout=PROGRESS_INTERVAL_SECONDS)
                 break
             except subprocess.TimeoutExpired:
                 payload = None
                 elapsed = max(0, int(time.monotonic() - started))
-                _report_progress(progress, f"Calculating local ELK layout ({elapsed:,} seconds elapsed); cancel to stop",
+                _report_progress(progress, f"Calculating local ELK layout ({context}; {elapsed:,} seconds elapsed); cancel to stop",
                                  elapsed_seconds=elapsed)
         if process.returncode:
-            detail = (f"was terminated by signal {-process.returncode}" if process.returncode < 0
-                      else f"failed with exit code {process.returncode}")
-            raise TraceError(f"The local ELK worker {detail}. The calculation could not complete; available memory "
-                             "or an ELK engine error may be responsible. No Miro changes were made")
+            detail = renderer_failure(errors, process.returncode, "ELK", heap_mb)
+            raise TraceError(f"{detail} Graph: {graph_size}. No Miro changes were made")
         result = json.loads(output)
         if not isinstance(result, dict) or result.get("version") != ELK_VERSION or not isinstance(result.get("candidates"), list):
             raise ValueError("invalid worker response")

@@ -230,7 +230,11 @@ class MermaidTests(unittest.TestCase):
             process = real_popen(*args, **kwargs)
             processes.append(process)
 
+            wait = process.wait
+
             def cancel(*call_args, **call_kwargs):
+                if call_kwargs.get("timeout") == 5:
+                    return wait(*call_args, **call_kwargs)
                 self.assertEqual(call_args, ())
                 self.assertEqual(call_kwargs, {}, "Rendering must have no application time limit")
                 deadline = time.monotonic() + 2
@@ -238,7 +242,7 @@ class MermaidTests(unittest.TestCase):
                     time.sleep(0.01)
                 raise KeyboardInterrupt
 
-            process.communicate = cancel
+            process.wait = cancel
             return process
 
         with patch("liquid_tracer.mermaid.subprocess.Popen", side_effect=cancellable_renderer):
@@ -263,6 +267,65 @@ class MermaidTests(unittest.TestCase):
                 export_mermaid(graph, self.destination)
             self.assertFalse(self.destination.exists())
 
+    def test_renderer_gives_node_and_browser_the_same_heap_without_protocol_deadline(self):
+        script = (
+            "import json,os,pathlib,sys; "
+            "config=json.loads(pathlib.Path(sys.argv[-1]).read_text()); "
+            "pathlib.Path('runtime.json').write_text(json.dumps({'config':config,'env':dict(os.environ)}))"
+        )
+        with patch.dict(os.environ, {"LIQUID_RENDER_HEAP_MB": "8192",
+                                     "NODE_OPTIONS": "--require=private-hook.js",
+                                     "MIRO_ACCESS_TOKEN": "SYNTHETIC_PRIVATE_TOKEN",
+                                     "BLOCKSTREAM_CLIENT_SECRET": "SYNTHETIC_PRIVATE_SECRET",
+                                     "PUPPETEER_EXECUTABLE_PATH": "/synthetic/pinned-chromium"}):
+            result = _render([sys.executable, "-c", script], self.root)
+        self.assertEqual(result.returncode, 0)
+        runtime = json.loads((self.root / "runtime.json").read_text())
+        self.assertEqual(runtime["config"], {"protocolTimeout": 0,
+                                           "args": ["--js-flags=--max-old-space-size=8192"]})
+        self.assertEqual(runtime["env"]["NODE_OPTIONS"], "--max-old-space-size=8192")
+        self.assertEqual(runtime["env"]["PUPPETEER_EXECUTABLE_PATH"], "/synthetic/pinned-chromium")
+        self.assertNotIn("MIRO_ACCESS_TOKEN", runtime["env"])
+        self.assertNotIn("BLOCKSTREAM_CLIENT_SECRET", runtime["env"])
+        self.assertNotIn("--no-sandbox", runtime["config"]["args"])
+
+    def test_renderer_retains_only_bounded_private_stderr_without_exposing_labels(self):
+        script = (
+            "import os,sys; os.write(2,b'x' * 200000); "
+            "os.write(2,b'\\nFATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\\n'"
+            "b'SYNTHETIC_PRIVATE_LABEL\\n'); sys.exit(1)"
+        )
+        with patch.dict(os.environ, {"LIQUID_RENDER_HEAP_MB": "8192"}):
+            result = _render([sys.executable, "-c", script], self.root)
+        self.assertEqual(result.returncode, 1)
+        diagnostic = self.root / "mermaid-renderer.log"
+        self.assertEqual(diagnostic.stat().st_mode & 0o777, 0o600)
+        self.assertLessEqual(diagnostic.stat().st_size, 64 * 1024)
+        self.assertIn("SYNTHETIC_PRIVATE_LABEL", diagnostic.read_text())
+        self.assertIn("heap out of memory", result.stderr)
+        with patch.dict(os.environ, {"LIQUID_MERMAID_BIN": "/synthetic/mmdc"}), \
+                patch("liquid_tracer.mermaid._render", return_value=result):
+            with self.assertRaises(TraceError) as caught:
+                export_mermaid(tiny_graph(), self.destination)
+        self.assertNotIn("SYNTHETIC_PRIVATE_LABEL", str(caught.exception))
+        self.assertNotIn("installation", str(caught.exception))
+        self.assertIn("8,192", str(caught.exception))
+
+    def test_unwritable_optional_log_does_not_hide_renderer_failure(self):
+        script = "import sys; sys.stderr.write('RangeError: Maximum call stack size exceeded'); sys.exit(1)"
+        original_open = os.open
+
+        def deny_diagnostic(path, *args, **kwargs):
+            if Path(path).name == "mermaid-renderer.log":
+                raise PermissionError("synthetic diagnostic denied")
+            return original_open(path, *args, **kwargs)
+
+        with patch("liquid_tracer.mermaid.os.open", side_effect=deny_diagnostic):
+            result = _render([sys.executable, "-c", script], self.root)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Maximum call stack size exceeded", result.stderr)
+        self.assertFalse((self.root / "mermaid-renderer.log").exists())
+
     @unittest.skipUnless(os.environ.get("LIQUID_MERMAID_BIN") or shutil.which("mmdc"),
                          "Mermaid CLI is supplied by devenv")
     def test_installed_mermaid_renders_fixture_with_dates_and_hostile_text(self):
@@ -271,11 +334,8 @@ class MermaidTests(unittest.TestCase):
         graph["nodes"].append({"id": "synthetic:hostile", "kind": "address",
                                "label": 'Literal "quotes" | #34; <script>bad</script>\n`text`',
                                "color": COLORS["address"]})
-        # Report renderer diagnostics only for this synthetic fixture. Product
-        # errors deliberately avoid echoing private investigation labels. The
-        # spy preserves process-group cleanup and never
-        # runs the renderer a second time merely to recover its stderr.
-        diagnostic_output = []
+        # Only synthetic fixture diagnostics may be echoed by this test.
+        # Production failures keep raw labels in the private local log.
         real_popen = subprocess.Popen
         fixture_browser_config = None
         if os.environ.get("GITHUB_ACTIONS") == "true":
@@ -284,29 +344,25 @@ class MermaidTests(unittest.TestCase):
             # in CI; production previews and ordinary devenv tests retain the
             # browser's sandbox defaults. See pptr.dev/troubleshooting.
             fixture_browser_config = self.root / "fixture-puppeteer.json"
-            save_json(fixture_browser_config, {"args": ["--no-sandbox"]})
 
         def capture_fixture_renderer(*args, **kwargs):
             if fixture_browser_config:
+                command = args[0]
+                original = Path(command[command.index("--puppeteerConfigFile") + 1])
+                config = json.loads(original.read_text())
+                config["args"] = [*config.get("args", []), "--no-sandbox"]
+                save_json(fixture_browser_config, config)
                 command = [*args[0], "--puppeteerConfigFile", str(fixture_browser_config)]
                 args = (command, *args[1:])
-            process = real_popen(*args, **kwargs)
-            communicate = process.communicate
-
-            def capture_communication(*call_args, **call_kwargs):
-                output = communicate(*call_args, **call_kwargs)
-                diagnostic_output.extend(text for text in output if text)
-                return output
-
-            process.communicate = capture_communication
-            return process
+            return real_popen(*args, **kwargs)
 
         with patch("liquid_tracer.mermaid.subprocess.Popen", side_effect=capture_fixture_renderer):
             try:
                 result = export_mermaid(graph, self.destination)
             except TraceError as error:
+                diagnostic = self.destination / "mermaid-renderer.log"
                 self.fail(str(error) + "\nSynthetic fixture renderer diagnostics:\n" +
-                          "\n".join(diagnostic_output))
+                          (diagnostic.read_text(errors="replace") if diagnostic.is_file() else "unavailable"))
         svg = Path(result["svg"]).read_text()
         root = ET.fromstring(svg)
         visible = " ".join(" ".join(root.itertext()).split())

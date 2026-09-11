@@ -11,14 +11,37 @@ import re
 import shutil
 import signal
 import subprocess
+import threading
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from pathlib import Path
 
 from .common import TraceError, save_json
 from .export import COLORS, edge_color, legend_lines
 from .processes import defer_cancellation_during_spawn
+from .render_runtime import renderer_failure, renderer_heap_mb
 
 _COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
+_DIAGNOSTIC_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True)
+class _RenderResult:
+    returncode: int
+    stderr: str
+    heap_mb: int
+
+
+def _renderer_environment(heap_mb):
+    # Keep the pinned browser, local fonts and normal Linux runtime paths.
+    # SecretSpec credentials and arbitrary Node/preload options are unnecessary.
+    names = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TMP", "TEMP", "SYSTEMROOT",
+             "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_DATA_DIRS", "XDG_RUNTIME_DIR",
+             "FONTCONFIG_FILE", "FONTCONFIG_PATH", "PUPPETEER_EXECUTABLE_PATH", "PUPPETEER_CACHE_DIR",
+             "PUPPETEER_TMP_DIR", "PUPPETEER_SKIP_DOWNLOAD", "DISPLAY", "WAYLAND_DISPLAY")
+    environment = {name: os.environ[name] for name in names if name in os.environ}
+    environment["NODE_OPTIONS"] = f"--max-old-space-size={heap_mb}"
+    return environment
 
 
 def _label(value):
@@ -130,13 +153,34 @@ def _render(command, directory):
     # Chromium launches child processes. Give this invocation its own process
     # group so an interruption cannot leave a browser running after
     # the Node entry point exits. The application already requires POSIX.
+    heap_mb = renderer_heap_mb()
+    browser_config = Path(directory) / "puppeteer-config.json"
+    # A single CDP call includes the complete Mermaid layout calculation.
+    # Puppeteer's default 180-second protocol deadline is a render deadline too.
+    # Browser startup retains its normal bounded timeout and sandbox defaults.
+    save_json(browser_config, {"protocolTimeout": 0,
+                              "args": [f"--js-flags=--max-old-space-size={heap_mb}"]})
+    command = [*command, "--puppeteerConfigFile", str(browser_config)]
     process = None
+    reader = None
+    tail = bytearray()
+
+    def collect_stderr():
+        try:
+            while chunk := process.stderr.read1(8192):
+                tail.extend(chunk)
+                if len(tail) > _DIAGNOSTIC_BYTES:
+                    del tail[:-_DIAGNOSTIC_BYTES]
+        except (OSError, ValueError):
+            pass  # Cleanup may close the pipe after killing the process group.
+
     try:
         with defer_cancellation_during_spawn():
-            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       text=True, cwd=directory, start_new_session=True)
-        process.communicate()
-        return process.returncode
+            process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                       cwd=directory, env=_renderer_environment(heap_mb), start_new_session=True)
+        reader = threading.Thread(target=collect_stderr, daemon=True)
+        reader.start()
+        process.wait()
     finally:
         if process is not None:
             try:
@@ -146,8 +190,21 @@ def _render(command, directory):
             try:
                 process.wait(timeout=5)
             finally:
-                process.stdout.close()
+                if reader is not None:
+                    reader.join(timeout=5)
                 process.stderr.close()
+    stderr = tail.decode("utf-8", errors="replace")
+    if process.returncode and stderr:
+        # This bounded local diagnostic can contain investigation labels.
+        # It is deliberately absent from the web download allowlist.
+        try:
+            descriptor = os.open(Path(directory) / "mermaid-renderer.log",
+                                 os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(tail)
+        except OSError:
+            pass  # Diagnostic persistence must not mask the renderer failure.
+    return _RenderResult(process.returncode, stderr, heap_mb)
 
 
 def export_mermaid(graph, directory):
@@ -191,14 +248,20 @@ def export_mermaid(graph, directory):
     command = [executable, "--input", str(paths["source"]), "--output", str(paths["svg"]),
                "--configFile", str(config_path), "--backgroundColor", "white", "--quiet"]
     try:
-        returncode = _render(command, directory)
+        result = _render(command, directory)
     except OSError as error:
         raise TraceError(f"Cannot start Mermaid renderer. Enter the project's devenv shell and retry. {retained}") from error
+    returncode = result if isinstance(result, int) else result.returncode
     if returncode:
         paths["svg"].unlink(missing_ok=True)
         # Do not echo arbitrary renderer output, which can contain complete
         # investigation labels. The source and config support local diagnosis.
-        raise TraceError(f"Mermaid rendering failed (exit {returncode}). Check the local mmdc/Chromium installation. {retained}")
+        stderr = "" if isinstance(result, int) else result.stderr
+        heap_mb = renderer_heap_mb() if isinstance(result, int) else result.heap_mb
+        detail = renderer_failure(stderr, returncode, "Mermaid", heap_mb)
+        diagnostic = (f" Local renderer details saved at {directory / 'mermaid-renderer.log'}."
+                      if (directory / "mermaid-renderer.log").is_file() else "")
+        raise TraceError(f"{detail}{diagnostic} {retained}")
     try:
         svg = paths["svg"].read_bytes()
         root = ET.fromstring(svg)
