@@ -113,6 +113,93 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None):
             new_transactions += 1
         return data
 
+    prepared = set()
+
+    def prepare_frontier():
+        """Overlap only work already required by a bounded frontier window.
+
+        Traversal and checkpoints stay on this thread. Near a transaction or
+        request cap, use the ordinary serial path so speculative work cannot
+        consume the slots needed by the current output's spending transaction.
+        """
+        workers = getattr(api, "workers", 1)
+        if workers <= 1 or not callable(getattr(api, "prefetch", None)) or not queue:
+            return
+        if queue[0][1] in prepared:
+            return
+        depth = queue[0][0]
+        window = []
+        seen = set()
+        for candidate_depth, key in heapq.nsmallest(min(workers, limits.max_outpoints - count), queue):
+            item = state["outputs"][key]
+            if (candidate_depth != depth or candidate_depth != item["depth"]
+                    or item["status"] != "pending" or key in seen):
+                continue
+            seen.add(key)
+            window.append(item)
+        if not window:
+            return
+        funding_ids = list(dict.fromkeys(item["txid"] for item in window))
+        missing = [txid for txid in funding_ids if txid not in state["transactions"]]
+        # At most one previously unseen spending transaction per output. This
+        # bound also covers converging branches, without fetching any sibling
+        # outputs that the investigator did not select for this frontier.
+        possible_children = len(window) if depth < limits.max_hops else 0
+        if len(missing) + possible_children > limits.max_transactions - new_transactions:
+            return
+        fetch_ids = [txid for txid in funding_ids
+                     if not state["transactions"].get(txid, {}).get("data", {}).get("status", {}).get("confirmed")]
+        nominal_requests = len(fetch_ids) + (len(funding_ids) + possible_children if possible_children else 0)
+        if api.auth == "blockstream" and not api.token:
+            nominal_requests += 1
+        if nominal_requests > limits.max_requests - api.budget.requests:
+            return
+        prepared.update(seen)
+        fetched = api.prefetch(["/tx/" + txid for txid in fetch_ids])
+        funding = {}
+        for txid in funding_ids:
+            result = fetched.get("/tx/" + txid)
+            if isinstance(result, Exception):
+                continue  # The normal get() surfaces this saved failure in order.
+            transaction = result[0] if result is not None else state["transactions"][txid]["data"]
+            try:
+                validate_transaction(transaction, txid)
+            except TraceError:
+                continue
+            funding[txid] = transaction
+        eligible = []
+        for item in window:
+            transaction = funding.get(item["txid"])
+            if transaction is None or item["vout"] >= len(transaction["vout"]):
+                continue
+            output = transaction["vout"][item["vout"]]
+            if (output_kind(output) != "spendable" or depth >= limits.max_hops
+                    or any(label.get("stop") for label in match_labels(labels, item["outpoint"], output))
+                    or (not include_unconfirmed and not transaction["status"]["confirmed"])):
+                continue
+            eligible.append(item)
+        spends = api.prefetch(list(dict.fromkeys("/tx/" + item["txid"] + "/outspends" for item in eligible)))
+        children = []
+        for item in eligible:
+            result = spends.get("/tx/" + item["txid"] + "/outspends")
+            if result is None or isinstance(result, Exception):
+                continue
+            rows = result[0]
+            if not isinstance(rows, list) or len(rows) != len(funding[item["txid"]]["vout"]):
+                continue
+            spend = rows[item["vout"]]
+            if (not isinstance(spend, dict) or spend.get("spent") is not True
+                    or (not include_unconfirmed and
+                        (not isinstance(spend.get("status"), dict) or not spend["status"].get("confirmed")))):
+                continue
+            child_id, vin = spend.get("txid"), spend.get("vin")
+            if (not isinstance(child_id, str) or not HEX64.fullmatch(child_id)
+                    or type(vin) is not int or vin < 0 or child_id == item["txid"]):
+                continue
+            if not state["transactions"].get(child_id, {}).get("data", {}).get("status", {}).get("confirmed"):
+                children.append("/tx/" + child_id)
+        api.prefetch(list(dict.fromkeys(children)))
+
     current = None
     stop_reason = None
     try:
@@ -121,6 +208,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None):
             api.budget.check()
             if count >= limits.max_outpoints:
                 raise StopRun("outpoint_limit")
+            prepare_frontier()
             depth, key = heapq.heappop(queue)
             current = state["outputs"][key]
             if depth != current["depth"] or current["status"] != "pending":

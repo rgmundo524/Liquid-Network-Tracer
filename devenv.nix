@@ -23,6 +23,9 @@
     LIQUID_DEMO_CASE_DIR = "${config.devenv.root}/demo-case";
     LIQUID_SECRET_PROVIDER = "protonpass";
     LIQUID_SECRET_PROFILE = "development";
+    # After verifying the account's Blockstream requests/second allowance,
+    # set LIQUID_BLOCKSTREAM_API_RPS here to its numeric string. Every interface
+    # uses 95% of that allowance; unset retains the conservative 4 RPS default.
     LIQUID_SECRETSPEC_BIN = "${pkgs.secretspec}/bin/secretspec";
     SECRETSPEC_PROTONPASS_CLI_PATH = "${pkgs.proton-pass-cli}/bin/pass-cli";
     # Mermaid's Nix wrapper also supplies Chromium on Linux. Rendering uses

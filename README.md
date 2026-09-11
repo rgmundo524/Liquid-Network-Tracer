@@ -258,7 +258,13 @@ Replace `--seed ...` with `--seeds-file case-seeds.txt`, or repeat `--seed 'TXID
 | `--max-requests 30` | At most 30 HTTP attempts, including token requests and retries. This is **not a count of Blockstream credits**. |
 | `--max-seconds 60` | Stops traversal and bounds HTTP timeouts. Checkpoint/export filesystem work can finish afterward. |
 
-GET requests are spaced by `--min-interval`, default 0.25 seconds. Transient server errors retry at most three times, subject to the same budget. One outspends response serves all outputs of its transaction within a run.
+Transaction inspection and tracing overlap up to **eight independent explorer requests**. A shared limiter spaces request starts across all workers, including OAuth and retries. Concurrent branches requesting the same endpoint share one response and evidence record. One `/tx/:txid/outspends` response serves all outputs of its transaction within a run. The [documented Esplora API](https://github.com/Blockstream/esplora/blob/master/API.md) has no arbitrary transaction-hash batch lookup, so this uses concurrent individual GETs.
+
+Blockstream's [paid API documentation](https://help.blockstream.com/blockstream-explorer-api/set-up-explorer-api/create-and-manage-your-api-keys) describes higher rate limits without publishing a numeric requests-per-second allowance. Until the account's limit is verified, the default remains **4 requests/second**. Set the nonsecret `LIQUID_BLOCKSTREAM_API_RPS` to the verified account allowance in the existing `devenv.nix` environment; all interfaces then use **95% of that allowance**. For one CLI trace, `--api-rate-limit NUMBER` overrides it. This value is an RPS allowance, not a credit balance. Do not substitute the public Esplora server configuration for the paid account's quota.
+
+`--api-workers 1` disables overlapping trace requests; the default is 8. `--min-interval` can impose a longer gap, but cannot raise the rate ceiling. Run evidence records the effective fetching settings in `trace.json`. Fixtures bypass network pacing. The limiter coordinates one client/run, not separate Liquid-trace processes sharing the same API account.
+
+HTTP 429 responses pause all workers. Transient failures retry within the same request/time budget; retries and token refreshes are intentional additional attempts. A requested cooldown above 30 seconds stops the run for later continuation. Successful in-flight responses are recorded before returning a failure or interruption. Near a traversal budget, fetching becomes serial to preserve the remaining work allowance. Completed transaction bodies can be reused from the evidence cache; spend status is refreshed for each new run so continuation can discover newly spent outputs. Duplicate suppression applies within a lookup or run, not across these deliberate refreshes.
 
 ## Continue after review
 

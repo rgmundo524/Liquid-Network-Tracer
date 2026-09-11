@@ -4,6 +4,8 @@ import io
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -12,6 +14,7 @@ from liquid_tracer.api import ENTERPRISE, TOKEN_URL, Esplora
 from liquid_tracer.cli import main
 from liquid_tracer.common import LBTC, TraceError, save_json
 from liquid_tracer.inspection import inspect_transaction, inspect_transactions, parse_transaction_hashes
+from liquid_tracer.store import Store
 
 from tests.fixtures import A, B, C, D, fixture, output
 
@@ -131,10 +134,11 @@ class TransactionInspectionTests(unittest.TestCase):
                 self.assertNotIn(sentinel, errors)
                 self.assertFalse(report.exists())
 
-    def live_api(self, transport, directories):
+    def live_api(self, transport, directories, **client_options):
         def make_api(store, *args, **kwargs):
             directories.append(store.case)
-            return Esplora(store, *args, **kwargs, min_interval=0, transport=transport)
+            return Esplora(store, *args, **kwargs, min_interval=0, transport=transport,
+                           **client_options)
         return patch("liquid_tracer.inspection.Esplora", side_effect=make_api)
 
     def test_paid_lookup_uses_oauth_and_fetches_only_one_transaction(self):
@@ -246,7 +250,8 @@ class TransactionInspectionTests(unittest.TestCase):
                 self.live_api(transport, directories):
             result = inspect_transactions(txids)
         self.assertEqual([item["txid"] for item in result["transactions"]], txids)
-        self.assertEqual(calls, [("POST", TOKEN_URL)] + [("GET", ENTERPRISE + "/tx/" + txid) for txid in txids])
+        self.assertEqual(calls[0], ("POST", TOKEN_URL))
+        self.assertCountEqual(calls[1:], [("GET", ENTERPRISE + "/tx/" + txid) for txid in txids])
         self.assertEqual(len(directories), 1)
         self.assertFalse(directories[0].exists())
         for secret in ("SYNTHETIC-client", "SYNTHETIC-secret", "SYNTHETIC-token"):
@@ -258,17 +263,20 @@ class TransactionInspectionTests(unittest.TestCase):
             calls.append((method, url))
             if url == TOKEN_URL:
                 return 200, {}, b'{"access_token":"SYNTHETIC-token"}'
-            return 200, {}, json.dumps(fixture()["/tx/" + A]).encode()
+            return 200, {}, json.dumps(fixture()[url.removeprefix(ENTERPRISE)]).encode()
         with patch.dict(os.environ, {"BLOCKSTREAM_CLIENT_ID": "SYNTHETIC-client", "BLOCKSTREAM_CLIENT_SECRET": "SYNTHETIC-secret"}, clear=True), \
                 self.live_api(transport, directories), self.assertRaises(TraceError) as error:
             inspect_transactions([A, B], max_requests=2)
-        self.assertIn(B, str(error.exception))
+        self.assertIn("Transaction lookup stopped for ", str(error.exception))
         self.assertIn("request limit reached", str(error.exception))
-        self.assertEqual(calls, [("POST", TOKEN_URL), ("GET", ENTERPRISE + "/tx/" + A)])
+        self.assertEqual(calls[0], ("POST", TOKEN_URL))
+        self.assertEqual(len(calls), 2)
+        self.assertIn(calls[1], [("GET", ENTERPRISE + "/tx/" + txid) for txid in (A, B)])
         self.assertFalse(directories[0].exists())
 
     def test_batch_time_budget_does_not_restart_for_each_transaction(self):
         elapsed = [0.0]
+        monotonic = time.monotonic
         calls, directories = [], []
         def transport(method, url, headers, body, timeout):
             calls.append((method, url))
@@ -277,8 +285,8 @@ class TransactionInspectionTests(unittest.TestCase):
             elapsed[0] = 2.0
             return 200, {}, json.dumps(fixture()["/tx/" + A]).encode()
         with patch.dict(os.environ, {"BLOCKSTREAM_CLIENT_ID": "SYNTHETIC-client", "BLOCKSTREAM_CLIENT_SECRET": "SYNTHETIC-secret"}, clear=True), \
-                self.live_api(transport, directories), \
-                patch("liquid_tracer.api.time.monotonic", side_effect=lambda: elapsed[0]), \
+                self.live_api(transport, directories, workers=1), \
+                patch("liquid_tracer.api.time.monotonic", side_effect=lambda: monotonic() + elapsed[0]), \
                 self.assertRaises(TraceError) as error:
             inspect_transactions([A, B], max_seconds=1)
         self.assertIn(B, str(error.exception))
@@ -308,8 +316,72 @@ class TransactionInspectionTests(unittest.TestCase):
         self.assertIn(B, str(error.exception))
         self.assertIn("HTTP 404", str(error.exception))
         self.assertNotIn("SYNTHETIC-private-server-content", str(error.exception))
-        self.assertEqual(calls, [ENTERPRISE + "/tx/" + A, ENTERPRISE + "/tx/" + B])
+        # A bounded parallel batch can already have C in flight when B fails.
+        # It must not fetch unrelated endpoints or duplicate any transaction.
+        self.assertIn(ENTERPRISE + "/tx/" + A, calls)
+        self.assertIn(ENTERPRISE + "/tx/" + B, calls)
+        self.assertEqual(len(calls), len(set(calls)))
+        self.assertLessEqual(set(calls), {ENTERPRISE + "/tx/" + txid for txid in (A, B, C)})
         self.assertFalse(directories[0].exists())
+
+    def test_batch_overlaps_distinct_lookups_deduplicates_and_preserves_input_order(self):
+        first_started, second_finished = threading.Event(), threading.Event()
+        calls, finished, directories = [], [], []
+        lock = threading.Lock()
+
+        def transport(method, url, headers, body, timeout):
+            with lock:
+                calls.append((method, url))
+            if url.endswith(A):
+                first_started.set()
+                self.assertTrue(second_finished.wait(5), "Transaction lookups did not overlap")
+                with lock:
+                    finished.append(url)
+            else:
+                self.assertTrue(first_started.wait(5), "First transaction lookup did not start")
+                with lock:
+                    finished.append(url)
+                second_finished.set()
+            return 200, {}, json.dumps(fixture()[url.removeprefix(ENTERPRISE)]).encode()
+
+        with self.live_api(transport, directories):
+            result = inspect_transactions([A.upper(), B, A, B.upper()], auth="none")
+        self.assertEqual([item["txid"] for item in result["transactions"]], [A, B])
+        self.assertCountEqual(calls, [("GET", ENTERPRISE + "/tx/" + txid) for txid in (A, B)])
+        self.assertEqual(finished, [ENTERPRISE + "/tx/" + B, ENTERPRISE + "/tx/" + A])
+        self.assertEqual(len(directories), 1)
+        self.assertFalse(directories[0].exists())
+
+    def test_clients_close_before_temporary_store_on_success_and_validation_failure(self):
+        events = []
+
+        class RecordingEsplora(Esplora):
+            def close(self):
+                super().close()
+                events.append("client closed")
+
+        class RecordingStore(Store):
+            def close(self):
+                events.append("store closed")
+                super().close()
+
+        for inspect, value in ((inspect_transaction, A), (inspect_transactions, [A, B])):
+            for invalid in (False, True):
+                with self.subTest(inspect=inspect.__name__, invalid=invalid):
+                    events.clear()
+                    data = fixture()
+                    if invalid:
+                        data["/tx/" + A] = {"txid": B, "vout": []}
+                    save_json(self.fixture_path, data)
+                    with patch("liquid_tracer.inspection.Esplora", RecordingEsplora), \
+                            patch("liquid_tracer.inspection.Store", RecordingStore):
+                        if invalid:
+                            with self.assertRaises(TraceError):
+                                inspect(value, fixture=self.fixture_path)
+                        else:
+                            inspect(value, fixture=self.fixture_path)
+                    self.assertEqual(events, ["client closed", "store closed"])
+                    self.assertEqual(list(self.root.iterdir()), [self.fixture_path])
 
 
 if __name__ == "__main__":

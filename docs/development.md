@@ -4,6 +4,8 @@ The project uses **one main `devenv.nix`** to define Python, the Textual termina
 
 Entering the environment and opening the interface do not access a secret provider. Selecting a live output lookup, trace, Miro board creation, or Miro sync retrieves credentials through SecretSpec for that action. The offline demo trace, navigation, and local previews need no credentials.
 
+Explorer fetching uses up to eight concurrent requests with one shared rate limiter. Keep a verified account requests-per-second allowance in the same `devenv.nix` under `env.LIQUID_BLOCKSTREAM_API_RPS` as a numeric string. All interfaces inherit it on their next launch and use 95% of the allowance. It is public configuration, so no new Proton Pass entry is needed. Leave it unset until the allowance is verified; the fallback is 4 requests/second. Credit balance and monthly request volume are not RPS limits. Separate processes do not share this limiter, so divide the account allowance if running live investigations simultaneously. See [fetching controls and run limits](../README.md#trace-a-case-with-explicit-commands).
+
 ## Start the environment and interface
 
 From the repository directory:

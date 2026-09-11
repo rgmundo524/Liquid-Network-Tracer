@@ -41,6 +41,21 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 0, errors or output)
         return json.loads(output)
 
+    def test_fetch_configuration_is_inherited_overridden_and_archived(self):
+        with patch.dict(os.environ, {"LIQUID_BLOCKSTREAM_API_RPS": "10"}):
+            first = self.start("--hops", "0", "--api-workers", "2")
+            saved = read_json(Path(first["directory"]) / "trace.json")["fetch_options"]
+            self.assertEqual(saved, {"workers": 2, "advertised_rps": 10.0,
+                                    "effective_rps": 9.5, "rate_limit_source": "advertised",
+                                    "min_interval": 0.0, "fixture": True})
+            second = self.start("--hops", "0", "--api-rate-limit", "20", "--api-workers", "1")
+            saved = read_json(Path(second["directory"]) / "trace.json")["fetch_options"]
+            self.assertEqual((saved["advertised_rps"], saved["effective_rps"], saved["workers"]), (20.0, 19.0, 1))
+            for option, value in (("--api-workers", "9"), ("--api-rate-limit", "0"), ("--api-rate-limit", "nan")):
+                status, _, errors = self.invoke(self.base + ["--seed", "a" * 64 + ":0", option, value])
+                self.assertNotEqual(status, 0)
+                self.assertIn("Error:", errors)
+
     def test_trace_continue_csv_identity_and_read_only_preview(self):
         first = self.start("--hops", "1")
         metadata = read_json(self.case / "case.json")

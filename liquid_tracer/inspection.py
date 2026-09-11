@@ -86,15 +86,15 @@ def inspect_transaction(txid, *, fixture=None, base_url=ENTERPRISE, auth="blocks
     with TemporaryDirectory(prefix="liquid-tx-lookup-") as directory:
         store = Store(directory)
         try:
-            api = Esplora(store, "transaction-lookup", limits, base=base_url, auth=auth,
-                          fixture=fixture, tx_cache_seconds=0)
-            try:
-                transaction, _ = api.get("/tx/" + txid)
-            except StopRun as error:
-                reasons = {"request_limit": "request limit reached", "time_limit": "time limit reached",
-                           "server_retry_later": "explorer requested a later retry"}
-                raise TraceError("Transaction lookup stopped: " + reasons.get(str(error), "lookup limit reached")) from None
-            return transaction_outputs(txid, transaction)
+            with Esplora(store, "transaction-lookup", limits, base=base_url, auth=auth,
+                         fixture=fixture, tx_cache_seconds=0) as api:
+                try:
+                    transaction, _ = api.get("/tx/" + txid)
+                except StopRun as error:
+                    reasons = {"request_limit": "request limit reached", "time_limit": "time limit reached",
+                               "server_retry_later": "explorer requested a later retry"}
+                    raise TraceError("Transaction lookup stopped: " + reasons.get(str(error), "lookup limit reached")) from None
+                return transaction_outputs(txid, transaction)
         finally:
             store.close()
 
@@ -115,22 +115,26 @@ def inspect_transactions(txids, *, fixture=None, base_url=ENTERPRISE, auth="bloc
     with TemporaryDirectory(prefix="liquid-tx-lookup-") as directory:
         store = Store(directory)
         try:
-            api = Esplora(store, "transaction-lookup", limits, base=base_url, auth=auth,
-                          fixture=fixture, tx_cache_seconds=0)
-            transactions = []
-            for txid in txids:
-                try:
-                    transaction, _ = api.get("/tx/" + txid)
-                    transactions.append(transaction_outputs(txid, transaction))
-                except StopRun as error:
-                    reasons = {"request_limit": "request limit reached", "time_limit": "time limit reached",
-                               "server_retry_later": "explorer requested a later retry"}
-                    raise TraceError(f"Transaction lookup stopped for {txid}: "
-                                     + reasons.get(str(error), "lookup limit reached")) from None
-                except TraceError as error:
-                    # API and output validation errors contain safe diagnostics,
-                    # never server bodies, credentials, or arbitrary input text.
-                    raise TraceError(f"Transaction lookup failed for {txid}: {error}") from None
-            return {"transactions": transactions}
+            with Esplora(store, "transaction-lookup", limits, base=base_url, auth=auth,
+                         fixture=fixture, tx_cache_seconds=0) as api:
+                fetched = api.prefetch(["/tx/" + txid for txid in txids])
+                transactions = []
+                for txid in txids:
+                    try:
+                        result = fetched["/tx/" + txid]
+                        if isinstance(result, (TraceError, StopRun)):
+                            raise result
+                        transaction, _ = result
+                        transactions.append(transaction_outputs(txid, transaction))
+                    except StopRun as error:
+                        reasons = {"request_limit": "request limit reached", "time_limit": "time limit reached",
+                                   "server_retry_later": "explorer requested a later retry"}
+                        raise TraceError(f"Transaction lookup stopped for {txid}: "
+                                         + reasons.get(str(error), "lookup limit reached")) from None
+                    except TraceError as error:
+                        # API and output validation errors contain safe diagnostics,
+                        # never server bodies, credentials, or arbitrary input text.
+                        raise TraceError(f"Transaction lookup failed for {txid}: {error}") from None
+                return {"transactions": transactions}
         finally:
             store.close()

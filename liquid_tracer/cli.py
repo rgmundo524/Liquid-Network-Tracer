@@ -77,7 +77,11 @@ def parser():
     run.add_argument("--labels", type=Path)
     run.add_argument("--include-unconfirmed", action="store_true")
     run.add_argument("--tx-cache-seconds", type=float, default=86400)
-    run.add_argument("--min-interval", type=float, default=.25)
+    run.add_argument("--api-workers", type=int, default=8, help="Concurrent explorer requests, from 1 to 8 (default: 8)")
+    run.add_argument("--api-rate-limit", type=float,
+                     help="Verified account requests/second; use 95%% of this limit (default: LIQUID_BLOCKSTREAM_API_RPS, otherwise a conservative 4 requests/second)")
+    run.add_argument("--min-interval", type=float,
+                     help="Additional minimum seconds between requests; cannot exceed the configured rate ceiling")
     run.add_argument("--merge-addresses", action="store_true", default=None, help="Merge circles by address; continuation otherwise inherits its parent's mode")
     fee_arguments(run)
     run.add_argument("--offline-preview", action="store_true", help="Also save optional HTML/SVG inspection files")
@@ -414,10 +418,18 @@ def run_trace(args, progress=None):
         labels = load_labels(args.labels) if args.labels else (parent["labels"] if parent else [])
         merge_addresses = bool(args.merge_addresses or (parent and parent.get("address_mode") == "merged"))
         store = Store(args.case)
+        api = None
         try:
             api = Esplora(store, "pending", limits, args.base_url, args.auth, args.fixture,
-                          args.tx_cache_seconds, args.min_interval)
+                          args.tx_cache_seconds, args.min_interval, workers=args.api_workers,
+                          advertised_rps=args.api_rate_limit)
             state = new_state(seeds, api.base, limits, labels, parent, case_id=identity)
+            state["fetch_options"] = {"workers": api.workers,
+                                      "advertised_rps": api.advertised_rps,
+                                      "effective_rps": api.effective_rps,
+                                      "rate_limit_source": api.rate_limit_source,
+                                      "min_interval": api.min_interval,
+                                      "fixture": api.fixture is not None}
             metadata = read_case(args.case)
             state["investigation"] = {"case_id": identity, "name": metadata.get("name"),
                                       "miro_board": args.miro_board or metadata.get("miro_board") or None}
@@ -446,7 +458,11 @@ def run_trace(args, progress=None):
             print(json.dumps(summary, indent=2))
             return 1 if failed else 0
         finally:
-            store.close()
+            try:
+                if api is not None:
+                    api.close()
+            finally:
+                store.close()
 
 
 def open_preview(path):
