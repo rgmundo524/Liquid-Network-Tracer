@@ -18,3 +18,5 @@ case.lock
 trace.lock
 *.sqlite*
 dist/
+node_modules/
+.astro/

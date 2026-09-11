@@ -1,23 +1,115 @@
 import csv
 import html
 import json
-from collections import defaultdict
+from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 
-from .common import (TraceError, canonical, digest, match_labels, output_kind,
-                     public_fields, quantity, save_json)
+from .common import (LBTC, TraceError, canonical, digest, match_labels, output_kind,
+                     public_fields, save_json)
 from .trace import TERMINAL
+from .layout import arrange, fee_date, transaction_ranks
+from .miro_frames import activity_frames
 
-COLORS = {"transaction": "#a6ccf5", "address": "#f5f6f8", "seed": "#f16c7f",
-          "candidate": "#fff9b1", "event": "#ea94bb", "attributed": "#d5f692"}
+PRESENTATION_VERSION = 9
+# Both renderers and their legends use this palette. Node colors describe the
+# displayed role, not ownership of an address or allocation of stolen value.
+PALETTE = {
+    "starting_transaction": ("Purple", "#c4b5fd"),
+    "transaction": ("Blue", "#a6ccf5"),
+    "address": ("Light gray", "#f5f6f8"),
+    "seed": ("Red", "#f16c7f"),
+    "candidate": ("Yellow", "#fff9b1"),
+    "unspent_endpoint": ("Orange", "#fdba74"),
+    "suspected_service": ("Cyan", "#a5f3fc"),
+    "event": ("Pink", "#ea94bb"),
+    "attributed": ("Green", "#d5f692"),
+    "traced_edge": ("Dark teal", "#155e75"),
+    "context_edge": ("Gray", "#9ca3af"),
+}
+COLORS = {key: value[1] for key, value in PALETTE.items()}
+_ADDRESS_PRIORITY = {"address": 0, "candidate": 1, "seed": 2, "unspent_endpoint": 3,
+                     "suspected_service": 4, "attributed": 5}
+NODE_CSV_FIELDS = ("id", "kind", "label", "url", "color", "details", "role", "classification",
+                   "service_name", "service_rationale", "service_source", "service_confidence",
+                   "service_observed_at", "stop_tracing")
+
+
+def legend_lines():
+    def name(key):
+        return PALETTE[key][0]
+    return [
+        f"Squares: {name('starting_transaction').lower()} = provided starting transactions; {name('transaction').lower()} = subsequent hops. Starting role takes priority.",
+        f"{name('event')} diamonds: events. Transaction inputs enter on the left; outputs leave on the right.",
+        f"Circles: {name('seed').lower()} = selected seed outputs; {name('candidate').lower()} = reachable candidate outputs.",
+        f"Circles: {name('address').lower()} = context; {name('attributed').lower()} = analyst attribution (read confidence).",
+        f"{name('suspected_service')} circles: investigator-designated suspected service; not confirmed ownership. Tracing stops at designated addresses.",
+        f"{name('unspent_endpoint')} circles: traced branch ends at a UTXO observed unspent. Unchecked or hop-limited outputs do not qualify.",
+        f"Arrows: {name('traced_edge').lower()} = traced UTXO links; {name('context_edge').lower()} = context only.",
+        "Captions: vin/vout number · amount asset. ?? = not publicly available. Known amounts are in base units.",
+        "Circle priority: attribution > suspected service > unspent endpoint > seed > candidate > context. Unspent evidence retains its label.",
+        "Unspent refers to tracked outputs at their last check, not all funds or inactivity at that address. Arrows do not allocate stolen value.",
+    ]
+
+
+def edge_color(role):
+    return COLORS["context_edge" if role.startswith("context") else "traced_edge"]
+
+
+def graph_quantity(output):
+    """Compact public quantity without inferring hidden assets or values."""
+    value, asset = output.get("value"), output.get("asset")
+    amount = "??" if value is None else str(value) + " base units"
+    name = "L-BTC" if asset == LBTC else (short(asset) if asset else "??")
+    return amount + " " + name
 
 
 def short(value):
     return value if len(value) <= 20 else value[:10] + "…" + value[-7:]
 
 
-def build_graph(state, merge_addresses=False):
-    nodes, edges = {}, []
+def transaction_date(transaction):
+    """Display the recorded block date, never the run or observation date."""
+    status = transaction.get("status")
+    if not isinstance(status, dict):
+        return "Date ??"
+    if status.get("confirmed") is False:
+        return "Unconfirmed"
+    timestamp = status.get("block_time")
+    if (status.get("confirmed") is True and isinstance(timestamp, int)
+            and not isinstance(timestamp, bool) and timestamp >= 0):
+        try:
+            return datetime.fromtimestamp(timestamp, timezone.utc).date().isoformat() + " UTC"
+        except (ValueError, OverflowError, OSError):
+            pass
+    return "Date ??"
+
+
+def _unspent_endpoints(state):
+    """Traced stop reasons backed by an outspend observation, not address balances.
+
+    Continuation can retain an older observation while changing the stop reason.
+    A saved spending input also overrides stale unspent evidence, even when that
+    spending transaction was reached through another seed or a context branch.
+    """
+    spent = set(state["links"])
+    for record in state["transactions"].values():
+        for vin in record["data"]["vin"]:
+            if not vin.get("is_pegin") and not vin.get("is_coinbase"):
+                spent.add(f"{vin.get('txid')}:{vin.get('vout')}")
+    return {key for key, item in state["outputs"].items()
+            if key not in spent and item.get("status") == "unspent_at_observation"
+            and isinstance(item.get("observed_spend"), dict)
+            and item["observed_spend"].get("spent") is False
+            and ((type(item.get("spend_observation_id")) is int and item["spend_observation_id"] > 0)
+                 or (isinstance(item.get("spend_observation_id"), str) and item["spend_observation_id"].strip()))}
+
+
+def build_graph(state, merge_addresses=False, include_fees=False):
+    nodes, edges, fee_items = {}, [], {}
+    unspent_endpoints = _unspent_endpoints(state)
+    starting_transactions = {seed.rsplit(":", 1)[0] for seed in state["seeds"]}
+    ranks, cycle_groups = transaction_ranks(state["transactions"])
     source = state["source"]
     explorer = "https://blockstream.info/" + ("liquidtestnet" if "liquidtestnet" in source else "liquid")
     simulated = source.startswith("fixture://")
@@ -33,41 +125,72 @@ def build_graph(state, merge_addresses=False):
     def address(key, output, column, network="liquid"):
         addr = output.get("scriptpubkey_address")
         kind = output_kind(output)
-        tracked = state["outputs"].get(key)
+        tracked = state["outputs"].get(key) if network == "liquid" else None
         matches = match_labels(state["labels"], key, output) if network == "liquid" else []
         if kind != "spendable":
             label = "PEG-OUT REQUEST" if kind == "pegout" else ("FEE" if kind == "fee" else "UNSPENDABLE")
             peg = output.get("pegout") or {}
             destination = peg.get("scriptpubkey_address")
-            label += "\n" + (short(destination) if destination else key[-8:])
+            label += "\n" + (short(destination) if destination else "vout " + key.rsplit(":", 1)[-1])
             return add_node("event:" + key, "event", label, column,
                             {"outpoint": key, "output": output, "trace": tracked})
         node_key = (network + ":address:" + (addr or output.get("scriptpubkey") or key)
                     if merge_addresses else network + ":outpoint:" + key)
-        label = short(addr) if addr else "Address unavailable"
+        label = short(addr) if addr else "Address ??"
         if network != "liquid":
             label = network.upper() + "\n" + label
-        if not merge_addresses:
-            label += "\n" + short(key)
-        if matches:
-            label += "\n" + ", ".join(m["entity"] + " (" + m["confidence"] + ")" for m in matches)
-        color = COLORS["seed"] if key in state["seeds"] else (COLORS["candidate"] if tracked else COLORS["address"])
-        if matches:
-            color = COLORS["attributed"]
+        role = "address"
+        if network == "liquid":
+            if key in state["outputs"]:
+                role = "candidate"
+            if key in state["seeds"]:
+                role = "seed"
+            if key in unspent_endpoints:
+                role = "unspent_endpoint"
+            if any(m.get("classification") == "suspected_service" for m in matches):
+                role = "suspected_service"
+            if any(m.get("classification") != "suspected_service" for m in matches):
+                role = "attributed"
         url = None if simulated or not addr or network != "liquid" else explorer + "/address/" + addr
         node_id = add_node(node_key, "address", label, column,
-            {"address": addr, "network": network, "occurrences": []}, url, color)
+            {"address": addr, "network": network, "occurrences": []}, url, COLORS[role])
+        node = nodes[node_id]
+        # One merged circle can occur first as context and later as a seed or
+        # attributed output. Its role and label must not depend on visit order.
+        if _ADDRESS_PRIORITY[role] >= _ADDRESS_PRIORITY[node.get("role", "address")]:
+            node["role"], node["color"] = role, COLORS[role]
         occurrence = {"outpoint": key, "output": public_fields(output), "trace": tracked, "labels": matches}
-        if occurrence not in nodes[node_id]["details"]["occurrences"]:
-            nodes[node_id]["details"]["occurrences"].append(occurrence)
+        if occurrence not in node["details"]["occurrences"]:
+            node["details"]["occurrences"].append(occurrence)
+        attributions = sorted({m["entity"] + " (" + m["confidence"] + ")"
+                               for item in node["details"]["occurrences"] for m in item["labels"]
+                               if m.get("classification") != "suspected_service"})
+        services = {canonical(m): m for item in node["details"]["occurrences"] for m in item["labels"]
+                    if m.get("classification") == "suspected_service"}
+        parts = [label]
+        if services:
+            # Keep uncertainty visible even when a separate attribution has
+            # higher color priority. Full names and rationale stay in evidence.
+            parts.append("Suspected service")
+            names = sorted({short(m["entity"]) for m in services.values()
+                            if m["entity"] != "Suspected service"})
+            if names:
+                parts.append(", ".join(names))
+            node["details"]["suspected_services"] = [services[key] for key in sorted(services)]
+        if attributions:
+            parts.append(", ".join(attributions))
+        node["label"] = "\n".join(parts)
         return node_id
 
-    for txid, record in sorted(state["transactions"].items(), key=lambda item: (item[1]["depth"], item[0])):
+    for txid, record in sorted(state["transactions"].items(), key=lambda item: (ranks[item[0]], item[0])):
         tx = record["data"]
-        column = 2 * record["depth"] + 1
-        txnode = add_node("tx:" + txid, "transaction", "TX\n" + short(txid) + "\nhop " + str(record["depth"]),
+        column = 2 * ranks[txid] + 1
+        role = "starting_transaction" if txid in starting_transactions else "transaction"
+        txnode = add_node("tx:" + txid, "transaction",
+                          "TX\n" + short(txid) + "\n" + transaction_date(tx) + "\nhop " + str(record["depth"]),
                           column, {"transaction": tx, "observation_id": record["observation_id"]},
-                          None if simulated else explorer + "/tx/" + txid)
+                          None if simulated else explorer + "/tx/" + txid, COLORS[role])
+        nodes[txnode]["role"] = role
         for index, vin in enumerate(tx["vin"]):
             key = f"{vin.get('txid', txid)}:{vin.get('vout', index)}"
             network = "bitcoin" if vin.get("is_pegin") else "liquid"
@@ -80,36 +203,56 @@ def build_graph(state, merge_addresses=False):
             traced = bool(link and link["spending_txid"] == txid and link["vin"] == index and network == "liquid")
             edges.append({"id": f"in:{txid}:{index}", "source": input_node, "target": txnode,
                           "role": "traced_input" if traced else "context_input", "outpoint": key,
-                          "label": f"vin {index} / {short(key)}", "quantity": quantity(prevout),
+                          "label": f"vin {index}", "quantity": graph_quantity(prevout),
                           "details": {"vin": vin, "validated_trace_link": link if traced else None}})
         for index, output in enumerate(tx["vout"]):
             key = f"{txid}:{index}"
+            if output_kind(output) == "fee":
+                fee_items["event:" + key] = {"endpoint": "shapes", "txid": txid, "vout": index}
+                fee_items["out:" + key] = {"endpoint": "connectors", "source": txnode, "target": "event:" + key}
+                if not include_fees:
+                    continue
             output_node = address(key, output, column + 1)
+            if output_kind(output) == "fee":
+                nodes[output_node]["label"] += "\n" + fee_date(tx)
             role = "seed_output" if key in state["seeds"] else ("candidate_output" if key in state["outputs"] else "context_output")
             edges.append({"id": "out:" + key, "source": txnode, "target": output_node,
                           "role": role, "outpoint": key, "label": "vout " + str(index),
-                          "quantity": quantity(output), "details": public_fields(output)})
+                          "quantity": graph_quantity(output), "details": public_fields(output)})
 
-    columns = defaultdict(list)
     for node in nodes.values():
-        columns[node["column"]].append(node)
-    for column, group in columns.items():
-        def priority(node):
-            if node["kind"] == "transaction" or node["color"] in (COLORS["seed"], COLORS["candidate"], COLORS["attributed"]):
-                return (0, node["id"])
-            return (1 if node["kind"] == "address" else 2, node["id"])
-        for row, node in enumerate(sorted(group, key=priority)):
-            node.update({"x": column * 390 + 130, "y": row * 245 + 240,
-                         "width": 160, "height": 160})
+        if node["kind"] != "address" or node["details"].get("network") != "liquid":
+            continue
+        endpoints = sorted({item["outpoint"] for item in node["details"]["occurrences"]
+                            if item["outpoint"] in unspent_endpoints})
+        if endpoints:
+            node["details"]["unspent_endpoints"] = endpoints
+            node["label"] += "\n" + ("Unspent endpoint" if len(endpoints) == 1
+                                      else f"Unspent endpoints: {len(endpoints)}")
+
+    layout = arrange(nodes, edges, state["transactions"], fee_items)
+    layout["cycle_groups"] = cycle_groups
     mode = "merged" if merge_addresses else "outpoint_occurrences"
-    return {"schema_version": 2, "run_id": state["run_id"], "simulated": simulated,
+    graph = {"schema_version": 2, "presentation_version": PRESENTATION_VERSION,
+            "run_id": state["run_id"], "simulated": simulated,
             "namespace": {"case_id": state["case_id"], "source": source, "address_mode": mode},
             "run": {key: state.get(key) for key in ("run_id", "parent_run", "ancestor_runs", "seeds", "started_at", "finished_at",
                     "status", "stop_reason", "limits", "stats")},
             "address_mode": mode,
-            "notice": "UTXO reachability, not allocation of stolen value. Gray inputs/outputs are context. "
-                      "Asset and amount may be confidential. Repeated addresses are separate outpoint occurrences by default.",
+            "connector_attachment": "transaction_sides_v1",
+            "include_fees": bool(include_fees),
+            "graph_options": {"include_fees": bool(include_fees)},
+            "fee_items": fee_items, "layout": layout,
+            "notice": "UTXO reachability, not allocation of stolen value. Gray arrows and light gray circles are context. "
+                      "?? marks amounts or assets not available from public data. "
+                      "Repeated addresses are separate outpoint occurrences by default.",
             "nodes": list(nodes.values()), "edges": edges}
+    if "service_controls" in state:
+        # A refreshed preview may use current investigator designations over an
+        # older archived run. Record that presentation snapshot independently.
+        graph["service_controls"] = deepcopy(state["service_controls"])
+    graph["activity_frames"] = activity_frames(graph)
+    return graph
 
 
 def write_csv(path, rows, fields):
@@ -123,26 +266,103 @@ def write_csv(path, rows, fields):
             writer.writerow(values)
 
 
+def node_csv_rows(graph):
+    """Append reviewable service fields without replacing original node columns.
+
+    A merged address can carry multiple independent designations. Use a JSON
+    array for each service field in that case, in the same deterministic order,
+    so names remain associated with their rationale and confidence.
+    """
+    fields = {"service_name": "entity", "service_rationale": "rationale",
+              "service_source": "source", "service_confidence": "confidence",
+              "service_observed_at": "observed_at"}
+    for node in graph["nodes"]:
+        services = node.get("details", {}).get("suspected_services", [])
+        row = dict(node)
+        if services:
+            row["classification"] = "suspected_service"
+            row["stop_tracing"] = any(service.get("stop") is True for service in services)
+            for field, key in fields.items():
+                values = [service.get(key, "") for service in services]
+                row[field] = values[0] if len(values) == 1 else values
+        yield row
+
+
+def _svg_edge_route(start, end):
+    """Keep transaction ports fixed, including return edges and the fee row."""
+    def attachment(node, other, source):
+        x, y = node["x"], node["y"]
+        if node["kind"] == "transaction":
+            direction = 1 if source else -1
+            return (x + node["width"] / 2 * direction, y), (direction, 0)
+        dx = other["x"] - x
+        # Horizontal address/event ports keep a same-column reused circle's
+        # input on the transaction's left and its output on the right, without
+        # routing a vertical segment through that transaction's rectangle.
+        direction = (1 if dx > 0 else -1) if dx else (-1 if source else 1)
+        return (x + node["width"] / 2 * direction, y), (direction, 0)
+
+    first, outgoing = attachment(start, end, True)
+    last, incoming = attachment(end, start, False)
+    x1, y1 = first
+    x2, y2 = last
+    reach = max(60, min(220, abs(x2 - x1) * .45 + abs(y2 - y1) * .15))
+    control1 = (x1 + outgoing[0] * reach, y1 + outgoing[1] * reach)
+    control2 = (x2 + incoming[0] * reach, y2 + incoming[1] * reach)
+    if x2 < x1:
+        # Keep the first and last bends outside their transaction rectangles.
+        # One wide cubic can double back through a rectangle even though its
+        # endpoint is on the correct side. A separate cross-row segment avoids
+        # that ambiguity, including backward paths up to the fee row.
+        clearance = max(start["height"], end["height"]) / 2 + 50
+        lane_y = ((y1 + y2) / 2 if abs(y2 - y1) >= 2 * clearance
+                  else min(y1, y2) - clearance)
+        middle = ((x1 + x2) / 2, lane_y)
+        direction = 1 if control2[0] > control1[0] else -1
+        corner = min(40, abs(control2[0] - control1[0]) / 4)
+        turn1 = (control1[0] + direction * corner, lane_y)
+        turn2 = (control2[0] - direction * corner, lane_y)
+        segments = ((control1, (control1[0], lane_y), turn1),
+                    ((turn1[0] + direction * corner, lane_y),
+                     (turn2[0] - direction * corner, lane_y), turn2),
+                    ((control2[0], lane_y), control2, last))
+        label = middle
+    else:
+        segments = ((control1, control2, last),)
+        # Position the caption on the curve rather than on its chord.
+        label = ((x1 + 3 * control1[0] + 3 * control2[0] + x2) / 8,
+                 (y1 + 3 * control1[1] + 3 * control2[1] + y2) / 8)
+    path = f"M {x1} {y1} " + " ".join(
+        "C " + ", ".join(f"{x} {y}" for x, y in segment) for segment in segments)
+    return path, label, [first] + [point for segment in segments for point in segment]
+
+
 def svg_graph(graph):
     lookup = {n["id"]: n for n in graph["nodes"]}
-    width = max((n["x"] for n in lookup.values()), default=500) + 160
-    height = max((n["y"] for n in lookup.values()), default=300) + 130
-    chunks = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}">',
+    routes = [(edge, _svg_edge_route(lookup[edge["source"]], lookup[edge["target"]]))
+              for edge in graph["edges"]]
+    bounds = [(n["x"] - n["width"] / 2, n["y"] - n["height"] / 2) for n in lookup.values()]
+    bounds += [(n["x"] + n["width"] / 2, n["y"] + n["height"] / 2) for n in lookup.values()]
+    bounds += [point for _, (_, _, points) in routes for point in points]
+    legend = legend_lines()
+    header_top = min((y for _, y in bounds), default=160) - max(170, 24 + len(legend) * 18 + 30)
+    min_x = min(0, min((x for x, _ in bounds), default=0) - 30)
+    min_y = min(0, header_top - 30)
+    width = max(1100, max((x for x, _ in bounds), default=500) + 80) - min_x
+    height = max((y for _, y in bounds), default=300) + 50 - min_y
+    chunks = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{min_x} {min_y} {width} {height}" width="{width}" height="{height}">',
         '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/></marker></defs>',
-        f'<rect width="{width}" height="{height}" fill="#fff"/>',
+        f'<rect x="{min_x}" y="{min_y}" width="{width}" height="{height}" fill="#fff"/>',
         '<g font-family="Arial, sans-serif">',
-        '<text x="40" y="40" font-size="24" font-weight="bold">Liquid UTXO trace' + (' · SYNTHETIC DEMO' if graph["simulated"] else '') + '</text>',
-        '<text x="40" y="70" font-size="14">Circles: addresses at outpoints · Squares: transactions · Diamonds: events</text>',
-        '<text x="40" y="95" font-size="14">Red: seed · Yellow: candidate · Gray: context · Arrows do not allocate stolen value</text>']
-    for edge in graph["edges"]:
-        start, end = lookup[edge["source"]], lookup[edge["target"]]
-        x1, y1, x2, y2 = start["x"] + 80, start["y"], end["x"] - 80, end["y"]
+        f'<text x="40" y="{header_top}" font-size="24" font-weight="bold">Liquid UTXO trace' + (' · SYNTHETIC DEMO' if graph["simulated"] else '') + '</text>']
+    chunks.extend(f'<text x="40" y="{header_top + 24 + index * 18}" font-size="13">{html.escape(line)}</text>'
+                  for index, line in enumerate(legend))
+    for edge, (path, (label_x, label_y), _) in routes:
         context = edge["role"].startswith("context")
-        color = "#9ca3af" if context else "#155e75"
-        mid = (x1 + x2) / 2
-        chunks.append(f'<g class="edge {"context" if context else "tracked"}"><title>{html.escape(edge["outpoint"] + " | " + edge["quantity"])}</title>'
-            f'<path d="M {x1} {y1} C {mid} {y1}, {mid} {y2}, {x2} {y2}" fill="none" stroke="{color}" stroke-width="2" marker-end="url(#arrow)"/>'
-            f'<text x="{mid}" y="{(y1+y2)/2-10}" text-anchor="middle" font-size="11" fill="{color}">{html.escape(edge["label"])}</text></g>')
+        color = edge_color(edge["role"])
+        chunks.append(f'<g class="edge {"context" if context else "tracked"}" data-edge-key="{html.escape(edge["id"], quote=True)}"><title>{html.escape(edge["outpoint"] + " | " + edge["quantity"])}</title>'
+            f'<path d="{path}" fill="none" stroke="{color}" stroke-width="2" marker-end="url(#arrow)"/>'
+            f'<text x="{label_x}" y="{label_y-10}" text-anchor="middle" font-size="11" fill="{color}">{html.escape(edge["label"])}</text></g>')
     for node in graph["nodes"]:
         x, y, fill = node["x"], node["y"], node["color"]
         chunks.append(f'<g class="node" data-key="{html.escape(node["id"], quote=True)}" tabindex="0" style="cursor:pointer"><title>{html.escape(json.dumps(node["details"], ensure_ascii=False))}</title>')
@@ -184,14 +404,20 @@ def export_run(store, state, destination, merge_addresses=False, offline_preview
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
     save_json(destination / "trace.json", state)
-    graph = build_graph(state, merge_addresses)
+    save_json(destination / "investigation.json", {
+        "run_id": state["run_id"], "parent_run": state.get("parent_run"),
+        "case_id": state["case_id"],
+        "name": state.get("investigation", {}).get("name"),
+        "miro_board": state.get("investigation", {}).get("miro_board"),
+        "note": "Board selection recorded at trace time. Subsequent publication details are in the case's miro/reports directory.",
+    })
+    graph = build_graph(state, merge_addresses, state.get("graph_options", {}).get("include_fees", False))
     save_json(destination / "graph.json", graph)
     if offline_preview:
         svg = svg_graph(graph)
         (destination / "graph.svg").write_text(svg, encoding="utf-8")
         (destination / "graph.html").write_text(html_graph(graph, svg), encoding="utf-8")
-    write_csv(destination / "nodes.csv", graph["nodes"],
-        ["id", "kind", "label", "url", "color", "details"])
+    write_csv(destination / "nodes.csv", node_csv_rows(graph), NODE_CSV_FIELDS)
     write_csv(destination / "edges.csv", graph["edges"],
         ["id", "source", "target", "role", "outpoint", "label", "quantity", "details"])
     rows, events, inputs = [], [], []

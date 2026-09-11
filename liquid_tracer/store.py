@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -12,7 +13,11 @@ class Store:
     def __init__(self, case):
         self.case = Path(case)
         self.case.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.case / "evidence.sqlite")
+        # One connection is shared by the bounded fetch workers. Serialize the
+        # whole transaction, not just execute(), so one worker cannot commit or
+        # roll back another worker's evidence.
+        self._lock = threading.RLock()
+        self.db = sqlite3.connect(self.case / "evidence.sqlite", check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
           CREATE TABLE IF NOT EXISTS observations (
@@ -27,19 +32,20 @@ class Store:
         """)
 
     def observe(self, run_id, source, endpoint, body, status=200):
-        with self.db:
+        with self._lock, self.db:
             cur = self.db.execute("INSERT INTO observations VALUES (NULL,?,?,?,?,?,?,?,?)",
                 (run_id, source, endpoint, now(), time.time(), status, digest(body), body))
         return cur.lastrowid
 
     def attempt(self, run_id, kind, endpoint, status):
-        with self.db:
+        with self._lock, self.db:
             self.db.execute("INSERT INTO attempts VALUES (NULL,?,?,?,?,?)",
                             (run_id, kind, endpoint, now(), str(status)))
 
     def cached(self, source, endpoint, run_id, ttl):
-        row = self.db.execute("SELECT * FROM observations WHERE source=? AND endpoint=? "
-                              "AND status=200 ORDER BY id DESC LIMIT 1", (source, endpoint)).fetchone()
+        with self._lock:
+            row = self.db.execute("SELECT * FROM observations WHERE source=? AND endpoint=? "
+                                  "AND status=200 ORDER BY id DESC LIMIT 1", (source, endpoint)).fetchone()
         if row and (row["run_id"] == run_id or (ttl > 0 and time.time() - row["epoch"] <= ttl)):
             if digest(row["body"]) != row["sha256"]:
                 raise TraceError("Cached evidence checksum failed")
@@ -51,10 +57,15 @@ class Store:
 
     def observations(self, ids):
         for oid in sorted(set(ids)):
-            row = self.db.execute("SELECT * FROM observations WHERE id=?", (oid,)).fetchone()
-            if row is None or digest(row["body"]) != row["sha256"]:
-                raise TraceError("Missing or altered evidence observation " + str(oid))
-            yield dict(row)
+            with self._lock:
+                row = self.db.execute("SELECT * FROM observations WHERE id=?", (oid,)).fetchone()
+                if row is None or digest(row["body"]) != row["sha256"]:
+                    raise TraceError("Missing or altered evidence observation " + str(oid))
+                snapshot = dict(row)
+            # Rows are append-only. Snapshot one response at a time so exports
+            # stay streaming without holding a lock while the consumer runs.
+            yield snapshot
 
     def close(self):
-        self.db.close()
+        with self._lock:
+            self.db.close()

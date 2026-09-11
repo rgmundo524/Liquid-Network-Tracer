@@ -1,60 +1,291 @@
 # Liquid UTXO Tracer
 
-A local Python program for bounded forward tracing on Liquid, per-run CSV/evidence exports, and incremental updates to an editable Miro graph. Version 0.2.0; Python 3.11+ on Linux or macOS; no third-party runtime packages. Live case integration still needs validation with your credentials and starting outputs.
+A local Python program for bounded forward tracing on Liquid, per-run CSV/evidence exports, and incremental updates to an editable Miro graph. Version 0.2.0; Python 3.11+ on Linux or macOS. Choose the Textual terminal interface or the local Astro browser interface; both use the same Python tracer and saved investigations. Live case integration still needs validation with your credentials and starting outputs.
 
 Miro is the investigation workspace. The program retrieves blockchain data and keeps the evidence and object mapping; it can be run from your terminal without a Miro plugin. CSV files document each run. The saved graph plan supplies native Miro shapes and connectors directly through the REST API, so a generic CSV-to-graph importer is unnecessary.
 
-It follows **exact output spends**, preserves confidential quantities as unknown, saves unfinished branches, and extends them in later runs. The graph uses address circles, transaction squares, and separate diamonds for fees, unspendable outputs, and peg-out requests.
+It follows **exact output spends**, preserves confidential quantities as unknown, saves unfinished branches, and extends them in later runs. The graph uses address circles, transaction squares, and separate diamonds for unspendable outputs, peg-out requests, and optionally transaction fees.
 
-## Start with the offline demo
+Graph captions use `vin/vout number · amount asset`. For example, `vout 0 · ?? ??` means neither amount nor asset is available in the public data; `?? L-BTC` retains an explicitly identified asset with an unavailable amount. Known amounts remain exact base-unit quantities. Other asset IDs are shortened for display and retained in full in the evidence. Address circles show the address and any analyst attribution; the creating transaction hash and exact UTXO reference remain in the saved details instead of being repeated on the circle or input caption.
 
-Clone the project and enter its devenv shell. Install [devenv](https://devenv.sh/getting-started/) first if needed. The shell provides Python 3.12 and project commands; no pip install or credentials are needed for the demo:
+The graph legend uses the same palette as its nodes and connectors:
+
+| Appearance | Meaning |
+| --- | --- |
+| Purple squares | Provided starting transactions, including those also reached through another starting transaction. |
+| Blue squares | Subsequent transactions outside the provided starting set. |
+| Red circles | Selected starting outputs. |
+| Yellow circles | Reachable candidate outputs. |
+| Orange circles | A traced branch ends at an output observed unspent. |
+| Light gray circles | Context addresses. |
+| Green circles | Analyst attribution; read its confidence label. |
+| Pink diamonds | Fees, unspendable outputs, or peg-out requests. |
+| Dark teal / gray arrows | Traced UTXO links / context connections. |
+
+Starting-transaction color comes from the saved seed transaction hashes, independently of hop depth, and remains purple across continuations. Where circle roles overlap, attribution takes precedence over unspent endpoint, then seed, candidate, and context. This also applies when addresses are merged. Colors describe graph roles; they do not establish ownership or allocate stolen value. Run notes show counts of starting outputs and transactions while the full seed list stays in the saved run data.
+
+**Unspent endpoint** marks the specific traced UTXO where a branch stops because the explorer reported it unspent. It does not highlight an address merely because it holds other unspent outputs. Hop limits, errors, analyst stops, and unselected outputs do not qualify. The output needs a recorded spending-status observation, and a known spending input in the saved graph overrides stale unspent evidence. Attribution colors retain priority, with the endpoint label still shown. In merged-address mode, the label identifies how many displayed tracked endpoints qualify; it does not imply the whole address is dormant.
+
+The status refers to the saved observation, not a real-time balance or a minimum inactivity period. Continuing and rechecking that branch can remove its orange color when it is spent. Regenerating a preview or syncing to Miro uses existing saved evidence and makes no extra explorer requests. Detailed graph/CSV data retains the qualifying outpoints. See [Esplora's spending-status endpoints](https://github.com/Blockstream/esplora/blob/master/API.md#get-txtxidoutspendvout).
+
+Miro presentations now use **ELK Layered**, a layout engine running locally through the pinned `elkjs` library. It places transactions and nearby inputs/outputs from left to right, orders connection points to reduce crossings, and separates disconnected components. Reused addresses remain distinct UTXO occurrences by default; merging them can introduce return edges that cannot all point right. The evidence archive retains its original baseline layout; ELK calculates a separate presentation without changing the recorded relationships.
+
+Transaction connectors attach to fixed sides: inputs enter the left and outputs leave the right, with separate attachment points ordered by ELK. **Connector appearance** in settings defaults to **Straight**; **Curved** and **Elbowed** are also available. Straight connections that return backward or would pass through objects use elbowed routes where needed. Miro controls the final connector paths, so the local preview estimates its appearance. New connectors use the selected setting; choose **Sync and reorganize graph** to apply the calculated positions and connector appearance to an existing graph. Normal sync preserves manual positions and connector choices.
+
+**Include transaction fee flows** is a checkbox in investigation settings and the defaults for new investigations. It starts unchecked. When included, fees appear in a horizontal row above the main flow, ordered by available chain chronology with deterministic tie handling. Excluding fees changes the graph only: fee amounts, events, and API observations remain in the evidence exports.
+
+The pink diamonds identify special outputs. **PEG-OUT REQUEST** records Esplora's parsed withdrawal instruction to the parent chain. On Liquid mainnet, a normal L-BTC peg-out burns L-BTC and requests a Bitcoin payout to the encoded destination. The tracer has not matched or confirmed that separate Bitcoin payout, and the label does not identify an Avalanche bridge. See [Blockstream's peg-out explanation](https://help.blockstream.com/liquid-network/faqs/what-is-a-liquid-peg-out) and the [Esplora transaction fields](https://github.com/blockstream/esplora/blob/master/API.md#transaction-format).
+
+**UNSPENDABLE** means the recorded script is identified as `OP_RETURN`, preventing that output from being spent later. The individual output branch ends there; other spendable outputs from the transaction can still be traced. Such an output may carry data or represent a burn, but Liquid can also add zero-value unspendable outputs when constructing confidential transactions. When the amount or asset is `??`, do not infer a positive-value L-BTC burn from the diamond alone. See the [Elements blinding documentation](https://elementsproject.org/en/doc/22.0.0/rpc/wallet/blindrawtransaction/) and [null-data script explanation](https://developer.bitcoin.org/devguide/transactions.html#null-data).
+
+## Start the program
+
+The project has **one main `devenv.nix`** for Python, Node.js, commands, and environment defaults. SecretSpec retrieves API credentials from Proton Pass when a selected action needs them. Investigation names, board IDs, and run history are saved as case data; you do not need another Nix file or shell variables for each investigation.
+
+The bundled Proton Pass CLI supports Linux on x86_64 or ARM64 and macOS on Apple Silicon. Clone the project and enter its devenv shell. Install [devenv](https://devenv.sh/getting-started/) first if needed:
 
 ```bash
 git clone https://github.com/rgmundo524/Liquid-Network-Tracer.git
 cd Liquid-Network-Tracer
 devenv shell
+liquid-trace
 ```
+
+In an interactive terminal, `liquid-trace` opens a Textual interface with **New investigation**, **Continue investigation**, **Settings**, and **Exit**. Select actions with the keyboard or mouse. You can also launch it explicitly with `liquid-trace menu`. Opening the menu does not load credentials or call Blockstream or Miro.
+
+When a button is highlighted, use **↑ ↓ ← →** to move between buttons and **Enter** to activate it. **Tab** and **Shift+Tab** move between all controls. Text fields, dropdowns, and tables keep their normal arrow-key behavior. **Space** toggles a checkbox; **Esc** returns to the previous screen. Disabled buttons are skipped, and navigation scrolls the focused button into view.
+
+1. Choose **New investigation** and give it a name. The program creates a unique subdirectory under `cases/`.
+2. Select **Live Liquid** or the offline synthetic demo. Paste one or more bare Liquid transaction hashes, separated by commas, into **Transaction hashes** and choose **Load outputs**. Review the outputs grouped by transaction, use Enter to toggle the relevant rows across transactions, then choose **Use selected outputs**. This fills the starting-output field; it replaces any existing entries. Alternatively enter known outputs directly as `HASH:NUMBER`, separated by whitespace or commas. Optionally provide an existing Miro board URL or ID; you can add it later.
+3. Start the first bounded run from the investigation menu. Review the hop and request limits before running it. A live trace retrieves credentials through SecretSpec; a demo trace needs none.
+4. Review the saved run summary and exported file locations. If the case has no board, choose **Create Miro board**, review its name and visibility, and create it. Then choose **Preview Miro** and **Sync to Miro** to publish the saved run.
+5. Next time, launch `liquid-trace`, choose **Continue investigation**, and select the saved case. Continue its latest run with another bounded hop allowance, or review and sync what is already saved.
+
+The investigation settings let you change its name, board, run limits, fee visibility, and connector appearance. Top-level **Settings** changes defaults for new investigations. Existing investigations keep their own saved defaults. Creating a board saves its ID with the case and shows its URL in the investigation menu. It creates an empty board; publishing the traced graph is a separate **Sync to Miro** action. A completed run can be synced after creating or linking a board without tracing again.
+
+Choose **ELK layout preview** after saving a run to inspect the proposed positions and routes locally, compare estimated crossings and overlaps, and download its SVG. It needs no credentials or board. The preview uses the same ELK calculation as the default Miro plan, while actual Miro routes and existing manual arrangements can differ.
+
+For an independent local view, choose **Mermaid chart** in the investigation menu after saving a run. The button creates a Mermaid source file, renders an SVG, and opens an HTML preview in your browser. It uses the latest saved run and current fee setting, needs no API credentials or Miro board, and saves each preview in a new directory under the investigation's `previews/`. The menu shows the file path if a browser cannot be opened. Miro remains the editable investigation board.
+
+Choose **Export CSV** beside **Mermaid chart** to save tables from the latest run. Each click creates a new directory under the investigation's `exports/` and displays its file paths. This offline action requires a saved run, with no Miro board or secret-provider session. Completed runs already contain CSVs; the menu action makes a separate export for review or use in another application.
+
+`vout` means the output's numeric index, starting at zero. In `HASH:0`, `0` selects the first output; `HASH:1` selects the second. Do not type the literal word `vout` or a backslash before the colon. Choose the output connected to your investigation; output 0 is only an example. The picker starts with nothing selected and excludes fees, peg-outs, and unspendable outputs. Hidden amounts and assets remain unknown.
+
+**Load outputs** accepts up to 100 distinct transaction hashes. Commas, spaces, or newlines separate hashes; duplicates are removed and the full list is validated before lookup. One credential session and API client serve the batch. The shared lookup budget defaults to five API attempts and 30 seconds per distinct transaction, including authentication and retries. For 10 transactions that means at most 50 attempts and 300 seconds across the batch. A failed lookup preserves the existing starting-output field; a partial result is not applied.
+
+Lookup creates no investigation or trace and follows no subsequent spends. The selected output references are saved when you create the investigation; the later trace fetches and archives its own evidence. Selected UTXOs from all starting transactions share one investigation, board, and set of run limits. Shared descendants are represented once. Continuing a bounded run resumes its saved branches; adding different starting transactions currently requires a new investigation.
+
+For your first trial, select the **offline demo** and use a separate empty Miro test board. Demo hashes and addresses are synthetic. Its full path ends in a synthetic peg-out request, not an actual Bitcoin payout or Avalanche transaction. You can navigate, trace the demo, and preview a Miro plan without credentials. Creating a Miro board and live sync require your access token, even for a demo investigation.
+
+## Local browser interface
+
+For the Astro alternative, enter the same environment and launch:
 
 ```bash
-python3 -m liquid_tracer trace \
-  --case ./demo-case \
-  --fixture examples/demo-api.json \
-  --seeds-file examples/demo-seeds.txt \
-  --hops 1
+devenv shell
+liquid-web
 ```
 
-The command prints its run ID and output directory. Inspect `nodes.csv`, `edges.csv`, `frontier.csv`, and `RUN.md`. All demo hashes and addresses are synthetic. Preview the number of Miro objects using the printed run ID:
+This builds the interface and opens [http://127.0.0.1:4321](http://127.0.0.1:4321) in your browser. The first launch installs the locked frontend packages; later launches reuse that installation unless the package manifest or lockfile changes. Leave the launching terminal open. Use `liquid-web --no-open` to open the address yourself, `--port 4322` to choose another port, or `--root /absolute/path/to/investigations` to select another investigation directory. `liquid-web --help` shows the options without building the interface.
+
+The browser and terminal interfaces share the same `cases/`, defaults, run history, and Miro mappings. An investigation created in either interface can be reopened in the other without importing or migrating it.
+
+1. Open a saved investigation, or create a new live or synthetic-demo investigation. For live cases, paste comma-separated transaction hashes, load their outputs, and select the relevant UTXOs grouped by transaction.
+2. Review the bounded run limits and start tracing. A later run continues the investigation's latest saved snapshot.
+3. Select a saved run to review it, create an **ELK layout preview** or Mermaid chart, or export CSV tables. Use **Download SVG** beside either chart or the individual CSV download buttons. Layout reports, Mermaid source, and supporting files are also available. Downloads remain available after reopening the investigation; selecting a different run shows that run's products. Changed display settings are identified so you can regenerate the affected product.
+4. Create a private Miro board or link an existing board in the investigation settings. Preview the saved run, then sync it to Miro. **Sync and reorganize graph** is a separate action because it can move existing managed objects and change their connector appearance and attachment points.
+
+The investigation settings include run limits, the fee-flow checkbox, and connector appearance; global settings provide defaults for new investigations. The synthetic demo, saved-run review, ELK and Mermaid previews, CSV export, and Miro plan preview need no API credentials. Miro board creation, sync, and organization still contact Miro, including for demo cases.
+
+The usual cycle is **Trace → Create or link a board once → Preview Miro → Sync to Miro → Continue run → Sync to Miro**. Keep the same investigation and board. Normal sync preserves your arrangement and adds the continuation. If the existing positions leave no room, or you want a fresh arrangement, choose **Sync and reorganize graph**. This action both adds the selected saved run and rearranges the managed graph; no separate sync or new trace is required afterward. It cannot reserve space for a future run that has not been traced. You may also tidy the native shapes in Miro by hand.
+
+During sync, the browser and launching terminal show the current stage and completed/total item counts. Existing-item checks finish before any board changes, so the board itself may initially appear unchanged. The display distinguishes checking, layout preparation, updates, new items, and temporary API retry waits. Counts belong to the current stage, not a predicted completion time. A failed action retains its last stage; consult the terminal for the specific API or mapping error before retrying.
+
+Live actions retrieve credentials through the existing SecretSpec/Proton Pass setup. If Proton Pass needs login or unlocking, respond in the **launching terminal**; do not enter API keys in the browser. Only one job runs at a time in each local server. Closing a browser tab does not cancel its job: reopen the address to see progress. **Ctrl+C** stops the server and its active offline worker. While a live action owns the terminal for provider prompts, the first Ctrl+C cancels that action; press it again after the prompt returns to stop the server. Restart `liquid-web` to reopen saved investigations from disk.
+
+Astro supplies the local interface; Python serves it and runs the existing tracer commands. The built interface and ELK/Mermaid previews need no CDN or hosted frontend. Use the local previews to review layouts and Miro for online editing and collaboration. See [local browser development](docs/development.md#local-astro-interface) for build and test commands.
+
+## Where investigations and runs are saved
+
+The menu uses `LIQUID_INVESTIGATIONS_DIR`, configured by devenv as the repository's `cases/` directory. To select another location explicitly, use:
 
 ```bash
-python3 -m liquid_tracer miro-sync \
-  --case ./demo-case --run RUN_ID \
-  --board DEMO_BOARD --dry-run
+liquid-trace menu --investigations-dir /absolute/path/to/investigations
 ```
 
-This preview makes no network calls, needs no token, and writes no state. `DEMO_BOARD` is only a placeholder. It cannot detect remote manual edits or deleted items; live sync performs that preflight. Extend the demo using `trace --case ./demo-case --fixture examples/demo-api.json --resume RUN_ID --additional-hops 2`. The full demo ends in a **synthetic peg-out request**, not an actual Bitcoin payout or Avalanche transaction.
+| Location | Contents |
+| --- | --- |
+| `cases/settings.json` | Run limits, fee visibility, and connector appearance defaults for new investigations. |
+| `cases/<investigation>/case.json` | Investigation name, seeds, source, board selection, run defaults, and latest exported run ID. |
+| `cases/<investigation>/runs/<run-id>/` | A separate evidence and export directory for each run. |
+| `cases/<investigation>/previews/<run-id>-elk-<id>/` | Local ELK SVG/HTML preview, complete graph geometry, and layout quality report. |
+| `cases/<investigation>/previews/<run-id>-mermaid-<id>/` | Local Mermaid source, SVG/HTML preview, graph details, and node identifiers. |
+| `cases/<investigation>/exports/<run-id>-csv-<id>/` | CSV tables with export provenance and checksums. |
+| `cases/<investigation>/miro/` | Saved mapping between graph objects and items on each Miro board. |
+| `cases/<investigation>/miro/board-creation.json` | Board creation request and receipt, retained to recover interrupted creation without duplicating a board. |
+| `cases/<investigation>/miro/reports/` | Sync reports identifying the run and actual board used. |
+
+One investigation normally keeps the same board across continuations. Each new run preserves the previous run and its evidence. A run ID distinguishes the snapshots, but the program saves and selects that ID for you. The latest reference survives closing the shell and restarting the computer.
+
+New run exports include an `investigation.json` snapshot of the investigation name and board selection as known when tracing occurred. If you choose or change the board later, the saved case settings and sync reports record that choice; completed run exports are not rewritten. The board ID is case configuration. Actual API credentials remain in the secret provider and are not written into these files.
+
+The default `cases/` directory is ignored by Git. Preserve the whole investigation directory when backing up or moving a case, including its `case.json` and `miro/` mapping. A custom investigation directory has its own storage and Git rules.
+
+## Explicit commands and demo helpers
+
+Either interface can be the normal starting point. All existing subcommands remain available for scripts and advanced tracing. `liquid-live` loads credentials before running a direct command; the interfaces handle that step when you select a live action. `liquid-test` runs the offline Python suite.
+
+For a quick fixture run without the menu:
+
+```bash
+liquid-demo
+liquid-demo-preview --board 'https://miro.com/app/board/YOUR_TEST_BOARD_ID/'
+liquid-demo-sync --board 'https://miro.com/app/board/YOUR_TEST_BOARD_ID/'
+```
+
+The preview makes no network calls, needs no token, and writes no state. It cannot detect remote manual edits or deleted items; live sync performs that preflight. Live sync saves the selected board after local validation so subsequent `liquid-demo-preview` and `liquid-demo-sync` commands can reuse it. In a terminal, a missing board can be entered at the first-use prompt. For scripts, supply `--board` or use a case that already has one saved.
+
+`liquid-demo` starts a fresh independent run each time. To extend a published demo graph, resume its lineage instead of creating another independent root:
+
+```bash
+liquid-trace trace \
+  --case "$LIQUID_DEMO_CASE_DIR" \
+  --fixture "$LIQUID_TRACER_ROOT/examples/demo-api.json" \
+  --resume latest --additional-hops 1
+liquid-demo-preview
+liquid-demo-sync
+```
+
+A new independent root cannot overwrite an already published graph's lineage. The interactive menu avoids this manual selection by offering continuation within the saved investigation.
 
 If needed, add `--offline-preview` to `trace` or `export` to also save an HTML inspector and SVG. These are optional inspection files; normal runs use Miro for visual review.
 
-Inside the shell, `liquid-demo` runs the same synthetic trace. `liquid-trace` is the normal CLI; `liquid-live` loads credentials at runtime before calling it. `liquid-test` runs the offline suite. Outside devenv, Python 3.11+ still works with `python3 -m liquid_tracer`; optional installation is `python3 -m pip install -e .`.
+To review address activity and record suspected services, open an investigation and choose **Address review** in either the local browser or terminal interface. Search addresses already observed in a selected saved run, or paste an address. The list is paginated; opening a review reads saved data and does not fetch every address automatically.
 
-Public defaults and command definitions live in `devenv.nix`. The package input is pinned in `devenv.yaml`; commit the generated `devenv.lock` after the first successful shell build. See [development and secrets](docs/development.md) for local overrides, keyring setup and the optional `.env` provider.
+1. Choose **Refresh activity** (the terminal calls it **Refresh address activity**). This explicitly retrieves statistics and bounded confirmed history through the existing Blockstream client and Proton Pass workflow. Defaults are five history pages, ten HTTP attempts including authentication/retries, and sixty seconds.
+2. Review confirmed transaction count, separate mempool count, confirmed unspent-output count, mempool output delta, combined general unspent-output count, and confirmed activity dates. These output counts include all indexed assets at the address. They are not an L-BTC balance or a count of only the investigation's UTXOs.
+3. Check history coverage. Transaction counts come from the explorer's address statistics without scanning every transaction. The first confirmed activity date is shown only when the complete paginated history agrees with those statistics. Otherwise, the oldest retrieved activity is explicitly partial. Block dates describe observed confirmed activity, not when a wallet or address was created. Statistics and history are separate observations, not an atomic chain snapshot.
+4. If your analysis supports the decision, enable **Suspected service / stop tracing**, enter an optional name and your reasoning, and save. This records your candidate assessment; the program does not infer ownership from activity counts or turn it into verified attribution.
+5. Continue the investigation. A designated address stops forward traversal before fetching its spend. If an earlier run already expanded beyond it, downstream frontier reachable only through that boundary is held too. Independent starting outputs and other unblocked paths remain eligible, subject to their currently permitted hop depths. Historical transactions, links, depths and observations stay intact.
+6. Refresh the local preview or use normal Miro sync to apply the new cyan **Suspected service** labels to existing address occurrences. Current decisions also appear in fresh CSV graph tables. Existing non-service analyst attribution retains color priority. Disable the designation later to allow subsequent continuation again; its rationale and revision history are retained.
+
+Decisions are saved in `services.json` with an audit history, separately from archived tracing runs. Each new run snapshots the current rules without copying the full decision history. Rules cannot change during an active trace. Address reviews are immutable, checksum-referenced JSON reports under `address-reviews/`; their raw API responses remain in `evidence.sqlite`. Refreshes create new observations and retain older reviews. Graph previews can reflect current decisions without rewriting the archived evidence. Service boundaries do not erase previously plotted downstream activity or classify that activity's owners.
+
+The same controls are available directly:
+
+```bash
+liquid-trace address-list --case cases/theft-liquid --query exchange
+liquid-live address-inspect --case cases/theft-liquid --address ADDRESS
+liquid-trace service-set --case cases/theft-liquid --address ADDRESS \
+  --name "Possible exchange" --rationale "Investigator's reasons"
+liquid-trace service-set --case cases/theft-liquid --address ADDRESS --disable
+```
+
+`address-inspect --run RUN_ID` uses that saved snapshot's API source. To inspect more history, explicitly increase `--max-pages`, `--max-requests`, and `--max-seconds`; every HTTP attempt still consumes the existing budget and rate controls. Increasing the page budget does not trace those transactions or add them to the funds-flow graph. Address spellings are not ownership clusters: use the address shown by the explorer/graph, because confidential and unconfidential representations are not automatically linked.
+
+To inspect the ELK layout for a saved run:
+
+```bash
+liquid-trace layout-preview --case cases/theft-liquid --run latest --open
+```
+
+This offline action saves `graph.html`, `graph.svg`, `graph.json`, and `layout-report.json` in a new `previews/<run-id>-elk-<id>/` directory. Optional `--connector-style straight|curved|elbowed`, `--include-fees`/`--exclude-fees`, `--run RUN_ID`, and `--out NEW_DIRECTORY` override the selected preview without changing its archive or case settings.
+
+In the ELK preview, click a transaction or address node, or focus it with Tab and press Enter, to open its **Explorer** link in a new tab. These links also work when the downloaded SVG is opened directly in a browser. They are limited to Blockstream's Liquid and Liquid testnet explorers; synthetic demonstrations and special event nodes have no live links. Opening a link is the only action that contacts the explorer. Saved previews remain self-contained and render offline. Choose **Refresh layout preview** to add links and current presentation colors to an older saved run.
+
+The report compares the saved graph's baseline arrangement with the proposed ELK arrangement, **not the current live Miro board**. It estimates line crossings, object overlaps, and lines through unrelated objects. Counts marked `≥` are lower bounds when the comparison limit is reached. Labels and Miro's automatic curves are not measured; zero estimated crossings does not guarantee a collision-free board. For smaller graphs ELK tries three deterministic alternatives; larger graphs use one. The comparison budget limits quality measurement work, never the accepted graph size or number of rendered objects. Optimization makes no external layout requests and uses no secrets.
+
+ELK now attempts the complete selected graph without an application-imposed node count, connection count, input/output size, coordinate, or elapsed-time ceiling. The earlier 10,000-object / 30,000-connection guards and 30-second timeout have been removed. A large graph is not automatically switched to the dependency layout. ELK finishes, reports an engine error, or stops when you cancel. Actual capacity still depends on graph complexity, available RAM, the JavaScript runtime, and processing time; accepting 100,000 objects does not guarantee a fast layout. Previously saved dependency-layout fallback previews remain readable.
+
+The existing `devenv.nix` now sets `LIQUID_RENDER_HEAP_MB = "auto"`. At each calculation, the tracer requests a JavaScript heap allowance equal to half the currently available memory, accounting for host memory and process/ancestor limits on standard Linux cgroup v1/v2 mounts. If memory detection is unavailable, auto uses 1,024 MiB. ELK receives the budget directly through Node's [max-old-space-size option](https://nodejs.org/docs/latest-v24.x/api/cli.html#--max-old-space-sizesize-in-mib). Arbitrary `NODE_OPTIONS` and credentials remain excluded from the ELK worker. Its progress reports graph size and the selected heap budget. The worker also releases its encoded input and avoids a second full graph copy when calculating the single layout used for larger graphs.
+
+For a fixed allowance, edit that same setting in the existing `devenv.nix`, for example `LIQUID_RENDER_HEAP_MB = "32768";` to request a 32 GiB heap on a 64 GiB workstation. Stop the application and re-enter `devenv shell` after changing it. No additional environment file or API secret is needed. This is a requested heap allowance, not a memory reservation or a total-process limit; Python, native buffers, Chromium and other applications also consume RAM. Explicit budgets are not silently reduced. Auto adapts to memory available when the calculation starts, so it may choose less than half installed RAM.
+
+Signal 6 by itself does not prove an out-of-memory failure. Renderer errors now distinguish recognized heap exhaustion, call-stack exhaustion, browser startup failures, and browser protocol timeouts without printing investigation labels. Unrecognized failures remain qualified. A heap abort during an eight-hop calculation after a successful one-hop preview is consistent with runtime memory pressure, but graph size and topology matter more than hop count alone.
+
+For an offline ELK or Mermaid preview, use **Cancel calculation** in the browser or terminal menu. The terminal menu also supports **Ctrl+X**; a direct CLI command can be interrupted with **Ctrl+C**. Cancellation stops the calculation and its renderer children. Saved runs and existing completed previews stay intact. ELK reports elapsed time while working, without claiming a percentage complete. Explicit Miro reorganization still replaces managed positions, while ordinary sync retains its existing manual-position rules and publication budgets.
+
+The single devenv installs the locked ELK dependency when entering the shell or building the browser interface. After pulling changes, re-enter `devenv shell`; `liquid-layout-setup` can also refresh the installation. Outside devenv, install Node.js 22.12 or newer and run `npm --prefix layout ci --ignore-scripts` from the project root. The [elkjs library](https://github.com/kieler/elkjs) calculates layout; Miro remains the renderer and editable board.
+
+To create a Mermaid chart directly from a saved investigation:
+
+```bash
+liquid-trace mermaid --case cases/theft-liquid --open
+```
+
+The command selects `latest` automatically. Optional `--run RUN_ID` selects a historical snapshot; `--out NEW_DIRECTORY` chooses a new destination. `--include-fees` and `--exclude-fees` override visibility for this preview only. Each invocation verifies the saved evidence before rendering and leaves archived runs and Miro mappings unchanged. The existing `devenv.nix` supplies Mermaid CLI and Chromium on Linux; leave an older shell and enter `devenv shell` after updating the project.
+
+Mermaid preserves the graph's arrows, shapes, colors, dates, and compact quantity labels, but computes its own left-to-right layout. Fixed Miro connection sides, manually arranged positions, and the chronological fee row are not copied into a Mermaid-rendered chart. It now runs for the full selected graph without the former 1,000-object / 2,000-connection bypass or 120-second deadline. Mermaid's source-size and edge settings are sized to the actual graph. Browser rendering can still take substantial time or exhaust runtime resources. The complete `graph.mmd`, `graph.json`, and `mermaid-node-map.json` are saved before rendering, and completed HTML remains self-contained for offline viewing. Previously saved direct SVG fallback previews remain available.
+
+The generated `puppeteer-config.json` also disables Puppeteer's [default 180-second protocol timeout](https://pptr.dev/api/puppeteer.connectoptions), which otherwise applies to the browser call containing the entire Mermaid calculation. Browser startup retains its normal timeout and sandbox behavior. The same requested heap budget is supplied to the Mermaid CLI's Node process and Chromium, while the Nix wrapper still supplies Chromium's executable. A Chromium build can impose a smaller internal heap limit even when more RAM is available; ELK's separate Node worker is the preferred layout path for very large investigations. Increasing RAM does not guarantee that Mermaid will render them.
+
+On a Mermaid renderer failure, a bounded diagnostic tail is saved locally as `mermaid-renderer.log` with owner-only permissions when possible. It can contain graph labels and is intentionally excluded from browser downloads. The displayed error uses fixed diagnostic categories and points to the saved source; a generic exit 1 no longer claims the installation is broken. Retry the selected saved run after updating, without another Blockstream trace.
+
+The local SVG exporter also has no fixed object, connection, coordinate-range, or route-point ceiling. It still validates finite geometry and retains every displayed connection. Very large SVGs may be slow to open in a browser; **Create CSV export** remains available for analysis. A saved continuation is cumulative: reducing the next run's hop count will not shrink the existing graph. You can retry either preview from a saved run without fetching Blockstream data again. Trace hop/request/time budgets and Miro's per-sync publication budget still use the investigator's settings.
+
+To export CSV tables directly:
+
+```bash
+liquid-trace csv-export --case cases/theft-liquid
+```
+
+`--run RUN_ID` selects an older saved snapshot; `--out NEW_DIRECTORY` chooses a destination. Without either flag, the command uses the saved `latest` pointer and creates its own export directory. Existing directories and destinations inside `runs/` are rejected. The output contains:
+
+| File | Contents |
+| --- | --- |
+| `nodes.csv` | Graph objects, full logical IDs, labels, colors, and details. |
+| `edges.csv` | Directed graph links, source/target IDs, outpoints, roles, and quantities. |
+| `inputs.csv` | Transaction inputs, previous outputs, addresses, and public values/assets. |
+| `outputs.csv` | Transaction outputs, addresses, public values/assets, commitments, and trace status. |
+| `spends.csv` | Recorded links from an output to its spending transaction and input. |
+| `events.csv` | Fees, peg-outs, unspendable outputs, peg-ins, and issuance events recorded in the run. |
+| `frontier.csv` | Unresolved branches and their stopping reasons. |
+
+`nodes.csv` and `edges.csv` use the current presentation, saved address mode, and case fee setting. Optional `--include-fees` or `--exclude-fees` affects those two graph tables for this export only. The other five tables are exact copies of verified archived CSVs and retain all recorded fee data. Unavailable numeric values remain empty fields in detailed tables; graph captions use `??`. Nested details remain JSON within quoted CSV cells. `export.json` records provenance and display options, and `SHA256SUMS` covers the new bundle. Exporting does not modify saved runs, settings, or Miro mappings.
+
+Outside devenv, Python 3.11+ works with `python3 -m liquid_tracer`; use explicit paths and install SecretSpec and its provider CLI before selecting live menu actions. Install the package with its interactive interface using `python3 -m pip install -e '.[tui]'`, or use `python3 -m pip install -e .` for explicit commands only.
+
+Public defaults and command definitions live in `devenv.nix`. The package input is pinned in `devenv.yaml`; commit the generated `devenv.lock` after the first successful shell build. See [development and secrets](docs/development.md) for Proton Pass setup and optional environment overrides.
 
 ## Configure the paid Blockstream API
 
-From the project directory inside `devenv shell`, store these values in your desktop keyring. Each command prompts for its value, so the credential does not appear in the command or shell history:
+The project defaults to the SecretSpec `protonpass` provider and `development` profile. Devenv supplies SecretSpec 0.19.1 and Proton Pass CLI 2.3.2 from the existing pinned package input. The launchers use these exact executables, avoiding an older system SecretSpec that calls the removed `pass-cli test` command. Sign in with `pass-cli login` if needed, then use this helper inside `devenv shell` to store the Blockstream credentials. It prompts for each value, so credentials do not appear in the command or shell history:
 
 ```bash
 liquid-secrets-setup blockstream
 ```
 
-Run API commands using `liquid-live`. It retrieves the values when the process starts and provides the environment variables the Python client already expects. The public `secretspec.toml` contains names and descriptions only. On Linux, keyring storage requires a running Secret Service implementation such as GNOME Keyring or KWallet. The [development guide](docs/development.md) also covers an ignored local `.env` file loaded at runtime. The Python application itself does not read `.env` files.
+If your credentials are already saved, verify the local tool versions and credential delivery without displaying their values:
+
+```bash
+liquid-toolchain-check
+liquid-secrets-check
+```
+
+The first command checks executable versions and support for `pass-cli info` without accessing a vault. The second resolves the project secrets through SecretSpec and reports whether the two Blockstream values reached Python. Use `liquid-secrets-check --service miro` for the Miro token, or `--service all` for all three values. Missing values return a nonzero exit status. These checks do not contact Blockstream or Miro; live API authentication is a separate check.
+
+The interface retrieves these credentials when you select a live trace. For direct API commands, use `liquid-live`; it retrieves the values from the same provider and profile when the process starts and provides the environment variables the Python client already expects. The public `secretspec.toml` contains names and descriptions only. If the credentials are already stored for this project in Proton Pass's `development` profile, skip setup. The [development guide](docs/development.md) covers CLI compatibility and alternative providers. The Python application itself does not read `.env` files.
 
 The default base is `https://enterprise.blockstream.info/liquid/api`. The client exchanges your credentials for a bearer token and refreshes it before expiry. These settings follow [Blockstream's authentication documentation](https://help.blockstream.com/blockstream-explorer-api/use-explorer-api/make-a-rest-api-request-with-your-api-keys). No credentials were supplied or used while developing this project.
 
-## Trace a case
+## Trace a case with explicit commands
 
-Create `case-seeds.txt` with **one exact Liquid outpoint per line**:
+The menu supplies the selected investigation path automatically. When scripting, supply its case directory with `--case`. The examples below use `cases/theft-liquid`; replace that with the directory printed by the menu, or use it to start a case directly. An existing `LIQUID_CASE_DIR` setting remains a fallback when `--case` is omitted.
+
+For a first live trial, select **one exact Liquid outpoint** and use small budgets:
+
+```bash
+liquid-live trace \
+  --case cases/theft-liquid \
+  --seed 'YOUR_64_CHARACTER_LIQUID_TXID:0' \
+  --hops 1 \
+  --max-transactions 20 \
+  --max-outpoints 100 \
+  --max-requests 30 \
+  --max-seconds 60
+```
+
+For multiple seeds, create `case-seeds.txt` with one outpoint per line:
 
 ```text
 # Replace the placeholder with a real Liquid transaction hash.
@@ -63,43 +294,46 @@ YOUR_64_CHARACTER_LIQUID_TXID:0
 
 An outpoint is a transaction hash plus a zero-based output index. Seed only the relevant outputs. Seeding every output of a funding transaction would also include its unrelated recipients and change.
 
-```bash
-liquid-live trace \
-  --case ./cases/theft-liquid \
-  --seeds-file case-seeds.txt \
-  --hops 3 \
-  --max-transactions 250 \
-  --max-outpoints 2000 \
-  --max-requests 600 \
-  --max-seconds 300
-```
-
-You can repeat `--seed 'TXID:VOUT'` instead of using a file. A Bitcoin deposit into Liquid must first be linked to its Liquid transaction/output; a Bitcoin txid alone is not a Liquid seed. This version intentionally does not expand complete address histories.
+Replace `--seed ...` with `--seeds-file case-seeds.txt`, or repeat `--seed 'TXID:VOUT'`. A Bitcoin deposit into Liquid must first be linked to its Liquid transaction/output; a Bitcoin txid alone is not a Liquid seed. This version intentionally does not expand complete address histories.
 
 | Limit | Meaning |
 | --- | --- |
-| `--hops 3` | Seed outputs are hop 0; follow at most three spending transactions from them. |
-| `--max-transactions 250` | At most 250 newly added transactions this run, including seed funding transactions. |
-| `--max-outpoints 2000` | At most 2,000 output examinations this run, including terminal outputs. |
-| `--max-requests 600` | At most 600 HTTP attempts, including token requests and retries. This is **not a count of Blockstream credits**. |
-| `--max-seconds 300` | Stops traversal and bounds HTTP timeouts. Checkpoint/export filesystem work can finish afterward. |
+| `--hops 1` | Seed outputs are hop 0; follow at most one spending transaction from them. |
+| `--max-transactions 20` | At most 20 newly added transactions this run, including seed funding transactions. |
+| `--max-outpoints 100` | At most 100 output examinations this run, including terminal outputs. |
+| `--max-requests 30` | At most 30 HTTP attempts, including token requests and retries. This is **not a count of Blockstream credits**. |
+| `--max-seconds 60` | Stops traversal and bounds HTTP timeouts. Checkpoint/export filesystem work can finish afterward. |
 
-GET requests are spaced by `--min-interval`, default 0.25 seconds. Transient server errors retry at most three times, subject to the same budget. One outspends response serves all outputs of its transaction within a run.
+Transaction inspection and tracing overlap up to **eight independent explorer requests**. A shared limiter spaces request starts across all workers, including OAuth and retries. Concurrent branches requesting the same endpoint share one response and evidence record. One `/tx/:txid/outspends` response serves all outputs of its transaction within a run. The [documented Esplora API](https://github.com/Blockstream/esplora/blob/master/API.md) has no arbitrary transaction-hash batch lookup, so this uses concurrent individual GETs.
+
+The paid `enterprise.blockstream.info` endpoint uses the selected operating target of **49 requests/second**, shared across all workers: at least **20.408 ms between request starts**. The nonsecret `LIQUID_BLOCKSTREAM_ENTERPRISE_RPS = "49"` setting in the existing `devenv.nix` persists this target for every interface. The client also defaults to 49 for this endpoint outside devenv. Public and other endpoints retain the 4 requests/second fallback.
+
+The 49 RPS target is an investigator-selected setting. Blockstream's [paid API documentation](https://help.blockstream.com/blockstream-explorer-api/set-up-explorer-api/create-and-manage-your-api-keys) describes higher limits without publishing a numeric requests-per-second allowance. A verified account allowance supplied through `LIQUID_BLOCKSTREAM_API_RPS` overrides the operating target and uses **95% of that allowance**; `--api-rate-limit NUMBER` overrides that allowance for one CLI trace. These settings use requests per second, not hourly quotas or credit balances. The shared 429 cooldown remains active if the service throttles requests.
+
+`--api-workers 1` disables overlapping trace requests; the default is 8. `--min-interval` can impose a longer gap, but cannot raise the rate ceiling. Run evidence records the effective fetching settings in `trace.json`. Fixtures bypass network pacing. The limiter coordinates one client/run, not separate Liquid-trace processes sharing the same API account.
+
+HTTP 429 responses pause all workers. Transient failures retry within the same request/time budget; retries and token refreshes are intentional additional attempts. A requested cooldown above 30 seconds stops the run for later continuation. Successful in-flight responses are recorded before returning a failure or interruption. Near a traversal budget, fetching becomes serial to preserve the remaining work allowance. Completed transaction bodies can be reused from the evidence cache; spend status is refreshed for each new run so continuation can discover newly spent outputs. Duplicate suppression applies within a lookup or run, not across these deliberate refreshes.
 
 ## Continue after review
 
-Use the run ID printed by the prior command:
+In the menu, choose **Continue investigation**, select the case, and continue its latest run. The equivalent direct command is:
 
 ```bash
 liquid-live trace \
-  --case ./cases/theft-liquid \
-  --resume PRIOR_RUN_ID \
-  --additional-hops 3
+  --case cases/theft-liquid \
+  --resume latest \
+  --additional-hops 1 \
+  --max-transactions 20 \
+  --max-outpoints 100 \
+  --max-requests 30 \
+  --max-seconds 60
 ```
 
-This creates a **new** run, preserves the parent, increases the absolute hop ceiling from 3 to 6, and reconsiders its unfinished branches. Request, time, transaction and output budgets reset for each run. The snapshot and graph are cumulative.
+This creates a **new** run, preserves the parent, increases the first trial's absolute hop ceiling from 1 to 2, and reconsiders its unfinished branches. Request, time, transaction and output budgets reset for each run. The snapshot and graph are cumulative.
 
-To finish a run stopped by its request budget without increasing depth, use `--resume PRIOR_RUN_ID` without `--additional-hops`. To extend selected branches, repeat `--only 'TXID:VOUT'`. Unselected frontier entries remain documented. Any new spending transaction exposes all of its outputs as candidates, even during selective continuation.
+`latest` resolves the run ID recorded in that case's `case.json`; it does not guess from file timestamps. The pointer advances only after a run's exports are saved, including runs that paused at a limit or recorded an error. Existing cases without the pointer need an explicit `--resume RUN_ID`. For a reproducible selection of a particular snapshot, use its explicit ID instead of `latest`.
+
+To finish a run stopped by its request budget without increasing depth, use `--resume latest` without `--additional-hops`, retaining the desired budgets. To extend selected branches, repeat `--only 'TXID:VOUT'`. Unselected frontier entries remain documented. Any new spending transaction exposes all of its outputs as candidates, even during selective continuation.
 
 `frontier.csv` records why each branch stopped: hop limit, unspent at observation, unconfirmed funding/spend, analyst stop, request/time/transaction/output limit, error, or interruption. `bounded_complete` means all currently selected tasks were examined within the hop ceiling; it does not mean every branch has a known destination.
 
@@ -130,30 +364,105 @@ Prefer outpoint labels when attribution applies to a particular payment. Address
 
 ## Keep one editable Miro graph up to date
 
-Create or choose a Miro board and obtain an access token with **`boards:read` and `boards:write`** scopes and access to that board. Follow [Miro's REST API quickstart](https://developers.miro.com/docs/rest-api-build-your-first-hello-world-app). Keep the token locally. If it expires, replace it and rerun sync; this program does not refresh Miro tokens automatically.
+Obtain an access token with **`boards:read` and `boards:write`** scopes and access to your Miro team. Follow [Miro's REST API quickstart](https://developers.miro.com/docs/rest-api-build-your-first-hello-world-app). Store the token with the setup helper. If it expires, replace it and retry the selected action; this program does not refresh Miro tokens automatically.
 
 ```bash
 liquid-secrets-setup miro
-
-liquid-trace miro-sync \
-  --case ./cases/theft-liquid --run RUN_ID \
-  --board 'https://miro.com/app/board/YOUR_BOARD_ID/' --dry-run
-
-liquid-live miro-sync \
-  --case ./cases/theft-liquid --run RUN_ID \
-  --board 'https://miro.com/app/board/YOUR_BOARD_ID/'
 ```
 
-Use the **same case directory and board** for later runs. Sync creates native [shapes](https://developers.miro.com/reference/create-shape-item-1) and [connectors](https://developers.miro.com/reference/create-connector-1), checks existing items, and updates compatible managed fields. It does not call Blockstream. A per-board state file under `case/miro/` maps stable graph IDs to remote item IDs, and `case/miro/reports/` retains sync reports separately from immutable run exports.
+In the investigation menu, choose **Create Miro board**. The name defaults to the investigation name, limited to 60 characters; demo names start with `SYNTHETIC DEMO`. Visibility defaults to **Private**. **Team members can edit** enables team access; public-link and organization access remain private. An optional Miro team ID selects a destination team. Availability depends on your Miro plan and team permissions; a rejected private request does not automatically become team-visible. Creation uses [Miro's board endpoint](https://developers.miro.com/reference/create-board-1) and its `boards:write` scope.
+
+Confirming creation retrieves the token through SecretSpec, creates an empty board, and saves its ID in `case.json`. The board's name, URL, and creation receipt are saved under `miro/board-creation.json`. The menu then reuses that board for previews and syncing. Opening or cancelling the form does not load credentials. For the same action from the CLI:
+
+```bash
+liquid-live miro-create-board --case cases/theft-liquid
+liquid-trace miro-sync --case cases/theft-liquid --dry-run
+liquid-live miro-sync --case cases/theft-liquid
+```
+
+Creation accepts `--name TEXT`, `--visibility private|team`, and `--team-id ID`. Repeating the command reuses a linked board or a saved successful creation receipt. If a connection failure leaves the outcome uncertain, it blocks another creation request. Inspect Miro, then link the created board through **Investigation settings**. If no board exists, create one in Miro and link it there. Completed run evidence remains unchanged.
+
+To use an existing board, save its URL or ID through **Investigation settings**, or pass it directly:
+
+```bash
+liquid-trace miro-sync --case cases/theft-liquid --dry-run \
+  --board 'https://miro.com/app/board/YOUR_CASE_BOARD_ID/'
+
+liquid-live miro-sync --case cases/theft-liquid \
+  --board 'https://miro.com/app/board/YOUR_CASE_BOARD_ID/'
+```
+
+The menu uses the selected investigation and its saved board. For direct sync commands, board selection is resolved in this order: explicit `--board`, the case's saved board, legacy `LIQUID_MIRO_BOARD`, then a first-use prompt in an interactive terminal. A noninteractive command with no board exits with an actionable error. `--run` defaults to the latest saved run; use `--run RUN_ID` to select a particular snapshot.
+
+A dry run does not save a new board selection. Live sync saves it in `case.json` after local validation and before contacting Miro, so a network failure can be retried with the same selection. After saving it once, the direct commands become:
+
+```bash
+liquid-trace miro-sync --case cases/theft-liquid --dry-run
+liquid-live miro-sync --case cases/theft-liquid
+```
+
+A configured board alone does not publish anything during tracing; run sync after reviewing the exports.
+
+Normal **Preview Miro** and **Sync to Miro** rebuild the current graph presentation in memory from the verified saved trace, current fee setting, and connector appearance, then calculate the ELK layout locally. This applies display changes without another Blockstream request or changes to archived run files. Live sync updates managed labels and colors while retaining manual edits and positions. Reports record the archived and rendered plan hashes and presentation version. An explicit `--plan` continues to use that verified plan as supplied.
+
+Transaction squares show the recorded block date as `YYYY-MM-DD UTC`, using Esplora's saved `status.block_time` for confirmed transactions. This is the containing block's date, not an exact transaction creation time. Unconfirmed transactions show `Unconfirmed`; missing or invalid confirmed dates show `Date ??`. These labels reflect the saved observation. To add dates to an existing board, reopen the investigation and choose **Sync to Miro**; no new trace is needed. Manually edited transaction labels are preserved and reported as conflicts instead of being overwritten.
+
+To add the selected saved run and rearrange the board together, choose **Sync and reorganize graph**. After confirmation, it applies an ELK arrangement to existing and new managed objects and updates their connector appearance and attachment points. This replaces manual positions and connector routing choices; existing dimensions and manual text/color annotations remain intact. Previous coordinates and changed connector choices are recorded with the sync state for review. The operation considers mapped items; unrelated board content is not an obstacle in its calculations.
+
+The equivalent direct command is:
+
+```bash
+liquid-live miro-sync --case cases/theft-liquid --reorganize
+```
+
+`trace`, `export`, and `miro-sync` accept `--include-fees` or `--exclude-fees` as an explicit display override. Otherwise they use the selected case's setting, defaulting to excluded. These flags do not alter tracing or erase fee evidence. A supplied `--plan` has its own reviewed fee selection; regenerate an export to change it instead of combining that plan with a fee override.
+
+Use the **same case directory and board** for later runs. Sync creates native export frames, [shapes](https://developers.miro.com/reference/create-shape-item-1) and [connectors](https://developers.miro.com/reference/create-connector-1), checks existing items, and updates compatible managed fields. It does not call Blockstream. A per-board JSON snapshot under `case/miro/` maps stable graph IDs to remote item IDs. While publishing, a private SQLite journal beside that snapshot stores incremental changes; successful completion or a handled interruption folds committed changes back into the JSON snapshot. Keep the entire directory when copying a case, including any active journal files. `case/miro/reports/` retains sync reports separately from immutable run exports.
 
 - Repeating the same run creates no duplicate acknowledged objects. A newer continuation adds new objects and a run note; already mapped circles and squares are reused.
-- Existing positions and dimensions are never patched. New batches are placed to the right of mapped shapes. This placement does not account for unrelated board content.
-- Keep mapped shapes on the board canvas. Items with frame/group-relative coordinates stop sync before writes; nested layouts are not supported in this version.
-- Existing content, captions and styles are updated only where the current value still matches the program's saved baseline. Analyst edits are retained and listed as conflicts in the report. Avoid simultaneous content/style edits during a live sync: the API check and update are separate requests.
-- No objects are deleted. A missing mapped object or changed connector endpoint stops sync before writes; restore it or repair the mapping after inspection.
+- Normal sync preserves existing positions, dimensions, and manual connector choices. New items are placed relative to connected mapped items and avoid mapped shape bounds. If those anchors cannot accommodate a continuation, sync stops before writes and offers reorganization. **Sync and reorganize graph** changes managed positions, connector appearance, and attachment points while preserving dimensions. Explicit legacy plans retain their original placement and attachment behavior.
+- Generated export frames are visually nested on the board canvas. Sync reads mapped shapes inside its own frames and detaches them at their current canvas positions before refreshing frame bounds. Unmapped children inside a frame that must change stop the operation before graph writes; move those annotations outside the generated frame and retry. Shapes inside unrelated frames or unsupported containers still require moving back to the canvas.
+- Existing content, captions and styles are updated only where the current value still matches the program's saved baseline. Analyst edits are retained and listed as conflicts in the report, except for positions and connector appearance/attachments explicitly replaced by reorganization. Avoid simultaneous content/style edits during a live sync: the API check and update are separate requests.
+- Excluding fees removes only generated fee connectors and diamonds identified from the saved trace. Edited fee labels, captions, or managed styles stop removal before board writes. Extra comments and unmapped connectors attached to fee diamonds are outside those checks; retain fees when these annotations need to remain attached. Enabling fees again recreates their representations. Other mapped objects are retained; an unexpectedly missing object or changed connector endpoint stops sync for inspection. Interrupted fee removals retain recovery state.
 - A board mapping is bound to one case, API source, and address mode. After a run has been synced, extend that run (or a later descendant). Older snapshots, sibling branches and independent roots cannot overwrite newer graph classifications. You may skip intermediate unpublished runs.
 - Finish an interrupted sync before switching to another run. Resolving a pending creation alone does not finish that sync.
-- The default cap is **750 new shapes plus connectors per sync**, not total board size. Use `--max-new-items` to change it. Existing-object checks can still take time on a large graph.
+- The default cap is **750 new shapes, connectors, and frames per sync**, not total board size. Use `--max-new-items` to change it. Existing-object checks can still take time on a large graph.
+
+### Export the whole graph or an activity group
+
+New and refreshed Miro presentations automatically include one **Complete graph** frame and one **Activity** frame for each connected part of the displayed graph. Three disconnected starting trees produce four frames. If a continuation connects two trees, sync expands their retained activity frame, removes the obsolete generated frame, and leaves three frames in total. Repeating sync reuses the frame IDs. The outer frame also includes the legend and saved run notes.
+
+Groups follow visible UTXO connections, including displayed context links. They do not infer common ownership or identify services. In the default outpoint mode, repeated address strings alone do not join groups. The optional merged-address mode can join them through a shared address circle. Fee visibility follows the investigation setting.
+
+Use **Sync to Miro** after selecting a saved continuation, or **Sync and reorganize graph** to also recalculate object placement. Existing boards receive frames on their next normal sync without fetching blockchain data again. Generated frame bounds refresh around the live object positions and dimensions, including manual arrangement. Retained manual frame titles and colors are preserved; generated frame geometry is recalculated. Obsolete generated frames are removed, while unrelated frames remain untouched.
+
+Select a frame by its title, open its **three-dot menu**, and choose an export option. Select the Complete graph frame for the entire graph, or an Activity frame for a section. Miro also supports exporting a selection of frames. See [Miro's frame export instructions](https://help.miro.com/hc/en-us/articles/360018261813-Frames).
+
+These are transparent, visually nested rectangles, without a native frame-parent hierarchy. Shape creation omits the optional `parent` field, restoring the request format used before export frames were added. If Miro assigns a new shape to a frame, sync verifies its canvas coordinates, saves its acknowledged ID, then detaches that shape while preserving its visible position. Each creation batch finishes this work before the next batch, preventing generated frames from accumulating attached children toward the API's 5,000-item limit. The parent frame itself is not edited by this cleanup. Frame bounds cover shape extents plus padding; Miro routes its own connectors, so long curves or captions can extend beyond those bounds. Manually interleaved groups or the shared horizontal fee row can also produce overlapping frame regions. Check the frame preview before exporting and adjust the arrangement if needed. See [Miro's parent relationship API](https://developers.miro.com/reference/update-item-position-or-parent-1).
+
+Repeat sync checks all mapped items before writing. Existing-item reads and edits use up to **four concurrent requests**, with HTTPS connections reused where a proxy is not required. Large connector sets are checked in [pages of up to 50](https://developers.miro.com/reference/get-connectors-1), using individual lookups when a response lacks fields needed for comparison. Shapes retain detailed individual reads: Miro's general item-list response omits styles, which are needed to protect analyst colors and annotations.
+
+New shapes use [bulk creation](https://developers.miro.com/reference/create-items) with up to **20 shapes per request**. Once their remote IDs are recorded, connectors are created with up to four concurrent requests. Response identity is checked rather than assuming that a bulk response has the same order as its request. Unchanged objects need no PATCH, and changed fields on an object share one PATCH. Fee removals remain ordered, connectors before their fee shapes. Explicit reorganization still reasserts connector attachment points because Miro's returned coordinates cannot reliably distinguish automatic and fixed attachment modes.
+
+Interrupted cleanup of an acknowledged new shape resumes through reads and a journaled detach before ordinary sync preflight. It never repeats the creation POST. A changed parent or visible position blocks cleanup so an intervening manual move is not overwritten. Unreadable or unsupported parent geometry leaves creation unresolved for inspection. This behavior also applies when Miro assigns a new shape to an unrelated frame; only the newly created, acknowledged shape can be detached.
+
+Each request intent is durably recorded before dispatch. Accepted object mappings and updates are saved as small journal records, replacing the previous full-file rewrite per object. If an operation fails or is interrupted, sync stops dispatching additional requests and drains responses already in flight. Known unsent or rejected creations can be retried; an uncertain POST is retained for explicit reconciliation. Retrying the same saved run checks the current board and preserves intervening manual content/style edits. A damaged or missing active journal blocks publication rather than silently resuming from an older mapping.
+
+The shared scheduler targets **95,000 API credits per minute**, below Miro's documented standard allowance of 100,000. Costs depend on the endpoint and batch size: a batch of 20 shapes uses 2,000 credits, each connector creation uses 100, each connector-list page uses 100, and individual item reads use 50. Frame creation and updates use 100 credits each; frame deletion uses 500. Batching reduces network round trips; it does not reduce Miro's per-item credit charges. An additional 0.02-second minimum request gap applies by default; an explicit slower interval remains an extra restriction. Response headers can reduce the available allowance and HTTP 429 responses pause workers. Valid rate-reset waits, including a full minute, remain interruptible and no longer fail merely because the wait exceeds 30 seconds; retries still have a bounded attempt count.
+
+A private, token-scoped quota file under the user's cache directory coordinates **processes on the same machine using the same Miro access token**, including different investigations and boards. It stores a one-way token identifier and scheduling data, never the token or board contents. Different tokens or machines have separate local schedulers even when Miro assigns them the same user/application quota; server response headers still apply. These improvements are used automatically by **Sync to Miro** and **Sync and reorganize graph** through the existing devenv and SecretSpec workflow.
+
+Miro also has a separate [100,000-object maximum per board](https://help.miro.com/hc/en-us/articles/360013588560-Board-performance-and-loading-issues), and large boards can become slow before that point. This service limit is independent of the uncapped local ELK and SVG outputs. Publication does not automatically split an investigation or discard objects.
+
+A network-free initial-publication benchmark with 103 shapes, 100 connectors, 150 ms of simulated response latency, and the same 95,000-credit/minute admission rate took **31.95 seconds before these changes and 12.94 seconds afterward (2.47× faster)** here. Shape creation used six requests instead of 103; connector creation still used 100 requests, with overlapping work. Normalized final board contents and mappings were identical, and repeated sync preserved a manual annotation without creating new objects. With 50 ms of simulated latency, both versions took 12.84 seconds because the shared credit allowance was already the bottleneck. In a separate 803-object run with latency and pacing disabled, measured process write bytes fell from about 596 MB to 24 MB; this isolates local overhead and is not a live throughput estimate. The real checkpoint code and disk synchronization remain enabled during measurement.
+
+Run the benchmark from the project environment:
+
+```bash
+python3 scripts/benchmark_miro_creation.py --transactions 50 --latency 0.15 --interval 0.02
+```
+
+Use `--source-root PATH_TO_CHECKOUT` to compare another version with the same parameters. The existing `scripts/benchmark_miro_sync.py` separately measures reorganization.
 
 Keep **`case.json` and the entire `miro/` directory** with the case. Losing or replacing the mapping can cause duplicates; do not delete state as a retry mechanism. Live sync changes board content, without changing board sharing or inviting people.
 
@@ -161,13 +470,36 @@ To trace and sync in one command:
 
 ```bash
 liquid-live trace \
-  --case ./cases/theft-liquid --resume PRIOR_RUN_ID --additional-hops 3 \
-  --miro-board 'https://miro.com/app/board/YOUR_BOARD_ID/'
+  --case cases/theft-liquid \
+  --resume latest --additional-hops 1 \
+  --max-transactions 20 --max-outpoints 100 --max-requests 30 --max-seconds 60 \
+  --miro-board 'https://miro.com/app/board/YOUR_CASE_BOARD_ID/'
 ```
 
 The run and checksums are saved before Miro updates. If sync fails, its run ID and retry details are printed; use `miro-sync` on that saved run without spending more explorer requests. A partial publication retains acknowledged progress.
 
-If a POST times out or returns a server error, its outcome can be uncertain. The publisher records the pending request and pauses to avoid duplicates. Inspect the board and pending state, then reconcile using the state path printed by the preview or sync report:
+If ELK finishes and Miro fails at **Adding new Miro items** with HTTP 500, layout succeeded and the failure occurred during publication. The error alone does not identify the server's underlying cause or demonstrate a graph-size limit. [Miro supports up to 20 items per bulk request](https://developers.miro.com/reference/create-items), which is the default batch size. Creation errors now include the endpoint, item count, and recognized error codes or request IDs when available, without printing submitted board content or raw server messages.
+
+The export-frame implementation had two request regressions. It added `parent: {"id": null}` to initial shape POSTs; a before/after comparison using the same plan showed this was the only creation-payload difference. That field is now omitted on creation. Miro documents null parents as supported, so the server's internal reason for HTTP 500 remains unverified. The recovery and frame-empty checks also used `limit=1`, below the [documented minimum of 10](https://developers.miro.com/reference/get-items-1). Those checks now request 10 items and validate the complete empty result; they do not mistake a failed or partial response for an empty board.
+
+A POST timeout or server error can leave its outcome uncertain. The publisher preserves the pending request to avoid duplicates. Subsequent sync and preview attempts check this state **before running ELK**. Keep the saved investigation and its Miro mapping; deleting the mapping would discard duplicate-prevention information.
+
+For a failed **initial publication**, when no items have been acknowledged and the linked board is empty:
+
+1. Open the linked Miro board after the failed request has finished and inspect it.
+2. In the local web UI, choose **Recover empty-board sync**. Check the confirmation box only if you verified that board is empty.
+3. Recovery checks both the board items and connectors through Miro. If either contains anything, or the response is incomplete, it leaves the pending batch unchanged. A successful check clears that initial pending batch locally and records your confirmation and the API check in the recovery history. It creates or deletes no board objects.
+4. Select the originally failed saved run and choose **Sync to Miro**. Recovery does not start a sync automatically or trace again.
+
+The equivalent terminal command uses the existing SecretSpec/Proton Pass setup:
+
+```bash
+liquid-live miro-recover --case cases/YOUR_CASE_DIRECTORY --confirm-empty
+```
+
+Empty-board recovery switches that board's saved `shape_batch_size` to `1`, so retry uses individual shape requests instead of the bulk endpoint. This is slower but can avoid a bulk-specific server failure. Other boards keep normal batching. HTTP 500 never automatically triggers this switch or repeats a creation request. An empty API read alone cannot prove an earlier request will never finish later, which is why recovery requires your explicit inspection and confirmation. If a request fails again, its endpoint and safe diagnostic identifiers help distinguish the failure.
+
+When objects exist, or the failed request belongs to an existing publication, use per-item reconciliation. Inspect the board and pending state, then reconcile using the state path printed by the preview or sync report:
 
 ```bash
 python3 -m liquid_tracer miro-resolve --state PATH_TO_STATE.json --item-id EXISTING_MIRO_ITEM_ID
@@ -175,7 +507,15 @@ python3 -m liquid_tracer miro-resolve --state PATH_TO_STATE.json --item-id EXIST
 python3 -m liquid_tracer miro-resolve --state PATH_TO_STATE.json --absent
 ```
 
-Then repeat `miro-sync`. This explicit recovery is necessary because an accepted creation request can lose its response. Reconciliation must use the actual existing item ID, or a verified absence.
+When several creations have uncertain outcomes, the error shows their count and a few example keys. The complete logical keys are retained under `pending_creations` in the sync state. Reconcile each one with `--key`, matching it to the correct object on the board:
+
+```bash
+python3 -m liquid_tracer miro-resolve --state PATH_TO_STATE.json --key 'LOGICAL_ITEM_KEY' --item-id EXISTING_MIRO_ITEM_ID
+# Or, after verifying that this specific item is absent:
+python3 -m liquid_tracer miro-resolve --state PATH_TO_STATE.json --key 'LOGICAL_ITEM_KEY' --absent
+```
+
+Then repeat `miro-sync` on the same saved run. An accepted bulk request can lose its response, leaving multiple creations to reconcile. Use the actual existing item ID or a verified absence for each key; do not delete state or mark a whole uncertain batch absent without inspecting it.
 
 The older `miro-publish` command remains for resuming version 0.1 snapshot publications; its per-plan mapping is not interchangeable with incremental state. For an older saved run, regenerate an export into a new directory with `export --case CASE --run RUN_ID --out NEW_DIRECTORY`, then select its plan using `miro-sync --case CASE --run RUN_ID --board BOARD --plan NEW_DIRECTORY/miro-plan.json`. This does not adopt objects from an old snapshot; use a fresh board for that migration.
 
@@ -186,6 +526,7 @@ Default circles are **address occurrences tied to individual outpoints**. Reused
 | File | Purpose |
 | --- | --- |
 | `trace.json` | Full checkpoint, seeds, limits, parent, lineage, frontier and labels. |
+| `investigation.json` | Investigation name and board selection as known at trace time; included in new runs. |
 | `nodes.csv`, `edges.csv` | Graph objects and directed input/output relationships with stable IDs, roles and details. |
 | `inputs.csv`, `outputs.csv` | Address/script, public values or commitments, asset fields and evidence IDs. |
 | `spends.csv` | Exact output-to-spending-input links validated against both API responses. |
@@ -217,6 +558,6 @@ Evidence is retrieved explorer JSON, not independently verified raw transaction 
 python3 -m unittest discover -v
 ```
 
-Tests cover seed precision, hop boundaries, split/merge paths, continuation, budgets, spend-status freshness, confidential fields, event stops, reference validation, labeling, graph identity, evidence checksums, OAuth refresh, incremental Miro updates, manual-edit preservation, retries, and uncertain creation recovery. API behavior is tested with fixtures and mock transports. **Paid Blockstream access and live Miro publication have not been exercised** because no case seeds or credentials were provided.
+Tests cover seed precision, hop boundaries, split/merge paths, continuation, budgets, spend-status freshness, confidential fields, event stops, reference validation, labeling, graph identity, evidence checksums, OAuth refresh, board creation and persistence, incremental Miro updates, manual-edit preservation, local ELK placement and route estimates, offline SVG export, retries, and uncertain creation recovery. Automated API checks use synthetic fixtures and mock transports. Live authentication and publication are verified locally with the operator's credentials.
 
-Source is organized into `api.py`, `store.py`, `trace.py`, `export.py`, `miro.py`, and `cli.py`. The CLI is separate from tracing, so a notebook or case-management interface can call the same engine later.
+Source separates the API client, evidence store, tracing engine, export, Miro publication, command parsing, and interactive investigation workflow. The CLI is separate from tracing, so a notebook or case-management interface can call the same engine later.
