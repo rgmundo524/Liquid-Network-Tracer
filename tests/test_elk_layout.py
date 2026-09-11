@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from liquid_tracer.common import TraceError
-from liquid_tracer.elk_layout import (_worker, attachment_point, layout_metrics,
+from liquid_tracer.elk_layout import (_LayoutTimeout, _worker, attachment_point, fallback_graph, layout_metrics,
                                      optimize_graph, segment_hits_node, segments_cross)
 from liquid_tracer.export import build_graph
 from tests.fixtures import fixture
@@ -133,6 +133,94 @@ class LayoutGeometryTests(unittest.TestCase):
                 _worker({}, [1])
             kill.assert_called_once()
             self.assertEqual(kill.call_args.args[0], 12345)
+
+
+class LargeGraphFallbackTests(unittest.TestCase):
+    def test_actual_graph_above_10000_nodes_retains_every_relationship_without_worker(self):
+        graph = build_graph(state_from(chain(5000)))
+        self.assertEqual(len(graph["nodes"]), 10001)
+        with patch("liquid_tracer.elk_layout._worker") as worker:
+            result = optimize_graph(graph)
+        worker.assert_not_called()
+        self.assertEqual(result["nodes"], graph["nodes"])
+        self.assertEqual({edge["id"]: (edge["source"], edge["target"], edge["outpoint"], edge["quantity"])
+                          for edge in result["edges"]},
+                         {edge["id"]: (edge["source"], edge["target"], edge["outpoint"], edge["quantity"])
+                          for edge in graph["edges"]})
+        self.assertEqual(result["layout"]["algorithm"], "dependency_layers_v1")
+        self.assertEqual(result["layout"]["fallback_reason"], "size_limit")
+        self.assertEqual(result["layout"]["placement"], "complete_graph_v1")
+        self.assertIn("10,001 objects", result["layout"]["fallback_notice"])
+        self.assertEqual(result["layout"]["metrics"]["candidate_count"], 0)
+        self.assertNotIn("selected_seed", result["layout"]["metrics"])
+        self.assertFalse(result["layout"]["crossing_optimization"])
+        self.assertNotIn("fallback_reason", graph["layout"])
+        self.assertTrue(all("attachment" not in edge for edge in graph["edges"]))
+
+    def test_connection_size_limit_falls_back_but_validation_still_runs_first(self):
+        graph = crossing_graph()
+        with patch("liquid_tracer.elk_layout.MAX_EDGES", 1), \
+                patch("liquid_tracer.elk_layout._worker") as worker:
+            result = optimize_graph(graph)
+            self.assertEqual(result["layout"]["fallback_reason"], "size_limit")
+            graph["edges"][0]["target"] = "missing"
+            with self.assertRaisesRegex(TraceError, "invalid graph connections"):
+                optimize_graph(graph)
+        worker.assert_not_called()
+
+    def test_only_actual_worker_timeout_uses_fallback_and_progress_explains_it(self):
+        graph = crossing_graph()
+        before, progress = copy.deepcopy(graph), []
+        with patch("liquid_tracer.elk_layout._worker", side_effect=_LayoutTimeout("timeout")):
+            result = optimize_graph(graph, progress=progress.append)
+        self.assertEqual(result["layout"]["fallback_reason"], "timeout")
+        self.assertIn("full dependency layout", progress[-1]["message"])
+        self.assertEqual(progress[-1]["completed"], 1)
+        self.assertEqual(graph, before)
+        with patch("liquid_tracer.elk_layout._worker", side_effect=TraceError("Missing dependency")):
+            with self.assertRaisesRegex(TraceError, "Missing dependency"):
+                optimize_graph(graph)
+
+    def test_fallback_keeps_transaction_sides_fees_evidence_and_seed_colors(self):
+        state = state_from({data["txid"]: data for key, data in fixture().items() if not key.endswith("outspends")})
+        state["seeds"] = [key + ":0" for key in state["transactions"]]
+        graph = build_graph(state, include_fees=True)
+        before = copy.deepcopy(graph)
+        result = fallback_graph(graph, connector_style="curved", reason="mermaid_timeout")
+        self.assertEqual(result["nodes"], graph["nodes"])
+        self.assertEqual(result["fee_items"], graph["fee_items"])
+        self.assertEqual(result["layout"]["fee_row_y"], graph["layout"]["fee_row_y"])
+        nodes = {node["id"]: node for node in result["nodes"]}
+        transaction_ports = {}
+        for original, edge in zip(graph["edges"], result["edges"]):
+            self.assertEqual(original, {key: value for key, value in edge.items()
+                                        if key not in ("attachment", "route", "connector_shape", "routing_exception")})
+            for field, key, expected in (("startItem", edge["source"], "100%"), ("endItem", edge["target"], "0%")):
+                node, port = nodes[key], edge["attachment"][field]
+                if node["kind"] == "transaction":
+                    self.assertEqual(port["position"]["x"], expected)
+                    transaction_ports.setdefault((key, field), []).append(port["position"]["y"])
+                elif node["kind"] == "address":
+                    absolute = attachment_point(node, port)
+                    radius = ((absolute["x"] - node["x"]) / (node["width"] / 2)) ** 2 + ((absolute["y"] - node["y"]) / (node["height"] / 2)) ** 2
+                    self.assertAlmostEqual(radius, 1, places=6)
+            self.assertEqual(edge["connector_shape"], "elbowed" if edge["routing_exception"] else "curved")
+        self.assertTrue(any(len(set(values)) > 1 for values in transaction_ports.values()))
+        self.assertEqual(graph, before)
+
+    def test_merged_address_returns_are_routed_deterministically_without_reversing_transactions(self):
+        graph = build_graph(state_from(chain(10)), merge_addresses=True)
+        shuffled = copy.deepcopy(graph)
+        random.Random(19).shuffle(shuffled["nodes"])
+        random.Random(3).shuffle(shuffled["edges"])
+        first, second = fallback_graph(graph), fallback_graph(shuffled)
+        self.assertEqual({edge["id"]: (edge["attachment"], edge["route"]) for edge in first["edges"]},
+                         {edge["id"]: (edge["attachment"], edge["route"]) for edge in second["edges"]})
+        self.assertEqual({node["id"]: (node["x"], node["y"]) for node in first["nodes"]},
+                         {node["id"]: (node["x"], node["y"]) for node in graph["nodes"]})
+        returns = [edge for edge in first["edges"] if edge["routing_exception"] == "return"]
+        self.assertTrue(returns)
+        self.assertTrue(all(edge["connector_shape"] == "elbowed" and len(edge["route"]) > 2 for edge in returns))
 
 
 @unittest.skipUnless(HAS_ELK, "Run liquid-layout-setup to install the pinned local ELK engine")

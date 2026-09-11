@@ -13,6 +13,7 @@ import os
 import shutil
 import signal
 import subprocess
+from collections import defaultdict
 from pathlib import Path
 
 from .common import TraceError
@@ -26,6 +27,10 @@ MAX_EDGES = 30000
 MAX_COMPARISONS = 250000
 STYLES = {"straight", "elbowed", "curved"}
 _EPS = 1e-7
+
+
+class _LayoutTimeout(TraceError):
+    """A terminated worker, distinct from broken dependencies or bad geometry."""
 
 
 def _finite(value):
@@ -246,7 +251,7 @@ def _worker(graph, seeds):
             raise ValueError("missing candidates")
         return result["candidates"]
     except subprocess.TimeoutExpired as exc:
-        raise TraceError("Local ELK layout exceeded its 30-second limit; use a smaller bounded run") from exc
+        raise _LayoutTimeout("Local ELK layout exceeded its 30-second limit") from exc
     except (OSError, ValueError, TypeError) as exc:
         raise TraceError("Local ELK returned an invalid layout; no Miro changes were made") from exc
     finally:
@@ -408,14 +413,11 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
     return result
 
 
-def optimize_graph(graph, connector_style="straight", progress=None):
-    """Deep-copy and optimize a display graph in at most three local ELK trials."""
+def _validate_graph(graph, connector_style):
     if not isinstance(connector_style, str) or connector_style not in STYLES:
         raise TraceError("Connector style must be straight, elbowed, or curved")
     if not isinstance(graph, dict) or not isinstance(graph.get("nodes"), list) or not isinstance(graph.get("edges"), list):
         raise TraceError("Cannot optimize an invalid graph")
-    if len(graph["nodes"]) > MAX_NODES or len(graph["edges"]) > MAX_EDGES:
-        raise TraceError("Graph exceeds the local layout limit of 10,000 objects or 30,000 connections")
     nodes = {}
     for node in graph["nodes"]:
         if (not isinstance(node, dict) or not isinstance(node.get("id"), str) or node["id"] in nodes
@@ -431,6 +433,114 @@ def optimize_graph(graph, connector_style="straight", progress=None):
                 or edge.get("source") not in nodes or edge.get("target") not in nodes):
             raise TraceError("Cannot optimize invalid graph connections")
         edge_ids.add(edge["id"])
+    return nodes
+
+
+def fallback_graph(graph, connector_style="straight", reason="size_limit"):
+    """Reuse the full dependency layout without sending a large graph to ELK.
+
+    Production callers supply build_graph's deterministic, nonoverlapping
+    dependency positions. This pass is presentation only: it never removes,
+    merges, or repositions objects and never changes recorded relationships.
+    Ports are assigned in sorted neighbor order with linear edge traversal.
+    Routing is deliberately simple; geometric quality is measured with the
+    same finite comparison budget rather than claimed to be optimized.
+    """
+    _validate_graph(graph, connector_style)
+    descriptions = {
+        "size_limit": "The graph exceeds the ELK optimization size limit",
+        "timeout": "ELK reached its 30-second time limit",
+        "mermaid_size_limit": "The graph exceeds the Mermaid rendering size limit",
+        "mermaid_timeout": "Mermaid reached its rendering time limit",
+    }
+    if reason not in descriptions:
+        raise TraceError("Invalid layout fallback reason")
+    result = copy.deepcopy(graph)
+    nodes = {node["id"]: node for node in result["nodes"]}
+    fee_ids = {key for key, item in result.get("fee_items", {}).items()
+               if item["endpoint"] == "shapes" and key in nodes}
+    ports = defaultdict(list)
+    for edge in result["edges"]:
+        edge["attachment"] = {}
+        for field, key, other, outgoing in (
+            ("startItem", edge["source"], edge["target"], True),
+            ("endItem", edge["target"], edge["source"], False),
+        ):
+            node, neighbor = nodes[key], nodes[other]
+            east = outgoing if node["kind"] == "transaction" else neighbor["x"] > node["x"]
+            side = "bottom" if key in fee_ids else "east" if east else "west"
+            ports[key, side].append((neighbor["y"], other, edge["id"], field, edge))
+    for (key, side), values in ports.items():
+        node = nodes[key]
+        for index, (_, _, _, field, edge) in enumerate(sorted(values, key=lambda item: item[:4])):
+            fraction = (index + 1) / (len(values) + 1)
+            x = fraction * node["width"] if side == "bottom" else node["width"] if side == "east" else 0
+            y = node["height"] if side == "bottom" else fraction * node["height"]
+            edge["attachment"][field] = _port(node, x, y)
+    exceptions = 0
+    for edge in result["edges"]:
+        source, target = nodes[edge["source"]], nodes[edge["target"]]
+        a = attachment_point(source, edge["attachment"]["startItem"])
+        b = attachment_point(target, edge["attachment"]["endItem"])
+        returning = b["x"] <= a["x"] or segment_hits_node(a, b, source) or segment_hits_node(a, b, target)
+        exception = "fee" if edge["target"] in fee_ids else "return" if returning else None
+        middle = (a["x"] + b["x"]) / 2
+        route = [a, {"x": middle, "y": a["y"]}, {"x": middle, "y": b["y"]}, b]
+        if exception:
+            departure = a["x"] + (100 if a["x"] >= source["x"] else -100)
+            if exception == "fee":
+                lane = target["y"] + target["height"] / 2 + 70
+                route = [a, {"x": departure, "y": a["y"]}, {"x": departure, "y": lane},
+                         {"x": b["x"], "y": lane}, b]
+            else:
+                arrival = b["x"] + (100 if b["x"] >= target["x"] else -100)
+                lane = min(source["y"] - source["height"] / 2, target["y"] - target["height"] / 2) - 80
+                route = [a, {"x": departure, "y": a["y"]}, {"x": departure, "y": lane},
+                         {"x": arrival, "y": lane}, {"x": arrival, "y": b["y"]}, b]
+        edge.update(route=route, connector_shape="elbowed" if exception else connector_style,
+                    routing_exception=exception)
+        exceptions += bool(exception) and connector_style != "elbowed"
+    main = [node for key, node in nodes.items() if key not in fee_ids]
+    shift = -260 if fee_ids else 0
+    notice = (f"{descriptions[reason]}. Using the full dependency layout for "
+              f"{len(nodes):,} objects and {len(result['edges']):,} connections; no objects or connections were omitted. "
+              "Crossing optimization was skipped; connectors may cross objects or other connectors.")
+    result["layout"] = {"algorithm": "dependency_layers_v1", "direction": "left_to_right",
+                        "main_top": min((node["y"] - node["height"] / 2 for node in main), default=160),
+                        "main_bottom": max((node["y"] + node["height"] / 2 for node in main), default=320),
+                        "fee_row_y": graph.get("layout", {}).get("fee_row_y", -100 if fee_ids else None),
+                        "cycle_groups": copy.deepcopy(graph.get("layout", {}).get("cycle_groups", [])),
+                        "annotations": copy.deepcopy(graph.get("layout", {}).get("annotations", {
+                            "legend": {"x": 700, "y": -160 + shift}, "run": {"x": 700, "y": -480 + shift}})),
+                        "fallback_reason": reason, "fallback_notice": notice,
+                        "placement": "complete_graph_v1",
+                        "routing_exceptions": exceptions, "routing_checks_truncated": False,
+                        "crossing_optimization": False}
+    result["layout"]["metrics"] = {"before": layout_metrics(graph), "after": layout_metrics(result),
+                                    "estimated": True, "candidate_count": 0,
+                                    "routing_exceptions": exceptions, "miro_routes_exact": False}
+    result.setdefault("graph_options", {})["connector_style"] = connector_style
+    result["connector_attachment"] = "transaction_ports_v2"
+    result["presentation_version"] = 6
+    return result
+
+
+def _fallback_with_progress(graph, connector_style, reason, progress):
+    result = fallback_graph(graph, connector_style=connector_style, reason=reason)
+    if progress:
+        try:
+            progress({"phase": "optimizing", "message": result["layout"]["fallback_notice"],
+                      "completed": 1, "total": 1})
+        except Exception:
+            pass
+    return result
+
+
+def optimize_graph(graph, connector_style="straight", progress=None):
+    """Try bounded ELK optimization, retaining the whole graph on size/timeout."""
+    nodes = _validate_graph(graph, connector_style)
+    if len(nodes) > MAX_NODES or len(graph["edges"]) > MAX_EDGES:
+        return _fallback_with_progress(graph, connector_style, "size_limit", progress)
     if progress:
         try:
             progress({"phase": "optimizing", "message": "Calculating local ELK layout", "completed": 0, "total": 1})
@@ -440,7 +550,10 @@ def optimize_graph(graph, connector_style="straight", progress=None):
     seeds = [1, 7, 19] if len(request["children"]) <= 300 else [1]
     before = layout_metrics(graph)
     if request["children"]:
-        candidates = _worker(request, seeds)
+        try:
+            candidates = _worker(request, seeds)
+        except _LayoutTimeout:
+            return _fallback_with_progress(graph, connector_style, "timeout", progress)
     else:
         candidates = [{"seed": 1, "nodes": [], "edges": []}]
     scored = []

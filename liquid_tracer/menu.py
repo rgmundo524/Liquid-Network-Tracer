@@ -264,7 +264,7 @@ def create_app(root=None):
                     yield Select([("Straight", "straight"), ("Curved", "curved"), ("Elbowed", "elbowed")],
                                  value=self.settings["connector_style"], allow_blank=False, id="connector-style")
                     yield Static("Return connections may use elbows. ELK calculates placement; Miro draws its own routes. "
-                                 "Mermaid has an independent layout.", markup=False)
+                                 "Large graphs use a dependency layout. Mermaid uses its own layout or a direct SVG fallback.", markup=False)
                 if self.mode in ("preview", "sync", "layout"):
                     text = ("Offline preview. This does not change case settings, saved runs or the Miro board."
                             if self.mode == "preview" else "Updates the existing board and saves its ID with this investigation.")
@@ -277,8 +277,9 @@ def create_app(root=None):
                         yield Static("Sync checks previously generated fee items for manual edits before removing them. "
                                      "Saved trace evidence is unchanged.", markup=False)
                     if self.mode == "layout":
-                        yield Static("Sync this saved run and use ELK to arrange the graph's managed items from left to right, keeping transaction inputs "
-                                     "and outputs nearby. This replaces their current positions and attaches "
+                        yield Static("Sync this saved run and arrange the graph's managed items from left to right, keeping transaction inputs "
+                                     "and outputs nearby. ELK is used within its local limits, with a dependency layout for larger graphs. "
+                                     "This replaces their current positions and attaches "
                                      "transaction inputs on the left and outputs on the right. "
                                      "Annotations, item content and dimensions are retained. "
                                      "You can still drag items in Miro afterward.", id="layout-notice", markup=False)
@@ -692,7 +693,12 @@ def create_app(root=None):
                         if isinstance(result, dict) and isinstance(result.get("html"), str):
                             action = ("Browser launch requested: " if result.get("browser_opened") is True
                                       else "Open in your browser: ")
-                            message = "Mermaid chart saved. " + action + result["html"]
+                            fallback = result.get("renderer") == "direct_svg"
+                            description = ("Direct SVG fallback saved. " if fallback else "Mermaid chart saved. ")
+                            if fallback:
+                                description += ("Mermaid reached its time limit. " if result.get("fallback_reason") == "timeout"
+                                                else "The graph exceeded the automatic Mermaid size limit. ")
+                            message = description + action + result["html"]
                     except ValueError:
                         pass
             elif getattr(self, "current_action", None) == "layout-preview":
@@ -704,7 +710,12 @@ def create_app(root=None):
                         if isinstance(result, dict) and isinstance(result.get("html"), str):
                             action = ("Browser launch requested: " if result.get("browser_opened") is True
                                       else "Open in your browser: ")
-                            message = "ELK layout preview saved. Miro is unchanged. " + action + result["html"]
+                            fallback = result.get("layout_algorithm") == "dependency_layers_v1"
+                            description = ("Dependency layout fallback saved. " if fallback else "ELK layout preview saved. ")
+                            if fallback:
+                                description += ("ELK reached its time limit. " if result.get("fallback_reason") == "timeout"
+                                                else "The graph exceeded the automatic ELK size limit. ")
+                            message = description + "Miro is unchanged. " + action + result["html"]
                     except ValueError:
                         pass
             elif getattr(self, "current_action", None) == "csv-export":

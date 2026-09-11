@@ -686,6 +686,12 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Open in your browser", message)
                 self.assertIn(str(preview), message)
                 self.assertFalse(app.screen.query_one("#create-board", Button).disabled)
+                app.screen.finished(0, json.dumps({"html": str(preview), "renderer": "direct_svg",
+                                                   "fallback_reason": "timeout", "browser_opened": False}))
+                message = str(app.screen.query_one("#action-status", Static).render())
+                self.assertIn("Direct SVG fallback saved", message)
+                self.assertIn("Mermaid reached its time limit", message)
+                self.assertIn(str(preview), message)
                 self.assertEqual(snapshot, {p.relative_to(case): p.read_bytes()
                                             for p in case.rglob("*") if p.is_file()})
 
@@ -719,6 +725,12 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 suspend.assert_not_called()
                 message = str(app.screen.query_one("#action-status", Static).render())
                 self.assertIn("ELK layout preview saved. Miro is unchanged.", message)
+                self.assertIn(str(preview), message)
+                app.screen.finished(0, json.dumps({"html": str(preview), "layout_algorithm": "dependency_layers_v1",
+                                                   "fallback_reason": "size_limit", "browser_opened": False}))
+                message = str(app.screen.query_one("#action-status", Static).render())
+                self.assertIn("Dependency layout fallback saved", message)
+                self.assertIn("ELK size limit", message)
                 self.assertIn(str(preview), message)
                 self.assertEqual(snapshot, {p.relative_to(case): p.read_bytes()
                                            for p in case.rglob("*") if p.is_file()})

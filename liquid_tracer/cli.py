@@ -525,6 +525,8 @@ def layout_preview_run(case, run_id="latest", out=None, include_fees=None,
     result.update({"run_id": run_id, "include_fees": graph["include_fees"], "connector_style": style,
                    "layout_algorithm": graph["layout"]["algorithm"],
                    "browser_opened": open_preview(result["html"]) if open_browser else False})
+    if graph["layout"].get("fallback_reason") in ("size_limit", "timeout", "mermaid_size_limit", "mermaid_timeout"):
+        result["fallback_reason"] = graph["layout"]["fallback_reason"]
     return result
 
 

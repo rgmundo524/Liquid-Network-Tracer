@@ -3,6 +3,11 @@ export {};
 type ConnectorStyle = "straight" | "curved" | "elbowed";
 type LayoutCounts = { crossings: number; node_overlaps: number; node_intersections: number; truncated?: boolean };
 type LayoutMetrics = { before: LayoutCounts; after: LayoutCounts; estimated: boolean };
+type RenderingMetadata = {
+  layout_algorithm?: "elk_layered_v1" | "dependency_layers_v1";
+  renderer?: "direct_svg";
+  fallback_reason?: "size_limit" | "timeout" | "mermaid_size_limit" | "mermaid_timeout";
+};
 
 type Settings = {
   hops: number;
@@ -23,7 +28,7 @@ type Run = {
   frontier_count?: number;
 };
 type Download = { name: string; url: string };
-type Artifact = {
+type Artifact = RenderingMetadata & {
   downloads: Download[];
   preview_url?: string;
   include_fees: boolean;
@@ -64,10 +69,9 @@ type Output = {
   script_type?: string;
 };
 type Report = { txid: string; outputs: Output[] };
-type Result = {
+type Result = RenderingMetadata & {
   connector_style?: ConnectorStyle;
   layout_metrics?: LayoutMetrics;
-  layout_algorithm?: string;
   downloads?: Download[];
   include_fees?: boolean;
   preview_url?: string;
@@ -425,16 +429,30 @@ function downloadLink(item: Download | undefined, label: string, classes = ""): 
   return `<a class="btn small ${classes}" href="${esc(item.url)}" download="${esc(item.name)}">${icon("download")}${esc(label)}</a>`;
 }
 
+function fallbackNotice(artifact: RenderingMetadata | undefined): string {
+  if (artifact?.renderer === "direct_svg")
+    return artifact.fallback_reason === "timeout"
+      ? "Mermaid reached its time limit. This direct SVG fallback includes the full saved graph. Mermaid source is also available."
+      : "This graph exceeds the automatic Mermaid size limit. The direct SVG fallback includes the full saved graph. Mermaid source is also available.";
+  if (artifact?.layout_algorithm === "dependency_layers_v1")
+    return artifact.fallback_reason === "timeout"
+      ? "ELK reached its time limit. A dependency layout keeps the full saved graph available; crossings are not optimized."
+      : "This graph exceeds the automatic ELK size limit. A dependency layout keeps the full saved graph available; crossings are not optimized.";
+  return "";
+}
+
 function localGraph(artifact: Artifact | undefined, saved: boolean, includeFees: boolean): string {
   const matches = artifact?.include_fees === includeFees;
   const preview = matches ? safeLocalUrl(artifact?.preview_url) : "";
   const svg = matches ? artifact?.downloads.find((item) => item.name === "graph.svg") : undefined;
   const source = matches ? artifact?.downloads.find((item) => item.name === "graph.mmd") : undefined;
   const mismatch = artifact && !matches;
-  return `<section class="panel"><div class="panel-head graph-panel-head"><div><h2>Local graph</h2><p>Mermaid preview of the selected saved run.</p></div><div class="artifact-actions">${downloadLink(svg, "Download SVG", "primary")}${preview ? `<a class="btn ghost small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">${icon("external")}Open full view</a>` : '<span class="badge gray">Offline renderer</span>'}</div></div>${preview ? `<iframe class="graph-preview" src="${esc(preview)}" title="Mermaid chart of the selected investigation run" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe><div class="preview-caption"><span>Generated from saved evidence · ${includeFees ? "Fee flows included" : "Fee flows hidden"}</span>${downloadLink(source, "Mermaid source (.mmd)", "ghost")}</div>` : `<div class="graph-placeholder"><div class="mini-flow" aria-hidden="true"><span class="mini-node">${icon("folder")}</span><span class="mini-connection"></span><span class="mini-node tx">${icon("layers")}</span><span class="mini-connection"></span><span class="mini-node out">${icon("folder")}</span></div><h3>${mismatch ? "Update the chart’s fee display" : "Your trace, in perspective"}</h3><p>${mismatch ? "The saved chart uses a different fee setting. Create another chart to match this investigation’s current settings." : saved ? "Create a quick local chart from this snapshot, then download the SVG or Mermaid source." : "After your first run, create a local chart or send the flow to an editable Miro board."}</p>${button("Create Mermaid chart", "mermaid", "graph", "", !saved || isBusy())}</div>`}</section>`;
+  const name = artifact?.renderer === "direct_svg" ? "Direct SVG fallback" : "Mermaid preview";
+  const notice = preview ? fallbackNotice(artifact) : "";
+  return `<section class="panel"><div class="panel-head graph-panel-head"><div><h2>Local graph</h2><p>${esc(name)} of the selected saved run.</p></div><div class="artifact-actions">${downloadLink(svg, "Download SVG", "primary")}${preview ? `<a class="btn ghost small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">${icon("external")}Open full view</a>` : '<span class="badge gray">Offline renderer</span>'}</div></div>${preview ? `${notice ? `<div class="panel-body artifact-note">${esc(notice)}</div>` : ""}<iframe class="graph-preview" src="${esc(preview)}" title="${esc(name)} of the selected investigation run" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe><div class="preview-caption"><span>Generated from saved evidence · ${includeFees ? "Fee flows included" : "Fee flows hidden"}</span>${downloadLink(source, "Mermaid source (.mmd)", "ghost")}</div>` : `<div class="graph-placeholder"><div class="mini-flow" aria-hidden="true"><span class="mini-node">${icon("folder")}</span><span class="mini-connection"></span><span class="mini-node tx">${icon("layers")}</span><span class="mini-connection"></span><span class="mini-node out">${icon("folder")}</span></div><h3>${mismatch ? "Update the chart’s fee display" : "Your trace, in perspective"}</h3><p>${mismatch ? "The saved chart uses a different fee setting. Create another chart to match this investigation’s current settings." : saved ? "Create a quick local chart from this snapshot, then download the SVG or Mermaid source." : "After your first run, create a local chart or send the flow to an editable Miro board."}</p>${button("Create Mermaid chart", "mermaid", "graph", "", !saved || isBusy())}</div>`}</section>`;
 }
 
-function layoutMetrics(metrics: LayoutMetrics | undefined): string {
+function layoutMetrics(metrics: LayoutMetrics | undefined, label = "ELK layout"): string {
   if (!metrics?.before || !metrics.after) return "";
   const measures: ["crossings" | "node_overlaps" | "node_intersections", string][] = [
     ["crossings", "Line crossings"],
@@ -443,7 +461,7 @@ function layoutMetrics(metrics: LayoutMetrics | undefined): string {
   ];
   const count = (value: number, truncated?: boolean): string =>
     Number.isFinite(value) && value >= 0 ? `${truncated ? "≥ " : ""}${esc(value)}` : "??";
-  return `<div class="layout-metrics"><table><caption>Estimated layout quality</caption><thead><tr><th scope="col">Measure</th><th scope="col">Baseline layout</th><th scope="col">ELK layout</th></tr></thead><tbody>${measures.map(([key, label]) => `<tr><th scope="row">${label}</th><td>${count(metrics.before[key], metrics.before.truncated)}</td><td>${count(metrics.after[key], metrics.after.truncated)}</td></tr>`).join("")}</tbody></table><p class="layout-metrics-note">Compared with the built-in layout of this saved run, not the live board. Labels are not measured and Miro routes may differ.${metrics.before.truncated || metrics.after.truncated ? " The comparison limit was reached. Counts marked ≥ are lower bounds, so the total may be higher." : ""}</p></div>`;
+  return `<div class="layout-metrics"><table><caption>Estimated layout quality</caption><thead><tr><th scope="col">Measure</th><th scope="col">Baseline layout</th><th scope="col">${esc(label)}</th></tr></thead><tbody>${measures.map(([key, label]) => `<tr><th scope="row">${label}</th><td>${count(metrics.before[key], metrics.before.truncated)}</td><td>${count(metrics.after[key], metrics.after.truncated)}</td></tr>`).join("")}</tbody></table><p class="layout-metrics-note">Compared with the built-in layout of this saved run, not the live board. Labels are not measured and Miro routes may differ.${metrics.before.truncated || metrics.after.truncated ? " The comparison limit was reached. Counts marked ≥ are lower bounds, so the total may be higher." : ""}</p></div>`;
 }
 
 function elkGraph(artifact: Artifact | undefined, saved: boolean, settings: Settings): string {
@@ -453,7 +471,10 @@ function elkGraph(artifact: Artifact | undefined, saved: boolean, settings: Sett
   const downloads = matches ? artifact?.downloads : undefined;
   const svg = downloads?.find((item) => item.name === "graph.svg");
   const report = downloads?.find((item) => item.name === "layout-report.json");
-  return `<section class="panel" id="elk-layout-panel"><div class="panel-head graph-panel-head"><div><h2>ELK layout preview</h2><p>Local placement preview for the selected saved run.</p></div><div class="artifact-actions">${downloadLink(svg, "Download ELK SVG", "primary")}${preview ? `<a class="btn ghost small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">${icon("external")}Open full view</a>` : '<span class="badge gray">Offline layout</span>'}</div></div>${preview ? `${layoutMetrics(artifact?.layout_metrics)}<iframe class="graph-preview" src="${esc(preview)}#chart" title="ELK layout of the selected investigation run" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe><div class="preview-caption"><span>${esc(human(settings.connector_style))} connectors · ${settings.include_fees ? "Fee flows included" : "Fee flows hidden"}</span>${downloadLink(report, "Layout report", "ghost")}</div><div class="panel-body elk-explanation"><p>ELK calculates placement; Miro draws the editable graph. This offline preview does not read your live board arrangement. Return connections can remain elbowed with the straight-line setting.</p>${button("Refresh ELK preview", "layout", "refresh", "small", !saved || isBusy())}</div>` : `<div class="panel-body"><p class="artifact-note">${artifact && !matches ? "The saved ELK preview uses different fee or connector settings. Generate a new preview to match this investigation." : "Inspect the proposed left-to-right layout and estimated crossings before updating Miro. No API credentials are needed."}</p>${button("Create ELK layout preview", "layout", "layers", "", !saved || isBusy())}<p class="small muted elk-hint">Previewing leaves your board unchanged. Sync and reorganize applies a fresh ELK arrangement and the selected run together.</p></div>`}</section>`;
+  const fallback = artifact?.layout_algorithm === "dependency_layers_v1";
+  const name = fallback ? "Dependency layout fallback" : "ELK layout preview";
+  const notice = preview ? fallbackNotice(artifact) : "";
+  return `<section class="panel" id="elk-layout-panel"><div class="panel-head graph-panel-head"><div><h2>${esc(name)}</h2><p>Local placement preview for the selected saved run.</p></div><div class="artifact-actions">${downloadLink(svg, fallback ? "Download SVG" : "Download ELK SVG", "primary")}${preview ? `<a class="btn ghost small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">${icon("external")}Open full view</a>` : '<span class="badge gray">Offline layout</span>'}</div></div>${preview ? `${notice ? `<div class="panel-body artifact-note">${esc(notice)}</div>` : ""}${layoutMetrics(artifact?.layout_metrics, fallback ? "Dependency layout" : "ELK layout")}<iframe class="graph-preview" src="${esc(preview)}#chart" title="${esc(name)} of the selected investigation run" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe><div class="preview-caption"><span>${esc(human(settings.connector_style))} connectors · ${settings.include_fees ? "Fee flows included" : "Fee flows hidden"}</span>${downloadLink(report, "Layout report", "ghost")}</div><div class="panel-body elk-explanation"><p>${fallback ? "The dependency layout calculates placement" : "ELK calculates placement"}; Miro draws the editable graph. This offline preview does not read your live board arrangement. Return connections can remain elbowed with the straight-line setting.</p>${button("Refresh layout preview", "layout", "refresh", "small", !saved || isBusy())}</div>` : `<div class="panel-body"><p class="artifact-note">${artifact && !matches ? "The saved layout preview uses different fee or connector settings. Generate a new preview to match this investigation." : "Inspect the proposed left-to-right layout and estimated crossings before updating Miro. No API credentials are needed."}</p>${button("Create ELK layout preview", "layout", "layers", "", !saved || isBusy())}<p class="small muted elk-hint">Previewing leaves your board unchanged. Sync and reorganize applies a fresh arrangement and the selected run together. Large graphs use a dependency layout automatically.</p></div>`}</section>`;
 }
 
 function csvDownloads(artifact: Artifact | undefined, saved: boolean, includeFees: boolean): string {
@@ -513,7 +534,7 @@ function resultBanner(action: string, result: Result): string {
           )
           .join("")}</div>`
       : ""
-  }${layoutMetrics(result.layout_metrics)}${typeof result.conflicts_count === "number" && result.conflicts_count > 0 ? `<p style="margin-top:10px"><strong>${result.conflicts_count} board conflict${result.conflicts_count === 1 ? "" : "s"} preserved.</strong> Review your board and the saved Miro sync report before further changes.</p>` : ""}</div><button class="dismiss" data-action="dismiss-result" aria-label="Dismiss result">${icon("close")}</button></div>`;
+  }${fallbackNotice(result) ? `<p>${esc(fallbackNotice(result))}</p>` : ""}${layoutMetrics(result.layout_metrics, result.layout_algorithm === "dependency_layers_v1" ? "Dependency layout" : "ELK layout")}${typeof result.conflicts_count === "number" && result.conflicts_count > 0 ? `<p style="margin-top:10px"><strong>${result.conflicts_count} board conflict${result.conflicts_count === 1 ? "" : "s"} preserved.</strong> Review your board and the saved Miro sync report before further changes.</p>` : ""}</div><button class="dismiss" data-action="dismiss-result" aria-label="Dismiss result">${icon("close")}</button></div>`;
 }
 
 function settingsPage(): string {
@@ -684,6 +705,9 @@ async function pollJob(): Promise<void> {
               include_fees: result.include_fees ?? detail.run_defaults.include_fees,
               connector_style: result.connector_style,
               layout_metrics: result.layout_metrics,
+              layout_algorithm: result.layout_algorithm,
+              renderer: result.renderer,
+              fallback_reason: result.fallback_reason,
             },
           });
         }
@@ -691,8 +715,8 @@ async function pollJob(): Promise<void> {
           (
             {
               trace: "Bounded run saved.",
-              mermaid: "Mermaid chart is ready.",
-              layout: "ELK layout preview is ready.",
+              mermaid: result.renderer === "direct_svg" ? "Direct SVG fallback is ready. " + fallbackNotice(result) : "Mermaid chart is ready.",
+              layout: result.layout_algorithm === "dependency_layers_v1" ? "Dependency layout fallback is ready. " + fallbackNotice(result) : "ELK layout preview is ready.",
               csv: "CSV export is ready to download.",
               "miro-preview": "Miro change preview is ready.",
               "miro-sync": "Miro sync finished.",
@@ -773,7 +797,7 @@ function openActionDialog(action: string): void {
     "miro-sync":
       "Add the selected saved graph to the linked board. Existing manual arrangements are preserved during normal sync.",
     "miro-organize":
-      "Sync the selected run and apply a fresh ELK layout to the managed graph in one action. This replaces existing positions, including arrangements made by hand, and sets transaction inputs on the left and outputs on the right.",
+      "Sync the selected run and apply a fresh layout to the managed graph in one action. ELK is used when the graph fits its local limits; larger graphs use a dependency layout. This replaces existing positions, including arrangements made by hand, and sets transaction inputs on the left and outputs on the right.",
     "miro-create":
       "Create an empty private board in your Miro account and link it to this investigation. Publishing the graph is a separate sync action.",
   };

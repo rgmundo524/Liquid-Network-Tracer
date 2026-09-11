@@ -594,6 +594,20 @@ def _overlap(a, b, gap=60):
     return abs(a[0] - b[0]) < (a[2] + b[2]) / 2 + gap and abs(a[1] - b[1]) < (a[3] + b[3]) / 2 + gap
 
 
+def _complete_layout(plan):
+    """Recognize complete layouts without changing legacy dependency plans.
+
+    Earlier dependency-layer archives rely on the column placement below. The
+    explicit marker distinguishes the full, scalable fallback presentation from
+    those archives; both it and ELK already supply positions for every shape.
+    """
+    layout = plan.get("layout", {})
+    return (layout.get("algorithm") == "elk_layered_v1"
+            or (layout.get("algorithm") == "dependency_layers_v1"
+                and layout.get("placement") == "complete_graph_v1"
+                and layout.get("fallback_reason") in ("size_limit", "timeout", "mermaid_size_limit", "mermaid_timeout")))
+
+
 def _placements(plan, state, remote, removed, reorganize):
     """Place new connected groups near their existing anchors, preserving old items.
 
@@ -605,6 +619,11 @@ def _placements(plan, state, remote, removed, reorganize):
                 if record["endpoint"] == "shapes" and key not in removed}
     new = set(planned) - set(existing)
     result = {}
+    complete_layout = _complete_layout(plan)
+    if complete_layout and not existing:
+        # A first sync has nothing to preserve or avoid. In particular, do not
+        # repack thousands of disconnected components against each other.
+        return {key: (value[0], value[1]) for key, value in planned.items()}, 0
     if not plan.get("layout") and not reorganize:
         shift = max(0., max((v[0] + v[2] / 2 for v in existing.values()), default=-math.inf) + 300
                     - min((planned[k][0] - planned[k][2] / 2 for k in new), default=math.inf))
@@ -663,10 +682,10 @@ def _placements(plan, state, remote, removed, reorganize):
             previous_right = x + width / 2
         place_group(keys, 0, dy, upward=True)
 
-    if reorganize and plan.get("layout", {}).get("algorithm") == "elk_layered_v1":
-        # ELK layer members can have different center x coordinates because
+    if reorganize and complete_layout:
+        # Layout layer members can have different center x coordinates because
         # their widths differ. Repacking every distinct center as a column
-        # destroys its layering and crossing reduction. Retain its complete
+        # destroys its layering and ordering. Retain the complete
         # layout, expanding uniformly only for larger live geometry.
         scale = max([1.] + [max(existing[key][axis] / planned[key][axis] for axis in (2, 3))
                             for key in targets & set(existing)])
@@ -674,7 +693,7 @@ def _placements(plan, state, remote, removed, reorganize):
             x, y, width, height = planned[key]
             planned[key] = (x * scale, y * scale, width, height)
         # Old run summaries not present in this cumulative plan stay put.
-        # Translate the whole group around them, keeping ELK's internal order.
+        # Translate the whole group around them, keeping its internal order.
         place_group(sorted(targets), 0, 0)
         return result, 0
 
@@ -783,12 +802,16 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
         report = {"dry_run": dry_run, "board_url": "https://miro.com/app/board/" + urllib.parse.quote(board_id, safe="") + "/",
                   "run_id": plan["run_id"], "namespace": namespace, "state_path": str(state_path), "max_items": max_items,
                   "reorganize": reorganize, "fee_items_to_remove": len(removals)}
-        if plan.get("layout", {}).get("algorithm") == "elk_layered_v1":
-            report["layout_algorithm"] = "elk_layered_v1"
+        layout = plan.get("layout", {})
+        if layout.get("algorithm"):
+            report["layout_algorithm"] = layout["algorithm"]
             report["connector_style"] = plan.get("graph_options", {}).get("connector_style", "straight")
-            report["layout_metrics"] = copy.deepcopy(plan["layout"].get("metrics", {}))
-            report["layout_metrics_notice"] = ("Estimated for the local proposed layout. Miro routes connectors itself; "
-                                               "preserved positions and live size adjustments can change crossings.")
+            if "fallback_reason" in layout:
+                report["fallback_reason"] = layout["fallback_reason"]
+            if "metrics" in layout:
+                report["layout_metrics"] = copy.deepcopy(layout["metrics"])
+                report["layout_metrics_notice"] = ("Estimated for the local proposed layout. Miro routes connectors itself; "
+                                                   "preserved positions and live size adjustments can change crossings.")
         for endpoint, collection in collections:
             for item in collection:
                 record = current["items"].get(item["key"])

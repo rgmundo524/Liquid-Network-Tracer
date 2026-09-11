@@ -18,6 +18,10 @@ from .common import TraceError, save_json
 from .export import COLORS, edge_color, legend_lines
 
 RENDER_TIMEOUT = 120
+# Browser layout becomes expensive well before the direct SVG display limit.
+# These are local scheduling thresholds, not limits of the Mermaid format.
+MAX_RENDER_NODES = 1000
+MAX_RENDER_EDGES = 2000
 _COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
 
 
@@ -88,11 +92,22 @@ def _preview_html(graph, svg):
     notice = html.escape(str(graph.get("notice", "")))
     fees = "included" if graph.get("include_fees") else "hidden"
     simulated = " · Synthetic demonstration data" if graph.get("simulated") else ""
+    fallback = graph.get("preview", {}).get("renderer") == "direct_svg"
+    title = "Direct SVG fallback" if fallback else "Mermaid preview"
+    if fallback:
+        cause = ("Mermaid reached its rendering time limit." if graph["preview"]["reason"] == "timeout"
+                 else "This graph exceeds the automatic Mermaid rendering threshold.")
+        layout_note = (cause + " This SVG uses the saved dependency layout. All displayed objects and connections "
+                       "are retained; ELK and Mermaid optimization were not applied. "
+                       "The complete Mermaid source remains available below.")
+    else:
+        layout_note = ("Mermaid arranges the graph from left to right. Cycles can return left; "
+                       "Miro positions and fixed transaction connection sides are not copied.")
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
-<title>Liquid trace · Mermaid preview</title>
+<title>Liquid trace · {title}</title>
 <style>
 body {{ margin:0; color:#172033; background:#f5f6f8; font:15px system-ui,sans-serif; }}
 header {{ padding:20px 28px; background:white; border-bottom:1px solid #d5dbe3; }}
@@ -102,11 +117,10 @@ summary {{ cursor:pointer; }} li {{ margin:6px 0; }}
 .chart {{ overflow:auto; padding:24px; background:white; }}
 .chart img {{ display:block; max-width:none; }}
 </style></head><body>
-<header><h1>Liquid trace · Mermaid preview</h1>
+<header><h1>Liquid trace · {title}</h1>
 <p>Run {run_id} · {len(graph['nodes'])} nodes · {len(graph['edges'])} links · Fees {fees}{simulated}</p>
 <p>{notice}</p>
-<p>Mermaid arranges the graph from left to right. Cycles can return left;
-Miro positions and fixed transaction connection sides are not copied.</p>
+<p>{layout_note}</p>
 <p>Scroll to explore; use your browser zoom to adjust the scale.</p>
 <p><a href="graph.mmd" download>Mermaid source</a> · <a href="graph.svg" download>SVG</a> ·
 <a href="graph.json" download>Graph details</a> · <a href="mermaid-node-map.json" download>Node identifiers</a></p>
@@ -172,6 +186,8 @@ def export_mermaid(graph, directory):
         raise TraceError(f"Cannot write Mermaid preview files in {directory}") from error
 
     retained = f"Mermaid source saved at {paths['source']}."
+    if len(graph["nodes"]) > MAX_RENDER_NODES or len(graph["edges"]) > MAX_RENDER_EDGES:
+        return _export_fallback(graph, paths, "size_limit", retained)
     executable = os.environ.get("LIQUID_MERMAID_BIN") or shutil.which("mmdc")
     if not executable:
         raise TraceError(f"Mermaid renderer (mmdc) is unavailable. Enter the project's devenv shell and retry. {retained}")
@@ -179,9 +195,9 @@ def export_mermaid(graph, directory):
                "--configFile", str(config_path), "--backgroundColor", "white", "--quiet"]
     try:
         returncode = _render(command, directory)
-    except subprocess.TimeoutExpired as error:
+    except subprocess.TimeoutExpired:
         paths["svg"].unlink(missing_ok=True)
-        raise TraceError(f"Mermaid rendering exceeded {RENDER_TIMEOUT} seconds. Try a smaller saved run. {retained}") from error
+        return _export_fallback(graph, paths, "timeout", retained)
     except OSError as error:
         raise TraceError(f"Cannot start Mermaid renderer. Enter the project's devenv shell and retry. {retained}") from error
     if returncode:
@@ -206,3 +222,32 @@ def export_mermaid(graph, directory):
         paths["html"].unlink(missing_ok=True)
         raise TraceError(f"Mermaid did not produce a usable SVG preview. {retained}") from error
     return {key: str(path) for key, path in paths.items()}
+
+
+def _export_fallback(graph, paths, reason, retained):
+    """Finish a failed/oversized Mermaid request with a clearly identified SVG.
+
+    Reuse the bounded dependency arrangement already produced by build_graph;
+    launching ELK here would just repeat the other expensive layout operation.
+    The complete .mmd and node map still describe the same physical topology.
+    """
+    from .elk_layout import fallback_graph
+    from .layout_preview import render_svg
+
+    temporary = paths["html"].with_name("graph.html.tmp")
+    try:
+        display = fallback_graph(graph, reason="mermaid_" + reason)
+        display["preview"] = {"renderer": "direct_svg", "reason": reason}
+        svg = render_svg(display)
+        save_json(paths["graph"], display)
+        paths["svg"].write_bytes(svg)
+        temporary.write_text(_preview_html(display, svg), encoding="utf-8")
+        temporary.replace(paths["html"])
+    except (OSError, TraceError) as error:
+        paths["svg"].unlink(missing_ok=True)
+        paths["html"].unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
+        message = str(error) if isinstance(error, TraceError) else "Cannot write the direct SVG preview"
+        raise TraceError(f"{message}. {retained}") from error
+    return {**{key: str(path) for key, path in paths.items()},
+            "renderer": "direct_svg", "fallback_reason": reason}

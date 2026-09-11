@@ -1,4 +1,4 @@
-"""Portable, offline SVG previews of an already calculated ELK layout.
+"""Portable, offline SVG previews of an already calculated display layout.
 
 This renderer consumes display geometry only. It never traces, contacts Miro,
 or changes an archived graph. Each physical edge remains a separate SVG path.
@@ -24,11 +24,30 @@ _MAX_ROUTE_POINTS = 1000
 _MAX_TOTAL_ROUTE_POINTS = 250000
 
 
+def layout_title(graph):
+    layout = graph.get("layout", {})
+    if layout.get("algorithm") == "dependency_layers_v1":
+        return "Dependency layout fallback" if layout.get("fallback_reason") else "Dependency layout"
+    return "ELK layout"
+
+
+def layout_notice(graph):
+    layout = graph.get("layout", {})
+    if layout.get("algorithm") == "dependency_layers_v1":
+        return (str(layout.get("fallback_notice") or "Dependency layout; ELK optimization was not applied.")
+                + " Miro routes may differ. Crossing counts are estimates.")
+    return LAYOUT_NOTICE
+
+
 def _number(value, *, positive=False):
     if (isinstance(value, bool) or not isinstance(value, (int, float))
-            or abs(value) > _MAX_COORDINATE or not math.isfinite(value)
             or (positive and value <= 0)):
-        raise TraceError("ELK preview contains invalid or out-of-range geometry")
+        raise TraceError("Local SVG preview contains invalid geometry")
+    if abs(value) > _MAX_COORDINATE:
+        raise TraceError(f"Local SVG preview exceeds the coordinate limit of {_MAX_COORDINATE:,}; "
+                         "export CSV for the complete graph or select an earlier saved run for a smaller preview")
+    if not math.isfinite(value):
+        raise TraceError("Local SVG preview contains invalid geometry")
     return float(value)
 
 
@@ -89,8 +108,12 @@ def _attachment(edge, key, node, other, source):
 def _geometry(graph):
     if not isinstance(graph, dict) or not isinstance(graph.get("nodes"), list) or not isinstance(graph.get("edges"), list):
         raise TraceError("ELK preview requires graph nodes and edges")
-    if not graph["nodes"] or len(graph["nodes"]) + len(graph["edges"]) > _MAX_ITEMS:
-        raise TraceError("ELK preview requires a nonempty graph within the display limit")
+    if not graph["nodes"]:
+        raise TraceError("Local SVG preview requires a nonempty graph")
+    if len(graph["nodes"]) + len(graph["edges"]) > _MAX_ITEMS:
+        raise TraceError(f"Local SVG preview has {len(graph['nodes']):,} objects and {len(graph['edges']):,} connections; "
+                         f"its display limit is {_MAX_ITEMS:,} combined. Export CSV for the complete graph "
+                         "or select an earlier saved run for a smaller preview; no objects were omitted")
     nodes = {}
     for item in graph["nodes"]:
         if (not isinstance(item, dict) or not isinstance(item.get("id"), str)
@@ -185,6 +208,8 @@ def _short_lines(value, width, height, kind):
 
 
 def _svg(graph, nodes, edges):
+    banner = ("Dependency layout fallback · Full graph retained; crossing optimization skipped."
+              if graph.get("layout", {}).get("fallback_reason") else layout_notice(graph))
     left = min(node["x"] - node["width"] / 2 for node in nodes)
     right = max(node["x"] + node["width"] / 2 for node in nodes)
     top = min(node["y"] - node["height"] / 2 for node in nodes)
@@ -198,15 +223,15 @@ def _svg(graph, nodes, edges):
     width, height = max(800, right - left + margin * 2), bottom - top + margin * 2
     lines = [f'<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc" '
              f'width="{_fmt(width)}" height="{_fmt(height)}" viewBox="{_fmt(x)} {_fmt(y)} {_fmt(width)} {_fmt(height)}">',
-             '<title id="title">Liquid trace · ELK layout</title>',
-             '<desc id="desc">' + _escape(LAYOUT_NOTICE + " " + str(graph.get("notice", ""))) + '</desc>',
+             '<title id="title">Liquid trace · ' + _escape(layout_title(graph)) + '</title>',
+             '<desc id="desc">' + _escape(layout_notice(graph) + " " + str(graph.get("notice", ""))) + '</desc>',
              '<defs>']
     for key, color in (("traced", COLORS["traced_edge"]), ("context", COLORS["context_edge"])):
         lines.append(f'<marker id="arrow-{key}" markerWidth="9" markerHeight="7" refX="8" refY="3.5" '
                      f'orient="auto" markerUnits="userSpaceOnUse"><path d="M 0 0 L 9 3.5 L 0 7 Z" fill="{color}"/></marker>')
     lines.extend(['</defs>', f'<rect x="{_fmt(x)}" y="{_fmt(y)}" width="{_fmt(width)}" height="{_fmt(height)}" fill="white"/>',
                   f'<text x="{_fmt(left)}" y="{_fmt(top - 100)}" font-family="sans-serif" font-size="15" fill="#475569">'
-                  + _escape(LAYOUT_NOTICE) + '</text>', '<g id="edges" fill="none" stroke-width="2">'])
+                  + _escape(banner) + '</text>', '<g id="edges" fill="none" stroke-width="2">'])
     for index, edge in enumerate(edges):
         marker = "context" if edge.get("role", "").startswith("context") else "traced"
         caption = _text(edge.get("label", "")) + (" · " + _text(edge["quantity"]) if edge.get("quantity") else "")
@@ -251,7 +276,12 @@ def _svg(graph, nodes, edges):
     return "\n".join(lines).encode("utf-8")
 
 
-def _metrics_table(metrics):
+def render_svg(graph):
+    """Render validated geometry directly, without Node, Chromium, or layout work."""
+    return _svg(graph, *_geometry(graph))
+
+
+def _metrics_table(metrics, title="ELK layout"):
     rows = []
     for key, label in (("crossings", "Line crossings"), ("node_overlaps", "Object overlaps"),
                        ("node_intersections", "Lines through objects")):
@@ -264,7 +294,7 @@ def _metrics_table(metrics):
             else:
                 values.append("??")
         rows.append(f'<tr><th scope="row">{label}</th><td>{values[0]}</td><td>{values[1]}</td></tr>')
-    return '<table><caption>Estimated layout quality</caption><thead><tr><th>Measure</th><th>Baseline layout</th><th>ELK layout</th></tr></thead><tbody>' + ''.join(rows) + '</tbody></table>'
+    return '<table><caption>Estimated layout quality</caption><thead><tr><th>Measure</th><th>Baseline layout</th><th>' + _escape(title) + '</th></tr></thead><tbody>' + ''.join(rows) + '</tbody></table>'
 
 
 def _preview_html(graph, svg, metrics):
@@ -275,7 +305,7 @@ def _preview_html(graph, svg, metrics):
     return f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
-<title>Liquid trace · ELK layout</title><style>
+<title>Liquid trace · {_escape(layout_title(graph))}</title><style>
 body {{ margin:0; color:#172033; background:#f5f6f8; font:14px system-ui,sans-serif; }}
 header {{ padding:16px 24px; background:white; border-bottom:1px solid #d5dbe3; }}
 h1 {{ font-size:22px; margin:0 0 8px; }} p {{ margin:6px 0; }} a {{ color:#155e75; }}
@@ -286,15 +316,15 @@ details {{ margin-top:8px; }} summary {{ cursor:pointer; }} li {{ margin:4px 0; 
 .chart {{ overflow:auto; background:white; }} .chart img {{ display:block; max-width:none; }}
 body:has(#chart:target) header {{ display:none; }}
 #chart:target img {{ width:100%; height:auto; }}
-</style></head><body><header><div class="summary"><div><h1>Liquid trace · ELK layout</h1>
+</style></head><body><header><div class="summary"><div><h1>Liquid trace · {_escape(layout_title(graph))}</h1>
 <p>Run {_escape(graph.get('run_id', ''))} · {len(graph['nodes'])} nodes · {len(graph['edges'])} links · Fees {fees}{simulated}</p>
-<p>{_escape(LAYOUT_NOTICE)}</p><p>Scroll to explore; use your browser zoom to adjust the scale.</p>
+<p>{_escape(layout_notice(graph))}</p><p>Scroll to explore; use your browser zoom to adjust the scale.</p>
 <p><a href="graph.svg" download>Download SVG</a> · <a href="graph.json" download>Graph details</a> ·
-<a href="layout-report.json" download>Layout report</a></p></div>{_metrics_table(metrics)}</div>
+<a href="layout-report.json" download>Layout report</a></p></div>{_metrics_table(metrics, layout_title(graph))}</div>
 <details><summary>Legend and evidence notes</summary><p>{_escape(graph.get('notice', ''))}</p>
 <p>Before uses the saved graph's baseline layout, not live Miro positions. Labels and Miro's automatic curves are not measured.
 Counts prefixed with ≥ are lower bounds because the comparison limit was reached.</p><ul>{legend}</ul></details></header>
-<main id="chart" class="chart"><img alt="Directed Liquid Network transaction graph arranged with ELK" src="data:image/svg+xml;base64,{encoded}"></main>
+<main id="chart" class="chart"><img alt="Directed Liquid Network transaction graph · {_escape(layout_title(graph))}" src="data:image/svg+xml;base64,{encoded}"></main>
 </body></html>\n'''
 
 
@@ -324,7 +354,7 @@ def export_layout(graph, directory):
     try:
         save_json(paths["graph"], graph)
         save_json(paths["report"], {"run_id": graph.get("run_id"), "layout": layout,
-                                  "metrics": metrics, "notice": LAYOUT_NOTICE,
+                                  "metrics": metrics, "notice": layout_notice(graph),
                                   "node_count": len(nodes), "edge_count": len(edges)})
         paths["svg"].write_bytes(svg)
         temporary.write_text(document, encoding="utf-8")

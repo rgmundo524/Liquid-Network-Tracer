@@ -36,6 +36,20 @@ EXPORT_NAMES = {"nodes.csv", "edges.csv", "inputs.csv", "outputs.csv", "spends.c
 PREVIEW_NAMES = {"graph.html", "graph.svg", "graph.mmd", "graph.json",
                  "mermaid-node-map.json", "mermaid-config.json"}
 LAYOUT_NAMES = {"graph.html", "graph.svg", "graph.json", "layout-report.json"}
+LAYOUT_ALGORITHMS = ("elk_layered_v1", "dependency_layers_v1")
+FALLBACK_REASONS = ("size_limit", "timeout", "mermaid_size_limit", "mermaid_timeout")
+
+
+def public_rendering_metadata(result):
+    """Only controlled renderer names and reasons may cross the browser boundary."""
+    value = {}
+    if result.get("layout_algorithm") in LAYOUT_ALGORITHMS:
+        value["layout_algorithm"] = result["layout_algorithm"]
+    if result.get("renderer") == "direct_svg":
+        value["renderer"] = "direct_svg"
+    if result.get("fallback_reason") in FALLBACK_REASONS:
+        value["fallback_reason"] = result["fallback_reason"]
+    return value
 
 
 def public_layout_metrics(metrics):
@@ -238,12 +252,21 @@ class LocalServer(ThreadingHTTPServer):
                         style = options.get("connector_style")
                         layout = info.get("layout")
                         if (not isinstance(style, str) or style not in ("straight", "curved", "elbowed")
-                                or not isinstance(layout, dict) or layout.get("algorithm") != "elk_layered_v1"):
+                                or not isinstance(layout, dict) or layout.get("algorithm") not in LAYOUT_ALGORITHMS):
                             continue
                         product["connector_style"] = style
+                        product.update(public_rendering_metadata({
+                            "layout_algorithm": layout.get("algorithm"),
+                            "fallback_reason": layout.get("fallback_reason")}))
                         metrics = public_layout_metrics(layout.get("metrics"))
                         if metrics is not None:
                             product["layout_metrics"] = metrics
+                    elif kind == "mermaid":
+                        preview = info.get("preview", {})
+                        if isinstance(preview, dict):
+                            product.update(public_rendering_metadata({
+                                "renderer": preview.get("renderer"),
+                                "fallback_reason": preview.get("reason")}))
                     artifacts.setdefault(run_id, {})[kind] = product
                     newest[(run_id, kind)] = order
                 except (RequestError, OSError, ValueError, TypeError):
@@ -393,8 +416,7 @@ class LocalServer(ThreadingHTTPServer):
                               if isinstance(item, (int, float)) and not isinstance(item, bool)}
         if result.get("connector_style") in ("straight", "curved", "elbowed"):
             value["connector_style"] = result["connector_style"]
-        if result.get("layout_algorithm") == "elk_layered_v1":
-            value["layout_algorithm"] = "elk_layered_v1"
+        value.update(public_rendering_metadata(result))
         metrics = public_layout_metrics(result.get("layout_metrics"))
         if metrics is not None:
             value["layout_metrics"] = metrics
