@@ -1,0 +1,29 @@
+[
+  {
+    "address": "REPLACE_WITH_LIQUID_ADDRESS_1",
+    "name": "Possible service",
+    "classification": "suspected_service",
+    "confidence": "candidate",
+    "source": "Investigator research",
+    "rationale": "Explain the evidence",
+    "stop_tracing": true
+  },
+  {
+    "address": "REPLACE_WITH_LIQUID_ADDRESS_2",
+    "name": "Known service",
+    "classification": "service",
+    "confidence": "confirmed",
+    "source": "Reference the supporting service records",
+    "rationale": "Explain the evidence",
+    "stop_tracing": true
+  },
+  {
+    "address": "REPLACE_WITH_LIQUID_ADDRESS_3",
+    "name": "Case alias",
+    "classification": "label",
+    "confidence": "candidate",
+    "source": "Client-provided",
+    "rationale": "Label only; continue tracing",
+    "stop_tracing": false
+  }
+]

@@ -50,7 +50,7 @@ def public_service(rule):
     if not isinstance(rule, dict):
         return None
     return {key: rule[key] for key in ("address", "classification", "name", "rationale", "enabled",
-                                      "created_at", "updated_at") if key in rule}
+                                      "created_at", "updated_at", "confidence", "source", "observed_at", "stop_tracing") if key in rule}
 
 
 def public_address_activity(summary):
@@ -786,14 +786,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def body(self):
+    def body(self, maximum=MAX_BODY):
         if self.headers.get("Transfer-Encoding") or len(self.headers.get_all("Content-Length", [])) != 1:
             raise RequestError("A bounded JSON request body is required.")
         try:
             length = int(self.headers["Content-Length"])
         except ValueError:
             raise RequestError("Invalid request length.") from None
-        if not 0 < length <= MAX_BODY:
+        if not 0 < length <= maximum:
             raise RequestError("Request is too large or empty.", 413)
         try:
             value = json.loads(self.rfile.read(length))
@@ -818,7 +818,9 @@ class Handler(BaseHTTPRequestHandler):
                 raise RequestError("Route not found", 404)
             parts = unquote(parsed.path).strip("/").split("/")
             if mutation:
-                body = self.body()
+                # Only the attribution upload route accepts a larger, still bounded text body.
+                is_import = len(parts) == 4 and parts[:2] == ["api", "cases"] and parts[3] == "address-import"
+                body = self.body(4 * 1024 * 1024 if is_import else MAX_BODY)
                 with self.server.job_lock:
                     if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "cancel":
                         result, status = self.server.cancel_job(parts[2]), 202
@@ -892,6 +894,17 @@ class Handler(BaseHTTPRequestHandler):
             return self.server.case_summary(case, read_case(case), detail=True), 201
         if len(parts) == 4 and parts[:2] == ["api", "cases"]:
             case, metadata = self.server.case(parts[2])
+            if parts[3] == "address-import":
+                from .address_import import apply_import, preview_import
+                if set(body) - {"text", "format", "policy", "approve_plan"}:
+                    raise RequestError("Import accepts uploaded text, format, policy and approval only; not file paths.")
+                options = {"format": body.get("format", "auto"), "policy": body.get("policy", "keep")}
+                try:
+                    result = (apply_import(case, body.get("text"), approval_sha256=body["approve_plan"], **options)
+                              if "approve_plan" in body else preview_import(case, body.get("text"), **options))
+                except TraceError as error:
+                    raise RequestError(str(error)) from None
+                return result, 200
             if parts[3] == "address-merge-preview":
                 return self.server.address_merge_preview(case), 200
             if parts[3] in ("addresses", "address", "services"):
@@ -940,7 +953,8 @@ class Handler(BaseHTTPRequestHandler):
         if type(body.get("enabled")) is not bool:
             raise RequestError("Choose whether this suspected-service stop is enabled.")
         settings = set_service(case, address, name=body.get("name", ""),
-                               rationale=body.get("rationale", ""), enabled=body["enabled"])
+                               rationale=body.get("rationale", ""), enabled=body["enabled"],
+                               **{key: body[key] for key in ("classification", "confidence", "source", "observed_at", "stop_tracing") if key in body})
         return {"service": public_service(settings["rules"][address]), "revision": settings["revision"]}
 
 

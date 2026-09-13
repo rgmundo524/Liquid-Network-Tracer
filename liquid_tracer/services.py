@@ -12,6 +12,37 @@ from .investigations import read_case
 
 MANAGED_BY = "case_service_rules"
 SERVICE_STATUSES = {"suspected_service_stop", "held_behind_service"}
+CLASSIFICATIONS = {"suspected_service", "service", "label"}
+CONFIDENCES = {"candidate", "corroborated", "confirmed"}
+
+
+def rule_fields(rule):
+    """Normalize old rules without rewriting archived snapshots or settings."""
+    return {"classification": rule.get("classification", "suspected_service"),
+            "confidence": rule.get("confidence", "candidate"),
+            "source": rule.get("source", "Investigator designation"),
+            "observed_at": rule.get("observed_at", ""),
+            "stop_tracing": rule.get("stop_tracing", True)}
+
+
+def validate_rule_fields(fields):
+    if fields["classification"] not in CLASSIFICATIONS or fields["confidence"] not in CONFIDENCES:
+        raise TraceError("Choose a supported classification and confidence")
+    if type(fields["stop_tracing"]) is not bool:
+        raise TraceError("Stop tracing must be true or false")
+    if fields["classification"] == "label" and fields["stop_tracing"]:
+        raise TraceError("Label-only attributions cannot stop tracing; choose a service classification")
+    if fields["classification"] == "suspected_service" and fields["confidence"] == "confirmed":
+        raise TraceError("For a confirmed service designation, choose classification service rather than suspected_service")
+    _text(fields["source"], "Source", 1000, required=True)
+    value = _text(fields["observed_at"], "Observation date", 80)
+    if value:
+        from datetime import datetime
+        try:
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            raise TraceError("Observation date must be an ISO date or timestamp") from None
+    return fields
 
 
 def _text(value, name, maximum, *, required=False, multiline=False):
@@ -33,9 +64,10 @@ def _validate(data, identity):
         raise TraceError("Invalid suspected-service settings; restore services.json")
     for address, rule in data["rules"].items():
         if (validate_address(address) != address or not isinstance(rule, dict)
-                or rule.get("address") != address or rule.get("classification") != "suspected_service"
+                or rule.get("address") != address or rule.get("classification") not in CLASSIFICATIONS
                 or type(rule.get("enabled")) is not bool):
             raise TraceError("Invalid suspected-service rule")
+        validate_rule_fields(rule_fields(rule))
         for field, maximum in (("name", 120), ("rationale", 4000), ("created_at", 80), ("updated_at", 80)):
             if _text(rule.get(field), field, maximum, required=field.endswith("_at"),
                      multiline=field == "rationale") != rule[field]:
@@ -56,12 +88,15 @@ def load_services(case):
         raise TraceError("Unable to read suspected-service settings; restore services.json") from error
 
 
-def set_service(case, address, *, name="", rationale="", enabled=True):
+def set_service(case, address, *, name="", rationale="", enabled=True,
+                classification=None, confidence=None, source=None, observed_at=None, stop_tracing=None):
     """Persist an audited local designation while no trace can snapshot half a change."""
-    return _update_service(case, address, name=name, rationale=rationale, enabled=enabled)
+    return _update_service(case, address, name=name, rationale=rationale, enabled=enabled,
+                           fields={"classification": classification, "confidence": confidence,
+                                   "source": source, "observed_at": observed_at, "stop_tracing": stop_tracing})
 
 
-def _update_service(case, address, *, name="", rationale="", enabled=True, preserve_text=False):
+def _update_service(case, address, *, name="", rationale="", enabled=True, preserve_text=False, fields=None):
     case, address = Path(case), validate_address(address)
     name, rationale = _text(name, "Service name", 120), _text(rationale, "Rationale", 4000, multiline=True)
     if type(enabled) is not bool:
@@ -80,7 +115,12 @@ def _update_service(case, address, *, name="", rationale="", enabled=True, prese
                 if previous is None:
                     raise TraceError("This address has no suspected-service designation")
                 name, rationale = previous["name"], previous["rationale"]
-            rule = {"address": address, "classification": "suspected_service", "name": name,
+            metadata = rule_fields(previous or {})
+            metadata.update({key: value for key, value in (fields or {}).items() if value is not None})
+            metadata["source"] = _text(metadata["source"], "Source", 1000, required=True)
+            metadata["observed_at"] = _text(metadata["observed_at"], "Observation date", 80)
+            validate_rule_fields(metadata)
+            rule = {"address": address, **metadata, "name": name,
                     "rationale": rationale, "enabled": enabled,
                     "created_at": previous["created_at"] if previous else stamp, "updated_at": stamp}
             data["rules"][address] = rule
@@ -96,11 +136,19 @@ def disable_service(case, address):
 
 
 def service_labels(settings):
-    return [{"kind": "address", "value": address, "entity": rule["name"] or "Suspected service",
-             "source": "Investigator designation", "confidence": "candidate",
-             "classification": "suspected_service", "managed_by": MANAGED_BY,
-             "stop": True, "observed_at": rule["updated_at"], "rationale": rule["rationale"]}
-            for address, rule in sorted(settings["rules"].items()) if rule["enabled"]]
+    labels = []
+    for address, rule in sorted(settings["rules"].items()):
+        if not rule["enabled"]:
+            continue
+        fields = rule_fields(rule)
+        fallback = {"suspected_service": "Suspected service", "service": "Service", "label": "Address label"}
+        labels.append({"kind": "address", "value": address,
+            "entity": rule["name"] or fallback[fields["classification"]],
+            "source": fields["source"], "confidence": fields["confidence"],
+            "classification": fields["classification"], "managed_by": MANAGED_BY,
+            "stop": fields["stop_tracing"],
+            "observed_at": fields["observed_at"] or rule["updated_at"], "rationale": rule["rationale"]})
+    return labels
 
 
 def apply_service_labels(labels, settings):
@@ -109,7 +157,7 @@ def apply_service_labels(labels, settings):
 
 
 def is_service_stop(label):
-    return label.get("kind") == "address" and label.get("classification") == "suspected_service" and label.get("stop") is True
+    return label.get("kind") == "address" and label.get("classification") in ("suspected_service", "service") and label.get("stop") is True
 
 
 class ServiceScope:

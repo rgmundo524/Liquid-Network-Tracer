@@ -44,7 +44,7 @@ def legend_lines():
         f"{name('event')} diamonds: events. Transaction inputs enter on the left; outputs leave on the right.",
         f"Circles: {name('seed').lower()} = selected seed outputs; {name('candidate').lower()} = reachable candidate outputs.",
         f"Circles: {name('address').lower()} = context; {name('attributed').lower()} = analyst attribution (read confidence).",
-        f"{name('suspected_service')} circles: investigator-designated suspected service; not confirmed ownership. Tracing stops at designated addresses.",
+        f"{name('suspected_service')} circles: investigator-designated suspected service; not confirmed ownership. Only active stop rules halt tracing; label-only entries do not.",
         f"{name('unspent_endpoint')} circles: traced branch ends at a UTXO observed unspent. Unchecked or hop-limited outputs do not qualify.",
         f"Arrows: {name('traced_edge').lower()} = traced UTXO links; {name('context_edge').lower()} = context only.",
         "Captions: vin/vout number · amount asset. ?? = not publicly available. Known amounts are in base units.",
@@ -219,6 +219,9 @@ def build_graph(state, merge_addresses=True, include_fees=False):
                                if m.get("classification") != "suspected_service"})
         services = {canonical(m): m for item in node["details"]["occurrences"] for m in item["labels"]
                     if m.get("classification") == "suspected_service"}
+        all_attributions = {canonical(m): m for item in node["details"]["occurrences"] for m in item["labels"]}
+        if all_attributions:
+            node["details"]["address_attributions"] = [all_attributions[key] for key in sorted(all_attributions)]
         parts = [node["label"]]
         if services:
             # Keep uncertainty visible even when a separate attribution has
@@ -291,10 +294,11 @@ def node_csv_rows(graph):
               "service_source": "source", "service_confidence": "confidence",
               "service_observed_at": "observed_at"}
     for node in graph["nodes"]:
-        services = node.get("details", {}).get("suspected_services", [])
+        services = node.get("details", {}).get("address_attributions", node.get("details", {}).get("suspected_services", []))
         row = dict(node)
         if services:
-            row["classification"] = "suspected_service"
+            classifications = sorted({service.get("classification", "attributed") for service in services})
+            row["classification"] = classifications[0] if len(classifications) == 1 else classifications
             row["stop_tracing"] = any(service.get("stop") is True for service in services)
             for field, key in fields.items():
                 values = [service.get(key, "") for service in services]

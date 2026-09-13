@@ -165,7 +165,7 @@ To review address activity and record suspected services, open an investigation 
 1. Choose **Refresh activity** (the terminal calls it **Refresh address activity**). This explicitly retrieves statistics and bounded confirmed history through the existing Blockstream client and Proton Pass workflow. Defaults are five history pages, ten HTTP attempts including authentication/retries, and sixty seconds.
 2. Review confirmed transaction count, separate mempool count, confirmed unspent-output count, mempool output delta, combined general unspent-output count, and confirmed activity dates. These output counts include all indexed assets at the address. They are not an L-BTC balance or a count of only the investigation's UTXOs.
 3. Check history coverage. Transaction counts come from the explorer's address statistics without scanning every transaction. The first confirmed activity date is shown only when the complete paginated history agrees with those statistics. Otherwise, the oldest retrieved activity is explicitly partial. Block dates describe observed confirmed activity, not when a wallet or address was created. Statistics and history are separate observations, not an atomic chain snapshot.
-4. If your analysis supports the decision, enable **Suspected service / stop tracing**, enter an optional name and your reasoning, and save. This records your candidate assessment; the program does not infer ownership from activity counts or turn it into verified attribution.
+4. If your analysis supports the decision, enable the assessment and **Stop tracing through this address**, select **Suspected service** and **Candidate**, enter an optional name and your reasoning, and save. This records your candidate assessment; the program does not infer ownership from activity counts or turn it into verified attribution.
 5. Continue the investigation. A designated address stops forward traversal before fetching its spend. If an earlier run already expanded beyond it, downstream frontier reachable only through that boundary is held too. Independent starting outputs and other unblocked paths remain eligible, subject to their currently permitted hop depths. Historical transactions, links, depths and observations stay intact.
 6. Refresh the local preview or use normal Miro sync to apply the new cyan **Suspected service** labels to existing address occurrences. Current decisions also appear in fresh CSV graph tables. Existing non-service analyst attribution retains color priority. Disable the designation later to allow subsequent continuation again; its rationale and revision history are retained.
 
@@ -182,6 +182,43 @@ liquid-trace service-set --case cases/theft-liquid --address ADDRESS --disable
 ```
 
 `address-inspect --run RUN_ID` uses that saved snapshot's API source. To inspect more history, explicitly increase `--max-pages`, `--max-requests`, and `--max-seconds`; every HTTP attempt still consumes the existing budget and rate controls. Increasing the page budget does not trace those transactions or add them to the funds-flow graph. Address spellings are not ownership clusters: use the address shown by the explorer/graph, because confidential and unconfidential representations are not automatically linked.
+
+### Bulk address attributions before the first run
+
+Create or open the investigation, then use **Import attributions** in the browser workspace (also on **Address review**) or **Import address attributions** in the terminal menu. This is available with **no saved run**. Choose a CSV/JSON/text file or paste addresses, preview the batch, review individual rows and any conflicts, then approve **Apply reviewed import**. Return to **Start first run** afterward. Importing does not start a trace, query Blockstream, load credentials, or update Miro.
+
+A plain list, one address per line or separated by commas/spaces, is imported as **suspected services**, **candidate** confidence, with **stop tracing enabled**. CSV/JSON lets you specify different names, source references, confidence and label-only entries per address. Templates are in `examples/address-attributions-template.csv` and `examples/address-attributions-template.json`; the interface also provides **Use CSV template**. Replace the placeholder addresses before importing.
+
+| Column | Meaning / default |
+| --- | --- |
+| `address` | Required. Full public Liquid address as shown by the trace/explorer. |
+| `name` | Service name or case alias; optional. |
+| `classification` | `suspected_service` (default), `service`, or `label`. |
+| `confidence` | `candidate` (default), `corroborated`, or `confirmed`. This is your assertion, never automatically verified by importing. Use `service`, not `suspected_service`, for a confirmed service designation. |
+| `source` | Evidence reference; defaults to `Investigator designation`. |
+| `rationale` | Optional notes, including quoted multiline CSV text, up to 4,000 characters. |
+| `stop_tracing` | `true` for service classifications by default; `false` for `label`. Service entries may explicitly use `false` to annotate without stopping. |
+| `enabled` | Optional active/inactive assessment, default `true`. `false` disables both the label and its stop. |
+| `observed_at` | Optional ISO date/timestamp for the supporting observation, separate from when the assessment was imported. |
+
+Only `address` is required. JSON is an array of strings or objects using these fields. `value`/`entity`/`stop` aliases are supported for address-label records; `kind`, when supplied, must be `address`. CSV uses a comma delimiter and a header; UTF-8 BOM and Windows line endings are supported. Import is scoped to the current investigation, not a global cross-case attribution database. Up to **5,000 rows and 512 KiB** per batch.
+
+The preview validates the entire batch. Invalid rows or conflicting duplicate addresses prevent all writes. Identical duplicates are collapsed. Existing assessments are **kept by default**, including disabled entries. To replace them, explicitly select **Replace conflicting existing assessments** (CLI `--on-conflict replace`) and review the before/after fields. Replacement uses the complete normalized row, including defaults for omitted fields. Reimporting unchanged entries makes no new settings write. Each changed entry has a previous/new value, timestamp, batch ID, input SHA-256 and row number in the audit history; the complete batch is committed in one atomic `services.json` replacement.
+
+The approved preview is bound to the case, file contents, options and current assessments. A changed file or assessment invalidates it. Active traces/lookups and reviewed compaction applications block an import. Imported addresses appear immediately in **Address review**, including addresses not encountered yet, and can be edited or disabled individually. Active stops affect the **first run and continuations**, and existing **seed outputs are not exempt**. To trace outward from an address without stopping, import it with `stop_tracing=false`. No global seed override is introduced.
+
+Both suspected and other service stops use the existing service-boundary reachability checks; the historical internal status `suspected_service_stop` remains the boundary status for compatibility, while the saved label retains its explicit classification/confidence. Label-only entries never manufacture new UTXO links or stop traversal. Old rule files remain readable without rewriting evidence archives. Current labels appear in regenerated previews and CSV metadata; Miro changes require a separate sync.
+
+Address text is checked using the existing review validator, **not a network/checksum verification service**. Use the exact public address spelling from the graph/explorer. Confidential and unconfidential address representations are not automatically linked. The importer does not establish ownership or turn suspected services into confirmed ones.
+
+CLI, without SecretSpec or API credentials:
+
+```bash
+liquid-trace address-import --case CASE_DIRECTORY --file attributions.csv --dry-run
+liquid-trace address-import --case CASE_DIRECTORY --file attributions.csv --approve-plan APPROVAL_SHA256
+```
+
+`APPROVAL_SHA256` is the exact hash from the reviewed preview. Use the same `--format` and `--on-conflict` options when applying. Both steps are local and offline.
 
 To inspect the ELK layout for a saved run:
 

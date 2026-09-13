@@ -61,6 +61,14 @@ def parser():
     batch.add_argument("--max-seconds", type=float, help="Shared lookup duration limit (default: 30 seconds per distinct transaction)")
     batch.add_argument("--base-url", default=ENTERPRISE)
     batch.add_argument("--auth", choices=["blockstream", "none"], default="blockstream")
+    bulk = commands.add_parser("address-import", help="Preview/apply bulk address attributions before or between runs; offline")
+    bulk.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    bulk.add_argument("--file", type=Path, required=True, help="UTF-8 CSV, JSON array, or plain address list")
+    bulk.add_argument("--format", choices=("auto", "csv", "json", "text"), default="auto")
+    bulk.add_argument("--on-conflict", choices=("keep", "replace"), default="keep")
+    approval = bulk.add_mutually_exclusive_group()
+    approval.add_argument("--dry-run", action="store_true", help="Preview only (the default)")
+    approval.add_argument("--approve-plan", help="Apply the exact approval_sha256 from a reviewed preview")
     activity = commands.add_parser("address-inspect", help="Save a bounded address activity lookup using the investigation's API source")
     activity.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     activity.add_argument("--address", required=True)
@@ -709,6 +717,14 @@ def main(argv=None, *, progress=None):
         args = parser().parse_args(argv)
         if args.command == "credentials-check":
             return check_credentials(args.service)
+        if args.command == "address-import":
+            from .address_import import apply_import, preview_import, read_import
+            text = read_import(args.file)
+            options = {"format": args.format, "policy": args.on_conflict}
+            result = (apply_import(args.case, text, approval_sha256=args.approve_plan, **options)
+                      if args.approve_plan else preview_import(args.case, text, **options))
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0 if result.get("valid", True) else 1
         if args.command == "address-inspect":
             from .address_review import inspect_case_address
             print(json.dumps(inspect_case_address(args.case, args.address, max_pages=args.max_pages,

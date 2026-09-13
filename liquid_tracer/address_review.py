@@ -143,7 +143,8 @@ def list_addresses(case, run_id="latest", query="", offset=0, limit=25, suspecte
     addresses = set(counts) | set(services["rules"]) | set(index["addresses"])
     needle = query.strip().casefold()
     addresses = sorted(address for address in addresses
-                       if (not suspected_only or services["rules"].get(address, {}).get("enabled"))
+                       if (not suspected_only or (services["rules"].get(address, {}).get("enabled")
+                            and services["rules"].get(address, {}).get("classification") != "label"))
                        and (not needle or needle in address.casefold()
                             or needle in services["rules"].get(address, {}).get("name", "").casefold()))
     rows = []

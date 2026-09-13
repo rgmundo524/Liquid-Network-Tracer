@@ -609,7 +609,7 @@ def create_app(root=None):
                 yield Static("Review saved address activity, then decide whether an address is a suspected service. "
                              "Opening this screen does not call Blockstream.", markup=False)
                 yield Input(placeholder="Search addresses or service names", id="address-search")
-                yield Checkbox("Show suspected services only", id="address-suspected-only")
+                yield Checkbox("Show service assessments only", id="address-suspected-only")
                 with Horizontal(classes="buttons"):
                     yield Button("Search", id="address-find")
                     yield Button("Previous", id="address-previous", disabled=True)
@@ -626,7 +626,17 @@ def create_app(root=None):
                              "Proton Pass prompts appear in the terminal. Activity is a dated snapshot; "
                              "partial history cannot establish an address's first on-chain use.", markup=False)
                 yield Button("Refresh address activity", id="address-refresh", disabled=True)
-                yield Checkbox("Suspected service: stop tracing through this address", id="service-enabled")
+                yield Checkbox("Enable this address assessment", id="service-enabled")
+                yield Checkbox("Stop tracing through this address", value=True, id="service-stop")
+                yield Label("Classification and confidence (your assessment, not automatic verification)")
+                yield Select([("Suspected service", "suspected_service"), ("Service", "service"), ("Label only", "label")],
+                             value="suspected_service", allow_blank=False, id="service-classification")
+                yield Select([(name.title(), name) for name in ("candidate", "corroborated", "confirmed")],
+                             value="candidate", allow_blank=False, id="service-confidence")
+                yield Label("Source / evidence reference")
+                yield Input("Investigator designation", id="service-source", max_length=1000)
+                yield Label("Observation date (optional ISO date / timestamp)")
+                yield Input(id="service-observed", max_length=80)
                 yield Label("Service name (optional)")
                 yield Input(id="service-name", max_length=120)
                 yield Label("Investigator rationale (optional, up to 4,000 characters)")
@@ -658,7 +668,8 @@ def create_app(root=None):
             for row in report["rows"]:
                 service = row.get("service") or {}
                 table.add_row(Text(row["address"]), str(row["run_output_count"]),
-                              Text(service.get("name") or "Suspected service") if service.get("enabled") else "No",
+                              Text(service.get("name") or "Service") if service.get("enabled") and service.get("stop_tracing", True)
+                              else "Label only" if service.get("enabled") else "No",
                               "Saved" if row.get("activity") else "Not fetched", key=row["address"])
             total = report["total"]
             count = len(report["rows"])
@@ -677,6 +688,13 @@ def create_app(root=None):
             self.selected_address = address
             self.query_one("#address-value", Input).value = address
             self.query_one("#service-enabled", Checkbox).value = rule.get("enabled", False)
+            from .services import rule_fields
+            fields = rule_fields(rule)
+            self.query_one("#service-stop", Checkbox).value = fields["stop_tracing"]
+            self.query_one("#service-classification", Select).value = fields["classification"]
+            self.query_one("#service-confidence", Select).value = fields["confidence"]
+            self.query_one("#service-source", Input).value = fields["source"]
+            self.query_one("#service-observed", Input).value = fields["observed_at"]
             self.query_one("#service-name", Input).value = rule.get("name", "")
             self.query_one("#service-rationale", TextArea).text = rule.get("rationale", "")
             self.query_one("#address-activity", Static).update(_address_activity_text(summary))
@@ -734,11 +752,17 @@ def create_app(root=None):
                     enabled = self.query_one("#service-enabled", Checkbox).value
                     set_service(self.case, address, enabled=enabled,
                                 name=self.query_one("#service-name", Input).value,
-                                rationale=self.query_one("#service-rationale", TextArea).text)
+                                rationale=self.query_one("#service-rationale", TextArea).text,
+                                classification=self.query_one("#service-classification", Select).value,
+                                confidence=self.query_one("#service-confidence", Select).value,
+                                source=self.query_one("#service-source", Input).value,
+                                observed_at=self.query_one("#service-observed", Input).value,
+                                stop_tracing=self.query_one("#service-stop", Checkbox).value)
                     self.load_page()
                     self.query_one("#address-error", Static).update(
-                        "Suspected-service stop saved. It applies to the next run." if enabled else
-                        "Service stop disabled. Future runs may trace through this address.")
+                        ("Suspected-service stop saved. It applies to the next run." if self.query_one("#service-stop", Checkbox).value
+                         else "Label-only assessment saved. It does not stop tracing.") if enabled else
+                        "Assessment disabled. Future runs may trace through this address.")
             except ACTION_ERRORS as error:
                 self.query_one("#address-error", Static).update(str(error))
 
@@ -971,6 +995,8 @@ def create_app(root=None):
                 with Horizontal(classes="buttons"):
                     yield Button("ELK layout preview", id="elk-preview")
                     yield Button("Address review", id="addresses-review")
+                with Horizontal(classes="buttons"):
+                    yield Button("Import address attributions", id="addresses-import")
                 yield Button("Merge duplicate addresses", id="address-merge")
                 with Horizontal(classes="buttons"):
                     yield Button("Compact graph (offline preview)", id="compact-preview")
@@ -1076,6 +1102,9 @@ def create_app(root=None):
                     self.app.push_screen(ReviewScreen(self.case))
                 elif action == "address-merge":
                     self.app.push_screen(AddressMergeScreen(self.case), self.perform)
+                elif action == "addresses-import":
+                    from .address_import_menu import import_screen
+                    self.app.push_screen(import_screen(BaseScreen, Button, self.case))
                 elif action == "addresses-review":
                     self.app.push_screen(AddressScreen(self.case))
             except ACTION_ERRORS as error:
