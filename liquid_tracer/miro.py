@@ -290,6 +290,15 @@ def _load_sync_state(path, board_id, namespace, *, allow_pending=False):
         "items": {}, "runs": {}, "pending": None, "pending_creations": {}})
     if state.get("schema_version") != 2:
         raise TraceError("This is legacy Miro snapshot state; keep it intact and use a separate sync state file")
+    if state.get("address_migration"):
+        raise TraceError("Address migration is unfinished. Resume miro-merge-addresses with its reviewed plan; "
+                         "ordinary sync is blocked until conversion finishes")
+    if (state.get("board_id") == board_id
+            and state.get("namespace") == {**namespace, "address_mode": "outpoint_occurrences"}
+            and namespace.get("address_mode") == "merged"):
+        raise TraceError("This board uses legacy per-output circles. Choose Merge duplicate addresses in the "
+                         "investigation menu, or run miro-merge-addresses --dry-run, then approve its plan. "
+                         "Do not delete the Miro mapping or the archived runs")
     if state.get("board_id") != board_id or state.get("namespace") != namespace:
         raise TraceError("Miro state belongs to a different board, case, API source, or address mode; use the matching export and state")
     if not isinstance(state.get("items"), dict) or not isinstance(state.get("runs"), dict):

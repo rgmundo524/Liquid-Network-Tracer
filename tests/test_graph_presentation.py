@@ -90,7 +90,7 @@ class GraphPresentationTests(unittest.TestCase):
         original = copy.deepcopy(self.state)
         graph = build_graph(self.state)
         nodes = {node["id"]: node for node in graph["nodes"]}
-        funding = nodes["liquid:outpoint:" + X + ":0"]
+        funding = nodes["liquid:address:SYNTHETIC-funding-context"]
         self.assertEqual(funding["label"], short("SYNTHETIC-funding-context"))
         self.assertEqual(funding["details"]["occurrences"][0]["outpoint"], X + ":0")
         for node in nodes.values():
@@ -115,9 +115,9 @@ class GraphPresentationTests(unittest.TestCase):
         expected = {
             "tx:" + A: "starting_transaction",
             "tx:" + B: "transaction",
-            "liquid:outpoint:" + A + ":0": "seed",
-            "liquid:outpoint:" + A + ":1": "address",
-            "liquid:outpoint:" + B + ":0": "candidate",
+            "liquid:address:SYNTHETIC-victim-deposit": "seed",
+            "liquid:address:SYNTHETIC-unrelated-seed-sibling": "address",
+            "liquid:address:SYNTHETIC-branch-A": "candidate",
             "event:" + C + ":1": "event",
         }
         plan = make_plan(graph)
@@ -279,7 +279,7 @@ class GraphPresentationTests(unittest.TestCase):
         vin = state["transactions"][B]["data"]["vin"][0]
         vin["is_pegin"] = True
         graph = build_graph(state)
-        node = next(node for node in graph["nodes"] if node["id"] == "bitcoin:outpoint:" + A + ":0")
+        node = next(node for node in graph["nodes"] if node["kind"] == "address" and node["details"]["network"] == "bitcoin")
         self.assertEqual(node["color"], COLORS["address"])
         self.assertIsNone(node["details"]["occurrences"][0]["trace"])
         edge = next(edge for edge in graph["edges"] if edge["id"] == "in:" + B + ":0")

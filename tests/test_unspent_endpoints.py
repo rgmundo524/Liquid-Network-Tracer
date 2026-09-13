@@ -48,7 +48,9 @@ class UnspentEndpointTests(unittest.TestCase):
 
     @staticmethod
     def node(graph, outpoint=ENDPOINT):
-        return next(node for node in graph["nodes"] if node["id"] == "liquid:outpoint:" + outpoint)
+        return next(node for node in graph["nodes"] if node["kind"] == "address"
+                    and node["details"].get("network") == "liquid"
+                    and any(item["outpoint"] == outpoint for item in node["details"]["occurrences"]))
 
     @staticmethod
     def snapshot(directory):
@@ -197,7 +199,7 @@ class UnspentEndpointTests(unittest.TestCase):
         state["transactions"][D]["data"]["vin"][0]["is_pegin"] = True
         graph = build_graph(state, include_fees=True)
         self.assertEqual(self.node(graph)["role"], "unspent_endpoint")
-        bitcoin = next(node for node in graph["nodes"] if node["id"] == "bitcoin:outpoint:" + ENDPOINT)
+        bitcoin = next(node for node in graph["nodes"] if node["kind"] == "address" and node["details"]["network"] == "bitcoin")
         self.assertEqual(bitcoin["role"], "address")
         self.assertEqual(bitcoin["color"], COLORS["address"])
         self.assertFalse(bitcoin["details"].get("unspent_endpoints"))

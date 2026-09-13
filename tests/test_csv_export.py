@@ -62,7 +62,7 @@ class CSVExportTests(unittest.TestCase):
         ids = {node["id"] for node in nodes}
         self.assertEqual(ids, {node["id"] for node in self.graph["nodes"]})
         self.assertIn("tx:" + A, ids)
-        self.assertIn("liquid:outpoint:" + B + ":0", ids)
+        self.assertIn("liquid:address:SYNTHETIC-branch-A", ids)
         self.assertEqual({edge["id"] for edge in edges}, {edge["id"] for edge in self.graph["edges"]})
         self.assertTrue(all(edge["source"] in ids and edge["target"] in ids for edge in edges))
         transaction = next(node for node in nodes if node["id"] == "tx:" + A)
@@ -77,7 +77,7 @@ class CSVExportTests(unittest.TestCase):
         self.assertEqual(info["source_trace_sha256"], digest(before["trace.json"]))
         self.assertEqual(info["source_files"], {name: digest(before[name]) for name in DETAIL_FILES})
         self.assertEqual(info["graph_options"], {"include_fees": False})
-        self.assertEqual(info["address_mode"], "outpoint_occurrences")
+        self.assertEqual(info["address_mode"], "merged")
         manifest = (self.destination / "SHA256SUMS").read_text().splitlines()
         self.assertEqual(len(manifest), 8)
         for line in manifest:
