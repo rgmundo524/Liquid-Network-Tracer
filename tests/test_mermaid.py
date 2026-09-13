@@ -65,7 +65,7 @@ class MermaidTests(unittest.TestCase):
             if node["kind"] == "transaction":
                 heading = (f"Starting TX {node['starting_transaction_index']}"
                            if "starting_transaction_index" in node else "TX")
-                self.assertIn(f'{node_id}["{heading}<br/>', source)
+                self.assertIn(f'{node_id}["{"★ " if node.get("convergence") else ""}{heading}<br/>', source)
             elif node["kind"] == "address":
                 self.assertIn(f'{node_id}(("', source)
             else:

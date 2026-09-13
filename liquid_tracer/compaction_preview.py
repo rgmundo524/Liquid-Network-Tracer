@@ -224,6 +224,7 @@ def export_compaction(before, after, directory, *, archive_sha256, service_sha25
 body{margin:0;background:#f5f6f8;color:#172033;font:14px system-ui,sans-serif}header{padding:20px;background:white}
 h1{font-size:22px}p{max-width:85em;line-height:1.6}a{color:#155e75}table{border-collapse:collapse;font-variant-numeric:tabular-nums}
 th,td{padding:6px 14px;border-bottom:1px solid #d5dbe3;text-align:right}th:first-child{text-align:left}details{padding:12px;background:white}
+pre{white-space:pre-wrap;overflow-wrap:anywhere}
 summary{cursor:pointer;font-size:18px;font-weight:600;margin:8px}.chart{overflow:auto}.chart svg{display:block;max-width:none}
 .metrics{overflow:auto}body:has(#chart:target) header,body:has(#chart:target) .baseline{display:none}#chart:target svg{width:100%;height:auto}
 </style></head><body><header><h1>Compact graph comparison</h1>'''
@@ -231,6 +232,8 @@ summary{cursor:pointer;font-size:18px;font-weight:600;margin:8px}.chart{overflow
         document += "<p>Before is a fresh ELK layout of the selected saved run, not your current Miro arrangement. Node sizes and default clearances are retained. Label bounds and curved paths are estimates; Miro routes may differ.</p>"
         document += '<div class="metrics"><table><thead><tr><th>Measure</th><th>Before</th><th>After</th></tr></thead><tbody>' + "".join(rows) + '</tbody></table></div>'
         document += '<p><a href="before.html" target="_blank" rel="noopener noreferrer">Open before separately</a> · <a href="graph.svg" download>Download compact SVG</a> · <a href="before.svg" download>Download before SVG</a> · <a href="layout-report.json" download>Layout report</a></p>'
+        from .attribution_presentation import register_html
+        document += register_html(after)
         document += '<p>Review both drawings, then return to the investigation and choose Apply compact layout to Miro. Applying replaces positions of managed graph objects. Calculating this preview makes no board changes.</p></header>'
         # Keep the baseline in its own complete document. A collapsed details
         # element would still instantiate a second huge SVG DOM in the browser.

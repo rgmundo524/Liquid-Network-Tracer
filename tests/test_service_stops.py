@@ -61,7 +61,7 @@ class ServiceStorageTests(unittest.TestCase):
         self.assertEqual(len(final["history"]), 3)
         self.assertEqual(final["history"][1]["previous"], first["rules"]["SYNTHETIC-address"])
         self.assertEqual(final["rules"]["SYNTHETIC-address"]["created_at"], first["rules"]["SYNTHETIC-address"]["created_at"])
-        self.assertEqual(final["rules"]["SYNTHETIC-address"]["rationale"], second["rules"]["SYNTHETIC-address"]["rationale"])
+        self.assertEqual(final["rules"]["SYNTHETIC-address"]["notes"], second["rules"]["SYNTHETIC-address"]["notes"])
         self.assertFalse(final["rules"]["SYNTHETIC-address"]["enabled"])
         self.assertEqual(service_labels(final), [])
         self.assertEqual(load_services(self.case), final)
@@ -76,8 +76,8 @@ class ServiceStorageTests(unittest.TestCase):
         self.assertEqual(result[0], generic)
         self.assertIsNot(result[0], generic)
         self.assertEqual(result[1]["value"], "SYNTHETIC-address")
-        self.assertEqual(result[1]["confidence"], "candidate")
-        self.assertEqual(result[1]["classification"], "suspected_service")
+        self.assertEqual(result[1]["confidence"], "suspected")
+        self.assertNotIn("classification", result[1])
         self.assertNotIn("confirmed", result[1].values())
         disabled = disable_service(self.case, "SYNTHETIC-address")
         self.assertEqual(apply_service_labels(result, disabled), [generic])
@@ -112,7 +112,7 @@ class ServiceStorageTests(unittest.TestCase):
 
     def test_multiline_rationale_is_preserved_and_controls_rejected(self):
         data = set_service(self.case, "SYNTHETIC-address", rationale="First line\r\n\tSecond line")
-        self.assertEqual(data["rules"]["SYNTHETIC-address"]["rationale"], "First line\n\tSecond line")
+        self.assertEqual(data["rules"]["SYNTHETIC-address"]["notes"], "First line\n\tSecond line")
         for options in ({"name": "Two\nlines"}, {"rationale": "text\x1b[0m"}, {"rationale": "text\x00tail"}):
             with self.subTest(options=options), self.assertRaises(TraceError):
                 set_service(self.case, "SYNTHETIC-address", **options)
@@ -221,12 +221,12 @@ class ServiceTraceTests(unittest.TestCase):
         self.assertNotIn(self.key("C"), state["outputs"])
         self.assertEqual(state["outputs"][self.key("D")]["status"], "held_behind_service")
 
-    def test_generic_label_behavior_is_preserved(self):
+    def test_address_stop_is_independent_of_classification(self):
         label = {"kind": "address", "value": self.addresses["B"], "stop": True}
         state, transport = self.run_trace(labels=[label])
-        self.assertEqual(state["outputs"][self.key("B")]["status"], "analyst_stop")
+        self.assertEqual(state["outputs"][self.key("B")]["status"], "suspected_service_stop")
         self.assertNotIn("/tx/" + self.ids["B"] + "/outspends", transport.calls)
-        self.assertNotIn("trace_control", state["outputs"][self.key("B")])
+        self.assertEqual(state["outputs"][self.key("B")]["trace_control"]["reason"], "suspected_service_stop")
 
     def test_parallel_shared_outspends_response_never_prefetches_stopped_siblings_child(self):
         # One response contains every spend from A, but the service's output is
@@ -245,12 +245,13 @@ class ServiceTraceTests(unittest.TestCase):
         self.assertEqual(set(state["links"]), {a + ":1"})
         self.assertEqual(state["outputs"][a + ":0"]["status"], "suspected_service_stop")
 
-    def test_generic_imported_stop_at_old_ancestor_keeps_existing_continuation_behavior(self):
+    def test_generic_imported_address_stop_holds_descendants_without_classification(self):
         parent, _ = self.run_trace(hops=2)
         generic = {"kind": "address", "value": self.addresses["B"], "stop": True}
         state, transport = self.run_trace(hops=3, parent=parent, labels=[generic])
-        self.assertEqual(state["outputs"][self.key("D")]["status"], "spent")
-        self.assertIn("/tx/" + self.ids["D"] + "/outspends", transport.calls)
+        self.assertEqual(state["outputs"][self.key("D")]["status"], "held_behind_service")
+        self.assertEqual(transport.calls, [])
+        self.assertEqual(state["links"], parent["links"])
 
     def make_unequal_routes(self):
         """A -> B -> D is shorter than E -> C -> H -> D."""

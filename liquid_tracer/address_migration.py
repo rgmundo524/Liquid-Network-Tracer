@@ -109,6 +109,12 @@ def _plan(case, state, target, metadata):
             edge = old_edges.get(key)
             if not edge or any(record.get(f) != edge[f] for f in ("source", "target")):
                 raise TraceError("A mapped connector is not proven by the archived UTXO graph")
+        elif key.startswith("annotation:"):
+            from .presentation_items import proof
+            saved = record.get("presentation_proof") or {}
+            if (record["endpoint"] != "shapes" or saved.get("key") != key
+                    or saved != proof(saved.get("kind"), saved.get("host"), saved.get("page"))):
+                raise TraceError("Unproven annotation prevents safe address conversion")
         elif record["endpoint"] == "shapes" and key != "legend" and not key.startswith("run:"):
             raise TraceError("An unrecognized managed shape prevents safe address conversion")
     retained = {new_key: min(keys) for new_key, keys in sorted(groups.items())}

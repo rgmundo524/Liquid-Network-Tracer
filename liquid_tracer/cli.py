@@ -86,8 +86,11 @@ def parser():
     service = commands.add_parser("service-set", help="Save or remove an investigator-designated suspected-service stop")
     service.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     service.add_argument("--address", required=True)
-    service.add_argument("--name", default="", help="Optional suspected service name")
-    service.add_argument("--rationale", default="", help="Investigator's reasoning; not verified ownership")
+    service.add_argument("--name", default=None, help="Optional attribution name")
+    service.add_argument("--notes", "--rationale", dest="notes", default=None, help="Notes supporting the attribution")
+    service.add_argument("--confidence", choices=("suspected", "confirmed"), default=None)
+    service.add_argument("--source", default=None)
+    service.add_argument("--stop-tracing", choices=("true", "false"), default=None)
     service.add_argument("--disable", action="store_true", help="Disable this designation so future continuation can resume its branches")
     run = commands.add_parser("trace", help="Start or extend a bounded run")
     run.add_argument("--case", type=Path, default=case_default, required=case_default is None,
@@ -366,7 +369,8 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
 
     def topology(value):
         return (
-            {(item["key"], item["body"]["data"]["shape"]) for item in value["shapes"]},
+            {(item["key"], item["body"]["data"]["shape"]) for item in value["shapes"]
+             if item["key"] not in value.get("presentation_items", {})},
             {(item["key"], item["source"], item["target"]) for item in value["connectors"]},
         )
 
@@ -738,7 +742,7 @@ def main(argv=None, *, progress=None):
             return 0
         if args.command == "service-set":
             settings = (disable_service(args.case, args.address) if args.disable else
-                        set_service(args.case, args.address, name=args.name, rationale=args.rationale))
+                        set_service(args.case, args.address, name=args.name, notes=args.notes, confidence=args.confidence, source=args.source, stop_tracing=None if args.stop_tracing is None else args.stop_tracing == "true"))
             from .address_activity import validate_address
             print(json.dumps({"revision": settings["revision"],
                               "service": settings["rules"][validate_address(args.address)]}, indent=2))

@@ -253,6 +253,14 @@ def _measure(nodes, edges, points, fee_ids, adjacent, annotations, frame_groups)
     main_edges = [edge for edge in edges.values() if edge["source"] not in fee_ids and edge["target"] not in fee_ids]
     main_box = _footprint(main_nodes, main_edges, points)
     board_boxes = [box for box in [_footprint(nodes.values(), edges.values(), points), *annotations] if box is not None]
+    # The register lives outside the forensic graph and is refitted after
+    # compaction. Include its generated footprint in board-size metrics only.
+    from .presentation_items import make_items
+    notes, catalog = make_items({"nodes": list(nodes.values())},
+        [(box[0] / 2 + box[2] / 2, box[1] / 2 + box[3] / 2, box[2] - box[0], box[3] - box[1])
+         for box in annotations])
+    board_boxes.extend(_box({**item["body"]["position"], **item["body"]["geometry"]})
+                       for item in notes if catalog[item["key"]]["kind"] == "attribution")
     if frame_groups:
         board_boxes.extend(_padded(_envelope(_box(nodes[key]) for key in keys)) for keys in frame_groups if keys)
         board_boxes.append(_padded(_envelope(board_boxes)))

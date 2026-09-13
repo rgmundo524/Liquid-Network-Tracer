@@ -13,24 +13,24 @@ from pathlib import Path
 
 from .address_activity import validate_address
 from .common import TraceError, canonical, digest, now, save_json
-from .services import _text, load_services, rule_fields, validate_rule_fields
+from .services import _text, load_services, rule_fields, validate_rule_fields, notes_for
 
 MAX_BYTES = 512 * 1024
 MAX_ROWS = 5000
 MAX_ERRORS = 50
-FIELDS = {"address", "name", "rationale", "classification", "confidence", "source",
+FIELDS = {"address", "name", "notes", "confidence", "source",
           "observed_at", "stop_tracing", "enabled"}
 ALIASES = {"value": "address", "entity": "name", "service_name": "name", "label": "name",
-           "notes": "rationale", "stop": "stop_tracing"}
+           "rationale": "notes", "stop": "stop_tracing"}
 FORMATS = {"auto", "csv", "json", "text"}
 NOTICE = ("Importing records your assessment, not independent verification of ownership. "
           "Addresses use the same text validation as Address review; network/checksums are not checked offline. "
           "Use the public address form shown by the trace, not a confidential-address alias. "
-          "Active service stops apply to the first run and continuations, including seed outputs. "
+          "Active address stops apply to the first run and continuations, including seed outputs. "
           "No blockchain requests or Miro changes are made. Existing evidence is retained.")
-TEMPLATE = ("address,name,classification,confidence,source,rationale,stop_tracing\n"
-            "REPLACE_WITH_LIQUID_ADDRESS_1,Possible service,suspected_service,candidate,Investigator research,Explain the evidence,true\n"
-            "REPLACE_WITH_LIQUID_ADDRESS_2,Case alias,label,candidate,Client-provided,Label only; continue tracing,false\n")
+TEMPLATE = ("Address,Name,confidence,stop_tracing,source,notes\n"
+            "REPLACE_WITH_LIQUID_ADDRESS_1,Example Exchange,suspected,true,Investigator research,Explain the evidence\n"
+            "REPLACE_WITH_LIQUID_ADDRESS_2,Client wallet,confirmed,false,Client records,Continue tracing\n")
 
 
 def read_import(path):
@@ -94,15 +94,13 @@ def _row(value):
             raise TraceError("Unsupported field; use the supplied Liquid address-import template")
         fields[name] = item
     address = validate_address(fields.get("address"))
-    classification = _text(_value(fields, "classification", "suspected_service"), "Classification", 30)
-    metadata = {"classification": classification,
-                "confidence": _text(_value(fields, "confidence", "candidate"), "Confidence", 30),
+    metadata = {"confidence": _text(_value(fields, "confidence", "suspected"), "Confidence", 30),
                 "source": _text(_value(fields, "source", "Investigator designation"), "Source", 1000, required=True),
                 "observed_at": _text(_value(fields, "observed_at"), "Observation date", 80),
-                "stop_tracing": _boolean(fields.get("stop_tracing"), "Stop tracing", classification != "label")}
+                "stop_tracing": _boolean(fields.get("stop_tracing"), "Stop tracing", True)}
     validate_rule_fields(metadata)
     return {"address": address, "name": _text(_value(fields, "name"), "Name", 120),
-            "rationale": _text(_value(fields, "rationale"), "Rationale", 4000, multiline=True),
+            "notes": _text(_value(fields, "notes"), "Notes", 4000, multiline=True),
             "enabled": _boolean(fields.get("enabled"), "Enabled", True), **metadata}
 
 
@@ -175,7 +173,7 @@ def parse_import(text, format="auto"):
 
 
 def _semantic(rule):
-    return {key: rule[key] for key in ("address", "name", "rationale", "enabled")} | rule_fields(rule)
+    return {key: rule[key] for key in ("address", "name", "enabled")} | {"notes": notes_for(rule)} | rule_fields(rule)
 
 
 def _plan(settings, parsed, policy):
@@ -235,6 +233,7 @@ def apply_import(case, text, *, approval_sha256, format="auto", policy="keep"):
                 settings["history"].append({"revision": settings["revision"], "changed_at": stamp,
                     "address": new["address"], "previous": copy.deepcopy(previous), "rule": copy.deepcopy(rule),
                     "import_id": batch_id, "import_sha256": parsed["source_sha256"], "import_row": entry["row"]})
+                settings["schema_version"] = 2
                 settings["rules"][new["address"]] = rule
                 changed += 1
             if changed:

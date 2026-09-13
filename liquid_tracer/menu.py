@@ -606,10 +606,10 @@ def create_app(root=None):
             yield Header()
             with VerticalScroll(classes="form-panel"):
                 yield Label("Address review", classes="title")
-                yield Static("Review saved address activity, then decide whether an address is a suspected service. "
+                yield Static("Review address activity, record a name and confidence, and choose whether tracing stops. "
                              "Opening this screen does not call Blockstream.", markup=False)
                 yield Input(placeholder="Search addresses or service names", id="address-search")
-                yield Checkbox("Show service assessments only", id="address-suspected-only")
+                yield Checkbox("Show suspected attributions only", id="address-suspected-only")
                 with Horizontal(classes="buttons"):
                     yield Button("Search", id="address-find")
                     yield Button("Previous", id="address-previous", disabled=True)
@@ -628,18 +628,16 @@ def create_app(root=None):
                 yield Button("Refresh address activity", id="address-refresh", disabled=True)
                 yield Checkbox("Enable this address assessment", id="service-enabled")
                 yield Checkbox("Stop tracing through this address", value=True, id="service-stop")
-                yield Label("Classification and confidence (your assessment, not automatic verification)")
-                yield Select([("Suspected service", "suspected_service"), ("Service", "service"), ("Label only", "label")],
-                             value="suspected_service", allow_blank=False, id="service-classification")
-                yield Select([(name.title(), name) for name in ("candidate", "corroborated", "confirmed")],
-                             value="candidate", allow_blank=False, id="service-confidence")
+                yield Label("Confidence (your assessment, not automatic verification)")
+                yield Select([("Suspected", "suspected"), ("Confirmed", "confirmed")],
+                             value="suspected", allow_blank=False, id="service-confidence")
                 yield Label("Source / evidence reference")
                 yield Input("Investigator designation", id="service-source", max_length=1000)
                 yield Label("Observation date (optional ISO date / timestamp)")
                 yield Input(id="service-observed", max_length=80)
-                yield Label("Service name (optional)")
+                yield Label("Name (optional)")
                 yield Input(id="service-name", max_length=120)
-                yield Label("Investigator rationale (optional, up to 4,000 characters)")
+                yield Label("Notes (optional, up to 4,000 characters)")
                 yield TextArea(id="service-rationale")
                 yield Static("This is your designation, not automatic ownership attribution. "
                              "Saved stops apply when the next run starts, including continuations. "
@@ -647,11 +645,11 @@ def create_app(root=None):
                 yield Static("", id="address-error", markup=False)
             with Horizontal(classes="buttons form-actions"):
                 yield Button("Back", id="address-back")
-                yield Button("Save service decision", id="service-save", variant="primary", disabled=True)
+                yield Button("Save assessment", id="service-save", variant="primary", disabled=True)
             yield Footer()
 
         def on_mount(self):
-            self.query_one("#addresses", DataTable).add_columns("Address", "Run outputs", "Service stop", "Activity")
+            self.query_one("#addresses", DataTable).add_columns("Address", "Run outputs", "Attribution", "Stop", "Activity")
             try:
                 self.load_page()
             except ACTION_ERRORS as error:
@@ -667,9 +665,12 @@ def create_app(root=None):
             table.clear()
             for row in report["rows"]:
                 service = row.get("service") or {}
+                from .attribution_presentation import display_name
+                from .services import rule_fields
+                fields = rule_fields(service)
                 table.add_row(Text(row["address"]), str(row["run_output_count"]),
-                              Text(service.get("name") or "Service") if service.get("enabled") and service.get("stop_tracing", True)
-                              else "Label only" if service.get("enabled") else "No",
+                              Text(display_name({**service, **fields})) if service.get("enabled") else "None",
+                              "Yes" if service.get("enabled") and fields["stop_tracing"] else "No",
                               "Saved" if row.get("activity") else "Not fetched", key=row["address"])
             total = report["total"]
             count = len(report["rows"])
@@ -691,12 +692,11 @@ def create_app(root=None):
             from .services import rule_fields
             fields = rule_fields(rule)
             self.query_one("#service-stop", Checkbox).value = fields["stop_tracing"]
-            self.query_one("#service-classification", Select).value = fields["classification"]
             self.query_one("#service-confidence", Select).value = fields["confidence"]
             self.query_one("#service-source", Input).value = fields["source"]
             self.query_one("#service-observed", Input).value = fields["observed_at"]
             self.query_one("#service-name", Input).value = rule.get("name", "")
-            self.query_one("#service-rationale", TextArea).text = rule.get("rationale", "")
+            self.query_one("#service-rationale", TextArea).text = rule.get("notes", rule.get("rationale", ""))
             self.query_one("#address-activity", Static).update(_address_activity_text(summary))
             self.query_one("#address-refresh", Button).disabled = False
             self.query_one("#service-save", Button).disabled = False
@@ -753,15 +753,14 @@ def create_app(root=None):
                     set_service(self.case, address, enabled=enabled,
                                 name=self.query_one("#service-name", Input).value,
                                 rationale=self.query_one("#service-rationale", TextArea).text,
-                                classification=self.query_one("#service-classification", Select).value,
                                 confidence=self.query_one("#service-confidence", Select).value,
                                 source=self.query_one("#service-source", Input).value,
                                 observed_at=self.query_one("#service-observed", Input).value,
                                 stop_tracing=self.query_one("#service-stop", Checkbox).value)
                     self.load_page()
                     self.query_one("#address-error", Static).update(
-                        ("Suspected-service stop saved. It applies to the next run." if self.query_one("#service-stop", Checkbox).value
-                         else "Label-only assessment saved. It does not stop tracing.") if enabled else
+                        ("Address stop saved. It applies to the next run." if self.query_one("#service-stop", Checkbox).value
+                         else "Attribution saved without a tracing stop.") if enabled else
                         "Assessment disabled. Future runs may trace through this address.")
             except ACTION_ERRORS as error:
                 self.query_one("#address-error", Static).update(str(error))
@@ -793,7 +792,7 @@ def create_app(root=None):
                                      "Address refresh failed for this fixture. Previously saved activity remains available.")
                 self.query_one("#address-activity", Static).update(_address_activity_text(saved_activity(self.case, address)))
                 self.load_page()
-                error_field.update("Address activity snapshot saved. Service decisions require Save service decision.")
+                error_field.update("Address activity snapshot saved. Service decisions require Save assessment.")
             except FileNotFoundError:
                 error_field.update("SecretSpec is unavailable. Reopen the project's devenv shell and try again.")
             except KeyboardInterrupt:

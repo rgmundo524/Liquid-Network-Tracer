@@ -46,19 +46,19 @@ class ImportTests(unittest.TestCase):
             self.assertEqual(page['total'], 2)
             self.assertTrue(all(row['run_output_count'] == 0 and row['activity'] is None for row in page['rows']))
             self.assertFalse((self.case / 'runs').exists())
-            self.assertTrue(all(label['stop'] and label['confidence'] == 'candidate'
+            self.assertTrue(all(label['stop'] and label['confidence'] == 'suspected'
                                 for label in service_labels(load_services(self.case))))
 
     def test_csv_metadata_multiline_and_json_label_compatibility(self):
-        text = '\ufeffaddress,name,classification,confidence,source,rationale,stop_tracing,observed_at\r\n'
-        text += A + ',"Service, X",service,confirmed,Records,"First line\nSecond line",true,2026-09-10\r\n'
+        text = '\ufeffaddress,name,confidence,source,notes,stop_tracing,observed_at\r\n'
+        text += A + ',"Service, X",confirmed,Records,"First line\nSecond line",true,2026-09-10\r\n'
         self.apply(text)
         rule = load_services(self.case)['rules'][A]
-        self.assertEqual((rule['name'], rule['rationale']), ('Service, X', 'First line\nSecond line'))
+        self.assertEqual((rule['name'], rule['notes']), ('Service, X', 'First line\nSecond line'))
         label = service_labels(load_services(self.case))[0]
         self.assertEqual((label['confidence'], label['source'], label['observed_at']), ('confirmed', 'Records', '2026-09-10'))
         self.apply(json.dumps([{'kind': 'address', 'value': B, 'entity': 'Case alias',
-                                'classification': 'label', 'confidence': 'candidate', 'stop': False}]))
+                                'confidence': 'suspected', 'stop': False}]))
         self.assertFalse(next(label for label in service_labels(load_services(self.case)) if label['value'] == B)['stop'])
 
     def test_identical_duplicates_and_reimports_are_idempotent(self):
@@ -95,7 +95,7 @@ class ImportTests(unittest.TestCase):
         self.assertNotIn(A, load_services(self.case)['rules'])
 
     def test_invalid_rows_never_partially_apply(self):
-        invalid = [{'address': B, 'stop_tracing': 'maybe'}, {'address': B, 'confidence': 'confirmed'},
+        invalid = [{'address': B, 'stop_tracing': 'maybe'}, {'address': B, 'confidence': 'corroborated'},
                    {'address': B, 'classification': 'label', 'stop_tracing': True},
                    {'address': B, 'kind': 'script'}, {'address': B, 'network': 'bitcoin'},
                    {'address': B, 'observed_at': 'yesterday'}, {'address': 'https://example.invalid/foo'}]
@@ -153,12 +153,12 @@ class ImportTests(unittest.TestCase):
             save.assert_called_once()
 
     def test_single_edits_disable_and_legacy_rules_preserve_imported_metadata(self):
-        self.apply(json.dumps([{'address': A, 'classification': 'service', 'confidence': 'confirmed',
+        self.apply(json.dumps([{'address': A, 'confidence': 'confirmed',
                                'source': 'Reviewed document', 'observed_at': '2023-10-04', 'stop_tracing': False}]))
         set_service(self.case, A, name='Amended name')
         rule = load_services(self.case)['rules'][A]
-        self.assertEqual((rule['classification'], rule['confidence'], rule['source'], rule['observed_at'], rule['stop_tracing']),
-                         ('service', 'confirmed', 'Reviewed document', '2023-10-04', False))
+        self.assertEqual((rule['confidence'], rule['source'], rule['observed_at'], rule['stop_tracing']),
+                         ('confirmed', 'Reviewed document', '2023-10-04', False))
         disable_service(self.case, A)
         self.assertFalse(load_services(self.case)['rules'][A]['enabled'])
         legacy = set_service(self.case, B)
@@ -180,8 +180,8 @@ class ImportTests(unittest.TestCase):
     def test_first_trace_uses_imported_service_stops_and_preserves_label_only(self):
         ids, addresses, data = network()
         fixture = self.root / 'api.json'; save_json(fixture, data)
-        self.apply(json.dumps([{'address': addresses['B'], 'classification': 'service', 'confidence': 'confirmed', 'name': 'Known service'},
-                               {'address': addresses['A'], 'classification': 'label', 'name': 'Starting output'}]))
+        self.apply(json.dumps([{'address': addresses['B'], 'confidence': 'confirmed', 'name': 'Known service'},
+                               {'address': addresses['A'], 'stop_tracing': False, 'name': 'Starting output'}]))
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
             self.assertEqual(main(['trace', '--case', str(self.case), '--fixture', str(fixture),
@@ -192,12 +192,12 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(state['outputs'][ids['B'] + ':0']['status'], 'suspected_service_stop')
         self.assertEqual(next(label for label in state['labels'] if label['value'] == addresses['B'])['confidence'], 'confirmed')
         archived = {p.name: p.read_bytes() for p in Path(result['directory']).iterdir() if p.is_file()}
-        self.apply(json.dumps([{'address': addresses['B'], 'classification': 'service', 'enabled': False}]), policy='replace')
+        self.apply(json.dumps([{'address': addresses['B'], 'enabled': False}]), policy='replace')
         self.assertEqual(archived, {p.name: p.read_bytes() for p in Path(result['directory']).iterdir() if p.is_file()})
 
     def test_seed_stops_and_post_run_downstream_hold_use_same_rules(self):
         ids, addresses, data = network()
-        self.apply(json.dumps([{'address': addresses['A'], 'classification': 'service', 'confidence': 'confirmed'}]))
+        self.apply(json.dumps([{'address': addresses['A'], 'confidence': 'confirmed'}]))
         state, transport = synthetic_trace(self.root / 'trace1', data, [ids['A'] + ':0'],
             limits=Limits(max_hops=4), labels=service_labels(load_services(self.case)))
         self.assertEqual(transport.calls, ['/tx/' + ids['A']])
@@ -205,7 +205,7 @@ class ImportTests(unittest.TestCase):
         parent, _ = synthetic_trace(self.root / 'trace2', data, [ids['A'] + ':0'], limits=Limits(max_hops=2))
         original = copy.deepcopy(parent)
         self.apply(json.dumps([{'address': addresses['A'], 'enabled': False},
-                               {'address': addresses['B'], 'classification': 'service', 'confidence': 'confirmed'}]), policy='replace')
+                               {'address': addresses['B'], 'confidence': 'confirmed'}]), policy='replace')
         result, transport = synthetic_trace(self.root / 'trace3', data, [ids['A'] + ':0'], parent=parent,
             limits=Limits(max_hops=4), labels=service_labels(load_services(self.case)))
         self.assertEqual(parent, original)

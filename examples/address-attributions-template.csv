@@ -1,3 +1,3 @@
-address,name,classification,confidence,source,rationale,stop_tracing
-REPLACE_WITH_LIQUID_ADDRESS_1,Possible service,suspected_service,candidate,Investigator research,Explain the evidence,true
-REPLACE_WITH_LIQUID_ADDRESS_2,Case alias,label,candidate,Client-provided,Label only; continue tracing,false
+Address,Name,confidence,stop_tracing,source,notes
+REPLACE_WITH_LIQUID_ADDRESS_1,Example Exchange,suspected,true,Investigator research,Explain the evidence
+REPLACE_WITH_LIQUID_ADDRESS_2,Client wallet,confirmed,false,Client records,Continue tracing

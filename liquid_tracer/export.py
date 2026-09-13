@@ -11,8 +11,10 @@ from .common import (LBTC, TraceError, canonical, digest, match_labels, output_k
 from .trace import TERMINAL
 from .layout import arrange, fee_date, transaction_ranks
 from .miro_frames import activity_frames
+from .services import confidence_value
+from .attribution_presentation import display_name, attribution_reference
 
-PRESENTATION_VERSION = 11
+PRESENTATION_VERSION = 12
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -31,9 +33,9 @@ PALETTE = {
 COLORS = {key: value[1] for key, value in PALETTE.items()}
 _ADDRESS_PRIORITY = {"address": 0, "candidate": 1, "seed": 2, "unspent_endpoint": 3,
                      "suspected_service": 4, "attributed": 5}
-NODE_CSV_FIELDS = ("id", "kind", "label", "url", "color", "details", "role", "classification",
+NODE_CSV_FIELDS = ("id", "kind", "label", "url", "color", "details", "role",
                    "service_name", "service_rationale", "service_source", "service_confidence",
-                   "service_observed_at", "stop_tracing")
+                   "service_observed_at", "stop_tracing", "name", "confidence", "source", "notes", "attribution_reference", "convergence")
 
 
 def legend_lines():
@@ -44,11 +46,12 @@ def legend_lines():
         f"{name('event')} diamonds: events. Transaction inputs enter on the left; outputs leave on the right.",
         f"Circles: {name('seed').lower()} = selected seed outputs; {name('candidate').lower()} = reachable candidate outputs.",
         f"Circles: {name('address').lower()} = context; {name('attributed').lower()} = analyst attribution (read confidence).",
-        f"{name('suspected_service')} circles: investigator-designated suspected service; not confirmed ownership. Only active stop rules halt tracing; label-only entries do not.",
+        f"{name('suspected_service')} circles: suspected attribution; {name('attributed').lower()} circles: confirmed attribution. Confidence is the investigator's assessment.",
         f"{name('unspent_endpoint')} circles: traced branch ends at a UTXO observed unspent. Unchecked or hop-limited outputs do not qualify.",
         f"Arrows: {name('traced_edge').lower()} = traced UTXO links; {name('context_edge').lower()} = context only.",
         "Captions: vin/vout number · amount asset. ?? = not publicly available. Known amounts are in base units.",
-        "Circle priority: attribution > suspected service > unspent endpoint > seed > candidate > context. Unspent evidence retains its label.",
+        "STOP TRACING: an explicit address boundary, independent of confidence. Source and notes are in the address attribution register (A- references).",
+        "★ at a transaction corner: distinct starting-transaction lineages meet through saved UTXO spends. Not proof of ownership or value allocation.",
         "Unspent refers to tracked outputs at their last check, not all funds or inactivity at that address. Arrows do not allocate stolen value.",
     ]
 
@@ -152,9 +155,9 @@ def build_graph(state, merge_addresses=True, include_fees=False):
                 role = "seed"
             if key in unspent_endpoints:
                 role = "unspent_endpoint"
-            if any(m.get("classification") == "suspected_service" for m in matches):
+            if any(confidence_value(m.get("confidence")) != "confirmed" for m in matches):
                 role = "suspected_service"
-            if any(m.get("classification") != "suspected_service" for m in matches):
+            if any(confidence_value(m.get("confidence")) == "confirmed" for m in matches):
                 role = "attributed"
         url = None if simulated or not addr or network != "liquid" else explorer + "/address/" + addr
         node_id = add_node(node_key, "address", label, column,
@@ -214,26 +217,17 @@ def build_graph(state, merge_addresses=True, include_fees=False):
     for node in nodes.values():
         if node["kind"] != "address":
             continue
-        attributions = sorted({m["entity"] + " (" + m["confidence"] + ")"
-                               for item in node["details"]["occurrences"] for m in item["labels"]
-                               if m.get("classification") != "suspected_service"})
-        services = {canonical(m): m for item in node["details"]["occurrences"] for m in item["labels"]
-                    if m.get("classification") == "suspected_service"}
-        all_attributions = {canonical(m): m for item in node["details"]["occurrences"] for m in item["labels"]}
-        if all_attributions:
-            node["details"]["address_attributions"] = [all_attributions[key] for key in sorted(all_attributions)]
-        parts = [node["label"]]
-        if services:
-            # Keep uncertainty visible even when a separate attribution has
-            # higher color priority. Full names and rationale stay in evidence.
-            parts.append("Suspected service")
-            names = sorted({short(m["entity"]) for m in services.values()
-                            if m["entity"] != "Suspected service"})
-            if names:
-                parts.append(", ".join(names))
-            node["details"]["suspected_services"] = [services[key] for key in sorted(services)]
-        if attributions:
-            parts.append(", ".join(attributions))
+        assessments = {canonical(m): m for item in node["details"]["occurrences"] for m in item["labels"]}
+        if not assessments:
+            continue
+        records = [assessments[key] for key in sorted(assessments)]
+        node["details"]["address_attributions"] = records
+        names = sorted({display_name(m) for m in records})
+        parts = names + [node["label"]]
+        if any(m.get("stop") is True for m in records):
+            parts.append("STOP TRACING")
+        node["attribution_reference"] = attribution_reference(node["id"])
+        parts.append(node["attribution_reference"])
         node["label"] = "\n".join(parts)
     for node in nodes.values():
         if node["kind"] != "address" or node["details"].get("network") != "liquid":
@@ -273,6 +267,10 @@ def build_graph(state, merge_addresses=True, include_fees=False):
         node = nodes[entry["key"]]
         node["starting_transaction_index"] = entry["index"]
         node["label"] = node["label"].replace("TX\n", f"Starting TX {entry['index']}\n", 1)
+    from .convergence import transaction_convergences
+    for key, detail in transaction_convergences(state, graph["activity_frames"]["starting_transactions"]).items():
+        nodes[key]["convergence"] = detail
+        nodes[key]["details"]["convergence"] = detail
     return graph
 
 
@@ -301,12 +299,16 @@ def node_csv_rows(graph):
         services = node.get("details", {}).get("address_attributions", node.get("details", {}).get("suspected_services", []))
         row = dict(node)
         if services:
-            classifications = sorted({service.get("classification", "attributed") for service in services})
-            row["classification"] = classifications[0] if len(classifications) == 1 else classifications
             row["stop_tracing"] = any(service.get("stop") is True for service in services)
             for field, key in fields.items():
-                values = [service.get(key, "") for service in services]
+                from .services import notes_for
+                values = [notes_for(service) if key == "rationale" else
+                          confidence_value(service.get(key)) if key == "confidence" else service.get(key, "")
+                          for service in services]
                 row[field] = values[0] if len(values) == 1 else values
+            for modern, legacy in (("name", "service_name"), ("confidence", "service_confidence"),
+                                   ("source", "service_source"), ("notes", "service_rationale")):
+                row[modern] = row[legacy]
         yield row
 
 
@@ -398,6 +400,8 @@ def svg_graph(graph):
         lines = node["label"].splitlines()
         for i, line in enumerate(lines):
             chunks.append(f'<text x="{x}" y="{y + (i-(len(lines)-1)/2)*18}" text-anchor="middle" dominant-baseline="middle" font-size="12">{html.escape(line)}</text>')
+        from .presentation_items import svg_badge
+        chunks.append(svg_badge(node))
         chunks.append('</g>')
     chunks.append('</g></svg>')
     return "".join(chunks)

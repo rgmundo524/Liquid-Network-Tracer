@@ -49,8 +49,9 @@ def public_service(rule):
     """Expose only the investigator's designation, never settings/audit internals."""
     if not isinstance(rule, dict):
         return None
-    return {key: rule[key] for key in ("address", "classification", "name", "rationale", "enabled",
-                                      "created_at", "updated_at", "confidence", "source", "observed_at", "stop_tracing") if key in rule}
+    from .services import rule_fields, notes_for
+    return {key: rule[key] for key in ("address", "name", "enabled", "created_at", "updated_at") if key in rule} | rule_fields(rule) | {"notes": notes_for(rule)}
+
 
 
 def public_address_activity(summary):
@@ -951,10 +952,12 @@ class Handler(BaseHTTPRequestHandler):
             return {"address": address, "service": public_service(service),
                     "activity": public_address_activity(activity) if activity else None}
         if type(body.get("enabled")) is not bool:
-            raise RequestError("Choose whether this suspected-service stop is enabled.")
-        settings = set_service(case, address, name=body.get("name", ""),
-                               rationale=body.get("rationale", ""), enabled=body["enabled"],
-                               **{key: body[key] for key in ("classification", "confidence", "source", "observed_at", "stop_tracing") if key in body})
+            raise RequestError("Choose whether this address assessment is enabled.")
+        if "classification" in body:
+            raise RequestError("Classification has been removed. Use confidence and stop_tracing independently.")
+        settings = set_service(case, address, name=body.get("name"),
+                               notes=body.get("notes", body.get("rationale")), enabled=body["enabled"],
+                               **{key: body[key] for key in ("confidence", "source", "observed_at", "stop_tracing") if key in body})
         return {"service": public_service(settings["rules"][address]), "revision": settings["revision"]}
 
 

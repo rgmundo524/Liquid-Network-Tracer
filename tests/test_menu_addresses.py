@@ -147,7 +147,7 @@ class AddressMenuTests(unittest.IsolatedAsyncioTestCase):
                 stored = load_services(self.case)
                 self.assertFalse(stored["rules"][ADDRESS]["enabled"])
                 self.assertEqual(stored["revision"], 2)
-                self.assertIn("Repeated deposit consolidation", stored["rules"][ADDRESS]["rationale"])
+                self.assertIn("Repeated deposit consolidation", stored["rules"][ADDRESS]["notes"])
         process.assert_not_called()
 
     async def test_live_refresh_is_bounded_and_uses_provider_terminal(self):

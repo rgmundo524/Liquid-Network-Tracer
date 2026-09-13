@@ -185,10 +185,10 @@ class UnspentEndpointTests(unittest.TestCase):
             with self.subTest(merge=merge):
                 graph = build_graph(state, merge)
                 node = next(node for node in graph["nodes"] if ENDPOINT in node["details"].get("unspent_endpoints", []))
-                self.assertEqual(node["role"], "attributed")
-                self.assertEqual(node["color"], COLORS["attributed"])
+                self.assertEqual(node["role"], "suspected_service")
+                self.assertEqual(node["color"], COLORS["suspected_service"])
                 self.assertIn("Unspent endpoint", node["label"].splitlines())
-                self.assertIn("Synthetic service (candidate)", node["label"])
+                self.assertIn("Suspected Synthetic service", node["label"])
 
     def test_event_and_bitcoin_input_colors_are_not_terminal_output_colors(self):
         state = self.run_trace()

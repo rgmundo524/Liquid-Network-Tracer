@@ -15,7 +15,7 @@ from .address_activity import inspect_address, validate_address
 from .api import ENTERPRISE, Esplora, Limits
 from .common import TraceError, canonical, digest, read_json, save_json
 from .investigations import read_case
-from .services import load_services
+from .services import load_services, rule_fields
 from .store import Store
 
 
@@ -144,7 +144,7 @@ def list_addresses(case, run_id="latest", query="", offset=0, limit=25, suspecte
     needle = query.strip().casefold()
     addresses = sorted(address for address in addresses
                        if (not suspected_only or (services["rules"].get(address, {}).get("enabled")
-                            and services["rules"].get(address, {}).get("classification") != "label"))
+                            and rule_fields(services["rules"].get(address, {}))["confidence"] == "suspected"))
                        and (not needle or needle in address.casefold()
                             or needle in services["rules"].get(address, {}).get("name", "").casefold()))
     rows = []

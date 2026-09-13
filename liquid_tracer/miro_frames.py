@@ -67,7 +67,7 @@ def activity_frames(graph, *, indexed=True):
     nodes = {}
     for node in graph["nodes"]:
         key = _key(node["id"])
-        if key in nodes or _note_key(key) or key.startswith("frame:"):
+        if key in nodes or _note_key(key) or key.startswith(("frame:", "annotation:")):
             raise TraceError("Miro graph node keys conflict with activity frames or notes")
         nodes[key] = node
     starts = _starting_keys(graph, nodes)

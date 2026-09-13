@@ -59,7 +59,7 @@ class AddressReviewTests(unittest.TestCase):
         disabled = load_services(self.case)["rules"][ADDRESS]
         self.assertFalse(disabled["enabled"])
         self.assertEqual(disabled["name"], "Suspected exchange")
-        self.assertEqual(disabled["rationale"], "Investigator assessment")
+        self.assertEqual(disabled["notes"], "Investigator assessment")
 
     def test_catalog_counts_distinct_observed_outpoints_and_paginates(self):
         self.initial()
@@ -150,9 +150,9 @@ class AddressReviewTests(unittest.TestCase):
         _, _, graph = saved_graph(self.case)
         addresses = [node for node in graph["nodes"] if node["details"].get("address") == ADDRESS]
         self.assertTrue(addresses)
-        self.assertTrue(all("Suspected service" in node["label"] for node in addresses))
+        self.assertTrue(all("Suspected " in node["label"] for node in addresses))
         self.assertEqual((archive / "trace.json").read_bytes(), before)
         set_service(self.case, ADDRESS, enabled=False)
         _, _, updated = saved_graph(self.case)
-        self.assertFalse(any("Suspected service" in node["label"] for node in updated["nodes"]))
+        self.assertFalse(any("Suspected " in node["label"] for node in updated["nodes"]))
         verify_export(archive)

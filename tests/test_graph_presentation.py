@@ -257,7 +257,7 @@ class GraphPresentationTests(unittest.TestCase):
         key = "liquid:address:" + shared
         label = {"kind": "outpoint", "value": B + ":0", "entity": "Synthetic service",
                  "confidence": "candidate", "source": "fixture://label", "observed_at": "2026-01-01"}
-        for labels, role in (([], "seed"), ([label], "attributed")):
+        for labels, role in (([], "seed"), ([label], "suspected_service")):
             state["labels"] = labels
             variants = [state, copy.deepcopy(state)]
             for record in variants[1]["transactions"].values():
@@ -269,10 +269,10 @@ class GraphPresentationTests(unittest.TestCase):
                 self.assertIn(X + ":0", {item["outpoint"] for item in merged["details"]["occurrences"]})
                 self.assertIn(A + ":0", {item["outpoint"] for item in merged["details"]["occurrences"]})
                 if labels:
-                    self.assertEqual(merged["label"], short(shared) + "\nSynthetic service (candidate)")
+                    self.assertEqual(merged["label"].splitlines()[:2], ["Suspected Synthetic service", short(shared)])
                     shape = next(item for item in make_plan(build_graph(variant, True))["shapes"]
                                  if item["key"] == key)
-                    self.assertEqual(shape["body"]["style"]["fillColor"], COLORS["attributed"])
+                    self.assertEqual(shape["body"]["style"]["fillColor"], COLORS["suspected_service"])
 
     def test_bitcoin_input_does_not_inherit_liquid_seed_or_candidate_role(self):
         state = copy.deepcopy(self.state)

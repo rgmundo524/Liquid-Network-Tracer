@@ -164,7 +164,7 @@ class MiroLayoutTests(unittest.TestCase):
         pending = read_json(self.state_path)["pending_deletions"]
         self.assertTrue(pending[FEE_EDGE]["attempted"])
         self.assertFalse(pending[FEE_SHAPE]["attempted"])
-        with self.assertRaisesRegex(TraceError, "Finish the interrupted Miro fee removal"):
+        with self.assertRaisesRegex(TraceError, "Finish the interrupted generated-item removal"):
             self.sync(presented(include_fees=True))
         report = self.sync()
         self.assertEqual(report["deleted"], 2)

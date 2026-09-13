@@ -184,7 +184,7 @@ class TraceTests(unittest.TestCase):
         labels = [{"kind": "address", "value": "SYNTHETIC-branch-A", "entity": "Demo service",
             "source": "case-record:synthetic", "confidence": "candidate", "observed_at": "2026-09-09", "stop": True}]
         state = self.run_trace(labels=labels)
-        self.assertEqual(state["outputs"][B + ":0"]["status"], "analyst_stop")
+        self.assertEqual(state["outputs"][B + ":0"]["status"], "suspected_service_stop")
         self.assertEqual(state["outputs"][B + ":0"]["labels"][0]["source"], labels[0]["source"])
 
     def test_selective_resume_keeps_unselected_branch(self):

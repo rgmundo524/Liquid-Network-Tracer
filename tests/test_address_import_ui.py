@@ -63,16 +63,16 @@ class WebImportTests(unittest.TestCase):
 
     def test_single_edit_preserves_imported_metadata_and_label_only(self):
         _, case = self.create(); route = '/api/cases/' + case['id']
-        text = json.dumps([{'address': A, 'name': 'Case alias', 'classification': 'label',
-                            'source': 'Client records', 'confidence': 'corroborated', 'observed_at': '2023-10-04'}])
+        text = json.dumps([{'address': A, 'name': 'Case alias', 'stop_tracing': False,
+                            'source': 'Client records', 'confidence': 'confirmed', 'observed_at': '2023-10-04'}])
         preview = self.success(route + '/address-import', {'text': text})
         self.success(route + '/address-import', {'text': text, 'approve_plan': preview['approval_sha256']})
         selected = self.success(route + '/address', {'address': A})
         self.assertFalse(selected['service']['stop_tracing'])
         self.assertEqual(selected['service']['source'], 'Client records')
         result = self.success(route + '/services', {'address': A, 'enabled': True, 'name': 'Amended'})
-        self.assertEqual(result['service']['classification'], 'label')
-        self.assertEqual(result['service']['confidence'], 'corroborated')
+        self.assertNotIn('classification', result['service'])
+        self.assertEqual(result['service']['confidence'], 'confirmed')
         self.assertFalse(result['service']['stop_tracing'])
         self.assertEqual(self.success(route + '/addresses', {'suspected_only': True})['total'], 0)
 
@@ -133,5 +133,5 @@ class MenuImportTests(unittest.IsolatedAsyncioTestCase):
             screen.query_one('#service-name', Input).value = 'Revised service'
             await self.click(app, pilot, '#service-save')
             rule = load_services(self.case)['rules'][A]
-            self.assertEqual((rule['name'], rule['source'], rule['classification'], rule['stop_tracing']),
-                             ('Revised service', 'Supplied service records', 'service', False))
+            self.assertEqual((rule['name'], rule['source'], rule['stop_tracing']),
+                             ('Revised service', 'Supplied service records', False))

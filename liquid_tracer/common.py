@@ -95,7 +95,7 @@ def load_labels(path=None):
         for field in ("value", "entity", "source", "confidence", "observed_at"):
             if not label.get(field):
                 raise TraceError("Each label requires " + field)
-        if label["confidence"] not in ("candidate", "corroborated", "confirmed"):
+        if label["confidence"] not in ("suspected", "candidate", "corroborated", "confirmed"):
             raise TraceError("Invalid label confidence")
         if "stop" in label and not isinstance(label["stop"], bool):
             raise TraceError("Label stop must be a JSON boolean")

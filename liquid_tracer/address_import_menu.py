@@ -21,8 +21,8 @@ def import_screen(base, button, case):
             with VerticalScroll(classes="form-panel"):
                 yield Label("Import address attributions", classes="title")
                 yield Static("Import before the first run or between runs. No Blockstream calls or Miro changes. "
-                             "A plain list means suspected services with tracing stops enabled. "
-                             "CSV/JSON can specify names, sources, confidence and label-only entries.", markup=False)
+                             "A plain list uses suspected confidence with tracing stops enabled. "
+                             "CSV/JSON can specify names, sources, notes, confidence and independent stop flags.", markup=False)
                 yield Label("CSV / JSON / text file path (optional; takes precedence over pasted text)")
                 yield Input(id="import-file")
                 yield Label("Or paste addresses / CSV / JSON")
@@ -44,7 +44,7 @@ def import_screen(base, button, case):
             yield Footer()
 
         def on_mount(self):
-            self.query_one("#import-rows", DataTable).add_columns("Row", "Address", "Action", "Name", "Classification", "Confidence", "Stop")
+            self.query_one("#import-rows", DataTable).add_columns("Row", "Address", "Action", "Name", "Confidence", "Stop")
             self.query_one("#import-file", Input).focus()
 
         def invalidate(self):
@@ -106,7 +106,7 @@ def import_screen(base, button, case):
                     for index, entry in enumerate(self.review["changes"]):
                         row = entry["rule"]
                         table.add_row(str(entry["row"]), Text(row["address"]), entry["action"], Text(row["name"]),
-                                      row["classification"], row["confidence"],
+                                      row["confidence"],
                                       "Yes" if row["enabled"] and row["stop_tracing"] else "No", key=str(index))
                     counts = self.review["counts"]
                     self.query_one("#import-summary", Static).update(

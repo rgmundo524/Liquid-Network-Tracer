@@ -281,6 +281,8 @@ def _svg(graph, nodes, edges):
             shape = '<polygon points="' + ' '.join(_fmt(a) + ',' + _fmt(b) for a, b in polygon) + f'" {style}/>'
         lines.append(shape)
         inset_x, inset_y = width * .22, height * .22
+        if node["kind"] == "address":
+            inset_x = width * .10  # Match the label width; keep the Suspected prefix visible.
         if node["kind"] == "transaction":
             inset_x, inset_y = width * .06, height * .06
         lines.append(f'<clipPath id="label-clip-{index}"><rect x="{_fmt(cx - width / 2 + inset_x)}" '
@@ -298,7 +300,8 @@ def _svg(graph, nodes, edges):
             baseline = cy + (row_count - 1) * 8 + 4
             lines.append(f'<text x="{_fmt(cx)}" y="{_fmt(baseline)}" font-size="11" '
                          'fill="#155e75" text-decoration="underline">Explorer</text>')
-        lines.append('</g></g>')
+        from .presentation_items import svg_badge
+        lines.append('</g>' + svg_badge(node) + '</g>')
         if url:
             lines.append('</a>')
     lines.append('</g><g id="captions" font-family="sans-serif" font-size="11" text-anchor="middle" fill="#334155">')
@@ -337,6 +340,7 @@ def _metrics_table(metrics, title="ELK layout"):
 def _preview_html(graph, svg, metrics):
     # SVG anchors are disabled inside an <img>. Inline only our escaped,
     # allowlisted renderer output so links work offline and in the local UI.
+    from .attribution_presentation import register_html
     inline_svg = svg.decode("utf-8")
     legend = "".join("<li>" + _escape(line) + "</li>" for line in legend_lines())
     simulated = " · Synthetic demonstration data" if graph.get("simulated") else ""
@@ -351,6 +355,7 @@ h1 {{ font-size:22px; margin:0 0 8px; }} p {{ margin:6px 0; }} a {{ color:#155e7
 .summary {{ display:flex; gap:24px; flex-wrap:wrap; align-items:start; }} .summary>div {{ flex:1; min-width:240px; }}
 table {{ border-collapse:collapse; font-size:13px; }} caption {{ text-align:left; font-weight:600; margin-bottom:4px; }}
 th,td {{ padding:3px 12px 3px 0; text-align:left; }} td {{ text-align:right; }} tbody th {{ font-weight:400; }}
+pre {{ white-space:pre-wrap; overflow-wrap:anywhere; }}
 details {{ margin-top:8px; }} summary {{ cursor:pointer; }} li {{ margin:4px 0; }}
 .chart {{ overflow:auto; background:white; }} .chart svg {{ display:block; max-width:none; }}
 body:has(#chart:target) header {{ display:none; }}
@@ -360,6 +365,7 @@ body:has(#chart:target) header {{ display:none; }}
 <p>{_escape(layout_notice(graph))}</p><p>Scroll to explore; use your browser zoom to adjust the scale. Select Explorer on a transaction or address to open Blockstream in a new tab.</p>
 <p><a href="graph.svg" download>Download SVG</a> · <a href="graph.json" download>Graph details</a> ·
 <a href="layout-report.json" download>Layout report</a></p></div>{_metrics_table(metrics, layout_title(graph))}</div>
+{register_html(graph)}
 <details><summary>Legend and evidence notes</summary><p>{_escape(graph.get('notice', ''))}</p>
 <p>Before uses the saved graph's baseline layout, not live Miro positions. Labels and Miro's automatic curves are not measured.
 Counts prefixed with ≥ are lower bounds because the comparison limit was reached.</p><ul>{legend}</ul></details></header>

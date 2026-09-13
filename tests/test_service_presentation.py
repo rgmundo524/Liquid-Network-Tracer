@@ -78,8 +78,8 @@ class ServicePresentationTests(unittest.TestCase):
                          {"liquid:address:" + ADDRESS})
         for node in service_nodes:
             self.assertEqual(node["color"], COLORS["suspected_service"])
-            self.assertIn("Suspected service", node["label"].splitlines())
-            self.assertEqual(node["details"]["suspected_services"], [label])
+            self.assertIn("Suspected Synthetic exchange", node["label"].splitlines())
+            self.assertEqual(node["details"]["address_attributions"], [label])
             self.assertNotIn(label["rationale"], node["label"])
         self.assertEqual(graph["presentation_version"], PRESENTATION_VERSION)
 
@@ -130,18 +130,21 @@ class ServicePresentationTests(unittest.TestCase):
                     self.assertNotIn("Unspent endpoint", node["label"])
                     self.assertNotIn("unspent_endpoints", node["details"])
 
-    def test_other_analyst_attribution_retains_priority_and_service_uncertainty(self):
+    def test_confidence_controls_display_without_hiding_alternative_assessment(self):
         for confidence in ("candidate", "corroborated", "confirmed"):
             with self.subTest(confidence=confidence):
                 manual = {"kind": "outpoint", "value": B + ":0", "entity": "Synthetic custodian",
                           "source": "fixture://manual", "confidence": confidence, "observed_at": "2026-01-02"}
                 self.state["labels"] = [designation(), manual]
                 node = self.node(build_graph(self.state))
-                self.assertEqual(node["role"], "attributed")
-                self.assertEqual(node["color"], COLORS["attributed"])
-                self.assertIn("Suspected service", node["label"].splitlines())
-                self.assertIn("Synthetic custodian (" + confidence + ")", node["label"])
-                self.assertEqual(node["details"]["suspected_services"], [designation()])
+                role = "attributed" if confidence == "confirmed" else "suspected_service"
+                self.assertEqual(node["role"], role)
+                self.assertEqual(node["color"], COLORS[role])
+                self.assertIn("Suspected Synthetic exchange", node["label"].splitlines())
+                prefix = "" if confidence == "confirmed" else "Suspected "
+                self.assertIn(prefix + "Synthetic custodian", node["label"].splitlines())
+                self.assertIn(designation(), node["details"]["address_attributions"])
+                self.assertIn(manual, node["details"]["address_attributions"])
 
     def test_merged_color_and_service_labels_are_deterministic(self):
         labels = [designation(entity="Synthetic Z"), designation(entity="Synthetic A")]
@@ -153,7 +156,7 @@ class ServicePresentationTests(unittest.TestCase):
                 state["transactions"] = dict(reversed(list(state["transactions"].items())))
             graph = build_graph(state, merge_addresses=True)
             node = next(node for node in graph["nodes"] if node["id"] == "liquid:address:" + ADDRESS)
-            signatures.append((node["role"], node["color"], node["label"], node["details"]["suspected_services"]))
+            signatures.append((node["role"], node["color"], node["label"], node["details"]["address_attributions"]))
             self.assertEqual(node["role"], "suspected_service")
             self.assertEqual({item["outpoint"] for item in node["details"]["occurrences"]}, {B + ":0", C + ":0"})
         self.assertEqual(signatures[0], signatures[1])
@@ -164,7 +167,7 @@ class ServicePresentationTests(unittest.TestCase):
         graph = build_graph(self.state)
         bitcoin = next(node for node in graph["nodes"] if node["kind"] == "address" and node["details"]["network"] == "bitcoin")
         self.assertEqual(bitcoin["role"], "address")
-        self.assertNotIn("suspected_services", bitcoin["details"])
+        self.assertNotIn("address_attributions", bitcoin["details"])
 
     def test_all_graph_products_use_service_color_and_label_and_preserve_explorer(self):
         self.state["labels"] = [designation()]
@@ -175,19 +178,19 @@ class ServicePresentationTests(unittest.TestCase):
         plan = make_plan(graph)
         shape = next(item for item in plan["shapes"] if item["key"] == node["id"])
         self.assertEqual(shape["body"]["style"]["fillColor"], COLORS["suspected_service"])
-        self.assertIn("Suspected service", shape["body"]["data"]["content"])
+        self.assertIn("Suspected Synthetic exchange", shape["body"]["data"]["content"])
         self.assertIn(node["url"], shape["body"]["data"]["content"])
         source = mermaid_source(graph)
-        self.assertIn("Suspected service", source)
+        self.assertIn("Suspected Synthetic exchange", source)
         self.assertIn("fill:" + COLORS["suspected_service"], source)
         for svg, attribute in ((svg_graph(graph), "data-key"), (render_svg(graph), "data-node-id")):
             document = ET.fromstring(svg)
             group = next(element for element in document.iter() if element.get(attribute) == node["id"])
             self.assertTrue(any(child.get("fill") == COLORS["suspected_service"] for child in group.iter()))
-            self.assertIn("Suspected service", " ".join(group.itertext()))
+            self.assertIn("Suspected Synthetic exchange", " ".join(group.itertext()))
         legend = " ".join(legend_lines())
         self.assertIn("Cyan circles", legend)
-        self.assertIn("not confirmed ownership", legend)
+        self.assertIn("investigator's assessment", legend)
 
     @unittest.skipUnless(HAS_ELK, "local Node and pinned ELK dependency are required")
     def test_real_elk_preserves_service_evidence_and_role(self):
@@ -210,14 +213,14 @@ class ServicePresentationTests(unittest.TestCase):
         self.assertEqual(tuple(node), NODE_CSV_FIELDS)
         self.assertEqual(tuple(node)[:6], ("id", "kind", "label", "url", "color", "details"))
         self.assertEqual(node["role"], "suspected_service")
-        self.assertEqual(node["classification"], "suspected_service")
+        self.assertNotIn("classification", node)
         self.assertEqual(node["service_name"], "'" + label["entity"])
         self.assertEqual(node["service_rationale"], "'" + label["rationale"])
         self.assertEqual(node["service_source"], "Investigator designation")
-        self.assertEqual(node["service_confidence"], "candidate")
+        self.assertEqual(node["service_confidence"], "suspected")
         self.assertEqual(node["service_observed_at"], label["observed_at"])
         self.assertEqual(node["stop_tracing"], "True")
-        self.assertEqual(json.loads(node["details"])["suspected_services"], [label])
+        self.assertEqual(json.loads(node["details"])["address_attributions"], [label])
         info = json.loads((destination / "export.json").read_text())
         self.assertEqual(info["service_controls"], self.state["service_controls"])
         self.assertEqual(before, {path.name: path.read_bytes() for path in archive.iterdir() if path.is_file()})

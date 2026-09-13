@@ -114,7 +114,7 @@ type Job = {
   cancellable?: boolean;
   started_at?: number;
 };
-type ServiceRule = { address: string; classification: "suspected_service" | "service" | "label"; name: string; rationale: string; enabled: boolean; updated_at: string;
+type ServiceRule = { address: string; name: string; notes: string; enabled: boolean; updated_at: string;
   confidence?: string; source?: string; observed_at?: string; stop_tracing?: boolean };
 type AddressActivity = {
   address: string;
@@ -164,8 +164,8 @@ const state = {
   addressReview: {
     query: "", suspectedOnly: false, data: null as AddressPage | null,
     selected: null as AddressRow | null, loading: false,
-    name: "", rationale: "", enabled: false, pasted: "",
-    classification: "suspected_service", confidence: "candidate", source: "Investigator designation", observedAt: "", stopTracing: true,
+    name: "", notes: "", enabled: false, pasted: "",
+    confidence: "suspected", source: "Investigator designation", observedAt: "", stopTracing: true,
   },
   job: null as ActiveJob | null,
   error: "",
@@ -595,10 +595,9 @@ function saveAddressDraft(): void {
   if (!form) return;
   const data = new FormData(form);
   state.addressReview.name = String(data.get("service_name") || "");
-  state.addressReview.rationale = String(data.get("service_rationale") || "");
+  state.addressReview.notes = String(data.get("service_notes") || "");
   state.addressReview.enabled = data.get("service_enabled") === "on";
-  state.addressReview.classification = String(data.get("service_classification") || "suspected_service");
-  state.addressReview.confidence = String(data.get("service_confidence") || "candidate");
+  state.addressReview.confidence = String(data.get("service_confidence") || "suspected");
   state.addressReview.source = String(data.get("service_source") || "");
   state.addressReview.observedAt = String(data.get("service_observed") || "");
   state.addressReview.stopTracing = data.get("service_stop") === "on";
@@ -607,10 +606,9 @@ function saveAddressDraft(): void {
 function selectAddress(row: AddressRow): void {
   state.addressReview.selected = row;
   state.addressReview.name = row.service?.name || "";
-  state.addressReview.rationale = row.service?.rationale || "";
+  state.addressReview.notes = row.service?.notes || "";
   state.addressReview.enabled = row.service?.enabled === true;
-  state.addressReview.classification = row.service?.classification || "suspected_service";
-  state.addressReview.confidence = row.service?.confidence || "candidate";
+  state.addressReview.confidence = row.service?.confidence || "suspected";
   state.addressReview.source = row.service?.source || "Investigator designation";
   state.addressReview.observedAt = row.service?.observed_at || "";
   state.addressReview.stopTracing = row.service?.stop_tracing ?? true;
@@ -651,8 +649,8 @@ async function saveService(enabled?: boolean): Promise<void> {
   render();
   try {
     const result = await api<{ service: ServiceRule; revision: number }>(`/api/cases/${encodeURIComponent(detail.id)}/services`, {
-      address, name: review.name, rationale: review.rationale, enabled: enabled ?? review.enabled,
-      classification: review.classification, confidence: review.confidence, source: review.source,
+      address, name: review.name, notes: review.notes, enabled: enabled ?? review.enabled,
+      confidence: review.confidence, source: review.source,
       observed_at: review.observedAt, stop_tracing: review.stopTracing,
     });
     if (generation !== pageGeneration || state.activeCase?.id !== detail.id) return;
@@ -698,18 +696,17 @@ function addressReviewPage(): string {
     <div class="address-review-grid"><section class="panel"><div class="panel-head"><div><h2>Saved addresses</h2><p>Selected run, saved reviews, and service assessments</p></div></div>
     <div class="panel-body"><label class="field"><span>Saved run</span><select id="address-run-picker"${disabled(busy)}>${options || '<option value="latest">No saved run yet</option>'}</select></label>
     <form id="address-search-form"><label class="field"><span>Search address or service name</span><input name="address_query" maxlength="256" value="${esc(review.query)}"${disabled(busy)}/></label>
-    <label class="check-line"><input name="suspected_only" type="checkbox"${review.suspectedOnly ? " checked" : ""}${disabled(busy)}/><span>Service assessments only</span></label>
+    <label class="check-line"><input name="suspected_only" type="checkbox"${review.suspectedOnly ? " checked" : ""}${disabled(busy)}/><span>Suspected attributions only</span></label>
     <button class="btn address-search" type="submit"${disabled(busy)}>${icon("search")}Search</button></form>
     <form id="address-open-form" class="address-open"><label class="field"><span>Or paste an address</span><input name="pasted_address" required maxlength="200" value="${esc(review.pasted)}" placeholder="Liquid address"${disabled(busy)}/><small>You can review an address before it appears in a trace.</small></label><button class="btn" type="submit"${disabled(busy)}>Open address</button></form></div>
-    <div class="address-list" aria-live="polite">${review.loading ? '<p class="panel-body muted">Loading saved addresses…</p>' : data?.rows.length ? data.rows.map(row => `<button class="address-row${selected?.address === row.address ? " selected" : ""}" data-action="address-select" data-address="${esc(row.address)}"${disabled(busy)}><span class="mono">${esc(row.address)}</span><small>${row.service?.enabled ? `<strong>${esc(human(row.service.classification))}${row.service.name ? ": " + esc(row.service.name) : ""}</strong> (${row.service.stop_tracing === false ? "label only" : "stop"}) · ` : ""}${esc(row.run_output_count ?? 0)} outputs in saved run${row.activity ? " · Activity saved" : ""}</small></button>`).join("") : '<p class="panel-body muted">No matching addresses in this run.</p>'}</div>
+    <div class="address-list" aria-live="polite">${review.loading ? '<p class="panel-body muted">Loading saved addresses…</p>' : data?.rows.length ? data.rows.map(row => `<button class="address-row${selected?.address === row.address ? " selected" : ""}" data-action="address-select" data-address="${esc(row.address)}"${disabled(busy)}><span class="mono">${esc(row.address)}</span><small>${row.service?.enabled ? `<strong>${row.service.confidence === "confirmed" ? "" : "Suspected "}${esc(row.service.name || "Unnamed address")}</strong> (${row.service.stop_tracing === false ? "continue" : "STOP TRACING"}) · ` : ""}${esc(row.run_output_count ?? 0)} outputs in saved run${row.activity ? " · Activity saved" : ""}</small></button>`).join("") : '<p class="panel-body muted">No matching addresses in this run.</p>'}</div>
     <div class="address-pagination"><span>${data?.total ? `${data.offset + 1}–${Math.min(data.offset + data.limit, data.total)} of ${data.total}` : "0 addresses"}</span><div>${button("Previous", "address-prev", "", "small", busy || !data || data.offset === 0)}${button("Next", "address-next", "", "small", busy || !data || data.offset + data.limit >= data.total)}</div></div></section>
     <div class="address-detail">${selected ? `<section class="panel"><div class="panel-head"><div><h2 id="address-detail-title" tabindex="-1">Address activity</h2><p class="mono address-full">${esc(selected.address)}</p></div>${button("Refresh activity", "address-inspect", "refresh", "", busy)}</div><div class="panel-body">${addressActivity(selected.activity)}<p class="address-note">Each refresh checks this address only, with up to 5 history pages, 10 API attempts, and 60 seconds.${detail.fixture ? " Uses the synthetic fixture." : " Uses your Blockstream credits. Proton Pass prompts appear in the launching terminal."}</p></div></section>
     <section class="panel"><div class="panel-head"><div><h2>Investigator assessment</h2><p>Your designation applies to this investigation.</p></div></div><form id="service-form" class="panel-body"><label class="check-line"><input type="checkbox" name="service_enabled"${review.enabled ? " checked" : ""}${disabled(busy)}/><span><strong>Enable this address assessment</strong><small>This records an investigative assessment. Activity counts do not establish ownership.</small></span></label><label class="check-line"><input type="checkbox" name="service_stop"${review.stopTracing ? " checked" : ""}${disabled(busy)}/><span>Stop tracing through this address</span></label>
-    <label class="field"><span>Classification</span><select name="service_classification"${disabled(busy)}>${["suspected_service", "service", "label"].map(value => `<option value="${value}"${review.classification === value ? " selected" : ""}>${esc(human(value))}</option>`).join("")}</select></label>
-    <label class="field"><span>Confidence (your assessment)</span><select name="service_confidence"${disabled(busy)}>${["candidate", "corroborated", "confirmed"].map(value => `<option value="${value}"${review.confidence === value ? " selected" : ""}>${value}</option>`).join("")}</select></label>
+    <label class="field"><span>Confidence (your assessment)</span><select name="service_confidence"${disabled(busy)}>${["suspected", "confirmed"].map(value => `<option value="${value}"${review.confidence === value ? " selected" : ""}>${value}</option>`).join("")}</select></label>
     <label class="field"><span>Source / evidence reference</span><input name="service_source" maxlength="1000" value="${esc(review.source)}"${disabled(busy)}/></label>
     <label class="field"><span>Observation date (optional ISO date / timestamp)</span><input name="service_observed" maxlength="80" value="${esc(review.observedAt)}"${disabled(busy)}/></label>
-    <div class="settings-divider"></div><label class="field"><span>Address / service name (optional)</span><input name="service_name" maxlength="120" value="${esc(review.name)}"${disabled(busy)}/></label><label class="field"><span>Reason for your assessment (optional)</span><textarea name="service_rationale" maxlength="4000" rows="4"${disabled(busy)}>${esc(review.rationale)}</textarea></label><p class="address-note">An enabled stop applies to the first run and continuations, including downstream branches reachable only through it. Label-only entries do not stop tracing. Other independently reachable branches continue. Prior run evidence stays saved.</p><div class="form-actions"><button type="submit" class="btn primary"${disabled(busy)}>Save assessment</button>${selected.service?.enabled ? button("Disable assessment", "service-remove", "", "", busy) : ""}</div>${selected.service ? `<p class="address-note">Last saved ${esc(formatDate(selected.service.updated_at))}. Changes remain in the investigation's assessment history.</p>` : ""}</form></section>` : '<section class="panel"><div class="empty-state"><div class="empty-icon">' + icon("search") + '</div><h2>Select an address</h2><p>Choose an address from the saved run, or paste one to review it. Activity is fetched only when you select Refresh activity.</p></div></section>'}</div></div>`;
+    <div class="settings-divider"></div><label class="field"><span>Address / service name (optional)</span><input name="service_name" maxlength="120" value="${esc(review.name)}"${disabled(busy)}/></label><label class="field"><span>Notes (optional)</span><textarea name="service_notes" maxlength="4000" rows="4"${disabled(busy)}>${esc(review.notes)}</textarea></label><p class="address-note">An enabled stop applies to the first run and continuations, including downstream branches reachable only through it. Confidence only controls the Suspected name prefix. Stop tracing is independent. Other independently reachable branches continue. Prior run evidence stays saved.</p><div class="form-actions"><button type="submit" class="btn primary"${disabled(busy)}>Save assessment</button>${selected.service?.enabled ? button("Disable assessment", "service-remove", "", "", busy) : ""}</div>${selected.service ? `<p class="address-note">Last saved ${esc(formatDate(selected.service.updated_at))}. Changes remain in the investigation's assessment history.</p>` : ""}</form></section>` : '<section class="panel"><div class="empty-state"><div class="empty-icon">' + icon("search") + '</div><h2>Select an address</h2><p>Choose an address from the saved run, or paste one to review it. Activity is fetched only when you select Refresh activity.</p></div></section>'}</div></div>`;
 }
 
 function miroRecoveryNotice(detail: Case): string {
@@ -814,8 +811,8 @@ async function openCase(id: string): Promise<void> {
   saveDraft();
   state.activeCase = detail;
   state.addressReview = { query: "", suspectedOnly: false, data: null, selected: null,
-    loading: false, name: "", rationale: "", enabled: false, pasted: "",
-    classification: "suspected_service", confidence: "candidate", source: "Investigator designation", observedAt: "", stopTracing: true };
+    loading: false, name: "", notes: "", enabled: false, pasted: "",
+    confidence: "suspected", source: "Investigator designation", observedAt: "", stopTracing: true };
   resetAddressImport(detail.id);
   state.selectedRun = "latest";
   state.page = "case";

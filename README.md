@@ -185,40 +185,47 @@ liquid-trace service-set --case cases/theft-liquid --address ADDRESS --disable
 
 ### Bulk address attributions before the first run
 
-Create or open the investigation, then use **Import attributions** in the browser workspace (also on **Address review**) or **Import address attributions** in the terminal menu. This is available with **no saved run**. Choose a CSV/JSON/text file or paste addresses, preview the batch, review individual rows and any conflicts, then approve **Apply reviewed import**. Return to **Start first run** afterward. Importing does not start a trace, query Blockstream, load credentials, or update Miro.
+Create or open an investigation, then use **Import attributions** in the browser
+workspace/Address review, or **Import address attributions** in the terminal.
+Upload CSV/JSON/text or paste a list, preview the complete batch, and approve
+**Apply reviewed import**. No saved run, credentials, blockchain request or Miro
+update is required. Existing decisions are kept unless replacement is explicitly
+reviewed. Invalid rows block the entire batch; unchanged reimports do not write.
 
-A plain list, one address per line or separated by commas/spaces, is imported as **suspected services**, **candidate** confidence, with **stop tracing enabled**. CSV/JSON lets you specify different names, source references, confidence and label-only entries per address. Templates are in `examples/address-attributions-template.csv` and `examples/address-attributions-template.json`; the interface also provides **Use CSV template**. Replace the placeholder addresses before importing.
+The standard CSV is now:
 
-| Column | Meaning / default |
-| --- | --- |
-| `address` | Required. Full public Liquid address as shown by the trace/explorer. |
-| `name` | Service name or case alias; optional. |
-| `classification` | `suspected_service` (default), `service`, or `label`. |
-| `confidence` | `candidate` (default), `corroborated`, or `confirmed`. This is your assertion, never automatically verified by importing. Use `service`, not `suspected_service`, for a confirmed service designation. |
-| `source` | Evidence reference; defaults to `Investigator designation`. |
-| `rationale` | Optional notes, including quoted multiline CSV text, up to 4,000 characters. |
-| `stop_tracing` | `true` for service classifications by default; `false` for `label`. Service entries may explicitly use `false` to annotate without stopping. |
-| `enabled` | Optional active/inactive assessment, default `true`. `false` disables both the label and its stop. |
-| `observed_at` | Optional ISO date/timestamp for the supporting observation, separate from when the assessment was imported. |
+```csv
+Address,Name,confidence,stop_tracing,source,notes
+```
 
-Only `address` is required. JSON is an array of strings or objects using these fields. `value`/`entity`/`stop` aliases are supported for address-label records; `kind`, when supplied, must be `address`. CSV uses a comma delimiter and a header; UTF-8 BOM and Windows line endings are supported. Import is scoped to the current investigation, not a global cross-case attribution database. Up to **5,000 rows and 512 KiB** per batch.
+Confidence has just **suspected** and **confirmed**. A suspected entry is displayed
+as **Suspected Example Exchange**; confirmed is **Example Exchange** with no added
+qualifier. **stop_tracing** is independent and accepts true/false. Active stops
+show **STOP TRACING**. Classification has been removed. Source and notes appear
+in the graph's attribution register, not just in exported metadata. Templates
+are in `examples/address-attributions-template.csv` and `.json`.
 
-The preview validates the entire batch. Invalid rows or conflicting duplicate addresses prevent all writes. Identical duplicates are collapsed. Existing assessments are **kept by default**, including disabled entries. To replace them, explicitly select **Replace conflicting existing assessments** (CLI `--on-conflict replace`) and review the before/after fields. Replacement uses the complete normalized row, including defaults for omitted fields. Reimporting unchanged entries makes no new settings write. Each changed entry has a previous/new value, timestamp, batch ID, input SHA-256 and row number in the audit history; the complete batch is committed in one atomic `services.json` replacement.
+Only Address is required. Address-only lists default to suspected confidence and
+stop_tracing=true. Explicitly set false to keep tracing through a named address.
+Names, sources and notes are free text; notes supports multiple lines. Optional
+enabled and observed_at fields remain available. Limits: 5,000 rows / 512 KiB.
+Import the exact public address spelling from the trace/explorer; address text is
+validated offline but network/checksum and confidential aliases are not resolved.
 
-The approved preview is bound to the case, file contents, options and current assessments. A changed file or assessment invalidates it. Active traces/lookups and reviewed compaction applications block an import. Imported addresses appear immediately in **Address review**, including addresses not encountered yet, and can be edited or disabled individually. Active stops affect the **first run and continuations**, and existing **seed outputs are not exempt**. To trace outward from an address without stopping, import it with `stop_tracing=false`. No global seed override is introduced.
-
-Both suspected and other service stops use the existing service-boundary reachability checks; the historical internal status `suspected_service_stop` remains the boundary status for compatibility, while the saved label retains its explicit classification/confidence. Label-only entries never manufacture new UTXO links or stop traversal. Old rule files remain readable without rewriting evidence archives. Current labels appear in regenerated previews and CSV metadata; Miro changes require a separate sync.
-
-Address text is checked using the existing review validator, **not a network/checksum verification service**. Use the exact public address spelling from the graph/explorer. Confidential and unconfidential address representations are not automatically linked. The importer does not establish ownership or turn suspected services into confirmed ones.
-
-CLI, without SecretSpec or API credentials:
+Existing saved assessments retain their explicit stop decisions; legacy
+candidate/corroborated confidence is interpreted as suspected without rewriting
+archived evidence. Remove classification and choose the new confidence spelling
+when preparing a new CSV upload. See [explicit attributions and convergence
+stars](docs/address-attributions-and-convergence.md) for output details,
+compatibility, and safe Miro updates.
 
 ```bash
 liquid-trace address-import --case CASE_DIRECTORY --file attributions.csv --dry-run
 liquid-trace address-import --case CASE_DIRECTORY --file attributions.csv --approve-plan APPROVAL_SHA256
 ```
 
-`APPROVAL_SHA256` is the exact hash from the reviewed preview. Use the same `--format` and `--on-conflict` options when applying. Both steps are local and offline.
+The approval hash binds the case, content, options and current assessments. Stops
+affect first runs and continuations; selected seed outputs are not exempt.
 
 To inspect the ELK layout for a saved run:
 
@@ -496,6 +503,13 @@ Use the **same case directory and board** for later runs. Sync creates native ex
 New and refreshed Miro presentations automatically include one **Complete graph** frame and one **Activity** frame for each connected part of the displayed graph. Three disconnected starting trees produce four frames. If a continuation connects two trees, sync expands their retained activity frame, removes the obsolete generated frame, and leaves three frames in total. Repeating sync reuses the frame IDs. The outer frame also includes the legend and saved run notes.
 
 Starting transactions are numbered globally by recorded confirmation time, oldest first. Frames list their actual numbers, for example **Activity 1 · Starting transactions 1, 4, 7**, and the corresponding boxes show **Starting TX 1**, **Starting TX 4**, and **Starting TX 7**. Multiple seed outputs of one transaction share one number. Equal timestamps use full transaction keys as a deterministic tie-breaker; undated or unconfirmed starts sort last. Ordinary **Sync to Miro** refreshes generated titles while preserving manual edits and existing frame IDs, without retracing. See [chronological starting-transaction numbers](docs/starting-transaction-index.md) for the saved mapping and historical-preview behavior.
+
+A small gold **★** marks a transaction where different starting-transaction
+lineages meet through verified saved UTXO spends. Starting transactions themselves
+are eligible. Address reuse alone and simple descendants of an earlier merge are
+not starred. Attributed addresses have **A-...** references to source/notes cards
+beside the Miro graph. Ordinary sync adds and refreshes these generated
+annotations without retracing. See [attribution and star behavior](docs/address-attributions-and-convergence.md).
 
 Groups follow visible UTXO connections, including displayed context links. They do not infer common ownership or identify services. The default shared-address display joins activity groups through a common address circle. This visual connection does not establish a spend between unrelated UTXOs. Explicit legacy outpoint exports keep repeated address occurrences separate. Fee visibility follows the investigation setting.
 

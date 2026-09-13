@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .common import TraceError, save_json
 from .export import COLORS, edge_color, legend_lines
+from .attribution_presentation import register_html
 from .processes import defer_cancellation_during_spawn
 from .render_runtime import renderer_failure, renderer_heap_mb
 
@@ -90,7 +91,8 @@ def mermaid_source(graph):
         if not isinstance(color, str) or not _COLOR.fullmatch(color):
             raise TraceError("The graph contains an invalid node color")
         identifier = ids[node["id"]]
-        lines.append(f"  {identifier}{start}{_label(node['label'])}{end}")
+        label = ("★ " if node.get("convergence") else "") + node["label"]
+        lines.append(f"  {identifier}{start}{_label(label)}{end}")
         lines.append(f"  style {identifier} fill:{color},stroke:#334155,stroke-width:2px,color:#172033")
     for edge in edges:
         caption = edge["label"] + (" · " + edge["quantity"] if edge.get("quantity") else "")
@@ -132,6 +134,7 @@ body {{ margin:0; color:#172033; background:#f5f6f8; font:15px system-ui,sans-se
 header {{ padding:20px 28px; background:white; border-bottom:1px solid #d5dbe3; }}
 h1 {{ margin:0 0 10px; font-size:24px; }}
 p {{ margin:8px 0; }} a {{ color:#155e75; }}
+pre {{ white-space:pre-wrap; overflow-wrap:anywhere; }}
 summary {{ cursor:pointer; }} li {{ margin:6px 0; }}
 .chart {{ overflow:auto; padding:24px; background:white; }}
 .chart img {{ display:block; max-width:none; }}
@@ -143,6 +146,7 @@ summary {{ cursor:pointer; }} li {{ margin:6px 0; }}
 <p>Scroll to explore; use your browser zoom to adjust the scale.</p>
 <p><a href="graph.mmd" download>Mermaid source</a> · <a href="graph.svg" download>SVG</a> ·
 <a href="graph.json" download>Graph details</a> · <a href="mermaid-node-map.json" download>Node identifiers</a></p>
+{register_html(graph)}
 <details><summary>Legend</summary><ul>{items}</ul></details></header>
 <main class="chart"><img alt="Directed Liquid Network transaction graph" src="data:image/svg+xml;base64,{encoded}"></main>
 </body></html>

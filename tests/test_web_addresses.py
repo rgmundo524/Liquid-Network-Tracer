@@ -41,7 +41,7 @@ class WebAddressTests(unittest.TestCase):
         self.assertEqual(detail["service"], designation["service"])
         self.assertIsNone(detail["activity"])
         removed = self.success(route + "/services", {"address": address, "enabled": False,
-                               "name": designation["service"]["name"], "rationale": designation["service"]["rationale"]})
+                               "name": designation["service"]["name"], "rationale": designation["service"]["notes"]})
         self.assertFalse(removed["service"]["enabled"])
         self.assertEqual(self.success(route + "/addresses", {"suspected_only": True})["total"], 0)
         self.assertEqual(before, {str(file.relative_to(archive)): file.read_bytes() for file in archive.iterdir() if file.is_file()})
