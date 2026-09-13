@@ -12,7 +12,7 @@ from .trace import TERMINAL
 from .layout import arrange, fee_date, transaction_ranks
 from .miro_frames import activity_frames
 
-PRESENTATION_VERSION = 10
+PRESENTATION_VERSION = 11
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -269,6 +269,10 @@ def build_graph(state, merge_addresses=True, include_fees=False):
         # older archived run. Record that presentation snapshot independently.
         graph["service_controls"] = deepcopy(state["service_controls"])
     graph["activity_frames"] = activity_frames(graph)
+    for entry in graph["activity_frames"]["starting_transactions"]:
+        node = nodes[entry["key"]]
+        node["starting_transaction_index"] = entry["index"]
+        node["label"] = node["label"].replace("TX\n", f"Starting TX {entry['index']}\n", 1)
     return graph
 
 

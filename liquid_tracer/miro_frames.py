@@ -26,26 +26,53 @@ def _key(value):
     return value
 
 
-def activity_frames(graph):
+def _starting_keys(graph, nodes):
+    seeds = {"tx:" + seed.rpartition(":")[0]
+             for seed in graph.get("run", {}).get("seeds", []) or []
+             if isinstance(seed, str) and ":" in seed}
+    return {key for key, node in nodes.items() if node.get("kind") == "transaction"
+            and (node.get("role") == "starting_transaction" or key in seeds)}
+
+
+def _confirmed_time(node):
+    """Use recorded confirmation time only; undated starts sort after dated ones."""
+    details = node.get("details") or {}
+    transaction = details.get("transaction") or {}
+    status = transaction.get("status") or {}
+    stamp = status.get("block_time")
+    # UTC seconds through year 9999. Do not accept booleans, missing dates,
+    # unconfirmed timestamps, or dates the preview cannot display.
+    return (stamp if status.get("confirmed") is True and type(stamp) is int
+            and 0 <= stamp <= 253402300799 else None)
+
+
+def _starting_catalog(nodes, starts):
+    times = {key: _confirmed_time(nodes[key]) for key in starts}
+    ordered = sorted(starts, key=lambda key: (times[key] is None, times[key] or 0, key))
+    return [{"key": key, "index": index, "block_time": times[key]}
+            for index, key in enumerate(ordered, 1)]
+
+
+def activity_frames(graph, *, indexed=True):
     """Describe weakly connected components using node identity, never labels.
 
     The iterative topology walk is O(V + E), including cycles and isolated
     nodes. Sorting the resulting descriptors makes them independent of input
     order. Ordinary continuation retains each frame's starting-transaction
-    anchor; merging components retains the smallest such anchor.
+    anchor; merging components retains the smallest such anchor. Display
+    numbers are global, oldest confirmation first, with full keys breaking
+    timestamp ties. Frame identities never depend on those display numbers.
+    ``indexed=False`` is only for validation of historical schema-1 exports.
     """
     nodes = {}
-    starts = set()
-    for seed in graph.get("run", {}).get("seeds", []) or []:
-        if isinstance(seed, str) and ":" in seed:
-            starts.add("tx:" + seed.rpartition(":")[0])
     for node in graph["nodes"]:
         key = _key(node["id"])
         if key in nodes or _note_key(key) or key.startswith("frame:"):
             raise TraceError("Miro graph node keys conflict with activity frames or notes")
         nodes[key] = node
-    starts = {key for key, node in nodes.items() if node.get("kind") == "transaction"
-              and (node.get("role") == "starting_transaction" or key in starts)}
+    starts = _starting_keys(graph, nodes)
+    catalog = _starting_catalog(nodes, starts) if indexed else []
+    start_numbers = {entry["key"]: entry["index"] for entry in catalog}
     neighbors = {key: [] for key in nodes}
     edge_keys = set()
     for edge in graph["edges"]:
@@ -84,7 +111,13 @@ def activity_frames(graph):
     activities = []
     for number, component in enumerate(sorted(components, key=lambda group: group["anchor"]), 1):
         count = len(component["starting_transaction_keys"])
-        suffix = f" · {count} starting transaction" + ("s" if count != 1 else "")
+        if indexed:
+            numbers = sorted(start_numbers[key] for key in component["starting_transaction_keys"])
+            suffix = (" · Starting transaction" + ("s" if count != 1 else "") + " "
+                      + ", ".join(map(str, numbers))) if numbers else " · No starting transactions"
+        else:
+            # Schema 1 remains reproducible for immutable historical plans.
+            suffix = f" · {count} starting transaction" + ("s" if count != 1 else "")
         activities.append({
             "key": ACTIVITY_PREFIX + hashlib.sha256(component["anchor"].encode("utf-8")).hexdigest(),
             "title": f"Activity {number}" + suffix,
@@ -92,9 +125,12 @@ def activity_frames(graph):
             "connector_keys": sorted(component["connector_keys"]),
             "starting_transaction_keys": component["starting_transaction_keys"],
         })
-    return {"schema_version": 1,
-            "outer": {"key": OUTER_KEY, "title": "Liquid UTXO trace · Complete graph"},
-            "activities": activities}
+    result = {"schema_version": 2 if indexed else 1,
+              "outer": {"key": OUTER_KEY, "title": "Liquid UTXO trace · Complete graph"},
+              "activities": activities}
+    if indexed:
+        result["starting_transactions"] = catalog
+    return result
 
 
 def validate_activity_frames(metadata, shape_keys, connector_items, *, starting_transaction_keys=None):
@@ -105,7 +141,8 @@ def validate_activity_frames(metadata, shape_keys, connector_items, *, starting_
     Older callers can use the explicit, member-constrained keys in metadata.
     """
     try:
-        if not isinstance(metadata, dict) or type(metadata.get("schema_version")) is not int:
+        if (not isinstance(metadata, dict) or type(metadata.get("schema_version")) is not int
+                or metadata["schema_version"] not in (1, 2)):
             raise ValueError
         keys = list(shape_keys)
         if any(not isinstance(key, str) or not key for key in keys) or len(keys) != len(set(keys)):
@@ -127,7 +164,28 @@ def validate_activity_frames(metadata, shape_keys, connector_items, *, starting_
             "edges": [{"id": item["key"], "source": item["source"], "target": item["target"]}
                       for item in connector_items],
         }
-        if metadata != activity_frames(graph):
+        if metadata["schema_version"] == 2:
+            # Plans retain the timestamp-to-index mapping because shape bodies
+            # do not contain raw transaction evidence. Validate a complete,
+            # canonical catalog, not arbitrary labels or per-frame numbering.
+            catalog = metadata["starting_transactions"]
+            if not isinstance(catalog, list) or len(catalog) != len(starts):
+                raise ValueError
+            lookup = {node["id"]: node for node in graph["nodes"]}
+            seen = set()
+            for index, entry in enumerate(catalog, 1):
+                if (not isinstance(entry, dict) or set(entry) != {"key", "index", "block_time"}
+                        or not isinstance(entry["key"], str) or entry["key"] not in starts
+                        or entry["key"] in seen or type(entry["index"]) is not int
+                        or entry["index"] != index):
+                    raise ValueError
+                stamp = entry["block_time"]
+                if stamp is not None and (type(stamp) is not int or not 0 <= stamp <= 253402300799):
+                    raise ValueError
+                seen.add(entry["key"])
+                lookup[entry["key"]]["details"] = {"transaction": {
+                    "status": {"confirmed": stamp is not None, "block_time": stamp}}}
+        if metadata != activity_frames(graph, indexed=metadata["schema_version"] == 2):
             raise ValueError
     except (KeyError, TypeError, ValueError, OverflowError):
         raise TraceError("Invalid Miro activity frame partition; regenerate the export") from None

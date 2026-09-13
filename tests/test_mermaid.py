@@ -63,7 +63,9 @@ class MermaidTests(unittest.TestCase):
         for node in graph["nodes"]:
             node_id = ids[node["id"]]
             if node["kind"] == "transaction":
-                self.assertIn(f'{node_id}["TX<br/>', source)
+                heading = (f"Starting TX {node['starting_transaction_index']}"
+                           if "starting_transaction_index" in node else "TX")
+                self.assertIn(f'{node_id}["{heading}<br/>', source)
             elif node["kind"] == "address":
                 self.assertIn(f'{node_id}(("', source)
             else:

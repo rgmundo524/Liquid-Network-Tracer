@@ -46,8 +46,8 @@ class ActivityFrameGroupingTests(unittest.TestCase):
         self.assertEqual(merged["connector_keys"], ["edge:a", "edge:b", "merge"])
         self.assertEqual(merged["key"], first["activities"][0]["key"])
         self.assertEqual(separate["key"], first["activities"][2]["key"])
-        self.assertEqual(merged["title"], "Activity 1 · 2 starting transactions")
-        self.assertEqual(separate["title"], "Activity 2 · 1 starting transaction")
+        self.assertEqual(merged["title"], "Activity 1 · Starting transactions 1, 2")
+        self.assertEqual(separate["title"], "Activity 2 · Starting transaction 3")
 
     def test_growth_and_new_later_seed_keep_starting_anchor(self):
         graph = three_trees()
