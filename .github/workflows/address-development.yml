@@ -1,0 +1,25 @@
+name: Address graph development source
+
+on:
+  push:
+    branches: [codex/shared-address-nodes-20260913]
+    paths: [.github/workflows/address-development.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Bundle only version-controlled source
+        run: git archive --format=tar.gz --output=address-development-source.tar.gz HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: address-development-source
+          path: address-development-source.tar.gz
+          retention-days: 1
