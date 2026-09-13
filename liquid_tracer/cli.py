@@ -19,6 +19,8 @@ from .progress import ProgressReporter
 from .store import Store
 from .trace import new_state, trace
 from .services import apply_service_labels, disable_service, load_services, set_service
+from .compaction_preview import (compaction_apply_lock, compaction_preview_metadata, latest_compaction_preview,
+                                 verified_compaction_preview)
 
 
 def fee_arguments(command):
@@ -130,6 +132,12 @@ def parser():
     layout.add_argument("--open", dest="open_browser", action="store_true", help="Open the completed local layout in your browser")
     fee_arguments(layout)
     connector_arguments(layout)
+    compact = commands.add_parser("compact-preview", help="Compact an ELK layout locally and save a before/after comparison for review")
+    compact.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    compact.add_argument("--run", default="latest")
+    compact.add_argument("--open", dest="open_browser", action="store_true")
+    fee_arguments(compact)
+    connector_arguments(compact)
     csv = commands.add_parser("csv-export", help="Export CSV tables from a saved run without API calls")
     csv.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                      help="Case directory (default: LIQUID_CASE_DIR)")
@@ -149,6 +157,7 @@ def parser():
     update.add_argument("--run", default="latest", help="Saved run ID (default: latest)")
     update.add_argument("--board", help="Miro board URL or ID (default: saved case board, then LIQUID_MIRO_BOARD, or a prompt)")
     update.add_argument("--plan", type=Path, help="Use a regenerated miro-plan.json for this run")
+    update.add_argument("--compact-preview", help="Apply this exact saved compact preview ID; requires --reorganize")
     update.add_argument("--dry-run", action="store_true", help="Preview local new/mapped counts without network access or writes")
     fee_arguments(update)
     connector_arguments(update)
@@ -417,13 +426,19 @@ def recover_miro_run(case, confirmed_empty=False, progress=None):
 
 
 def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_path=None,
-             include_fees=None, reorganize=False, progress=None, connector_style=None):
-    if plan_path is not None and (include_fees is not None or connector_style is not None):
+             include_fees=None, reorganize=False, progress=None, connector_style=None, compact_preview=None):
+    if compact_preview is not None and (not reorganize or plan_path is not None):
+        raise TraceError("--compact-preview requires --reorganize and cannot be combined with --plan")
+    if (plan_path is not None or compact_preview is not None) and (include_fees is not None or connector_style is not None):
         raise TraceError("--plan cannot be combined with --include-fees, --exclude-fees, or --connector-style; select an explicit plan with the desired presentation")
     run_id = resolve_latest(case, run_id)
     default_plan = run_path(case, run_id) / "miro-plan.json"
-    verify_export((plan_path or default_plan).parent)
-    plan = read_json(plan_path or default_plan)
+    compaction_meta = None
+    if compact_preview is not None:
+        plan, compaction_meta = verified_compaction_preview(case, run_id, compact_preview)
+    else:
+        verify_export((plan_path or default_plan).parent)
+        plan = read_json(plan_path or default_plan)
     validate_plan(plan)
     namespace = _namespace(plan)
     if plan.get("run_id") != run_id:
@@ -431,7 +446,7 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
     metadata = read_case(case)
     if namespace["case_id"] != metadata["case_id"]:
         raise TraceError("Saved plan has no matching case identity; regenerate it with export or create a continuation")
-    archived_plan_sha256 = plan["sha256"]
+    archived_plan_sha256 = (read_json(default_plan)["sha256"] if compaction_meta is not None else plan["sha256"])
     if not isinstance(max_new_items, int) or max_new_items < 0:
         raise TraceError("--max-new-items must be a nonnegative integer")
     target = resolve_board(metadata, board)
@@ -439,7 +454,7 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
     # Pending creation outcomes block both preview and publication. Check the
     # durable mapping before running ELK; sync repeats this under its own lock.
     _load_sync_state(state_path, target, namespace)
-    if plan_path is None:
+    if plan_path is None and compact_preview is None:
         plan = refresh_presentation(plan, default_plan.parent / "trace.json", include_fee_flows(metadata, include_fees),
                                     connector_appearance(metadata, connector_style), progress=progress,
                                     service_settings=load_services(case))
@@ -449,8 +464,9 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
         options["progress"] = progress
     result = sync(plan, target, state_path, max_items=max_new_items, dry_run=True, **options)
     if not dry_run:
-        update_case(case, {"miro_board": target})
-        result = sync(plan, target, state_path, max_items=max_new_items, dry_run=False, **options)
+        with compaction_apply_lock(case, compaction_meta):
+            update_case(case, {"miro_board": target})
+            result = sync(plan, target, state_path, max_items=max_new_items, dry_run=False, **options)
     report = {**result, "run_id": run_id, "board_id": target,
               "board_url": "https://miro.com/app/board/" + quote(target, safe="") + "/",
               "state_file": str(state_path.resolve()),
@@ -459,6 +475,9 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
               "include_fees": plan.get("include_fees", True),
               "reorganize": bool(reorganize),
               "presentation_refreshed": plan["sha256"] != archived_plan_sha256}
+    if compaction_meta is not None:
+        report.update(compact_preview=compact_preview, compaction=compaction_meta["compaction"],
+                      connector_style=compaction_meta["connector_style"])
     if not dry_run:
         report_path = case / "miro" / "reports" / (run_id + "-" + uuid.uuid4().hex[:12] + ".json")
         report["report_file"] = str(report_path.resolve())
@@ -626,6 +645,33 @@ def layout_preview_run(case, run_id="latest", out=None, include_fees=None,
     return result
 
 
+def compact_preview_run(case, run_id="latest", include_fees=None, connector_style=None,
+                        open_browser=False, progress=None):
+    from .compaction import compact_graph
+    from .compaction_preview import export_compaction, service_fingerprint
+    from .elk_layout import optimize_graph
+
+    case = Path(case)
+    # Freeze local presentation decisions for the calculation without holding a
+    # case lock through a potentially long layout. A concurrent decision change
+    # prevents the completed proposal from becoming an applicable preview.
+    services_before = service_fingerprint(case)
+    run_id, archive, graph = saved_graph(case, run_id, include_fees)
+    archive_sha256 = digest((archive / "SHA256SUMS").read_bytes())
+    style = connector_appearance(read_case(case), connector_style)
+    before = optimize_graph(graph, connector_style=style, progress=progress)
+    after = compact_graph(before, progress=progress)
+    if services_before != service_fingerprint(case):
+        raise TraceError("Service assessments changed during compaction; create the preview again")
+    destination = case / "previews" / (run_id + "-compact-" + uuid.uuid4().hex[:8])
+    result = export_compaction(before, after, destination, archive_sha256=archive_sha256,
+                               service_sha256=services_before)
+    result.update(run_id=run_id, include_fees=after["include_fees"], connector_style=style,
+                  layout_algorithm=after["layout"]["algorithm"],
+                  browser_opened=open_preview(result["html"]) if open_browser else False)
+    return result
+
+
 def csv_run(case, run_id="latest", out=None, include_fees=None):
     from .csv_export import export_csv
 
@@ -726,6 +772,9 @@ def main(argv=None, *, progress=None):
         elif args.command == "layout-preview":
             print(json.dumps(layout_preview_run(args.case, args.run, args.out, args.include_fees,
                                                 args.connector_style, args.open_browser, progress), indent=2))
+        elif args.command == "compact-preview":
+            print(json.dumps(compact_preview_run(args.case, args.run, args.include_fees,
+                                                 args.connector_style, args.open_browser, progress), indent=2))
         elif args.command == "csv-export":
             print(json.dumps(csv_run(args.case, args.run, args.out, args.include_fees), indent=2))
         elif args.command == "miro-create-board":
@@ -733,7 +782,7 @@ def main(argv=None, *, progress=None):
         elif args.command == "miro-sync":
             print(json.dumps(sync_run(args.case, args.run, args.board, args.max_new_items, args.dry_run, args.plan,
                                       args.include_fees, args.reorganize, progress=progress,
-                                      connector_style=args.connector_style), indent=2))
+                                      connector_style=args.connector_style, compact_preview=args.compact_preview), indent=2))
         elif args.command == "miro-publish":
             print(json.dumps(publish(read_json(args.plan), board_id(args.board_id), args.state, args.max_items), indent=2))
         elif args.command == "miro-resolve":

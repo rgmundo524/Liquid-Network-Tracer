@@ -6,6 +6,7 @@ filesystem paths, API credentials, or a SecretSpec provider configuration.
 
 import argparse
 import json
+import math
 import mimetypes
 import os
 import re
@@ -31,15 +32,17 @@ from .progress import public_progress
 MAX_BODY = 64 * 1024
 CASE_ID = re.compile(r"[0-9a-f]{32}")
 RUN_ID = re.compile(r"[a-zA-Z0-9]{16}")
-ARTIFACT_DIR = re.compile(r"[a-zA-Z0-9]{16}-(?:csv|mermaid|elk)-[0-9a-f]{8}")
+ARTIFACT_DIR = re.compile(r"[a-zA-Z0-9]{16}-(?:csv|mermaid|elk|compact)-[0-9a-f]{8}")
+COMPACTION_DIR = re.compile(r"[a-zA-Z0-9]{16}-compact-[0-9a-f]{8}")
 EXPORT_NAMES = {"nodes.csv", "edges.csv", "inputs.csv", "outputs.csv", "spends.csv",
                 "events.csv", "frontier.csv", "export.json", "SHA256SUMS"}
 PREVIEW_NAMES = {"graph.html", "graph.svg", "graph.mmd", "graph.json",
                  "mermaid-node-map.json", "mermaid-config.json"}
 LAYOUT_NAMES = {"graph.html", "graph.svg", "graph.json", "layout-report.json"}
+COMPACTION_NAMES = LAYOUT_NAMES | {"before.html", "before.svg", "before.json", "compaction.json", "SHA256SUMS"}
 LAYOUT_ALGORITHMS = ("elk_layered_v1", "dependency_layers_v1")
 FALLBACK_REASONS = ("size_limit", "timeout", "mermaid_size_limit", "mermaid_timeout")
-CANCELLABLE_ACTIONS = {"layout", "mermaid"}
+CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact"}
 
 
 def public_service(rule):
@@ -116,6 +119,36 @@ def public_layout_metrics(metrics):
             counts[key] = value
         counts["truncated"] = values.get("truncated") is True
         result[phase] = counts
+    return result
+
+
+def public_compaction_report(report):
+    """Expose measured sizes and counts, not arbitrary preview metadata."""
+    if not isinstance(report, dict):
+        return None
+    result = {}
+    for phase in ("before", "after"):
+        sizes = report.get(phase)
+        if not isinstance(sizes, dict):
+            return None
+        result[phase] = {}
+        for scope in ("main", "board"):
+            measurements = sizes.get(scope)
+            if not isinstance(measurements, dict):
+                return None
+            result[phase][scope] = {}
+            for name in ("width", "height", "area", "edge_length", "address_distance"):
+                value = measurements.get(name)
+                if type(value) in (int, float) and 0 <= value <= 2 ** 53 - 1 and math.isfinite(value):
+                    result[phase][scope][name] = value
+                elif name in ("width", "height", "area"):
+                    return None
+    for name in ("moved_addresses", "moved_components", "accepted_moves", "skipped_moves"):
+        value = report.get(name)
+        if type(value) is int and 0 <= value <= 2 ** 53 - 1:
+            result[name] = value
+    for name in ("truncated", "unchanged"):
+        result[name] = report.get(name) is True
     return result
 
 
@@ -282,6 +315,7 @@ class LocalServer(ThreadingHTTPServer):
         for folder, kind, names, metadata_file in (
             ("previews", "mermaid", PREVIEW_NAMES, "graph.json"),
             ("previews", "elk", LAYOUT_NAMES, "graph.json"),
+            ("previews", "compact", COMPACTION_NAMES, "graph.json"),
             ("exports", "csv", EXPORT_NAMES, "export.json"),
         ):
             try:
@@ -300,7 +334,21 @@ class LocalServer(ThreadingHTTPServer):
                     files = {name: self.artifact(case, [folder, directory.name, name]) for name in names}
                     if not all(path.is_file() for path in files.values()):
                         continue
-                    info = read_json(files[metadata_file])
+                    compact_meta = None
+                    if kind == "compact":
+                        from .cli import compaction_preview_metadata
+
+                        compact_meta = compaction_preview_metadata(case, run_id, directory.name)
+                        # Verification caches only small metadata. Reopening a
+                        # large comparison need not parse either full graph.
+                        layout_report = read_json(files["layout-report.json"])
+                        if not isinstance(layout_report, dict):
+                            continue
+                        info = {**compact_meta, "graph_options": {
+                            "connector_style": compact_meta["connector_style"]},
+                            "layout": layout_report.get("layout")}
+                    else:
+                        info = read_json(files[metadata_file])
                     if not isinstance(info, dict) or info.get("run_id") != run_id:
                         continue
                     namespace = info if kind == "csv" else info.get("namespace", {})
@@ -314,13 +362,13 @@ class LocalServer(ThreadingHTTPServer):
                         continue
                     # Completion file is written last. A partial later attempt
                     # cannot hide a previous complete, downloadable product.
-                    finished = files["SHA256SUMS" if kind == "csv" else "graph.html"].stat().st_mtime_ns
+                    finished = files["SHA256SUMS" if kind in ("csv", "compact") else "graph.html"].stat().st_mtime_ns
                     order = (finished, directory.name)
                     if order <= newest.get((run_id, kind), (-1, "")):
                         continue
                     product = self.artifact_links(case, [folder, directory.name], names)
                     product["include_fees"] = fees
-                    if kind == "elk":
+                    if kind in ("elk", "compact"):
                         style = options.get("connector_style")
                         layout = info.get("layout")
                         if (not isinstance(style, str) or style not in ("straight", "curved", "elbowed")
@@ -333,6 +381,12 @@ class LocalServer(ThreadingHTTPServer):
                         metrics = public_layout_metrics(layout.get("metrics"))
                         if metrics is not None:
                             product["layout_metrics"] = metrics
+                        if compact_meta is not None:
+                            report = public_compaction_report(compact_meta.get("compaction"))
+                            if report is None:
+                                continue
+                            product["compaction"] = report
+                            product["preview_id"] = directory.name
                     elif kind == "mermaid":
                         preview = info.get("preview", {})
                         if isinstance(preview, dict):
@@ -341,7 +395,7 @@ class LocalServer(ThreadingHTTPServer):
                                 "fallback_reason": preview.get("reason")}))
                     artifacts.setdefault(run_id, {})[kind] = product
                     newest[(run_id, kind)] = order
-                except (RequestError, OSError, ValueError, TypeError):
+                except (RequestError, TraceError, OSError, ValueError, TypeError):
                     continue
         return artifacts
 
@@ -539,10 +593,21 @@ class LocalServer(ThreadingHTTPServer):
         metrics = public_layout_metrics(result.get("layout_metrics"))
         if metrics is not None:
             value["layout_metrics"] = metrics
-        if action in ("mermaid", "csv", "layout"):
+        if action in ("mermaid", "csv", "layout", "compact"):
             directory = Path(result["directory"])
             relative = directory.relative_to(case)
-            names = {"mermaid": PREVIEW_NAMES, "csv": EXPORT_NAMES, "layout": LAYOUT_NAMES}[action]
+            names = {"mermaid": PREVIEW_NAMES, "csv": EXPORT_NAMES, "layout": LAYOUT_NAMES,
+                     "compact": COMPACTION_NAMES}[action]
+            if action == "compact":
+                from .cli import compaction_preview_metadata
+
+                if not COMPACTION_DIR.fullmatch(directory.name):
+                    raise RequestError("Invalid compact preview identifier.")
+                meta = compaction_preview_metadata(case, result["run_id"], directory.name)
+                value["preview_id"] = directory.name
+                report = public_compaction_report(meta.get("compaction"))
+                if report is not None:
+                    value["compaction"] = report
             value.update(self.artifact_links(case, relative.parts, names))
         return value
 
@@ -553,7 +618,8 @@ class LocalServer(ThreadingHTTPServer):
         kind = parts[1].split("-")[1]
         if (parts[0] == "exports") != (kind == "csv"):
             raise RequestError("File not found", 404)
-        expected = {"mermaid": PREVIEW_NAMES, "csv": EXPORT_NAMES, "elk": LAYOUT_NAMES}[kind]
+        expected = {"mermaid": PREVIEW_NAMES, "csv": EXPORT_NAMES, "elk": LAYOUT_NAMES,
+                    "compact": COMPACTION_NAMES}[kind]
         if parts[2] not in expected:
             raise RequestError("File not found", 404)
         return safe_path(case, parts)
@@ -600,13 +666,16 @@ class LocalServer(ThreadingHTTPServer):
                 raise RequestError("Empty-board recovery is unavailable. Review the pending Miro items before retrying.")
             arguments = ["miro-recover", "--case", str(case), "--confirm-empty"]
             live = True
-        elif action in ("mermaid", "csv", "layout", "miro-preview", "miro-sync", "miro-organize"):
+        elif action in ("mermaid", "csv", "layout", "compact", "miro-preview", "miro-sync", "miro-organize", "miro-compact"):
+            if not isinstance(selected, str) or (selected != "latest" and not RUN_ID.fullmatch(selected)):
+                raise RequestError("Choose a saved run for this graph.")
             selected = resolve_latest(case, selected)
             archive = run_path(case, selected)
             safe_path(case, ["runs", selected, "trace.json"])
             verify_export(archive)
-            if action in ("mermaid", "csv", "layout"):
-                arguments = [{"mermaid": "mermaid", "csv": "csv-export", "layout": "layout-preview"}[action],
+            if action in ("mermaid", "csv", "layout", "compact"):
+                arguments = [{"mermaid": "mermaid", "csv": "csv-export", "layout": "layout-preview",
+                              "compact": "compact-preview"}[action],
                              "--case", str(case), "--run", selected]
             else:
                 if not metadata.get("miro_board"):
@@ -617,9 +686,21 @@ class LocalServer(ThreadingHTTPServer):
                     arguments.append("--dry-run")
                 elif action == "miro-organize":
                     arguments.append("--reorganize")
+                elif action == "miro-compact":
+                    from .cli import verified_compaction_preview
+
+                    identity = body.get("preview_id")
+                    if (not isinstance(identity, str) or not COMPACTION_DIR.fullmatch(identity)
+                            or identity[:16] != selected):
+                        raise RequestError("Choose a compact preview of this saved run first.")
+                    if miro_recovery_status(case)["pending_count"]:
+                        raise RequestError("Recover the pending Miro items before applying a compact layout.")
+                    verified_compaction_preview(case, selected, identity)
+                    arguments.extend(["--compact-preview", identity, "--reorganize"])
                 live = action != "miro-preview"
-            arguments.append("--include-fees" if settings["include_fees"] else "--exclude-fees")
-            if action not in ("mermaid", "csv"):
+            if action != "miro-compact":
+                arguments.append("--include-fees" if settings["include_fees"] else "--exclude-fees")
+            if action not in ("mermaid", "csv", "miro-compact"):
                 arguments.extend(["--connector-style", settings["connector_style"]])
         else:
             raise RequestError("Choose a supported investigation action.")
@@ -751,7 +832,7 @@ class Handler(BaseHTTPRequestHandler):
             content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             self.send(200, path.read_bytes(), content_type, preview=path.suffix in (".html", ".svg"),
                       download=None if path.suffix == ".html" else path.name,
-                      explorer_links=parts[3].split("-")[1] == "elk" and path.suffix in (".html", ".svg"))
+                      explorer_links=parts[3].split("-")[1] in ("elk", "compact") and path.suffix in (".html", ".svg"))
         else:
             path = safe_path(self.server.assets, ["index.html"] if parts == [""] else parts)
             if not path.is_file():

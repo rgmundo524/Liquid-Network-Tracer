@@ -829,6 +829,74 @@ def create_app(root=None):
                 except ACTION_ERRORS as error:
                     self.query_one("#form-error", Static).update(str(error))
 
+    class CompactApplyScreen(BaseScreen):
+        def __init__(self, case, run_id, preview_id):
+            super().__init__()
+            self.case, self.run_id, self.preview_id = case, run_id, preview_id
+            self.board = read_case(case).get("miro_board")
+
+        def compose(self) -> ComposeResult:
+            yield Header()
+            with VerticalScroll(classes="form-panel"):
+                yield Label("Apply compact layout to Miro", classes="title")
+                yield Static(f"Saved run: {self.run_id}\nComparison: {self.preview_id}\n"
+                             f"Miro board: {self.board}", id="compact-selection", markup=False)
+                yield Static("The comparison starts from the saved graph's ELK layout, not the current Miro board. "
+                             "Applying it replaces the positions of managed graph items, including your manual moves. "
+                             "It also syncs this saved run's graph and resizes its generated frames. "
+                             "Saved investigation evidence is unchanged.", id="compact-notice", markup=False)
+                yield Button("Open saved comparison", id="compact-open")
+                yield Checkbox("I reviewed this comparison and approve replacing managed positions.",
+                               value=False, id="compact-reviewed")
+                yield Static("Uses the comparison's saved fee and connector settings. "
+                             "The investigation's saved maximum new-item budget still applies.", markup=False)
+                yield Static("", id="form-error", markup=False)
+            with Horizontal(classes="buttons form-actions"):
+                yield Button("Cancel", id="cancel")
+                yield Button("Apply compact layout", id="submit", variant="primary")
+            yield Footer()
+
+        def on_mount(self):
+            self.query_one("#cancel", Button).focus()
+
+        def on_button_pressed(self, event: Button.Pressed):
+            event.stop()
+            if self.app.busy:
+                return
+            if event.button.id == "cancel":
+                self.dismiss(None)
+                return
+            if event.button.id not in ("compact-open", "submit"):
+                return
+            try:
+                from .cli import miro_recovery_status, verified_compaction_preview
+                verified_compaction_preview(self.case, self.run_id, self.preview_id)
+                if event.button.id == "compact-open":
+                    import webbrowser
+                    comparison = self.case / "previews" / self.preview_id / "graph.html"
+                    opened = webbrowser.open(comparison.resolve().as_uri())
+                    self.query_one("#form-error", Static).update(
+                        "Browser launch requested." if opened else "Open in your browser: " + str(comparison))
+                    return
+                if not self.query_one("#compact-reviewed", Checkbox).value:
+                    raise TraceError("Review the saved comparison and select the confirmation checkbox before applying it.")
+                metadata = read_case(self.case)
+                _, state = _latest(self.case, metadata, verify=True)
+                if state["run_id"] != self.run_id:
+                    raise TraceError("The latest run changed. Return to the investigation and create a new comparison.")
+                if not self.board or metadata.get("miro_board") != self.board:
+                    raise TraceError("The linked Miro board changed. Return to the investigation and review the board selection.")
+                recovery = miro_recovery_status(self.case)
+                if recovery.get("pending_count") or recovery.get("unavailable"):
+                    raise TraceError("Miro sync needs recovery. Resolve the pending sync before applying a compact layout.")
+                settings = validate_settings(metadata.get("run_defaults", {}))
+                arguments = ["miro-sync", "--case", str(self.case), "--run", self.run_id,
+                             "--compact-preview", self.preview_id, "--reorganize",
+                             "--max-new-items", str(settings["max_new_items"])]
+                self.dismiss((arguments, True))
+            except ACTION_ERRORS as error:
+                self.query_one("#form-error", Static).update(str(error))
+
     class CaseScreen(BaseScreen):
         def __init__(self, case):
             super().__init__()
@@ -850,6 +918,10 @@ def create_app(root=None):
                 with Horizontal(classes="buttons"):
                     yield Button("ELK layout preview", id="elk-preview")
                     yield Button("Address review", id="addresses-review")
+                with Horizontal(classes="buttons"):
+                    yield Button("Compact graph (offline preview)", id="compact-preview")
+                    yield Button("Apply compact layout to Miro", id="compact-apply", disabled=True)
+                yield Static("", id="compact-status", markup=False)
                 with Horizontal(classes="buttons"):
                     yield Button("Create Miro board", id="create-board")
                     yield Button("Sync and reorganize Miro graph", id="layout")
@@ -878,6 +950,20 @@ def create_app(root=None):
                 self.query_one("#mermaid", Button).disabled = self.app.busy or not metadata.get("latest_run")
                 self.query_one("#csv", Button).disabled = self.app.busy or not metadata.get("latest_run")
                 self.query_one("#elk-preview", Button).disabled = self.app.busy or not metadata.get("latest_run")
+                self.query_one("#compact-preview", Button).disabled = self.app.busy or not metadata.get("latest_run")
+                from .cli import latest_compaction_preview, miro_recovery_status
+                self.compact_preview_id = None
+                self.query_one("#compact-apply", Button).disabled = True
+                self.compact_preview_id = (latest_compaction_preview(self.case)
+                                           if metadata.get("latest_run") else None)
+                recovery = miro_recovery_status(self.case) if board else {}
+                blocked = bool(recovery.get("pending_count") or recovery.get("unavailable"))
+                self.query_one("#compact-apply", Button).disabled = (
+                    self.app.busy or not (board and self.compact_preview_id) or blocked)
+                self.query_one("#compact-status", Static).update(
+                    "Miro sync needs recovery before a compact layout can be applied." if blocked else
+                    "Saved compact comparison: " + self.compact_preview_id if self.compact_preview_id else
+                    "Create an offline compact comparison to review before applying it to Miro.")
             except ACTION_ERRORS as error:
                 self.show_error(error)
 
@@ -915,6 +1001,17 @@ def create_app(root=None):
                 elif action == "elk-preview":
                     _latest(self.case, read_case(self.case), verify=True)
                     self.perform((["layout-preview", "--case", str(self.case), "--run", "latest", "--open"], False))
+                elif action == "compact-preview":
+                    _latest(self.case, read_case(self.case), verify=True)
+                    self.perform((["compact-preview", "--case", str(self.case), "--run", "latest", "--open"], False))
+                elif action == "compact-apply":
+                    from .cli import latest_compaction_preview, verified_compaction_preview
+                    _, state = _latest(self.case, read_case(self.case), verify=True)
+                    preview_id = latest_compaction_preview(self.case, state["run_id"])
+                    if not preview_id:
+                        raise TraceError("Create a compact comparison for the latest saved run before applying it.")
+                    verified_compaction_preview(self.case, state["run_id"], preview_id)
+                    self.app.push_screen(CompactApplyScreen(self.case, state["run_id"], preview_id), self.perform)
                 elif action == "csv":
                     _latest(self.case, read_case(self.case), verify=True)
                     self.perform((["csv-export", "--case", str(self.case), "--run", "latest"], False))
@@ -946,7 +1043,8 @@ def create_app(root=None):
             arguments, live = selection
             self.current_action = arguments[0]
             self.reorganizing = "--reorganize" in arguments
-            if not live and self.current_action in ("layout-preview", "mermaid"):
+            self.applying_compaction = "--compact-preview" in arguments
+            if not live and self.current_action in ("layout-preview", "compact-preview", "mermaid"):
                 self.app.active_calculation = _OfflineCalculation()
                 self.calculation_started = time.monotonic()
             self.set_busy(True)
@@ -1029,6 +1127,16 @@ def create_app(root=None):
                             message = description + "Miro is unchanged. " + action + result["html"]
                     except ValueError:
                         pass
+            elif getattr(self, "current_action", None) == "compact-preview":
+                message = ("Compact comparison saved. Miro is unchanged. Review it, then choose Apply compact layout to Miro."
+                           if status == 0 else "Compaction did not complete. Check the result below; saved evidence remains available.")
+                if status == 0:
+                    try:
+                        result = json.loads(output)
+                        if isinstance(result, dict) and isinstance(result.get("directory"), str):
+                            message += "\nSaved comparison: " + result["directory"]
+                    except ValueError:
+                        pass
             elif getattr(self, "current_action", None) == "csv-export":
                 message = ("CSV export saved. File paths are listed below." if status == 0
                            else "CSV export did not complete. Check the result below; saved evidence remains available.")
@@ -1042,6 +1150,9 @@ def create_app(root=None):
                                 message += "\n" + "\n".join(files)
                     except ValueError:
                         pass
+            elif getattr(self, "applying_compaction", False):
+                message = ("Reviewed compact layout applied to Miro. You can adjust item positions directly in Miro."
+                           if status == 0 else "Compact layout sync did not complete. Check the terminal result before retrying.")
             elif getattr(self, "reorganizing", False):
                 message = ("Miro graph synced and reorganized. You can adjust item positions directly in Miro."
                            if status == 0 else "Sync and reorganization did not complete. Check the terminal result before retrying.")
@@ -1143,6 +1254,7 @@ def create_app(root=None):
         #addresses { height: 10; margin-top: 1; }
         #address-activity { border: round $panel; padding: 1; }
         #case-summary { height: auto; margin-bottom: 1; }
+        #compact-status { height: auto; margin-top: 1; }
         #action-status { height: auto; margin: 1 0; }
         #cancel-calculation { display: none; width: auto; }
         #action-log { height: 1fr; min-height: 10; border: round $panel; }

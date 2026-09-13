@@ -1134,3 +1134,12 @@ dialog::backdrop {
   .address-review-grid { grid-template-columns: 1fr; }
   .address-list { max-height: 380px; overflow-y: auto; }
 }
+
+.compact-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.compaction-preview { min-height: 540px; }
+.compaction-metrics { overflow-x: auto; }
+.compaction-metrics table th:first-child { min-width: 125px; }
+@media (max-width: 600px) {
+  .compact-actions .btn { width: 100%; justify-content: center; }
+  .compaction-preview { min-height: 400px; }
+}

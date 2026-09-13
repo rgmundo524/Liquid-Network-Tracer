@@ -1,6 +1,7 @@
 import copy
 import fcntl
 import html
+import heapq
 import json
 import math
 import os
@@ -78,6 +79,10 @@ def make_plan(graph):
                     connector["attachment"][field] = {"snapTo": side}
         elif graph.get("connector_attachment") == "transaction_ports_v2":
             connector["attachment"] = copy.deepcopy(edge.get("attachment"))
+        if graph.get("layout", {}).get("compaction") is not None:
+            # Preserve ELK's return-link exceptions for compact-plan geometry
+            # checks. This metadata is never sent to the Miro connector API.
+            connector["routing_exception"] = edge.get("routing_exception")
         connectors.append(connector)
     if graph.get("layout"):
         # The graph supplies its actual top bound, including the optional fee row.
@@ -164,6 +169,9 @@ def validate_plan(plan):
             raise TraceError("Miro frame geometry disagrees with the graph; regenerate the export")
     elif "frames" in plan:
         raise TraceError("Miro frames need activity metadata; regenerate the export")
+    if _compact_layout(plan):
+        _check_compact_bounds(plan, {
+            item["key"]: _bounds(item["body"], item["key"]) for item in plan["shapes"]})
 
 
 def _validate_attachments(plan):
@@ -710,6 +718,176 @@ def _complete_layout(plan):
                 and layout.get("fallback_reason") in ("size_limit", "timeout", "mermaid_size_limit", "mermaid_timeout")))
 
 
+def _compact_layout(plan):
+    """Recognize the reviewed compaction contract without trusting its metrics."""
+    layout = plan.get("layout", {})
+    if not isinstance(layout, dict) or "compaction" not in layout:
+        return False
+    from .compaction import (LINKED_HORIZONTAL, NODE_SPACING, COMPONENT_SPACING,
+                             EDGE_NODE_SPACING, EDGE_SPACING)
+    report = layout["compaction"]
+    expected = {"linked_horizontal": LINKED_HORIZONTAL, "node_node": NODE_SPACING,
+                "components": COMPONENT_SPACING, "edge_node": EDGE_NODE_SPACING,
+                "edge_edge": EDGE_SPACING}
+    if (layout.get("algorithm") != "elk_layered_v1" or not isinstance(report, dict)
+            or report.get("algorithm") != "local_address_components_v1"
+            or type(report.get("version")) is not int or report["version"] != 1
+            or report.get("clearances") != expected):
+        raise TraceError("Malformed compact Miro layout; generate a new Compact graph preview")
+    if any(edge.get("routing_exception") not in (None, "return", "fee", "obstacle", "unchecked")
+           for edge in plan["connectors"]):
+        raise TraceError("Malformed compact Miro routing exception; generate a new Compact graph preview")
+    return True
+
+
+def _bounds_collision(bounds, gap):
+    """Exact rectangle sweep in O(n log n), including very tall or wide shapes.
+
+    The active x intervals add coverage to compressed y intervals. A range-max
+    tree avoids quadratic comparisons for the long columns common in traces.
+    Touching the requested clearance is allowed; tiny serialization noise is
+    ignored. Returns one conflicting key, never a truncated collision count.
+    """
+    if len(bounds) < 2:
+        return None
+    boxes = []
+    for key, (x, y, width, height) in bounds.items():
+        padding = gap / 2 - min(1e-6, width / 4, height / 4)
+        boxes.append((x - width / 2 - padding, x + width / 2 + padding,
+                      y - height / 2 - padding, y + height / 2 + padding, key))
+    boxes.sort()
+    coordinates = sorted({value for box in boxes for value in box[2:4]})
+    rank = {value: index for index, value in enumerate(coordinates)}
+    count = len(coordinates) - 1
+    maxima, lazy = [0] * (4 * count), [0] * (4 * count)
+
+    def update(index, left, right, first, last, delta):
+        if first <= left and right <= last:
+            maxima[index] += delta
+            lazy[index] += delta
+            return
+        middle = (left + right) // 2
+        if first < middle:
+            update(index * 2, left, middle, first, last, delta)
+        if last > middle:
+            update(index * 2 + 1, middle, right, first, last, delta)
+        maxima[index] = lazy[index] + max(maxima[index * 2], maxima[index * 2 + 1])
+
+    def occupied(index, left, right, first, last, inherited=0):
+        if first <= left and right <= last:
+            return maxima[index] + inherited > 0
+        inherited += lazy[index]
+        middle = (left + right) // 2
+        return ((first < middle and occupied(index * 2, left, middle, first, last, inherited))
+                or (last > middle and occupied(index * 2 + 1, middle, right, first, last, inherited)))
+
+    active = []
+    for left, right, top, bottom, key in boxes:
+        while active and active[0][0] <= left:
+            _, first, last = heapq.heappop(active)
+            update(1, 0, count, first, last, -1)
+        first, last = rank[top], rank[bottom]
+        if first >= last:
+            continue
+        if occupied(1, 0, count, first, last):
+            return key
+        update(1, 0, count, first, last, 1)
+        heapq.heappush(active, (right, first, last))
+    return None
+
+
+def _check_compact_bounds(plan, bounds, *, live=False):
+    """Validate the positions we will actually publish, retaining live sizes.
+
+    Local routes and caption boxes are not available from Miro's REST shape
+    response. The reviewed local preview checks those; this preflight verifies
+    node clearance, forward connection space and annotation separation. Frames
+    are refitted later. Unmapped board objects are outside this inventory.
+    """
+    from .compaction import LINKED_HORIZONTAL, NODE_SPACING
+    fees = {key for key, proof in plan.get("fee_items", {}).items() if proof["endpoint"] == "shapes"}
+    graph = {key: value for key, value in bounds.items()
+             if key != "legend" and not key.startswith("run:") and key not in fees}
+    # The existing fee row uses 70-unit clear gaps. Compaction freezes that row;
+    # it must not invent an 80-unit requirement for unchanged fee neighbors.
+    conflict = _bounds_collision(graph, NODE_SPACING) or _bounds_collision(bounds, 0)
+    if conflict is None:
+        for edge in plan["connectors"]:
+            source, target = edge["source"], edge["target"]
+            if source in fees or target in fees or edge.get("routing_exception") == "return":
+                continue
+            a, b = bounds[source], bounds[target]
+            if a[0] < b[0] and b[0] - b[2] / 2 - a[0] - a[2] / 2 < LINKED_HORIZONTAL - 1e-6:
+                conflict = source
+                break
+    if conflict is not None:
+        if live:
+            raise TraceError("Current Miro dimensions or rotations do not fit the reviewed compact layout near "
+                             + conflict + ". Restore affected shapes to their previewed dimensions, or use "
+                             "Reorganize graph to accommodate their current sizes. No board writes made.")
+        raise TraceError("Compact Miro layout violates minimum spacing near " + conflict
+                         + "; generate a new Compact graph preview. No board writes made.")
+
+
+def _check_compact_frames(plan, frames, positions):
+    """Do not introduce sibling-frame overlap when live sizes differ.
+
+    Existing ELK activities can interlock. Their historical overlap is allowed;
+    only a new overlapping relationship caused by live geometry blocks apply.
+    The outer frame is deliberately excluded because it contains all siblings.
+    """
+    desired = {item["key"]: _bounds(item["body"], item["key"])
+               for item in plan.get("frames", []) if item["key"] != "frame:graph"}
+    actual = {item["key"]: _bounds(item["body"], item["key"])
+              for item in frames if item["key"] != "frame:graph"}
+    if len(actual) < 2:
+        return
+    anchor = plan["shapes"][0]
+    ax, ay = positions[anchor["key"]]
+    dx, dy = ax - anchor["body"]["position"]["x"], ay - anchor["body"]["position"]["y"]
+    desired = {key: (x + dx, y + dy, width, height) for key, (x, y, width, height) in desired.items()}
+    changed = {key for key, value in actual.items()
+               if any(not math.isclose(a, b, rel_tol=0, abs_tol=1e-6) for a, b in zip(value, desired[key]))}
+    if not changed or _bounds_collision(actual, 0) is None:
+        return
+
+    def box(value):
+        x, y, width, height = value
+        return (x - width / 2, y - height / 2, x + width / 2, y + height / 2)
+
+    def build(keys):
+        boxes = [box(actual[key]) for key in keys]
+        outer = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+                 max(b[2] for b in boxes), max(b[3] for b in boxes))
+        if len(keys) == 1:
+            return outer, keys[0], None, None
+        axis = max((0, 1), key=lambda axis: max(actual[key][axis] for key in keys)
+                   - min(actual[key][axis] for key in keys))
+        keys.sort(key=lambda key: (actual[key][axis], key))
+        middle = len(keys) // 2
+        return outer, None, build(keys[:middle]), build(keys[middle:])
+
+    def neighbors(tree, target):
+        area, key, left, right = tree
+        if area[0] >= target[2] - 1e-6 or target[0] >= area[2] - 1e-6 or area[1] >= target[3] - 1e-6 or target[1] >= area[3] - 1e-6:
+            return
+        if key is not None:
+            yield key
+        else:
+            yield from neighbors(left, target)
+            yield from neighbors(right, target)
+
+    # A static spatial index avoids all-pair scans across separate activity
+    # trees. Dense historical overlaps are inspected only around changed frames.
+    tree = build(list(actual))
+    for key in sorted(changed):
+        for other in neighbors(tree, box(actual[key])):
+            if other != key and not _overlap(desired[key], desired[other], gap=0):
+                raise TraceError("Current Miro dimensions or rotations make activity frames overlap in the reviewed "
+                                 "compact layout. Restore affected shapes to their previewed dimensions, or use "
+                                 "Reorganize graph to accommodate their current sizes. No board writes made.")
+
+
 def _placements(plan, state, remote, removed, reorganize):
     """Place new connected groups near their existing anchors, preserving old items.
 
@@ -783,6 +961,17 @@ def _placements(plan, state, remote, removed, reorganize):
             planned[key] = (x, y, width, height)
             previous_right = x + width / 2
         place_group(keys, 0, dy, upward=True)
+
+    if reorganize and _compact_layout(plan):
+        # Compact graph is an explicitly reviewed placement. One enlarged live
+        # node must not scale every component and undo the reviewed compaction.
+        # Preserve its dimensions if it still fits, otherwise stop before writes.
+        _check_compact_bounds(plan, {key: effective(key, value[0], value[1])
+                                    for key, value in planned.items()}, live=True)
+        # Retained summaries may translate the whole graph, never scale it or
+        # alter its internal relative positions. Actual frame bounds follow.
+        place_group(sorted(targets), 0, 0)
+        return result, 0
 
     if reorganize and complete_layout:
         # Layout layer members can have different center x coordinates because
@@ -1174,6 +1363,8 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
         _recover_updates(state, remote)
         positions, shift_x = _placements(plan, state, remote, removals, reorganize)
         frames = _live_frames(plan, state, remote, positions, removals)
+        if reorganize and _compact_layout(plan):
+            _check_compact_frames(plan, frames, positions)
         live_collections = (("shapes", plan["shapes"]), ("connectors", plan["connectors"]), ("frames", frames))
         updates, conflicts, attachment_intents = [], [], {}
         for endpoint, collection in live_collections:

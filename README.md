@@ -195,6 +195,32 @@ In the ELK preview, click a transaction or address node, or focus it with Tab an
 
 The report compares the saved graph's baseline arrangement with the proposed ELK arrangement, **not the current live Miro board**. It estimates line crossings, object overlaps, and lines through unrelated objects. Counts marked `≥` are lower bounds when the comparison limit is reached. Labels and Miro's automatic curves are not measured; zero estimated crossings does not guarantee a collision-free board. For smaller graphs ELK tries three deterministic alternatives; larger graphs use one. The comparison budget limits quality measurement work, never the accepted graph size or number of rendered objects. Optimization makes no external layout requests and uses no secrets.
 
+To remove unnecessary space after ELK, choose **Compact graph** in either interface:
+
+1. Select the saved run and calculate the local compact preview. This uses the existing ELK engine, followed by address and disconnected-component compaction. It makes no Blockstream or Miro requests.
+2. Review the comparison page. It reports width, height, area, total connection length, and address-to-transaction distance before and after compaction. Open the original ELK drawing separately to compare it with the compact drawing. The baseline is a fresh local ELK layout, not your manually arranged Miro board.
+3. Choose **Apply compact layout to Miro** and confirm that you reviewed it. The program applies that exact saved proposal, including its fee and connector settings, without rerunning ELK. This explicitly replaces managed object positions. Normal **Sync to Miro** continues to preserve manual positions.
+
+Local compaction brings eligible terminal output addresses toward their creating transactions and external input addresses toward their spending transactions. An address between one producer and one spender can move away from its original display column while preserving forward order. Disconnected activity components move as intact groups, including their connector routes, with space reserved for activity-frame padding and titles. Transaction shapes only move with their whole activity component. Existing node sizes and minimum clearances remain unchanged; captions, neighboring objects and connector channels constrain which moves are accepted. Cyclic or ambiguous merged-address occurrences are left in place when a safe move cannot be established.
+
+If fee flows are displayed, the chronological fee row stays fixed. Components connected to that row retain their positions during component packing; eligible address moves can still be made. Hiding fee flows permits additional component-packing opportunities. Existing main-graph and full-drawing dimensions are reported separately because the fee row and run notes can determine the overall extent. A shorter local connection does not necessarily reduce the entire drawing's width.
+
+Compaction uses spatial indexes and bounded candidate checks instead of comparing every object with every other object. Unchecked or unsafe moves are skipped, and the report says when optimization work was truncated. This does not cap graph size or remove any node, edge, or evidence. An already compact or crowded layout may remain unchanged. Caption bounds are estimates, and Miro chooses its final connector routes.
+
+Each comparison is saved under `previews/<run-id>-compact-<id>/` with complete before/after graph files, SVGs, HTML, a layout report, and the exact Miro plan. A checksum manifest marks completion and binds the proposal to its archived run and the current service assessments. Incomplete, modified, wrong-case, or stale-service previews cannot be applied. Changing ordinary display defaults does not modify a previously reviewed proposal; calculate another preview to use the new defaults. Preview discovery and application also work after reopening the investigation. Service assessments stay locked during compact application so the reviewed labels cannot change mid-sync.
+
+Manually resized or rotated Miro shapes keep their live dimensions when those dimensions fit the reviewed positions. An incompatible shape stops compact application before board writes, with instructions to restore its previewed dimensions or use ordinary reorganization to accommodate the current sizes. A single enlarged shape does not scale the entire compact proposal. Retained run notes may require translating the whole proposal without changing its internal arrangement. Export frames are refitted to the resulting geometry.
+
+The direct commands are:
+
+```bash
+liquid-trace compact-preview --case cases/theft-liquid --run latest --open
+liquid-live miro-sync --case cases/theft-liquid --run RUN_ID \
+  --compact-preview PREVIEW_ID --reorganize --max-new-items 750
+```
+
+Use the run and preview IDs printed by the first command. Optional `--include-fees`/`--exclude-fees` and `--connector-style` belong on `compact-preview`; application uses the frozen preview settings. Add `--dry-run` to the second command for local publication counts. Archived tracing runs remain unchanged throughout this workflow.
+
 ELK now attempts the complete selected graph without an application-imposed node count, connection count, input/output size, coordinate, or elapsed-time ceiling. The earlier 10,000-object / 30,000-connection guards and 30-second timeout have been removed. A large graph is not automatically switched to the dependency layout. ELK finishes, reports an engine error, or stops when you cancel. Actual capacity still depends on graph complexity, available RAM, the JavaScript runtime, and processing time; accepting 100,000 objects does not guarantee a fast layout. Previously saved dependency-layout fallback previews remain readable.
 
 The existing `devenv.nix` now sets `LIQUID_RENDER_HEAP_MB = "auto"`. At each calculation, the tracer requests a JavaScript heap allowance equal to half the currently available memory, accounting for host memory and process/ancestor limits on standard Linux cgroup v1/v2 mounts. If memory detection is unavailable, auto uses 1,024 MiB. ELK receives the budget directly through Node's [max-old-space-size option](https://nodejs.org/docs/latest-v24.x/api/cli.html#--max-old-space-sizesize-in-mib). Arbitrary `NODE_OPTIONS` and credentials remain excluded from the ELK worker. Its progress reports graph size and the selected heap budget. The worker also releases its encoded input and avoids a second full graph copy when calculating the single layout used for larger graphs.

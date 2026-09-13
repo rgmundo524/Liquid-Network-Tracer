@@ -10,6 +10,7 @@ from pathlib import Path
 
 MESSAGES = {
     "optimizing": "Optimizing the saved graph with ELK",
+    "compacting": "Compacting address positions and activity components",
     "preflight": "Checking existing Miro items before making changes",
     "layout": "Preparing the graph layout",
     "updating": "Updating mapped Miro items",
@@ -87,7 +88,7 @@ class ProgressReporter:
             wait = f"; retry in {value['retry_after']:g}s" if "retry_after" in value else ""
             elapsed = f"; {value['elapsed_seconds']:g}s elapsed" if "elapsed_seconds" in value else ""
             try:
-                prefix = "ELK: " if value["phase"] == "optimizing" else "Miro: "
+                prefix = "ELK: " if value["phase"] in ("optimizing", "compacting") else "Miro: "
                 print(prefix + value["message"] + counts + wait + elapsed, file=sys.stderr, flush=True)
             except (OSError, ValueError):
                 pass
