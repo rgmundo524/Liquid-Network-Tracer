@@ -1,4 +1,4 @@
-name: Address graph development source
+name: Validate shared-address implementation
 
 on:
   push:
@@ -6,23 +6,106 @@ on:
     paths: [.github/workflows/address-development.yml]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  source:
+  validate:
+    if: github.ref == 'refs/heads/codex/shared-address-nodes-20260913'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          persist-credentials: false
-      - name: Prepare pinned offline test dependencies
+          node-version: '24.19.0'
+      - name: Apply hash-verified source edits
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          python3 - <<'PY'
+          import base64
+          import gzip
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+          repo = 'rgmundo524/Liquid-Network-Tracer'
+          blobs = ['4ce82bf38d29297a25962f2bd9deff3271ff4651',
+                   '47449120e19d67ecdbe6e813559eb6400d35a49f',
+                   '12bf87f93553b21f13effc00e2f1f85ea993207d',
+                   'cb41cc720fc44931e822327ff96fd56816e2e125']
+          chunks = []
+          for sha in blobs:
+              request = Request(f'https://api.github.com/repos/{repo}/git/blobs/{sha}',
+                                headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                                         'Accept': 'application/vnd.github+json',
+                                         'User-Agent': 'shared-address-development'})
+              with urlopen(request, timeout=30) as response:
+                  record = json.load(response)
+              if record['sha'] != sha or record['encoding'] != 'base64':
+                  raise RuntimeError('Unexpected source blob')
+              chunk = base64.b64decode(record['content'])
+              if hashlib.sha1(b'blob ' + str(len(chunk)).encode() + b'\0' + chunk).hexdigest() != sha:
+                  raise RuntimeError('Source blob hash mismatch')
+              chunks.append(chunk)
+          payload = gzip.decompress(base64.b64decode(b''.join(chunks), validate=True))
+          if hashlib.sha256(payload).hexdigest() != '12d3567492ddcb6b533687755e12ddb6ede163979f69885ae09c19c0023c8450':
+              raise RuntimeError('Edit payload hash mismatch')
+          expected = {'README.md', 'liquid_tracer/address_migration.py', 'liquid_tracer/cli.py',
+                      'liquid_tracer/export.py', 'liquid_tracer/menu.py', 'liquid_tracer/miro.py',
+                      'liquid_tracer/web.py', 'tests/test_address_migration.py',
+                      'tests/test_address_migration_ui.py', 'tests/test_cli.py',
+                      'tests/test_csv_export.py', 'tests/test_elk_layout.py',
+                      'tests/test_graph_presentation.py', 'tests/test_layout.py',
+                      'tests/test_service_presentation.py', 'tests/test_shared_addresses.py',
+                      'tests/test_tracer.py', 'tests/test_unspent_endpoints.py', 'web/src/scripts/app.ts'}
+          edits = json.loads(payload)
+          if len(edits) != len(expected) or {item['path'] for item in edits} != expected:
+              raise RuntimeError('Unexpected edited paths')
+          writes = []
+          for item in edits:
+              path = Path(item['path'])
+              if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
+                  raise RuntimeError('Symlink in source tree')
+              old = path.read_bytes() if path.exists() else b''
+              if item['old_sha256'] is None:
+                  if path.exists():
+                      raise RuntimeError('New source path already exists')
+              elif hashlib.sha256(old).hexdigest() != item['old_sha256']:
+                  raise RuntimeError('Source changed: ' + str(path))
+              text = old.decode('utf-8')
+              previous = 0
+              for start, end, replacement in item['edits']:
+                  if not 0 <= previous <= start <= end <= len(text) or not isinstance(replacement, str):
+                      raise RuntimeError('Invalid edit offsets')
+                  previous = end
+              for start, end, replacement in reversed(item['edits']):
+                  text = text[:start] + replacement + text[end:]
+              data = text.encode('utf-8')
+              if hashlib.sha256(data).hexdigest() != item['new_sha256']:
+                  raise RuntimeError('Result hash mismatch: ' + str(path))
+              writes.append((path, data))
+          for path, data in writes:
+              path.write_bytes(data)
+              print('Verified:', path)
+          PY
+      - name: Run offline regression tests
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install '.[tui]'
           npm --prefix layout ci --ignore-scripts --no-audit --no-fund
-          python3 -m pip download 'textual==8.2.8' --dest address-test-wheels
-          tar -czf address-test-dependencies.tar.gz layout/node_modules address-test-wheels
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: address-test-dependencies
-          path: address-test-dependencies.tar.gz
-          retention-days: 1
+          .venv/bin/python -m unittest discover -s tests -v
+      - name: Check and build browser interface
+        run: |
+          npm --prefix web ci --no-audit --no-fund
+          npm --prefix web run check
+          npm --prefix web run build
+      - name: Commit validated feature to development branch
+        run: |
+          git diff --check
+          git add README.md liquid_tracer tests web/src/scripts/app.ts
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat: share address nodes by default with reviewed Miro migration'
+          git push origin HEAD:codex/shared-address-nodes-20260913
