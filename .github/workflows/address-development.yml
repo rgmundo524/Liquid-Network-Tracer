@@ -16,10 +16,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Bundle only version-controlled source
-        run: git archive --format=tar.gz --output=address-development-source.tar.gz HEAD
+      - name: Prepare pinned offline test dependencies
+        run: |
+          npm --prefix layout ci --ignore-scripts --no-audit --no-fund
+          python3 -m pip download 'textual==8.2.8' --dest address-test-wheels
+          tar -czf address-test-dependencies.tar.gz layout/node_modules address-test-wheels
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: address-development-source
-          path: address-development-source.tar.gz
+          name: address-test-dependencies
+          path: address-test-dependencies.tar.gz
           retention-days: 1
