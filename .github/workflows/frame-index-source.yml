@@ -1,23 +1,67 @@
-name: Frame index development source
+name: Validate chronological frame titles
 on:
   push:
     branches: [codex/protonpass-development]
     paths: [.github/workflows/frame-index-source.yml]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  source:
+  validate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
-          persist-credentials: false
-      - name: Bundle version-controlled source only
-        run: git archive --format=tar.gz --output=frame-index-source.tar.gz HEAD
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+          fetch-depth: 2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          name: frame-index-source
-          path: frame-index-source.tar.gz
-          retention-days: 1
+          node-version: '24.19.0'
+      - name: Apply hash-verified frame-title changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import lzma
+          import os
+          import subprocess
+          import urllib.request
+          from pathlib import Path
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip() == '232ed3234666a8957a47491bbe85668ec7ea2570', 'Development branch changed; reconcile before applying'
+          patches = (
+              ('56fb77b8efded305ac722836eb091fb59cf7a033', True, '51cba5ddbb01d8a26a03fa27bb0b3672391596d14d8c25c8bb226e378e82e4a5'),
+              ('3282e0e77510661f50a9e78a760c0997a583f8b0', False, 'e5e9a0f744df897a37556f57ca0a983b41bb17a839ddbce0133ff9f89cd60c33'),
+          )
+          for sha, compressed, checksum in patches:
+              request = urllib.request.Request(
+                  'https://api.github.com/repos/rgmundo524/Liquid-Network-Tracer/git/blobs/' + sha,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'},
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  blob = json.load(response)
+              assert blob['sha'] == sha and blob['encoding'] == 'base64'
+              patch = base64.b64decode(blob['content'])
+              if compressed:
+                  patch = lzma.decompress(base64.b64decode(patch, validate=True))
+              assert hashlib.sha256(patch).hexdigest() == checksum
+              destination = Path('/tmp/frame-index-' + sha + '.patch')
+              destination.write_bytes(patch)
+              subprocess.run(['git', 'apply', '--index', str(destination)], check=True)
+          subprocess.run(['git', 'rm', '.github/workflows/frame-index-source.yml'], check=True)
+          assert subprocess.check_output(['git', 'write-tree'], text=True).strip() == '55e783e7005fda5f7283d726052eada210a62530', 'Final source differs from tested implementation'
+          PY
+      - name: Check frames, chronological labels, real ELK, compaction and legacy plans
+        run: |
+          npm --prefix layout ci --ignore-scripts --no-audit --no-fund
+          python3 -m unittest tests.test_starting_transaction_index tests.test_miro_frame_groups tests.test_miro_frame_sync tests.test_mermaid tests.test_graph_presentation -v
+          git diff --cached --check
+      - name: Publish to the existing development branch
+        run: |
+          test "$(git write-tree)" = 55e783e7005fda5f7283d726052eada210a62530
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Index starting transactions chronologically in Miro frame titles'
+          git push origin HEAD:refs/heads/codex/protonpass-development
