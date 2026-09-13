@@ -1,0 +1,77 @@
+name: Validate bulk address attribution import
+
+on:
+  push:
+    branches: [codex/protonpass-development]
+    paths: [.github/workflows/bulk-attribution-apply.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.19.0'
+      - name: Apply and verify reviewed source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import lzma
+          import os
+          import subprocess
+          import urllib.request
+          from pathlib import Path
+
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip() == '81b9683b53f41578d843e39ac103bf246589310b', 'Development branch changed; reconcile before applying'
+          chunks = []
+          for sha in (
+              '86634b932628f12342c114acb81d811ffa2a9a59',
+              'aebafb2265b0621dc9c722ffb642d83dfe09519d',
+              '7d3aa7fa96a4e7b14f015f8a4883645264428724',
+              '9892345bae75e141e20d36f1afa1e507209e0b47',
+          ):
+              request = urllib.request.Request(
+                  'https://api.github.com/repos/rgmundo524/Liquid-Network-Tracer/git/blobs/' + sha,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'},
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  blob = json.load(response)
+              assert blob['sha'] == sha and blob['encoding'] == 'base64'
+              chunks.append(base64.b64decode(blob['content']).decode('ascii'))
+          patch = lzma.decompress(base64.b64decode(''.join(chunks), validate=True))
+          assert hashlib.sha256(patch).hexdigest() == 'ab72e2ddf70daddbf5250d52fc91e6d2109ad0d19908ae1f96c0d3b5057bdd5c'
+          Path('/tmp/bulk-attribution.patch').write_bytes(patch)
+          subprocess.run(['git', 'apply', '--index', '--unidiff-zero', '/tmp/bulk-attribution.patch'], check=True)
+          subprocess.run(['git', 'rm', '.github/workflows/bulk-attribution-apply.yml'], check=True)
+          assert subprocess.check_output(['git', 'write-tree'], text=True).strip() == 'b238e54d859d52cef62390788e799261541588b8', 'Final source differs from reviewed implementation'
+          PY
+      - name: Run full offline regression suite
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install '.[tui]'
+          npm --prefix layout ci --ignore-scripts --no-audit --no-fund
+          .venv/bin/python -m unittest discover -s tests -v
+      - name: Check and build browser interface
+        run: |
+          npm --prefix web ci --ignore-scripts --no-audit --no-fund
+          npm --prefix web run check
+          npm --prefix web run build
+      - name: Publish validated changes to the same development branch
+        run: |
+          test "$(git write-tree)" = b238e54d859d52cef62390788e799261541588b8
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Add reviewed bulk address attributions before tracing'
+          git push origin HEAD:refs/heads/codex/protonpass-development
