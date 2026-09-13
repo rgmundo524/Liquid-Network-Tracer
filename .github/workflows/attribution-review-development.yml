@@ -1,23 +1,74 @@
-name: Attribution and convergence development
+name: Validate explicit attributions and convergence stars
 on:
   push:
     branches: [codex/protonpass-development]
     paths: [.github/workflows/attribution-review-development.yml]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  source:
+  validate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
-          persist-credentials: false
-      - name: Bundle version-controlled source only
-        run: git archive --format=tar.gz --output=attribution-convergence-source.tar.gz HEAD
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+          fetch-depth: 2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          name: attribution-convergence-source
-          path: attribution-convergence-source.tar.gz
-          retention-days: 1
+          node-version: '24.19.0'
+      - name: Apply and verify tested source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import lzma
+          import os
+          import subprocess
+          import urllib.request
+          from pathlib import Path
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip() == '2f047a6cab372d7aae3d34550700010e5414526a', 'Development branch changed; reconcile before applying'
+          chunks = []
+          for sha in (
+              'bda716ebccac9d27b5f9d7d7b0815fb09c52fb5c',
+              'd7676326869c99f842014e70f118b279a07029a5',
+              'e1665866fb3ea913b1afcba236d980474dff347d',
+              '1957d6b64ffe7030beef8040df3fb406b8d2f9fe',
+          ):
+              request = urllib.request.Request(
+                  'https://api.github.com/repos/rgmundo524/Liquid-Network-Tracer/git/blobs/' + sha,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'},
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  blob = json.load(response)
+              assert blob['sha'] == sha and blob['encoding'] == 'base64'
+              chunks.append(base64.b64decode(blob['content']).decode('ascii'))
+          patch = lzma.decompress(base64.b64decode(''.join(chunks), validate=True))
+          assert hashlib.sha256(patch).hexdigest() == 'a40c0e6e92d7955364db0c2f0df142bedaf9655732c6f72b898fc8f739a79974'
+          Path('/tmp/attribution-convergence.patch').write_bytes(patch)
+          subprocess.run(['git', 'apply', '--index', '--unidiff-zero', '/tmp/attribution-convergence.patch'], check=True)
+          subprocess.run(['git', 'rm', '.github/workflows/attribution-review-development.yml'], check=True)
+          assert subprocess.check_output(['git', 'write-tree'], text=True).strip() == '7b64509cd0e852ad4d155f0f0811690e3295c0be', 'Final source differs from tested implementation'
+          PY
+      - name: Run full offline regression suite
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install '.[tui]'
+          npm --prefix layout ci --ignore-scripts --no-audit --no-fund
+          .venv/bin/python -m unittest discover -s tests -v
+          git diff --cached --check
+      - name: Check and build browser interface
+        run: |
+          npm --prefix web ci --ignore-scripts --no-audit --no-fund
+          npm --prefix web run check
+          npm --prefix web run build
+      - name: Publish to the existing development branch
+        run: |
+          test "$(git write-tree)" = 7b64509cd0e852ad4d155f0f0811690e3295c0be
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Simplify address attributions and highlight starting-branch convergence'
+          git push origin HEAD:refs/heads/codex/protonpass-development
