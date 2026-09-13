@@ -199,7 +199,7 @@ class CliIntegrationTests(unittest.TestCase):
             self.assertEqual(status, 0, errors)
             saved = read_json(Path(json.loads(output)["state_file"]))
             ids = {key: value["id"] for key, value in saved["items"].items()}
-            node = next(remote.items[item] for key, item in ids.items() if key.startswith("liquid:outpoint:"))
+            node = next(remote.items[item] for key, item in ids.items() if key.startswith("liquid:address:"))
             node["position"]["y"] = 5555
             node["data"]["content"] += "<p>Analyst note</p>"
             content = node["data"]["content"]

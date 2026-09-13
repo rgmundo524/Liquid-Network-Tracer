@@ -105,7 +105,11 @@ def parser():
                      help="Verified account requests/second; use 95%% of this limit (default: LIQUID_BLOCKSTREAM_API_RPS, otherwise the enterprise target of 49 requests/second or 4 for other endpoints)")
     run.add_argument("--min-interval", type=float,
                      help="Additional minimum seconds between requests; cannot exceed the configured rate ceiling")
-    run.add_argument("--merge-addresses", action="store_true", default=None, help="Merge circles by address; continuation otherwise inherits its parent's mode")
+    address_display = run.add_mutually_exclusive_group()
+    address_display.add_argument("--merge-addresses", action="store_true", default=True,
+                     help="One circle per full address (default); UTXO tracing remains unchanged")
+    address_display.add_argument("--separate-outpoints", dest="merge_addresses", action="store_false",
+                     help="Explicit legacy display: one circle per outpoint")
     fee_arguments(run)
     run.add_argument("--offline-preview", action="store_true", help="Also save optional HTML/SVG inspection files")
     run.add_argument("--miro-board", help="Sync the saved run to this Miro board URL or ID")
@@ -115,7 +119,10 @@ def parser():
                         help="Case directory (default: LIQUID_CASE_DIR)")
     export.add_argument("--run", required=True, help="Saved run ID or latest")
     export.add_argument("--out", type=Path, required=True, help="New export directory")
-    export.add_argument("--merge-addresses", action="store_true", default=None)
+    address_display = export.add_mutually_exclusive_group()
+    address_display.add_argument("--merge-addresses", action="store_true", default=True)
+    address_display.add_argument("--separate-outpoints", dest="merge_addresses", action="store_false",
+                        help="Explicit legacy display: one circle per outpoint")
     fee_arguments(export)
     export.add_argument("--offline-preview", action="store_true")
     mermaid = commands.add_parser("mermaid", help="Create a local Mermaid chart from a saved run without API calls")
@@ -151,6 +158,12 @@ def parser():
     board.add_argument("--team-id", help="Optional destination Miro team ID")
     board.add_argument("--visibility", choices=["private", "team"], default="private",
                        help="Private or editable by the destination team (default: private)")
+    migration = commands.add_parser("miro-merge-addresses", help="Review or resume in-place conversion to shared address circles")
+    migration.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    migration.add_argument("--board", help="Existing mapped board (default: saved case board)")
+    approval = migration.add_mutually_exclusive_group(required=True)
+    approval.add_argument("--dry-run", action="store_true", help="Local-only conversion plan; no network or writes")
+    approval.add_argument("--approve-plan", help="Exact approval_sha256 from the reviewed local plan")
     update = commands.add_parser("miro-sync", help="Add a saved run to the existing case graph, preserving manual edits")
     update.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                         help="Case directory (default: LIQUID_CASE_DIR)")
@@ -320,7 +333,7 @@ def connector_appearance(metadata, explicit=None):
 
 def refresh_presentation(plan, trace_path, include_fees=False, connector_style="straight", progress=None,
                          service_settings=None):
-    """Refresh verified evidence; only proven fee items may change topology."""
+    """Verify historical topology, then create a current shared-address view."""
     namespace = _namespace(plan)
     state = read_json(trace_path)
     if (not isinstance(state, dict) or state.get("run_id") != plan["run_id"]
@@ -358,13 +371,12 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
             raise TraceError("Presentation refresh would change saved graph topology beyond fee flows; use an explicit verified --plan or regenerate an export for review")
     # Layout is a derivative of verified evidence, never a rewrite of the archive.
     from .elk_layout import optimize_graph
-    graph = full_graph if include_fees else build_graph(state, merged, include_fees=False)
+    graph = build_graph(state, merge_addresses=True, include_fees=include_fees)
     refreshed = make_plan(optimize_graph(graph, connector_style=connector_style, progress=progress))
     validate_plan(refreshed)
-    expected = full_topology if include_fees else tuple(
-        {item for item in values if item[0] not in keys} for values, keys in zip(full_topology, fee_keys))
-    if (_namespace(refreshed) != namespace or refreshed["run_id"] != plan["run_id"]
-            or topology(refreshed) != expected):
+    expected = topology(make_plan(graph))
+    if (_namespace(refreshed) != {**namespace, "address_mode": "merged"}
+            or refreshed["run_id"] != plan["run_id"] or topology(refreshed) != expected):
         raise TraceError("Presentation refresh would change saved graph topology; use an explicit verified --plan or regenerate an export for review")
     return refreshed
 
@@ -453,7 +465,9 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
     state_path = case / "miro" / (digest(target.encode())[:24] + ".json")
     # Pending creation outcomes block both preview and publication. Check the
     # durable mapping before running ELK; sync repeats this under its own lock.
-    _load_sync_state(state_path, target, namespace)
+    expected_namespace = ({**namespace, "address_mode": "merged"}
+                          if plan_path is None and compact_preview is None else namespace)
+    _load_sync_state(state_path, target, expected_namespace)
     if plan_path is None and compact_preview is None:
         plan = refresh_presentation(plan, default_plan.parent / "trace.json", include_fee_flows(metadata, include_fees),
                                     connector_appearance(metadata, connector_style), progress=progress,
@@ -527,7 +541,7 @@ def run_trace(args, progress=None):
         labels = load_labels(args.labels) if args.labels else (parent["labels"] if parent else [])
         service_settings = load_services(args.case)
         labels = apply_service_labels(labels, service_settings)
-        merge_addresses = bool(args.merge_addresses or (parent and parent.get("address_mode") == "merged"))
+        merge_addresses = bool(args.merge_addresses)
         store = Store(args.case)
         api = None
         try:
@@ -606,7 +620,7 @@ def saved_graph(case, run_id="latest", include_fees=None):
     state["labels"] = apply_service_labels(state["labels"], service_settings)
     state["service_controls"] = {key: value for key, value in service_settings.items() if key != "history"}
     fees = include_fee_flows(metadata, include_fees)
-    graph = build_graph(state, merge_addresses=state.get("address_mode") == "merged", include_fees=fees)
+    graph = build_graph(state, merge_addresses=True, include_fees=fees)
     return run_id, archive, graph
 
 
@@ -762,7 +776,7 @@ def main(argv=None, *, progress=None):
                 state["service_controls"] = {key: value for key, value in service_settings.items() if key != "history"}
                 state["graph_options"] = {**state.get("graph_options", {}),
                                           "include_fees": include_fee_flows(read_case(args.case), args.include_fees)}
-                merged = bool(args.merge_addresses or state.get("address_mode") == "merged")
+                merged = bool(args.merge_addresses)
                 export_run(store, state, args.out, merged, args.offline_preview)
             finally:
                 store.close()
@@ -779,6 +793,11 @@ def main(argv=None, *, progress=None):
             print(json.dumps(csv_run(args.case, args.run, args.out, args.include_fees), indent=2))
         elif args.command == "miro-create-board":
             print(json.dumps(create_board(args.case, args.name, args.team_id, args.visibility), indent=2))
+        elif args.command == "miro-merge-addresses":
+            from .address_migration import preview_merge, apply_merge
+            result = (preview_merge(args.case, args.board) if args.dry_run else
+                      apply_merge(args.case, args.approve_plan, args.board, progress=progress))
+            print(json.dumps(result, indent=2))
         elif args.command == "miro-sync":
             print(json.dumps(sync_run(args.case, args.run, args.board, args.max_new_items, args.dry_run, args.plan,
                                       args.include_fees, args.reorganize, progress=progress,

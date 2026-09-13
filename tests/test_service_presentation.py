@@ -59,7 +59,9 @@ class ServicePresentationTests(unittest.TestCase):
 
     @staticmethod
     def node(graph, outpoint=B + ":0"):
-        return next(node for node in graph["nodes"] if node["id"] == "liquid:outpoint:" + outpoint)
+        return next(node for node in graph["nodes"] if node["kind"] == "address"
+                    and node["details"].get("network") == "liquid"
+                    and any(item["outpoint"] == outpoint for item in node["details"]["occurrences"]))
 
     def test_designation_reaches_every_occurrence_without_rewriting_evidence_or_topology(self):
         baseline = build_graph(self.state)
@@ -73,7 +75,7 @@ class ServicePresentationTests(unittest.TestCase):
         self.assertEqual(baseline["edges"], graph["edges"])
         service_nodes = [node for node in graph["nodes"] if node.get("role") == "suspected_service"]
         self.assertEqual({node["id"] for node in service_nodes},
-                         {"liquid:outpoint:" + B + ":0", "liquid:outpoint:" + C + ":0"})
+                         {"liquid:address:" + ADDRESS})
         for node in service_nodes:
             self.assertEqual(node["color"], COLORS["suspected_service"])
             self.assertIn("Suspected service", node["label"].splitlines())
@@ -160,7 +162,7 @@ class ServicePresentationTests(unittest.TestCase):
         self.state["transactions"][B]["data"]["vin"][0]["is_pegin"] = True
         self.state["labels"] = [designation("SYNTHETIC-victim-deposit")]
         graph = build_graph(self.state)
-        bitcoin = next(node for node in graph["nodes"] if node["id"] == "bitcoin:outpoint:" + A + ":0")
+        bitcoin = next(node for node in graph["nodes"] if node["kind"] == "address" and node["details"]["network"] == "bitcoin")
         self.assertEqual(bitcoin["role"], "address")
         self.assertNotIn("suspected_services", bitcoin["details"])
 
@@ -204,7 +206,7 @@ class ServicePresentationTests(unittest.TestCase):
         self.state["service_controls"] = {"revision": 3, "rules": {ADDRESS: {"enabled": True}}}
         destination = self.root / "export"
         export_csv(build_graph(self.state), archive, destination)
-        node = next(row for row in read_csv(destination / "nodes.csv") if row["id"] == "liquid:outpoint:" + B + ":0")
+        node = next(row for row in read_csv(destination / "nodes.csv") if row["id"] == "liquid:address:" + ADDRESS)
         self.assertEqual(tuple(node), NODE_CSV_FIELDS)
         self.assertEqual(tuple(node)[:6], ("id", "kind", "label", "url", "color", "details"))
         self.assertEqual(node["role"], "suspected_service")

@@ -897,6 +897,59 @@ def create_app(root=None):
             except ACTION_ERRORS as error:
                 self.query_one("#form-error", Static).update(str(error))
 
+    class AddressMergeScreen(BaseScreen):
+        def __init__(self, case):
+            super().__init__()
+            from .address_migration import preview_merge
+            self.case = case
+            self.report = preview_merge(case)
+
+        def compose(self) -> ComposeResult:
+            report = self.report
+            yield Header()
+            with VerticalScroll(classes="form-panel"):
+                yield Label("Merge duplicate addresses", classes="title")
+                yield Static(f"Board: {report['board_id']}\nLast synced run: {report['run_id']}\n"
+                             f"Address circles: {report['address_objects_before']} → {report['address_objects_after']}\n"
+                             f"Redundant circles to remove: {report['duplicates_to_remove']}\n"
+                             f"Connectors to redirect: {report['connectors_to_redirect']}", markup=False)
+                yield Static(report["notice"], markup=False)
+                yield Static("This preview uses local evidence and the saved Miro mapping. Applying checks the live board. "
+                             "Manual text/style edits on redundant circles and unmanaged attached connectors block removal. "
+                             "A backup of the mapping and accessible item fields is saved before writes. "
+                             "After conversion, Sync to Miro refreshes labels and frames; Sync and reorganize applies a new layout.", markup=False)
+                yield Checkbox("I reviewed the conversion and preserved any comments on redundant circles.",
+                               value=False, id="address-merge-approved")
+                yield Static("", id="form-error", markup=False)
+            with Horizontal(classes="buttons form-actions"):
+                yield Button("Cancel", id="cancel")
+                yield Button("Resume conversion" if report["resume"] else "Apply address conversion", id="submit", variant="primary")
+            yield Footer()
+
+        def on_mount(self):
+            self.query_one("#cancel", Button).focus()
+
+        def on_button_pressed(self, event: Button.Pressed):
+            event.stop()
+            if self.app.busy:
+                return
+            if event.button.id == "cancel":
+                self.dismiss(None)
+                return
+            if event.button.id != "submit":
+                return
+            try:
+                from .address_migration import preview_merge
+                if not self.query_one("#address-merge-approved", Checkbox).value:
+                    raise TraceError("Review the conversion and select the confirmation checkbox before applying it.")
+                current = preview_merge(self.case)
+                if current["approval_sha256"] != self.report["approval_sha256"]:
+                    raise TraceError("The conversion plan changed. Return and review the new plan.")
+                self.dismiss((["miro-merge-addresses", "--case", str(self.case), "--board", self.report["board_id"],
+                               "--approve-plan", self.report["approval_sha256"]], True))
+            except ACTION_ERRORS as error:
+                self.query_one("#form-error", Static).update(str(error))
+
     class CaseScreen(BaseScreen):
         def __init__(self, case):
             super().__init__()
@@ -918,6 +971,7 @@ def create_app(root=None):
                 with Horizontal(classes="buttons"):
                     yield Button("ELK layout preview", id="elk-preview")
                     yield Button("Address review", id="addresses-review")
+                yield Button("Merge duplicate addresses", id="address-merge")
                 with Horizontal(classes="buttons"):
                     yield Button("Compact graph (offline preview)", id="compact-preview")
                     yield Button("Apply compact layout to Miro", id="compact-apply", disabled=True)
@@ -947,6 +1001,7 @@ def create_app(root=None):
                 self.query_one("#run", Button).label = "Continue latest run" if metadata.get("latest_run") else "Start first run"
                 self.query_one("#create-board", Button).disabled = self.app.busy or bool(board)
                 self.query_one("#layout", Button).disabled = self.app.busy or not (board and metadata.get("latest_run"))
+                self.query_one("#address-merge", Button).disabled = self.app.busy or not (board and metadata.get("latest_run"))
                 self.query_one("#mermaid", Button).disabled = self.app.busy or not metadata.get("latest_run")
                 self.query_one("#csv", Button).disabled = self.app.busy or not metadata.get("latest_run")
                 self.query_one("#elk-preview", Button).disabled = self.app.busy or not metadata.get("latest_run")
@@ -1019,6 +1074,8 @@ def create_app(root=None):
                     self.app.push_screen(FormScreen(action, self.case), self.perform)
                 elif action == "review":
                     self.app.push_screen(ReviewScreen(self.case))
+                elif action == "address-merge":
+                    self.app.push_screen(AddressMergeScreen(self.case), self.perform)
                 elif action == "addresses-review":
                     self.app.push_screen(AddressScreen(self.case))
             except ACTION_ERRORS as error:
@@ -1090,6 +1147,10 @@ def create_app(root=None):
             self.query_one("#action-log", RichLog).write(output)
             if cancelled:
                 message = "Calculation cancelled. Saved investigation evidence remains available."
+            elif getattr(self, "current_action", None) == "miro-merge-addresses":
+                message = ("Address objects merged. Sync to Miro to refresh labels and frames; "
+                           "Sync and reorganize applies a fresh layout." if status == 0 else
+                           "Address conversion stopped. Review the terminal message and reopen Merge duplicate addresses to resume.")
             elif getattr(self, "current_action", None) == "miro-create-board":
                 message = ("Miro board saved. Choose Preview Miro, then Sync to Miro to add the traced graph."
                            if status == 0 else "Board creation did not complete. Check the terminal result before retrying.")

@@ -193,9 +193,9 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(state["outputs"][B + ":1"]["status"], "hop_limit")
         self.assertNotIn(B + ":1", state["links"])
 
-    def test_default_graph_keeps_reused_address_outpoints_separate(self):
+    def test_legacy_graph_keeps_reused_address_outpoints_separate(self):
         state = self.run_trace()
-        graph = build_graph(state)
+        graph = build_graph(state, merge_addresses=False)
         repeated = [node for node in graph["nodes"] if node["details"].get("address") == "SYNTHETIC-branch-A"]
         self.assertEqual(len(repeated), 2)
         merged = build_graph(state, True)

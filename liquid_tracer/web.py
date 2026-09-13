@@ -553,6 +553,11 @@ class LocalServer(ThreadingHTTPServer):
     def public_result(self, result, action, case, txids):
         if action == "address-inspect":
             return public_address_activity(result)
+        if action == "address-merge":
+            fields = ("run_id", "board_id", "converted", "sync_required", "address_objects_before",
+                      "address_objects_after", "duplicates_to_remove", "connectors_to_redirect")
+            return {key: result[key] for key in fields if key in result
+                    and isinstance(result[key], (str, int, bool))}
         if action == "lookup":
             # inspect-txs always uses a transactions wrapper, including one hash.
             report = result.get("transactions", [])
@@ -624,6 +629,15 @@ class LocalServer(ThreadingHTTPServer):
             raise RequestError("File not found", 404)
         return safe_path(case, parts)
 
+    def address_merge_preview(self, case):
+        from .address_migration import preview_merge
+        report = preview_merge(case)
+        # No physical item mappings, full evidence, or local paths in the page.
+        fields = ("approval_sha256", "board_id", "run_id", "address_objects_before",
+                  "address_objects_after", "duplicates_to_remove", "connectors_to_redirect",
+                  "resume", "notice", "remote_preflight_required")
+        return {key: report[key] for key in fields}
+
     def action(self, case, metadata, body):
         from .boards import board_options, default_board_name
         from .cli import miro_recovery_status, resolve_latest, run_path, verify_export
@@ -656,6 +670,18 @@ class LocalServer(ThreadingHTTPServer):
             if metadata.get("miro_board"):
                 raise RequestError("A Miro board is already linked. Use Sync to Miro.")
             arguments = ["miro-create-board", "--case", str(case), "--name", name, "--visibility", "private"]
+            live = True
+        elif action == "address-merge":
+            if body.get("confirm_merge") is not True:
+                raise RequestError("Review the address conversion and confirm before changing Miro.")
+            approval = body.get("approval_sha256")
+            if not isinstance(approval, str) or not re.fullmatch(r"[0-9a-f]{64}", approval):
+                raise RequestError("Choose a reviewed address conversion plan.")
+            reviewed = self.address_merge_preview(case)
+            if reviewed["approval_sha256"] != approval:
+                raise RequestError("The address conversion changed; review a fresh preview.")
+            arguments = ["miro-merge-addresses", "--case", str(case), "--board", reviewed["board_id"],
+                         "--approve-plan", approval]
             live = True
         elif action == "miro-recover":
             if body.get("confirm_empty") is not True:
@@ -866,6 +892,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.server.case_summary(case, read_case(case), detail=True), 201
         if len(parts) == 4 and parts[:2] == ["api", "cases"]:
             case, metadata = self.server.case(parts[2])
+            if parts[3] == "address-merge-preview":
+                return self.server.address_merge_preview(case), 200
             if parts[3] in ("addresses", "address", "services"):
                 return self.address_request(parts[3], case, body), 200
             if parts[3] == "settings":

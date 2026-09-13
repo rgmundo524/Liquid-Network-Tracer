@@ -28,7 +28,7 @@ Starting-transaction color comes from the saved seed transaction hashes, indepen
 
 The status refers to the saved observation, not a real-time balance or a minimum inactivity period. Continuing and rechecking that branch can remove its orange color when it is spent. Regenerating a preview or syncing to Miro uses existing saved evidence and makes no extra explorer requests. Detailed graph/CSV data retains the qualifying outpoints. See [Esplora's spending-status endpoints](https://github.com/Blockstream/esplora/blob/master/API.md#get-txtxidoutspendvout).
 
-Miro presentations now use **ELK Layered**, a layout engine running locally through the pinned `elkjs` library. It places transactions and nearby inputs/outputs from left to right, orders connection points to reduce crossings, and separates disconnected components. Reused addresses remain distinct UTXO occurrences by default; merging them can introduce return edges that cannot all point right. The evidence archive retains its original baseline layout; ELK calculates a separate presentation without changing the recorded relationships.
+Miro presentations now use **ELK Layered**, a layout engine running locally through the pinned `elkjs` library. It places transactions and nearby inputs/outputs from left to right, orders connection points to reduce crossings, and separates disconnected components. Each full address has one circle per network, shared across starting transactions and hops. Address reuse can introduce return edges that cannot all point right; transaction dependency order remains preserved. The evidence archive retains its original baseline layout; ELK calculates a separate presentation without changing the recorded relationships.
 
 Transaction connectors attach to fixed sides: inputs enter the left and outputs leave the right, with separate attachment points ordered by ELK. **Connector appearance** in settings defaults to **Straight**; **Curved** and **Elbowed** are also available. Straight connections that return backward or would pass through objects use elbowed routes where needed. Miro controls the final connector paths, so the local preview estimates its appearance. New connectors use the selected setting; choose **Sync and reorganize graph** to apply the calculated positions and connector appearance to an existing graph. Normal sync preserves manual positions and connector choices.
 
@@ -267,7 +267,7 @@ liquid-trace csv-export --case cases/theft-liquid
 | `events.csv` | Fees, peg-outs, unspendable outputs, peg-ins, and issuance events recorded in the run. |
 | `frontier.csv` | Unresolved branches and their stopping reasons. |
 
-`nodes.csv` and `edges.csv` use the current presentation, saved address mode, and case fee setting. Optional `--include-fees` or `--exclude-fees` affects those two graph tables for this export only. The other five tables are exact copies of verified archived CSVs and retain all recorded fee data. Unavailable numeric values remain empty fields in detailed tables; graph captions use `??`. Nested details remain JSON within quoted CSV cells. `export.json` records provenance and display options, and `SHA256SUMS` covers the new bundle. Exporting does not modify saved runs, settings, or Miro mappings.
+`nodes.csv` and `edges.csv` use the current shared-address presentation and case fee setting. Optional `--include-fees` or `--exclude-fees` affects those two graph tables for this export only. The other five tables are exact copies of verified archived CSVs and retain all recorded fee data. Unavailable numeric values remain empty fields in detailed tables; graph captions use `??`. Nested details remain JSON within quoted CSV cells. `export.json` records provenance and display options, and `SHA256SUMS` covers the new bundle. Exporting does not modify saved runs, settings, or Miro mappings.
 
 Outside devenv, Python 3.11+ works with `python3 -m liquid_tracer`; use explicit paths and install SecretSpec and its provider CLI before selecting live menu actions. Install the package with its interactive interface using `python3 -m pip install -e '.[tui]'`, or use `python3 -m pip install -e .` for explicit commands only.
 
@@ -458,7 +458,7 @@ Use the **same case directory and board** for later runs. Sync creates native ex
 
 New and refreshed Miro presentations automatically include one **Complete graph** frame and one **Activity** frame for each connected part of the displayed graph. Three disconnected starting trees produce four frames. If a continuation connects two trees, sync expands their retained activity frame, removes the obsolete generated frame, and leaves three frames in total. Repeating sync reuses the frame IDs. The outer frame also includes the legend and saved run notes.
 
-Groups follow visible UTXO connections, including displayed context links. They do not infer common ownership or identify services. In the default outpoint mode, repeated address strings alone do not join groups. The optional merged-address mode can join them through a shared address circle. Fee visibility follows the investigation setting.
+Groups follow visible UTXO connections, including displayed context links. They do not infer common ownership or identify services. The default shared-address display joins activity groups through a common address circle. This visual connection does not establish a spend between unrelated UTXOs. Explicit legacy outpoint exports keep repeated address occurrences separate. Fee visibility follows the investigation setting.
 
 Use **Sync to Miro** after selecting a saved continuation, or **Sync and reorganize graph** to also recalculate object placement. Existing boards receive frames on their next normal sync without fetching blockchain data again. Generated frame bounds refresh around the live object positions and dimensions, including manual arrangement. Retained manual frame titles and colors are preserved; generated frame geometry is recalculated. Obsolete generated frames are removed, while unrelated frames remain untouched.
 
@@ -545,7 +545,27 @@ Then repeat `miro-sync` on the same saved run. An accepted bulk request can lose
 
 The older `miro-publish` command remains for resuming version 0.1 snapshot publications; its per-plan mapping is not interchangeable with incremental state. For an older saved run, regenerate an export into a new directory with `export --case CASE --run RUN_ID --out NEW_DIRECTORY`, then select its plan using `miro-sync --case CASE --run RUN_ID --board BOARD --plan NEW_DIRECTORY/miro-plan.json`. This does not adopt objects from an old snapshot; use a fresh board for that migration.
 
-Default circles are **address occurrences tied to individual outpoints**. Reused addresses can appear more than once. Each input/output edge retains its outpoint and index; full identifiers remain in CSV/JSON evidence, with explorer links on live graph nodes. `--merge-addresses` gives one circle per address/script for a compact summary, but can create apparent cycles and paths between unrelated UTXOs. Use the default for evidence review. Continuation inherits its parent's address mode.
+Default circles are **unique full addresses, scoped by network**. Two starting transactions paying the same address connect to one circle. This identity is reused across hops, previews, and Miro continuations. Inputs and outputs keep separate connectors and exact outpoints/indexes; the node retains their individual evidence occurrences. Unknown addresses remain distinct by outpoint, even if their scripts match. Short display labels never determine identity. Sharing a circle does not allocate value, merge UTXOs, infer ownership, or permit tracing between unrelated outputs. Address reuse can create apparent display cycles; tracing and transaction ordering remain UTXO-based. New traces, continuations, and regenerated saved previews use shared addresses. `--merge-addresses` remains a compatible explicit spelling; `--separate-outpoints` on `trace` or `export` requests a legacy occurrence export. Archived runs are never rewritten.
+
+
+### Convert an existing Miro graph without retracing
+
+Old Miro mappings retain their original address mode. Ordinary sync refuses to silently switch an occurrence mapping. Do not delete the mapping or restart the trace to work around this safeguard.
+
+1. Open **Merge duplicate addresses** in the investigation's terminal menu or browser Miro panel. The offline preview reports the last completed **synced run**, address counts, redundant circles and connectors to redirect. It does not fetch blockchain data, contact Miro, or load credentials.
+2. Preserve any comments attached to circles being removed, stop concurrent board editing, and approve the reviewed conversion. It reuses a deterministic existing circle per address, redirects all managed connectors, then removes only verified redundant circles. Connector IDs and UTXO records remain intact. A full paginated connector inventory protects unmanaged attachments; modified redundant circles, grouped shapes, missing objects, pending syncs and stale approvals block unsafe conversion.
+3. Choose **Sync to Miro** to refresh labels and generated frames. Choose **Sync and reorganize Miro graph** when you also approve applying a fresh ELK layout. Compaction previews should be regenerated for the shared-address graph.
+
+The converter saves the original mapping and accessible live item fields under `miro/migrations/` before board writes. PATCH/DELETE attempts are journaled. An interrupted conversion blocks ordinary sync: reopen **Merge duplicate addresses** and approve the same current preview to resume/reconcile it. Do not remove its checkpoint. This is recovery support, not an automatic undo operation. Miro does not provide an atomic cross-item transaction; avoid simultaneous board edits. Comments are not available in the REST item snapshot and cannot be backed up by this conversion.
+
+CLI equivalent (inside the project environment):
+
+```bash
+python -m liquid_tracer miro-merge-addresses --case CASE_DIRECTORY --dry-run
+liquid-live miro-merge-addresses --case CASE_DIRECTORY --approve-plan APPROVAL_SHA256
+```
+
+`APPROVAL_SHA256` is the exact value from the reviewed preview. The live command uses Miro credentials through the normal SecretSpec workflow. Conversion does not call Blockstream, change seeds or service-stop decisions, or rewrite `runs/`. New boards start in shared-address mode and do not need conversion.
 
 ## Files saved per run
 

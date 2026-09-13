@@ -2,6 +2,7 @@ import csv
 import html
 import json
 from copy import deepcopy
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from .trace import TERMINAL
 from .layout import arrange, fee_date, transaction_ranks
 from .miro_frames import activity_frames
 
-PRESENTATION_VERSION = 9
+PRESENTATION_VERSION = 10
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -105,8 +106,9 @@ def _unspent_endpoints(state):
                  or (isinstance(item.get("spend_observation_id"), str) and item["spend_observation_id"].strip()))}
 
 
-def build_graph(state, merge_addresses=False, include_fees=False):
+def build_graph(state, merge_addresses=True, include_fees=False):
     nodes, edges, fee_items = {}, [], {}
+    occurrence_keys = defaultdict(set)
     unspent_endpoints = _unspent_endpoints(state)
     starting_transactions = {seed.rsplit(":", 1)[0] for seed in state["seeds"]}
     ranks, cycle_groups = transaction_ranks(state["transactions"])
@@ -134,8 +136,11 @@ def build_graph(state, merge_addresses=False, include_fees=False):
             label += "\n" + (short(destination) if destination else "vout " + key.rsplit(":", 1)[-1])
             return add_node("event:" + key, "event", label, column,
                             {"outpoint": key, "output": output, "trace": tracked})
-        node_key = (network + ":address:" + (addr or output.get("scriptpubkey") or key)
-                    if merge_addresses else network + ":outpoint:" + key)
+        # Display identity is independent of the UTXO evidence. Never deduplicate
+        # by a shortened label, and never collapse unknown addresses together.
+        # Network separation is explicit; the enclosing namespace fixes source.
+        node_key = (network + ":address:" + addr if merge_addresses and addr
+                    else network + ":outpoint:" + key)
         label = short(addr) if addr else "Address ??"
         if network != "liquid":
             label = network.upper() + "\n" + label
@@ -160,26 +165,10 @@ def build_graph(state, merge_addresses=False, include_fees=False):
         if _ADDRESS_PRIORITY[role] >= _ADDRESS_PRIORITY[node.get("role", "address")]:
             node["role"], node["color"] = role, COLORS[role]
         occurrence = {"outpoint": key, "output": public_fields(output), "trace": tracked, "labels": matches}
-        if occurrence not in node["details"]["occurrences"]:
+        fingerprint = canonical(occurrence)
+        if fingerprint not in occurrence_keys[node_id]:
+            occurrence_keys[node_id].add(fingerprint)
             node["details"]["occurrences"].append(occurrence)
-        attributions = sorted({m["entity"] + " (" + m["confidence"] + ")"
-                               for item in node["details"]["occurrences"] for m in item["labels"]
-                               if m.get("classification") != "suspected_service"})
-        services = {canonical(m): m for item in node["details"]["occurrences"] for m in item["labels"]
-                    if m.get("classification") == "suspected_service"}
-        parts = [label]
-        if services:
-            # Keep uncertainty visible even when a separate attribution has
-            # higher color priority. Full names and rationale stay in evidence.
-            parts.append("Suspected service")
-            names = sorted({short(m["entity"]) for m in services.values()
-                            if m["entity"] != "Suspected service"})
-            if names:
-                parts.append(", ".join(names))
-            node["details"]["suspected_services"] = [services[key] for key in sorted(services)]
-        if attributions:
-            parts.append(", ".join(attributions))
-        node["label"] = "\n".join(parts)
         return node_id
 
     for txid, record in sorted(state["transactions"].items(), key=lambda item: (ranks[item[0]], item[0])):
@@ -220,6 +209,29 @@ def build_graph(state, merge_addresses=False, include_fees=False):
                           "role": role, "outpoint": key, "label": "vout " + str(index),
                           "quantity": graph_quantity(output), "details": public_fields(output)})
 
+    # Aggregate shared labels once, not once for each input/output occurrence.
+    # A highly reused service address must not make rendering quadratic.
+    for node in nodes.values():
+        if node["kind"] != "address":
+            continue
+        attributions = sorted({m["entity"] + " (" + m["confidence"] + ")"
+                               for item in node["details"]["occurrences"] for m in item["labels"]
+                               if m.get("classification") != "suspected_service"})
+        services = {canonical(m): m for item in node["details"]["occurrences"] for m in item["labels"]
+                    if m.get("classification") == "suspected_service"}
+        parts = [node["label"]]
+        if services:
+            # Keep uncertainty visible even when a separate attribution has
+            # higher color priority. Full names and rationale stay in evidence.
+            parts.append("Suspected service")
+            names = sorted({short(m["entity"]) for m in services.values()
+                            if m["entity"] != "Suspected service"})
+            if names:
+                parts.append(", ".join(names))
+            node["details"]["suspected_services"] = [services[key] for key in sorted(services)]
+        if attributions:
+            parts.append(", ".join(attributions))
+        node["label"] = "\n".join(parts)
     for node in nodes.values():
         if node["kind"] != "address" or node["details"].get("network") != "liquid":
             continue
@@ -245,7 +257,9 @@ def build_graph(state, merge_addresses=False, include_fees=False):
             "fee_items": fee_items, "layout": layout,
             "notice": "UTXO reachability, not allocation of stolen value. Gray arrows and light gray circles are context. "
                       "?? marks amounts or assets not available from public data. "
-                      "Repeated addresses are separate outpoint occurrences by default.",
+                      + ("One circle per full address per network. UTXO occurrences and connectors remain separate; "
+                       "shared addresses do not establish value allocation or common ownership."
+                       if merge_addresses else "Legacy view: separate outpoint occurrences."),
             "nodes": list(nodes.values()), "edges": edges}
     if "service_controls" in state:
         # A refreshed preview may use current investigator designations over an
@@ -400,7 +414,7 @@ document.getElementById('context').onchange=e=>document.querySelectorAll('.edge.
 </script></html>'''
 
 
-def export_run(store, state, destination, merge_addresses=False, offline_preview=False):
+def export_run(store, state, destination, merge_addresses=True, offline_preview=False):
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
     save_json(destination / "trace.json", state)

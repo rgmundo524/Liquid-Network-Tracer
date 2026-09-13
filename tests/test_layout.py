@@ -58,7 +58,7 @@ class LayoutTests(unittest.TestCase):
     def test_ten_related_starting_transactions_move_forward_despite_all_hop_zero(self):
         state = state_from(chain(10))
         state["seeds"] = [key + ":0" for key in state["transactions"]]
-        graph = build_graph(state)
+        graph = build_graph(state, merge_addresses=False)
         self.assert_forward(graph)
         self.assert_no_overlap(graph)
         nodes = {node["id"]: node for node in graph["nodes"]}
@@ -70,7 +70,7 @@ class LayoutTests(unittest.TestCase):
 
     def test_transaction_spacing_leaves_clearance_for_ports_and_neighboring_rows(self):
         graph = build_graph(state_from({data["txid"]: data for key, data in fixture().items()
-                                       if not key.endswith("outspends")}))
+                                       if not key.endswith("outspends")}), merge_addresses=False)
         nodes = {node["id"]: node for node in graph["nodes"]}
         transaction = nodes["tx:" + B]
         for key in ("liquid:outpoint:" + A + ":0", "liquid:outpoint:" + B + ":0"):
@@ -83,7 +83,7 @@ class LayoutTests(unittest.TestCase):
     def test_split_join_and_reused_address_have_local_neighbors_without_overlap(self):
         state = state_from({data["txid"]: data for key, data in fixture().items()
                             if not key.endswith("outspends")})
-        graph = build_graph(state)
+        graph = build_graph(state, merge_addresses=False)
         self.assert_forward(graph)
         self.assert_no_overlap(graph)
         nodes = {node["id"]: node for node in graph["nodes"]}
@@ -101,7 +101,7 @@ class LayoutTests(unittest.TestCase):
             transactions[key] = {"txid": key, "vin": [{"txid": txid("parent" + str(index)),
                 "vout": 0, "prevout": output("SYNTHETIC-input-" + str(index))}],
                 "vout": [output("SYNTHETIC-output-" + str(index))], "status": {}}
-        graph = build_graph(state_from(transactions))
+        graph = build_graph(state_from(transactions), merge_addresses=False)
         self.assert_forward(graph)
         self.assert_no_overlap(graph)
         nodes = {node["id"]: node for node in graph["nodes"]}
@@ -124,7 +124,7 @@ class LayoutTests(unittest.TestCase):
         transactions[joined] = {"txid": joined, "vin": [{"txid": txid("next-" + str(index)),
             "vout": 0, "prevout": transactions[txid("next-" + str(index))]["vout"][0]}
             for index in range(10)], "vout": [output("SYNTHETIC-joined")], "status": {}}
-        graph = build_graph(state_from(transactions))
+        graph = build_graph(state_from(transactions), merge_addresses=False)
         self.assert_forward(graph)
         self.assert_no_overlap(graph)
         nodes = {node["id"]: node for node in graph["nodes"]}
@@ -140,13 +140,13 @@ class LayoutTests(unittest.TestCase):
     def test_layout_is_deterministic_under_transaction_and_seed_order(self):
         state = state_from(chain(10))
         state["seeds"] = [key + ":0" for key in state["transactions"]]
-        first = build_graph(state)
+        first = build_graph(state, merge_addresses=False)
         shuffled = copy.deepcopy(state)
         items = list(shuffled["transactions"].items())
         random.Random(12).shuffle(items)
         shuffled["transactions"] = dict(items)
         shuffled["seeds"].reverse()
-        second = build_graph(shuffled)
+        second = build_graph(shuffled, merge_addresses=False)
         self.assertEqual(first["nodes"], second["nodes"])
         self.assertEqual(first["edges"], second["edges"])
         self.assertEqual(first["layout"], second["layout"])
@@ -164,10 +164,10 @@ class LayoutTests(unittest.TestCase):
         transactions = chain(3)
         transactions[txid(0)]["vin"][0]["txid"] = txid(2)
         state = state_from(transactions)
-        graph = build_graph(state)
+        graph = build_graph(state, merge_addresses=False)
         self.assertEqual(graph["layout"]["cycle_groups"], [sorted(transactions)])
         self.assert_no_overlap(graph)
-        self.assertEqual(graph, build_graph(state))
+        self.assertEqual(graph, build_graph(state, merge_addresses=False))
 
     def test_deep_dependencies_do_not_use_python_recursion(self):
         state = state_from(chain(1500))
@@ -185,7 +185,7 @@ class LayoutTests(unittest.TestCase):
         state = state_from({data["txid"]: data for key, data in fixture().items()
                             if not key.endswith("outspends")})
         original = copy.deepcopy(state)
-        hidden, shown = build_graph(state), build_graph(state, include_fees=True)
+        hidden, shown = build_graph(state, merge_addresses=False), build_graph(state, include_fees=True, merge_addresses=False)
         self.assertEqual(state, original)
         self.assertEqual(hidden["namespace"], shown["namespace"])
         self.assertFalse(hidden["graph_options"]["include_fees"])
@@ -213,7 +213,7 @@ class LayoutTests(unittest.TestCase):
         for index, tx in enumerate(transactions.values()):
             tx["status"] = statuses[index]
             tx["vout"].append(copy.deepcopy(fee))
-        graph = build_graph(state_from(transactions), include_fees=True)
+        graph = build_graph(state_from(transactions), include_fees=True, merge_addresses=False)
         fees = sorted((node for node in graph["nodes"] if node["id"] in graph["fee_items"]), key=lambda node: node["x"])
         self.assertEqual([node["id"] for node in fees], ["event:" + txid(index) + ":1" for index in range(6)])
         self.assertEqual({node["y"] for node in fees}, {graph["layout"]["fee_row_y"]})
@@ -225,7 +225,7 @@ class LayoutTests(unittest.TestCase):
     def test_svg_bounds_include_negative_fee_row_and_legend_is_above_every_node(self):
         state = state_from({data["txid"]: data for key, data in fixture().items()
                             if not key.endswith("outspends")})
-        graph = build_graph(state, include_fees=True)
+        graph = build_graph(state, include_fees=True, merge_addresses=False)
         svg = ET.fromstring(svg_graph(graph))
         left, top, width, height = map(float, svg.attrib["viewBox"].split())
         self.assertLess(top, 0)

@@ -436,9 +436,13 @@ class RealElkTests(unittest.TestCase):
                          {edge["id"]: edge["route"] for edge in second["edges"]})
 
     def test_curved_is_optional_while_returns_remain_routed(self):
-        result = optimize_graph(build_graph(state_from(chain(3))), connector_style="curved")
+        result = optimize_graph(build_graph(state_from(chain(3)), merge_addresses=False), connector_style="curved")
         self.assertEqual(result["graph_options"]["connector_style"], "curved")
         self.assertTrue(all(edge["connector_shape"] == "curved" for edge in result["edges"]))
+        shared = optimize_graph(build_graph(state_from(chain(3))), connector_style="curved")
+        self.assertTrue(any(edge.get("routing_exception") == "return" for edge in shared["edges"]))
+        self.assertTrue(all(edge["connector_shape"] == ("elbowed" if edge.get("routing_exception") else "curved")
+                            for edge in shared["edges"]))
 
 
 if __name__ == "__main__":
