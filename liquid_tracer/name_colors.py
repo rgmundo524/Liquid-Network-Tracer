@@ -15,7 +15,7 @@ COLOR_PRESETS = (
     ("Gray", "#d1d5db"),
 )
 NOTICE = ("Colors are assigned to names, not confidence. Matching ignores capitalization; "
-          "display spelling and address identity are unchanged. Selected seed outputs stay red. "
+          "display spelling and address identity are unchanged. Selected seeds retain their configured seed color. "
           "Without an assigned color, the normal unspent/candidate/context color applies. "
           "Saving is local; regenerate previews or sync Miro to update the graph. No trace is started.")
 
@@ -75,7 +75,9 @@ def name_color_catalog(case, *, query="", offset=0, limit=100):
         row = groups[key]
         variants = sorted(row["variants"])
         rows.append({**row, "variants": variants, "name": variants[0], "color": colors.get(key)})
-    return {"revision": settings["revision"], "rows": rows, "total": len(ordered),
+    from .role_colors import role_color_rows, NOTICE as ROLE_NOTICE
+    return {"roles": role_color_rows(settings), "role_notice": ROLE_NOTICE,
+            "revision": settings["revision"], "rows": rows, "total": len(ordered),
             "offset": offset, "limit": limit, "presets": list(COLOR_PRESETS), "notice": NOTICE}
 
 
@@ -85,6 +87,9 @@ def set_name_colors(case, updates, *, expected_revision):
     The existing case and trace locks keep run and compact-preview snapshots
     consistent. Revision checking rejects an editor left open during an import.
     """
+    if isinstance(updates, list) and any(isinstance(item, dict) and "role" in item for item in updates):
+        from .role_colors import set_role_colors
+        return set_role_colors(case, updates, expected_revision=expected_revision)
     if type(expected_revision) is not int or expected_revision < 0:
         raise TraceError("Refresh the name color menu before saving")
     if not isinstance(updates, list) or not 1 <= len(updates) <= 100:
@@ -129,7 +134,7 @@ def set_name_colors(case, updates, *, expected_revision):
             return {"changed": changed, "revision": settings["revision"], "notice": NOTICE}
 
 
-def apply_name_colors(nodes, colors):
+def apply_name_colors(nodes, colors, *, role_colors=None):
     """Resolve display colors once per shared node, never by confidence.
 
     Conflicting colors on independent assessments do not silently choose one
@@ -137,6 +142,9 @@ def apply_name_colors(nodes, colors):
     exposed in the register. Multiple names with the same color are compatible.
     """
     validate_name_colors(colors)
+    from .role_colors import apply_role_colors
+    nodes = list(nodes)
+    apply_role_colors(nodes, {} if role_colors is None else role_colors)
     for node in nodes:
         if node["kind"] != "address" or node["details"].get("network") != "liquid":
             continue
@@ -149,7 +157,7 @@ def apply_name_colors(nodes, colors):
                 key = name.strip().casefold()
                 if key in colors:
                     matches[key] = colors[key]
-        node["color_source"] = node.get("role", "address")
+        node.setdefault("color_source", node.get("role", "address"))
         if not matches:
             continue
         node["details"]["name_colors"] = dict(sorted(matches.items()))

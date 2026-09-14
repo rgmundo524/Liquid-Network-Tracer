@@ -1,81 +1,82 @@
-# Per-name colors and selected-seed priority
+# Graph-role and imported-name colors
 
-After importing attributions, choose **Assign name colors**. This button is in
-both the terminal import screen and the browser import panel. It is also
-available in the terminal investigation menu and Address review. In the browser,
-open **Import attributions** or **Address review**, then **Assign name colors**.
-No saved run, credentials, or blockchain lookup is required.
+Open **Assign name colors** from the terminal investigation menu, Import
+attributions, or Address review. The editor now contains both graph-role colors
+and imported-name colors. No run, import, credentials, or blockchain lookup is
+required to configure graph roles.
 
-The menu groups existing attribution names case-insensitively. For example,
-`BTSE`, `btse`, and `BtSe` share one assignment, while their original spelling is
-preserved in graph labels and evidence. Unicode casefold is used consistently
-for searching, grouping, saving, and rendering. The automatically generated
-`Suspected ` prefix is not part of the color key. `Perp` and `Perpetrator` are
-different names, not automatic aliases; assign each the same color if desired.
-Addresses are never lowercased or merged because their names match.
+In the **browser**, use the **Graph role colors** table: choose a color using the
+picker or enter `#RRGGBB`, then select **Save color**. **Reset to default** clears
+only that role's override. The **Imported name colors** table remains separate.
 
-Select a name and choose its color. The browser provides a color picker and hex
-field; the terminal offers a palette and hex field. Save with **Save color**.
-Use **Clear assignment** to restore the usual tracing-role colors. Custom colors
-use `#RRGGBB`; text is light or dark as needed for readability. Assignments are
-case-local and persist across application restarts and later imports. Newly
-imported addresses with an already configured name inherit its color. Disabled
-assessments are counted separately and do not color the displayed graph.
+In the **terminal**, use **Or choose a graph role**, select the category, then use
+the existing palette or hex field and **Save color**. **Clear / reset to default**
+restores its default. Selecting a name in the table returns the editor to name
+assignments. These settings are per investigation, not global.
 
-The six-column attribution import format is unchanged:
+| Graph role | Default fill | Stored role key |
+| --- | --- | --- |
+| Seed addresses | Red, `#f16c7f` | `seed` |
+| Seed / starting transactions | Purple, `#c4b5fd` | `starting_transaction` |
+| Child / downstream transactions | Blue, `#a6ccf5` | `transaction` |
+| Context addresses | Light gray, `#f5f6f8` | `address` |
+| Child / reachable addresses | Yellow, `#fff9b1` | `candidate` |
+| Unspent endpoints | Orange, `#fdba74` | `unspent_endpoint` |
+| Events, fees and unspendable outputs | Pink, `#ea94bb` | `event` |
+
+Only fills are configured here. Connector colors, border colors, border widths,
+node shapes, and convergence detection are unchanged. Shared-address highlights
+remain border-only; the removed SHARED ADDRESS node text is not restored.
+
+## Priority and imported names
+
+A selected seed address always uses the configured seed-address color, red by
+default, even when attributed, observed unspent, or marked STOP TRACING. A merged
+address remains a seed whenever any displayed Liquid occurrence is a selected
+seed. Starting-transaction role similarly takes priority over downstream role.
+
+For other Liquid addresses, an assigned name color overrides the role fill.
+Without an applicable name assignment, precedence remains unspent endpoint,
+reachable child/candidate, then context, using each role's configured color.
+Colors never assign ownership, allocate value, change confidence, or override a
+tracing stop. Text switches between light and dark for readability.
+
+Name matching uses Unicode casefold, preserving original spelling and exact
+addresses. `BTSE`, `btse`, and `BtSe` share an assignment. The generated Suspected
+prefix is not part of the key. `Perp` and `Perpetrator` remain different names.
+New imports inherit existing name assignments. Disabled assessments do not color
+the graph. A name such as "Seed addresses" is a normal imported name, not a role
+setting, and cannot collide with the separate role palette.
+
+Conflicting assigned colors on independent assessments retain the applicable
+role color and report the conflict in the local attribution register. Several
+names with the same assigned color are compatible. Name and role assignments
+are independent of confidence, sources, notes, observation dates and stop flags.
+The six-column attribution format is unchanged:
 
 ```csv
 Address,Name,confidence,stop_tracing,source,notes
 ```
 
-No special color is automatically assigned for a perpetrator, a service, or a
-confidence level. **Suspected** still appears before a suspected name; confirmed
-names have no prefix. Confidence, stop flags, source, notes, and the starting
-transaction convergence detection keep their existing meanings. Convergence now
-uses a thick red transaction border rather than a separate star.
+## Persistence and existing diagrams
 
-## Color priority
+Role overrides are saved as `role_colors` beside `name_colors` in the case's
+`services.json`. Both editors share the existing case/trace locks, revision
+checks and audit history. Identical assignments are no-ops. An import or a save
+in another editor makes an older editor stale; refresh before saving again.
+Unused name assignments remain available for later imports until cleared.
 
-1. **Selected seed outputs: red**, even when named, attributed, observed unspent,
-   or configured as a tracing stop. A shared-address node remains red whenever
-   any of its Liquid output occurrences is an explicitly selected seed.
-2. **Assigned name color**, regardless of confidence.
-3. **Unspent endpoint: orange**, when backed by the existing observation rules.
-4. **Reachable candidate: yellow**.
-5. **Context address: light gray**.
+After pulling the development branch, restart the application. Browser builds
+must include the updated frontend. Save colors, then use normal **Sync to Miro**
+or regenerate a preview. No retracing or reorganization is required. Normal sync
+retains existing identities and positions and protects manually edited Miro
+styles through the usual conflict checks. Changing colors does not directly
+edit a live board.
 
-Starting transaction boxes remain purple. This is a rule for address circles,
-not transaction colors. Fee and event colors and connector colors are unchanged.
-The graph's `role` retains its tracing meaning; `color_source` identifies whether
-the displayed color came from that role or a name assignment. Exact UTXO records,
-address identities, and edges are never merged or expanded by coloring a name.
-
-Attribution names, STOP TRACING indicators, unspent evidence labels, sources,
-notes and local-register references stay present when seed red wins. Miro no
-longer creates register cards or shows their A- references. A red seed still
-obeys its active tracing-stop rule: color priority is not a seed-stop override.
-
-If independent assessments on one displayed address have conflicting assigned
-colors, no name is selected by confidence or input order. The normal trace-role
-color remains and the local attribution register reports the conflict. Several names
-with the same assigned color are compatible. Graph JSON and node CSV include the
-assigned name colors, conflict flag, displayed color, and color source.
-
-## Existing investigations
-
-Pull the development branch, restart the application, and assign the colors.
-Then choose **Sync to Miro** or regenerate a preview. No new trace or reorganization
-is required. Existing node identities and positions are preserved on normal sync.
-Miro colors manually edited outside the tool remain protected by its usual
-manual-edit conflict rules. A saved compact preview is a frozen artifact; changing
-colors invalidates its approval, so regenerate it before applying.
-
-The name-color map is saved as `name_colors` in the case's `services.json`, with
-an audit entry for each changed batch. It is separate from the per-address rules:
-saving a color does not change their confidence, name spelling, stop flags,
-observation dates or timestamps. Existing run archives are not rewritten.
-Changes use the existing locks and revision checks. Importing assessments or
-saving colors in another window invalidates a stale color editor; refresh it
-before saving. Identical assignments are no-ops. Removing the last assessment
-using a name does not silently delete its saved palette assignment; it can be
-cleared explicitly or reused by a later import.
+Run archives retain their own presentation snapshot. Current previews and normal
+sync use current case settings. Palette changes invalidate a reviewed compact
+preview, so regenerate it before applying. Miro, Mermaid, basic SVG, and ELK SVG
+share the resolved node fills; legends show configured hex values for custom
+roles. Graph JSON retains the settings snapshot, and node CSV includes displayed
+color and `color_source` (`role_palette` for a role override, `name` for a name
+assignment). Existing tracing roles and evidence remain unchanged.

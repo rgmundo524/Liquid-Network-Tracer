@@ -109,7 +109,7 @@ def _preview_html(graph, svg):
     # An SVG image cannot execute embedded scripts. Embedding the image also
     # makes this page portable and keeps viewing independent of a web server.
     encoded = base64.b64encode(svg).decode("ascii")
-    legend = legend_lines()
+    legend = legend_lines(graph)
     legend[1] = "Pink diamonds: events. Arrows show the direction of UTXO links."
     items = "".join("<li>" + html.escape(line) + "</li>" for line in legend)
     run_id = html.escape(str(graph.get("run_id", "")))

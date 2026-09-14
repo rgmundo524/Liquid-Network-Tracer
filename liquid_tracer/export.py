@@ -16,7 +16,7 @@ from .services import confidence_value
 from .attribution_presentation import display_name, attribution_reference
 from .name_colors import apply_name_colors, color_text
 
-PRESENTATION_VERSION = 15
+PRESENTATION_VERSION = 16
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -37,20 +37,22 @@ NODE_CSV_FIELDS = ("id", "kind", "label", "url", "color", "details", "role",
                    "service_observed_at", "stop_tracing", "name", "confidence", "source", "notes", "attribution_reference", "convergence", "color_source", "name_colors", "name_color_conflict", "address_convergence", "address_interactions", "interaction_types")
 
 
-def legend_lines():
+def legend_lines(graph=None):
+    from .role_colors import validate_role_colors
+    colors = validate_role_colors((graph or {}).get("service_controls", {}).get("role_colors", {}))
     def name(key):
-        return PALETTE[key][0]
+        return colors.get(key, PALETTE[key][0])
     return [
         f"Squares: {name('starting_transaction').lower()} = provided starting transactions; {name('transaction').lower()} = subsequent hops. Starting role takes priority.",
         f"{name('event')} diamonds: events. Transaction inputs enter on the left; outputs leave on the right.",
         f"Circles: {name('seed').lower()} = selected seed outputs; {name('candidate').lower()} = reachable candidate outputs.",
         f"Circles: {name('address').lower()} = context. Optional name colors match case-insensitively; confidence never selects a color.",
-        "Color priority: selected seed red > assigned name color > unspent orange > candidate yellow > context gray. Shared seed addresses stay red.",
+        f"Color priority: selected seed {name('seed').lower()} > assigned name color > unspent {name('unspent_endpoint').lower()} > candidate {name('candidate').lower()} > context {name('address').lower()}. Shared seed addresses retain the seed color.",
         f"{name('unspent_endpoint')} circles: traced branch ends at a UTXO observed unspent. Unchecked or hop-limited outputs do not qualify.",
         f"Arrows: {name('traced_edge').lower()} = traced UTXO links; {name('context_edge').lower()} = context only.",
         "Captions: vin/vout number · amount asset. ?? = not publicly available. Known amounts are in base units.",
         "STOP TRACING: an explicit address boundary, independent of confidence. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards.",
-        "Thick red border: INPUT MERGE = distinct starting lineages meet in a transaction; SHARED ADDRESS = receipts from distinct branches at one address, including earlier senders. Neither proves ownership or value allocation.",
+        "Thick red border: INPUT MERGE = distinct starting lineages meet in a transaction; shared-address receipts from distinct branches also highlight the receiving address and all participating senders. Neither proves ownership or value allocation.",
         "Unspent refers to tracked outputs at their last check, not all funds or inactivity at that address. Arrows do not allocate stolen value.",
     ]
 
@@ -236,7 +238,8 @@ def build_graph(state, merge_addresses=True, include_fees=False):
                                       else f"Unspent endpoints: {len(endpoints)}")
 
     name_colors = state.get("service_controls", {}).get("name_colors", {})
-    apply_name_colors(nodes.values(), name_colors)
+    apply_name_colors(nodes.values(), name_colors,
+                      role_colors=state.get("service_controls", {}).get("role_colors", {}))
     for node in nodes.values():
         node["text_color"] = color_text(node["color"])
     layout = arrange(nodes, edges, state["transactions"], fee_items)
@@ -252,7 +255,7 @@ def build_graph(state, merge_addresses=True, include_fees=False):
             "include_fees": bool(include_fees),
             "graph_options": {"include_fees": bool(include_fees)},
             "fee_items": fee_items, "layout": layout,
-            "notice": "UTXO reachability, not allocation of stolen value. Gray arrows and light gray circles are context. "
+            "notice": "UTXO reachability, not allocation of stolen value. Consult the legend for context and traced roles. "
                       "?? marks amounts or assets not available from public data. "
                       + ("One circle per full address per network. UTXO occurrences and connectors remain separate; "
                        "shared addresses do not establish value allocation or common ownership."
@@ -369,7 +372,7 @@ def svg_graph(graph):
     bounds = [(n["x"] - n["width"] / 2, n["y"] - n["height"] / 2) for n in lookup.values()]
     bounds += [(n["x"] + n["width"] / 2, n["y"] + n["height"] / 2) for n in lookup.values()]
     bounds += [point for _, (_, _, points) in routes for point in points]
-    legend = legend_lines()
+    legend = legend_lines(graph)
     header_top = min((y for _, y in bounds), default=160) - max(170, 24 + len(legend) * 18 + 30)
     min_x = min(0, min((x for x, _ in bounds), default=0) - 30)
     min_y = min(0, header_top - 30)
