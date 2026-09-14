@@ -1,0 +1,39 @@
+name: Validate completed ELK layout reuse
+on:
+  push:
+    branches: [codex/elk-preview-reuse]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.19.0'
+      - name: Apply guarded integration changes
+        run: |
+          python3 .github/elk-reuse-edit.py
+          git rm .github/elk-reuse-edit.py .github/workflows/elk-reuse-check.yml
+          git add liquid_tracer/cli.py liquid_tracer/elk_layout.py liquid_tracer/progress.py
+          git diff --cached --check
+      - name: Install offline test dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install '.[tui]'
+          npm --prefix layout ci --ignore-scripts --no-audit --no-fund
+      - name: Check ELK reuse and progress
+        run: .venv/bin/python -m unittest tests.test_layout_reuse tests.test_elk_workflows tests.test_web_progress -v
+      - name: Run full offline regression suite
+        run: .venv/bin/python -m unittest discover -s tests -v
+      - name: Publish validated source
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Reuse matching completed ELK layouts in ordinary Miro sync'
+          git push origin HEAD:refs/heads/codex/elk-preview-reuse
