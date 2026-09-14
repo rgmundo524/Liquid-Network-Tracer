@@ -59,66 +59,106 @@ Removing cards does not delete or change any assessment or evidence archive.
 No register column is generated or included in new full-board compaction metrics.
 Longer notes therefore do not increase the Miro graph's item count or its bounds.
 
-## Thick red borders: where starting lineages meet
+## Two independent branch-interaction signals
 
-Eligible transactions now have a native **red (#ff0000), 12-pixel border**, six
-times the ordinary 2-pixel border. The detector is unchanged. A starting
-transaction can qualify and keeps its purple fill; subsequent transactions keep
-their blue fill. Selected seed address circles still have highest-priority red
-fill. The transaction border does not use attribution confidence or name colors.
-There is no extra marker shape to hide behind another object or drift away when
-the transaction is moved. Miro, basic SVG, ELK/compact SVG, and Mermaid use the same
-border policy. The old corner/inline star is no longer generated.
+New presentations use **red (#ff0000), 12-pixel borders** for two distinct
+relationships. Labels identify which relationship caused the highlight. The
+border does not change node fill, confidence, names, stop flags, topology or
+tracing. Starting transaction boxes remain purple, subsequent transactions remain
+blue, and selected seed address circles retain highest-priority red fill. No
+separate star or attribution-card objects are generated.
 
-The exact rule is in `transaction_convergences()` in `liquid_tracer/convergence.py`:
+### INPUT MERGE: transaction inputs
 
-1. At least two distinct starting transactions must be present in the graph's
-   chronological starting catalog. Multiple selected outputs of one transaction
-   share one origin.
-2. Only `state["links"]` spending links contribute. The exact funding output must
-   be tracked and the recorded spending input must match that outpoint. Merely
-   showing an input as untraced context, sharing an address, sharing a name,
-   being in the same activity frame, or being close in time never creates a link.
-3. Origin sets propagate forward through those saved links. A spendable output
-   at an active stop address does not contribute. Own starting-origin propagation
-   begins only at selected outputs, not unselected sibling outputs.
-4. At a transaction, gather the nonempty incoming origin sets and its own origin
-   when it is itself a starting transaction. Highlight only when there are at
-   least two *different* sets and at least two distinct starting origins in their
-   union: `len(groups) > 1 and combined.bit_count() > 1`.
+`transaction_convergences()` in `liquid_tracer/convergence.py` retains the existing
+rule. At least two different nonempty starting-origin sets must meet at a
+transaction through saved, validated UTXO spending links. Their union must contain
+at least two starting transactions. An explicitly selected starting transaction
+also contributes its own origin, so it can qualify when another origin arrives.
+Multiple selected outputs from one starting transaction share one origin.
 
-| Situation at a transaction | Highlight? |
-| --- | --- |
-| Inputs carrying {1} and {2} | Yes |
-| Starting TX 2 receives an allowed verified input from Starting TX 1 | Yes |
-| Inputs carrying {1} and {1} | No |
-| One input carrying an already merged {1, 2} | No |
-| Two inputs both carrying the same already merged {1, 2} | No |
-| Inputs carrying {1, 2} and {2}, or {1, 2} and {3} | Yes |
-| Two starting transactions only pay the same shared address circle | No |
-| An apparent second branch is untraced context or blocked by an active stop | No, unless other qualifying branches remain |
+Only `state["links"]` contributes to this propagation. The exact saved funding
+outpoint must match the recorded spending input. Unselected starting outputs and
+untraced context inputs never acquire an origin just because they are visible.
+Active stops block further propagation through that output. A transaction with
+one already-merged input, or multiple inputs carrying the identical merged origin
+set, is not highlighted again. Different overlapping sets, such as {1, 2} and
+{2}, still qualify. An eligible box displays **INPUT MERGE**.
 
-This is convergence of saved UTXO paths, **not common ownership, allocation of
-stolen value, or proof that confidential inputs/outputs have the same asset**.
-The graph JSON and node CSV `convergence` record keep the exact input outpoints
-and chronological Starting TX numbers. No API requests are made by the detector.
-A bounded run cannot highlight a merge whose spending transaction/link has not
-yet been collected.
+### SHARED ADDRESS: receipts from different branches
 
-## Diagnosing missing highlights
+After propagating UTXO origins, `branch_interactions()` scans **all recorded,
+tracked receiving outputs** in the saved graph. It groups spendable outputs by
+the **exact full Liquid address**, not by names, shortened labels, case-folded
+addresses, timestamps or activity-frame membership. An address qualifies when
+its receipts contain at least two different nonempty origin sets whose union
+contains at least two starting origins. No later joint-spend transaction is
+required. Selected initial outputs are included even in a zero-hop graph.
 
-Check a newly regenerated `graph.json`, not an old reviewed preview. An eligible
-transaction node has a nonempty `convergence` object. The generated Miro plan's
-matching transaction shape should have `style.borderColor="#ff0000"` and
-`style.borderWidth="12"`. These distinguish a detection/scope problem from a
-render/sync issue. Changing the marker from a star to a border does not make a
-transaction qualify when it has no convergence record.
+A qualifying address circle gets a thick red border and **SHARED ADDRESS** label.
+Every transaction with a qualifying receipt to that address gets the same label
+and border, including the **earlier sender**, not just the later sender. This is
+a sender/destination interaction, not an assertion that the sender merged input
+UTXOs. A transaction can have both **INPUT MERGE** and **SHARED ADDRESS** labels.
+Only participating senders are marked; all their ancestors, unrelated outputs,
+and co-inputs are not automatically highlighted.
 
-The old star was a separate 24-by-24 transparent shape containing a glyph. A
-successful synthetic detector test does not establish why a particular live
-board did not display that item. Without the affected saved graph/plan and board
-state, that specific failure remains unverified. Manually edited Miro borders
-remain protected by the usual field-conflict logic and are reported as conflicts.
+For example, if Starting TX 1 pays address X and a later transaction in starting
+branch 2 also pays X, the regenerated graph marks **both senders and X**. It does
+not wait until X's two outputs are spent together. The address need not have any
+saved spending transaction. Receipts at an active stop address can qualify:
+arrival is visible, but the stop continues to prevent further traversal.
+
+This is a graph-wide post-pass, not a first-seen/second-seen flag. Transaction or
+API result order cannot hide the earlier participant. Continuing a run recomputes
+the signals from all saved evidence and can update earlier existing objects.
+An already saved preview/archive is not rewritten: regenerate a presentation and
+sync it. Legacy occurrence exports mark all occurrences of that same address;
+the default graph still has only one circle per full address per network.
+
+**Address grouping never feeds its origin union back into UTXO propagation.**
+For example, X can receive an output from branch 1 and another from branch 2,
+while a later transaction spends only branch 1's output. That later transaction
+does not inherit branch 2 merely because its input uses address X. Neither signal
+proves common ownership, value allocation or identical confidential asset types.
+
+| Situation | Input merge | Shared-address interaction |
+| --- | --- | --- |
+| A transaction spends inputs carrying {1} and {2} | Yes, at that transaction | Only if a receiving address also meets its separate rule |
+| Starting TX 2 receives an allowed verified input from branch 1 | Yes, at Starting TX 2 | Evaluated independently |
+| Two different starting transactions pay X | No joint spend required | X and both senders, retroactively |
+| A single starting transaction pays X twice | No | No, just one origin |
+| One already-merged output carrying {1, 2} pays X | Not a new input merge | Not by itself, only one receipt origin set |
+| X receives several outputs all carrying the identical {1, 2} set | Not a new input merge by itself | No, repetition of one already-merged lineage |
+| X receives {1, 2} and separately {2} | Evaluated independently | Yes, different overlapping sets |
+| The second apparent branch is context-only or behind an upstream stop | Does not contribute | Does not contribute unless independently seeded/reached |
+
+Both detectors are offline and limited to saved trace scope. Missing receipts or
+links beyond the run's bounds are not inferred and require further collection.
+
+## Inspecting the evidence and missing highlights
+
+In a newly regenerated `graph.json`:
+
+- A transaction's `convergence` record identifies **input merges**, with exact
+  contributing input outpoints and chronological Starting TX numbers.
+- An address's `address_convergence` summary identifies its **shared receipts**.
+  The full receiving-output table is stored once in top-level
+  `address_convergences`, keyed by network and full address. Each receipt includes
+  its exact outpoint, sending transaction, output index, and starting-origin
+  numbers. The same table is retained in the Miro plan JSON, not drawn as cards.
+- Each participating sender's `address_interactions` lists the shared addresses
+  and only its own contributing outputs/origin numbers. This avoids copying the
+  whole address receipt history into every sender. `interaction_types` lists the
+  independent reasons. Node CSV exports include these fields as well.
+
+A marked Miro shape should have `style.borderColor="#ff0000"` and
+`style.borderWidth="12"`. **SHARED ADDRESS** on a sending transaction does not mean
+its `convergence` record should be populated. Either independent signal can
+cause its border. This separates a detection/scope issue from a render/sync issue.
+Normal sync updates generated borders on existing objects while preserving their
+IDs and positions. Manually edited Miro borders or labels remain protected by the
+usual conflict handling and may prevent a generated change from being visible.
 
 ## Updating existing boards safely
 

@@ -520,9 +520,15 @@ New and refreshed Miro presentations automatically include one **Complete graph*
 
 Starting transactions are numbered globally by recorded confirmation time, oldest first. Frames list their actual numbers, for example **Activity 1 · Starting transactions 1, 4, 7**, and the corresponding boxes show **Starting TX 1**, **Starting TX 4**, and **Starting TX 7**. Multiple seed outputs of one transaction share one number. Equal timestamps use full transaction keys as a deterministic tie-breaker; undated or unconfirmed starts sort last. Ordinary **Sync to Miro** refreshes generated titles while preserving manual edits and existing frame IDs, without retracing. See [chronological starting-transaction numbers](docs/starting-transaction-index.md) for the saved mapping and historical-preview behavior.
 
-A **12-pixel red transaction border** marks where different starting-transaction
-lineages meet through verified saved UTXO spends. Starting transactions themselves
-can qualify; simple downstream propagation of an already merged lineage does not.
+A **12-pixel red border** now distinguishes two independent signals with text:
+**INPUT MERGE** marks transactions where distinct starting lineages meet through
+verified UTXO inputs. **SHARED ADDRESS** marks an address receiving outputs from
+different starting branches, and **all participating sending transactions**,
+including the earlier sender. This second check does not require a joint spend.
+It runs across the whole saved graph after UTXO lineage propagation, so it can
+update earlier objects without falsely propagating one output's origins through
+another output at the same address. Starting transactions can qualify. Fill
+colors, selected-seed red priority, and evidence remain unchanged.
 Miro attribution cards and separate stars are no longer generated. Source and notes
 remain in local exports and Address review. Normal sync retires unmodified old
 annotations and refreshes borders without retracing. See

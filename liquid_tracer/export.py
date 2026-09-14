@@ -16,7 +16,7 @@ from .services import confidence_value
 from .attribution_presentation import display_name, attribution_reference
 from .name_colors import apply_name_colors, color_text
 
-PRESENTATION_VERSION = 14
+PRESENTATION_VERSION = 15
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -34,7 +34,7 @@ COLORS = {key: value[1] for key, value in PALETTE.items()}
 _ADDRESS_PRIORITY = {"address": 0, "candidate": 1, "unspent_endpoint": 2, "seed": 3}
 NODE_CSV_FIELDS = ("id", "kind", "label", "url", "color", "details", "role",
                    "service_name", "service_rationale", "service_source", "service_confidence",
-                   "service_observed_at", "stop_tracing", "name", "confidence", "source", "notes", "attribution_reference", "convergence", "color_source", "name_colors", "name_color_conflict")
+                   "service_observed_at", "stop_tracing", "name", "confidence", "source", "notes", "attribution_reference", "convergence", "color_source", "name_colors", "name_color_conflict", "address_convergence", "address_interactions", "interaction_types")
 
 
 def legend_lines():
@@ -50,7 +50,7 @@ def legend_lines():
         f"Arrows: {name('traced_edge').lower()} = traced UTXO links; {name('context_edge').lower()} = context only.",
         "Captions: vin/vout number · amount asset. ?? = not publicly available. Known amounts are in base units.",
         "STOP TRACING: an explicit address boundary, independent of confidence. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards.",
-        "Thick red transaction border: distinct starting-transaction lineages meet through saved UTXO spends. Not proof of ownership or value allocation.",
+        "Thick red border: INPUT MERGE = distinct starting lineages meet in a transaction; SHARED ADDRESS = receipts from distinct branches at one address, including earlier senders. Neither proves ownership or value allocation.",
         "Unspent refers to tracked outputs at their last check, not all funds or inactivity at that address. Arrows do not allocate stolen value.",
     ]
 
@@ -267,10 +267,8 @@ def build_graph(state, merge_addresses=True, include_fees=False):
         node = nodes[entry["key"]]
         node["starting_transaction_index"] = entry["index"]
         node["label"] = node["label"].replace("TX\n", f"Starting TX {entry['index']}\n", 1)
-    from .convergence import transaction_convergences
-    for key, detail in transaction_convergences(state, graph["activity_frames"]["starting_transactions"]).items():
-        nodes[key]["convergence"] = detail
-        nodes[key]["details"]["convergence"] = detail
+    from .convergence import annotate_branch_interactions
+    annotate_branch_interactions(graph, state)
     return graph
 
 

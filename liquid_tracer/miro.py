@@ -105,7 +105,7 @@ def make_plan(graph):
             if name in annotations:
                 shape["body"]["position"].update({field: annotations[name][field] for field in ("x", "y")})
     plan = {"schema_version": 2 if incremental else 1, "run_id": graph["run_id"], "shapes": shapes, "connectors": connectors}
-    for key in ("layout", "fee_items", "include_fees", "connector_attachment", "graph_options"):
+    for key in ("layout", "fee_items", "include_fees", "connector_attachment", "graph_options", "address_convergences"):
         if key in graph:
             plan[key] = copy.deepcopy(graph[key])
     if "fee_items" in graph:

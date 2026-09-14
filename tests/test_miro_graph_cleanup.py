@@ -82,7 +82,7 @@ class GraphCleanupTests(unittest.TestCase):
         self.assertTrue(selected)
         self.assertTrue(all(n["color"] == COLORS["seed"] for n in selected))
 
-    def test_plain_shared_address_context_or_single_lineage_is_not_marked(self):
+    def test_shared_address_is_separate_from_input_merge_and_single_lineage_is_not_marked(self):
         for state in (graph_state(raw_links=(("a:0", "c"), ("b:0", "c"))),
                       graph_state((("a:0", "c"), ("a:1", "c")), seeds=("a:0", "a:1"))):
             for record in state["transactions"].values():
@@ -90,7 +90,12 @@ class GraphCleanupTests(unittest.TestCase):
                     out["scriptpubkey_address"] = "SYNTHETIC-shared"
             graph = build_graph(state)
             self.assertFalse(any(n.get("convergence") for n in graph["nodes"]))
-            self.assertTrue(all(node_border(n) == ("#334155", 2) for n in graph["nodes"]))
+            if len({seed.rpartition(":")[0] for seed in state["seeds"]}) == 1:
+                self.assertTrue(all(node_border(n) == ("#334155", 2) for n in graph["nodes"]))
+            else:
+                self.assertTrue(graph["address_convergences"])
+                context_tx = next(n for n in graph["nodes"] if n["id"] == "tx:" + tx("c"))
+                self.assertEqual(node_border(context_tx), ("#334155", 2))
 
     def test_upgrade_retires_old_cards_and_stars_without_recreating_graph(self):
         old = legacy_plan(self.graph); validate_plan(old); self.sync(old)
@@ -123,7 +128,7 @@ class GraphCleanupTests(unittest.TestCase):
         before = trace_path.read_bytes()
         with patch("liquid_tracer.cli.Esplora", side_effect=AssertionError("Must not retrace")):
             plan = refresh_presentation(old, trace_path)
-        self.assertEqual(plan["presentation_version"], 14)
+        self.assertEqual(plan["presentation_version"], 15)
         self.assertEqual(plan["presentation_items"], {})
         self.sync(plan, max_items=0)
         self.assertEqual(self.item(self.host)["style"]["borderWidth"], "12")
