@@ -65,10 +65,12 @@ class SharedReceiptTests(unittest.TestCase):
             self.assertEqual(node["interaction_types"], ["shared_address_sender"])
             self.assertEqual(node["address_interactions"][0]["sent_starting_transaction_indices"], [index])
             self.assertEqual(node["address_interactions"][0]["outpoints"], [tx(name) + ":0"])
-            self.assertIn("SHARED ADDRESS", node["label"])
+            self.assertNotIn("SHARED ADDRESS", node["label"])
             self.assertNotIn("INPUT MERGE", node["label"])
             self.assertEqual(node_border(node), RED)
         self.assertEqual(node_border(found[ADDRESS_KEY]), RED)
+        self.assertNotIn("SHARED ADDRESS", found[ADDRESS_KEY]["label"])
+        self.assertEqual(found[ADDRESS_KEY]["interaction_types"], ["shared_address_receipts"])
         self.assertEqual(found[ADDRESS_KEY]["color"], COLORS["seed"])
         self.assertEqual(state, before)
         self.assertEqual(len(graph["edges"]), 2)
@@ -131,6 +133,7 @@ class SharedReceiptTests(unittest.TestCase):
         self.assertEqual(len(addresses), 2)
         self.assertEqual(len(graph["address_convergences"]), 1)
         self.assertTrue(all(node_border(n) == RED for n in addresses))
+        self.assertTrue(all("SHARED ADDRESS" not in n["label"] for n in addresses))
         self.assertEqual(addresses[0]["address_convergence"], addresses[1]["address_convergence"])
 
     def test_two_outputs_of_one_start_are_not_two_branches(self):
@@ -170,7 +173,7 @@ class SharedReceiptTests(unittest.TestCase):
         combined = nodes(graph)["tx:" + tx("c")]
         self.assertEqual(combined["interaction_types"], ["input_merge", "shared_address_sender"])
         self.assertIn("INPUT MERGE", combined["label"])
-        self.assertIn("SHARED ADDRESS", combined["label"])
+        self.assertNotIn("SHARED ADDRESS", combined["label"])
         self.assertEqual(node_border(combined), RED)
         self.assertEqual(nodes(graph)["tx:" + tx("a")]["address_interactions"][0]["outpoints"], [tx("a") + ":1"])
 
@@ -287,16 +290,18 @@ class SharedReceiptPresentationTests(unittest.TestCase):
         for node in graph["nodes"]:
             shape = next(s for s in plan["shapes"] if s["key"] == node["id"])
             self.assertEqual((shape["body"]["style"]["borderColor"], shape["body"]["style"]["borderWidth"]), ("#ff0000", "12"))
-            self.assertIn("SHARED ADDRESS", shape["body"]["data"]["content"])
+            self.assertNotIn("SHARED ADDRESS", shape["body"]["data"]["content"])
             if node["kind"] == "address":
                 self.assertEqual(shape["body"]["style"]["fillColor"], COLORS["seed"])
                 self.assertIn("Suspected Example Exchange", shape["body"]["data"]["content"])
             for content, attr in ((svg_graph(graph), "data-key"), (render_svg(graph), "data-node-id")):
+                self.assertNotIn("SHARED ADDRESS", content)
                 element = next(e for e in ET.fromstring(content).iter() if e.get(attr) == node["id"])
                 self.assertTrue(any(e.get("stroke") == "#ff0000" and e.get("stroke-width") == "12" for e in element.iter()))
         source = mermaid_source(graph)
         self.assertEqual(source.count("stroke:#ff0000,stroke-width:12px"), len(graph["nodes"]))
         self.assertNotIn("★", source)
+        self.assertNotIn("SHARED ADDRESS", source)
         rows = list(node_csv_rows(graph))
         self.assertTrue(any(r.get("address_convergence") for r in rows))
         self.assertEqual(sum(bool(r.get("address_interactions")) for r in rows), 2)
@@ -337,7 +342,7 @@ class SharedReceiptPresentationTests(unittest.TestCase):
                 actual = remote.items[after[host]["id"]]
                 self.assertEqual(actual["style"]["borderColor"], "#ff0000")
                 self.assertEqual(actual["style"]["borderWidth"], "12")
-                self.assertIn("SHARED ADDRESS", actual["data"]["content"])
+                self.assertNotIn("SHARED ADDRESS", actual["data"]["content"])
             self.assertEqual(remote.items[after[key]["id"]]["position"], {"x": -777, "y": 555, "origin": "center"})
             writes = len(remote.writes)
             publish(build_graph(later))

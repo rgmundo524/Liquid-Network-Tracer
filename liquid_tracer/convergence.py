@@ -190,7 +190,6 @@ def annotate_branch_interactions(graph, state):
             if key in result["senders"]:
                 node["address_interactions"] = result["senders"][key]
                 node["details"]["address_interactions"] = node["address_interactions"]
-                markers.append("SHARED ADDRESS")
                 types.append("shared_address_sender")
         elif kind == "address" and node["details"].get("network") == "liquid":
             address_key = "liquid:address:" + (node["details"].get("address") or "")
@@ -204,10 +203,12 @@ def annotate_branch_interactions(graph, state):
                     "receipt_count": len(record["receipts"]),
                 }
                 node["details"]["address_convergence"] = node["address_convergence"]
-                markers.append("SHARED ADDRESS")
                 types.append("shared_address_receipts")
-        if markers:
+        # Shared-address interactions are a border-only attention cue. Keep
+        # their typed metadata even when no visible text marker is added.
+        if types:
             node["interaction_types"] = types
+        if markers:
             lines = node["label"].splitlines()
             if kind == "transaction":
                 # Keep chronological Starting TX numbers at the top of the box.
