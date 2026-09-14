@@ -13,8 +13,9 @@ from .layout import arrange, fee_date, transaction_ranks
 from .miro_frames import activity_frames
 from .services import confidence_value
 from .attribution_presentation import display_name, attribution_reference
+from .name_colors import apply_name_colors, color_text
 
-PRESENTATION_VERSION = 12
+PRESENTATION_VERSION = 13
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -24,18 +25,15 @@ PALETTE = {
     "seed": ("Red", "#f16c7f"),
     "candidate": ("Yellow", "#fff9b1"),
     "unspent_endpoint": ("Orange", "#fdba74"),
-    "suspected_service": ("Cyan", "#a5f3fc"),
     "event": ("Pink", "#ea94bb"),
-    "attributed": ("Green", "#d5f692"),
     "traced_edge": ("Dark teal", "#155e75"),
     "context_edge": ("Gray", "#9ca3af"),
 }
 COLORS = {key: value[1] for key, value in PALETTE.items()}
-_ADDRESS_PRIORITY = {"address": 0, "candidate": 1, "seed": 2, "unspent_endpoint": 3,
-                     "suspected_service": 4, "attributed": 5}
+_ADDRESS_PRIORITY = {"address": 0, "candidate": 1, "unspent_endpoint": 2, "seed": 3}
 NODE_CSV_FIELDS = ("id", "kind", "label", "url", "color", "details", "role",
                    "service_name", "service_rationale", "service_source", "service_confidence",
-                   "service_observed_at", "stop_tracing", "name", "confidence", "source", "notes", "attribution_reference", "convergence")
+                   "service_observed_at", "stop_tracing", "name", "confidence", "source", "notes", "attribution_reference", "convergence", "color_source", "name_colors", "name_color_conflict")
 
 
 def legend_lines():
@@ -45,8 +43,8 @@ def legend_lines():
         f"Squares: {name('starting_transaction').lower()} = provided starting transactions; {name('transaction').lower()} = subsequent hops. Starting role takes priority.",
         f"{name('event')} diamonds: events. Transaction inputs enter on the left; outputs leave on the right.",
         f"Circles: {name('seed').lower()} = selected seed outputs; {name('candidate').lower()} = reachable candidate outputs.",
-        f"Circles: {name('address').lower()} = context; {name('attributed').lower()} = analyst attribution (read confidence).",
-        f"{name('suspected_service')} circles: suspected attribution; {name('attributed').lower()} circles: confirmed attribution. Confidence is the investigator's assessment.",
+        f"Circles: {name('address').lower()} = context. Optional name colors match case-insensitively; confidence never selects a color.",
+        "Color priority: selected seed red > assigned name color > unspent orange > candidate yellow > context gray. Shared seed addresses stay red.",
         f"{name('unspent_endpoint')} circles: traced branch ends at a UTXO observed unspent. Unchecked or hop-limited outputs do not qualify.",
         f"Arrows: {name('traced_edge').lower()} = traced UTXO links; {name('context_edge').lower()} = context only.",
         "Captions: vin/vout number · amount asset. ?? = not publicly available. Known amounts are in base units.",
@@ -151,14 +149,11 @@ def build_graph(state, merge_addresses=True, include_fees=False):
         if network == "liquid":
             if key in state["outputs"]:
                 role = "candidate"
-            if key in state["seeds"]:
-                role = "seed"
             if key in unspent_endpoints:
                 role = "unspent_endpoint"
-            if any(confidence_value(m.get("confidence")) != "confirmed" for m in matches):
-                role = "suspected_service"
-            if any(confidence_value(m.get("confidence")) == "confirmed" for m in matches):
-                role = "attributed"
+            # Seed selection wins even for an attributed or unspent output.
+            if key in state["seeds"]:
+                role = "seed"
         url = None if simulated or not addr or network != "liquid" else explorer + "/address/" + addr
         node_id = add_node(node_key, "address", label, column,
             {"address": addr, "network": network, "occurrences": []}, url, COLORS[role])
@@ -239,6 +234,10 @@ def build_graph(state, merge_addresses=True, include_fees=False):
             node["label"] += "\n" + ("Unspent endpoint" if len(endpoints) == 1
                                       else f"Unspent endpoints: {len(endpoints)}")
 
+    name_colors = state.get("service_controls", {}).get("name_colors", {})
+    apply_name_colors(nodes.values(), name_colors)
+    for node in nodes.values():
+        node["text_color"] = color_text(node["color"])
     layout = arrange(nodes, edges, state["transactions"], fee_items)
     layout["cycle_groups"] = cycle_groups
     mode = "merged" if merge_addresses else "outpoint_occurrences"
@@ -298,6 +297,9 @@ def node_csv_rows(graph):
     for node in graph["nodes"]:
         services = node.get("details", {}).get("address_attributions", node.get("details", {}).get("suspected_services", []))
         row = dict(node)
+        for field in ("name_colors", "name_color_conflict"):
+            if field in node.get("details", {}):
+                row[field] = node["details"][field]
         if services:
             row["stop_tracing"] = any(service.get("stop") is True for service in services)
             for field, key in fields.items():
@@ -399,7 +401,7 @@ def svg_graph(graph):
         chunks.append(shape + f' fill="{fill}" stroke="#334155" stroke-width="2"/>')
         lines = node["label"].splitlines()
         for i, line in enumerate(lines):
-            chunks.append(f'<text x="{x}" y="{y + (i-(len(lines)-1)/2)*18}" text-anchor="middle" dominant-baseline="middle" font-size="12">{html.escape(line)}</text>')
+            chunks.append(f'<text x="{x}" y="{y + (i-(len(lines)-1)/2)*18}" text-anchor="middle" dominant-baseline="middle" font-size="12" fill="{color_text(fill)}">{html.escape(line)}</text>')
         from .presentation_items import svg_badge
         chunks.append(svg_badge(node))
         chunks.append('</g>')

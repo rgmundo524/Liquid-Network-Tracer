@@ -1,3 +1,4 @@
+import {nameColorsPanel, nameColorsInput, nameColorsAction, resetNameColors} from "./name-colors";
 import { addressImportPanel, addressImportInput, addressImportFile, addressImportAction, resetAddressImport } from "./address-import";
 export {};
 
@@ -693,6 +694,7 @@ function addressReviewPage(): string {
   const options = (detail.runs || []).map(run => `<option value="${esc(run.id)}"${run.id === (state.selectedRun === "latest" ? detail.latest_run : state.selectedRun) ? " selected" : ""}>${esc(run.id)}${run.id === detail.latest_run ? " · Latest" : ""}</option>`).join("");
   return `<div class="page-heading"><div><div class="eyebrow">${esc(detail.name)}</div><h1 id="page-title" tabindex="-1">Address review</h1><p>Review activity, record your assessment, and choose where future tracing stops.</p></div>${button("Back to investigation", "back-case", "arrow")}</div>
     ${addressImportPanel(detail.id, busy)}
+    ${nameColorsPanel(detail.id, busy)}
     <div class="address-review-grid"><section class="panel"><div class="panel-head"><div><h2>Saved addresses</h2><p>Selected run, saved reviews, and service assessments</p></div></div>
     <div class="panel-body"><label class="field"><span>Saved run</span><select id="address-run-picker"${disabled(busy)}>${options || '<option value="latest">No saved run yet</option>'}</select></label>
     <form id="address-search-form"><label class="field"><span>Search address or service name</span><input name="address_query" maxlength="256" value="${esc(review.query)}"${disabled(busy)}/></label>
@@ -814,6 +816,7 @@ async function openCase(id: string): Promise<void> {
     loading: false, name: "", notes: "", enabled: false, pasted: "",
     confidence: "suspected", source: "Investigator designation", observedAt: "", stopTracing: true };
   resetAddressImport(detail.id);
+  resetNameColors(detail.id);
   state.selectedRun = "latest";
   state.page = "case";
   state.error = "";
@@ -1121,6 +1124,9 @@ async function caseAction(action: string): Promise<void> {
 }
 
 async function dispatch(action: string, element?: HTMLElement): Promise<void> {
+  if (action === "name-colors-open" && state.activeCase && state.page !== "addresses") await loadAddresses(0);
+  if (state.activeCase && await nameColorsAction(action, {caseId: state.activeCase.id, busy: isBusy(), render,
+      post: (path, body) => api(path, body as Record<string, unknown>)}, element)) return;
   if (action === "address-import-open") {
     await loadAddresses(0);
     document.querySelector<HTMLElement>("#address-import-title")?.focus();
@@ -1267,6 +1273,7 @@ app.addEventListener("change", (event) => {
     void addressImportFile(element as HTMLInputElement, render).catch(handleError);
     return;
   }
+  if (nameColorsInput(element as HTMLInputElement)) return;
   if (addressImportInput(element)) return;
   if (element.closest("#service-form")) saveAddressDraft();
   if (element.name === "suspected_only") {
@@ -1306,6 +1313,7 @@ app.addEventListener("change", (event) => {
 // Keep an in-memory draft while a lookup runs so its completion does not
 // discard names, notes, or limit edits typed in the meantime.
 app.addEventListener("input", (event) => {
+  if (nameColorsInput(event.target as HTMLInputElement)) return;
   if (addressImportInput(event.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement)) return;
   if ((event.target as Element).closest("#new-case-form")) saveDraft();
   if ((event.target as Element).closest("#service-form")) saveAddressDraft();

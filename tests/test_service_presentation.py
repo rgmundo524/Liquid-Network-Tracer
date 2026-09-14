@@ -73,11 +73,11 @@ class ServicePresentationTests(unittest.TestCase):
         self.assertEqual(self.state, original)
         self.assertEqual({node["id"] for node in baseline["nodes"]}, {node["id"] for node in graph["nodes"]})
         self.assertEqual(baseline["edges"], graph["edges"])
-        service_nodes = [node for node in graph["nodes"] if node.get("role") == "suspected_service"]
+        service_nodes = [node for node in graph["nodes"] if node["details"].get("address_attributions")]
         self.assertEqual({node["id"] for node in service_nodes},
                          {"liquid:address:" + ADDRESS})
         for node in service_nodes:
-            self.assertEqual(node["color"], COLORS["suspected_service"])
+            self.assertEqual(node["color"], COLORS["candidate"])
             self.assertIn("Suspected Synthetic exchange", node["label"].splitlines())
             self.assertEqual(node["details"]["address_attributions"], [label])
             self.assertNotIn(label["rationale"], node["label"])
@@ -97,7 +97,7 @@ class ServicePresentationTests(unittest.TestCase):
         graph["service_controls"]["rules"][ADDRESS]["rationale"] = "Changed presentation copy"
         self.assertEqual(self.state["service_controls"], controls)
 
-    def test_service_color_overrides_seed_context_and_observed_unspent(self):
+    def test_unassigned_names_preserve_seed_context_and_unspent_colors(self):
         for outpoint, address in ((A + ":0", "SYNTHETIC-victim-deposit"),
                                   (X + ":0", "SYNTHETIC-funding-context"),
                                   (C + ":0", ADDRESS)):
@@ -110,8 +110,9 @@ class ServicePresentationTests(unittest.TestCase):
                     state["outputs"][outpoint].update(status="unspent_at_observation",
                         observed_spend={"spent": False}, spend_observation_id=123)
                 node = self.node(build_graph(state), outpoint)
-                self.assertEqual(node["role"], "suspected_service")
-                self.assertEqual(node["color"], COLORS["suspected_service"])
+                role = "seed" if outpoint == A + ":0" else "address" if outpoint == X + ":0" else "unspent_endpoint"
+                self.assertEqual(node["role"], role)
+                self.assertEqual(node["color"], COLORS[role])
                 if outpoint == C + ":0":
                     self.assertIn("Unspent endpoint", node["label"].splitlines())
 
@@ -126,7 +127,7 @@ class ServicePresentationTests(unittest.TestCase):
                                                     spend_observation_id=123)
                     state["labels"] = [designation()] if labelled else []
                     node = self.node(build_graph(state), C + ":0")
-                    self.assertEqual(node["role"], "suspected_service" if labelled else "candidate")
+                    self.assertEqual(node["role"], "candidate")
                     self.assertNotIn("Unspent endpoint", node["label"])
                     self.assertNotIn("unspent_endpoints", node["details"])
 
@@ -137,7 +138,7 @@ class ServicePresentationTests(unittest.TestCase):
                           "source": "fixture://manual", "confidence": confidence, "observed_at": "2026-01-02"}
                 self.state["labels"] = [designation(), manual]
                 node = self.node(build_graph(self.state))
-                role = "attributed" if confidence == "confirmed" else "suspected_service"
+                role = "candidate"  # Confidence changes the name, never the color.
                 self.assertEqual(node["role"], role)
                 self.assertEqual(node["color"], COLORS[role])
                 self.assertIn("Suspected Synthetic exchange", node["label"].splitlines())
@@ -157,7 +158,7 @@ class ServicePresentationTests(unittest.TestCase):
             graph = build_graph(state, merge_addresses=True)
             node = next(node for node in graph["nodes"] if node["id"] == "liquid:address:" + ADDRESS)
             signatures.append((node["role"], node["color"], node["label"], node["details"]["address_attributions"]))
-            self.assertEqual(node["role"], "suspected_service")
+            self.assertEqual(node["role"], "candidate")
             self.assertEqual({item["outpoint"] for item in node["details"]["occurrences"]}, {B + ":0", C + ":0"})
         self.assertEqual(signatures[0], signatures[1])
 
@@ -169,7 +170,7 @@ class ServicePresentationTests(unittest.TestCase):
         self.assertEqual(bitcoin["role"], "address")
         self.assertNotIn("address_attributions", bitcoin["details"])
 
-    def test_all_graph_products_use_service_color_and_label_and_preserve_explorer(self):
+    def test_all_graph_products_preserve_unassigned_color_labels_and_explorer(self):
         self.state["labels"] = [designation()]
         self.state["source"] = "https://blockstream.info/liquid/api"
         graph = build_graph(self.state)
@@ -177,20 +178,20 @@ class ServicePresentationTests(unittest.TestCase):
         self.assertEqual(node["url"], "https://blockstream.info/liquid/address/" + ADDRESS)
         plan = make_plan(graph)
         shape = next(item for item in plan["shapes"] if item["key"] == node["id"])
-        self.assertEqual(shape["body"]["style"]["fillColor"], COLORS["suspected_service"])
+        self.assertEqual(shape["body"]["style"]["fillColor"], COLORS["candidate"])
         self.assertIn("Suspected Synthetic exchange", shape["body"]["data"]["content"])
         self.assertIn(node["url"], shape["body"]["data"]["content"])
         source = mermaid_source(graph)
         self.assertIn("Suspected Synthetic exchange", source)
-        self.assertIn("fill:" + COLORS["suspected_service"], source)
+        self.assertIn("fill:" + COLORS["candidate"], source)
         for svg, attribute in ((svg_graph(graph), "data-key"), (render_svg(graph), "data-node-id")):
             document = ET.fromstring(svg)
             group = next(element for element in document.iter() if element.get(attribute) == node["id"])
-            self.assertTrue(any(child.get("fill") == COLORS["suspected_service"] for child in group.iter()))
+            self.assertTrue(any(child.get("fill") == COLORS["candidate"] for child in group.iter()))
             self.assertIn("Suspected Synthetic exchange", " ".join(group.itertext()))
         legend = " ".join(legend_lines())
-        self.assertIn("Cyan circles", legend)
-        self.assertIn("investigator's assessment", legend)
+        self.assertIn("confidence never selects a color", legend)
+        self.assertIn("selected seed red > assigned name color", legend)
 
     @unittest.skipUnless(HAS_ELK, "local Node and pinned ELK dependency are required")
     def test_real_elk_preserves_service_evidence_and_role(self):
@@ -212,7 +213,7 @@ class ServicePresentationTests(unittest.TestCase):
         node = next(row for row in read_csv(destination / "nodes.csv") if row["id"] == "liquid:address:" + ADDRESS)
         self.assertEqual(tuple(node), NODE_CSV_FIELDS)
         self.assertEqual(tuple(node)[:6], ("id", "kind", "label", "url", "color", "details"))
-        self.assertEqual(node["role"], "suspected_service")
+        self.assertEqual(node["role"], "candidate")
         self.assertNotIn("classification", node)
         self.assertEqual(node["service_name"], "'" + label["entity"])
         self.assertEqual(node["service_rationale"], "'" + label["rationale"])

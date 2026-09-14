@@ -78,6 +78,8 @@ def _validate(data, identity):
                      multiline=False) != rule[field]:
                 raise TraceError("Invalid address-assessment rule " + field)
         _text(notes_for(rule), "Notes", 4000, multiline=True)
+    from .name_colors import validate_name_colors
+    validate_name_colors(data.get("name_colors", {}))
     return data
 
 

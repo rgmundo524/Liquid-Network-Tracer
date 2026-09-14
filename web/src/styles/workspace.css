@@ -1143,3 +1143,8 @@ dialog::backdrop {
   .compact-actions .btn { width: 100%; justify-content: center; }
   .compaction-preview { min-height: 400px; }
 }
+
+/* The name editor keeps custom colors explicit and editable after import. */
+#name-colors-panel input[type="color"] { width: 46px; height: 36px; padding: 2px; vertical-align: middle; }
+#name-colors-panel input[id^="name-colors-hex-"] { width: 110px; margin-left: 8px; font-family: monospace; }
+#name-colors-panel td { vertical-align: middle; }

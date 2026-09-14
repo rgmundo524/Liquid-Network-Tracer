@@ -189,17 +189,23 @@ class MiroFrameSyncTests(unittest.TestCase):
         key = framed_graph()["activity_frames"]["activities"][0]["shape_keys"][0]
         self.item(key)["position"]["x"] += 20000
         lost = [False]
+        applied_frame_ids = set()
 
         def transport(method, url, headers, body, timeout):
             result = self.remote(method, url, headers, body, timeout)
-            if method == "PATCH" and "/frames/" in url and not lost[0]:
-                lost[0] = True
-                raise TraceError("Synthetic frame PATCH response lost")
+            if method == "PATCH" and "/frames/" in url:
+                applied_frame_ids.add(url.rsplit("/", 1)[-1])
+                if not lost[0]:
+                    lost[0] = True
+                    raise TraceError("Synthetic frame PATCH response lost")
             return result
 
         with self.assertRaisesRegex(TraceError, "frame PATCH response lost"):
             self.sync(transport=transport)
-        acknowledged = {entry["id"] for entry in self.state()["pending_updates"].values()}
+        # Concurrent failure can leave queued-but-unsent entries in the journal.
+        # Only writes actually applied remotely must not be sent again.
+        pending = {entry["id"] for entry in self.state()["pending_updates"].values()}
+        acknowledged = pending & applied_frame_ids
         self.assertTrue(acknowledged)
         self.remote.calls.clear()
         self.sync()

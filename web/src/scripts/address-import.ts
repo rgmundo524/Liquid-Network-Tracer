@@ -68,7 +68,8 @@ export function addressImportPanel(caseId: string, busy: boolean): string {
   <div class="form-actions"><span>Rows ${review.changes.length ? draft.offset + 1 : 0}–${Math.min(draft.offset + 100, review.changes.length)} of ${review.changes.length}</span><button class="btn" data-action="attribution-prev"${locked || draft.offset === 0 ? ' disabled' : ''}>Previous</button><button class="btn" data-action="attribution-next"${locked || draft.offset + 100 >= review.changes.length ? ' disabled' : ''}>Next</button></div>` : ''}</div>
   <label class="check-line"><input type="checkbox" id="attribution-approved"${draft.approved ? ' checked' : ''}${locked || !review?.valid ? ' disabled' : ''}/><span>I reviewed the address attributions and tracing-stop settings.</span></label>
   <div class="form-actions"><button class="btn primary" id="attribution-apply" data-action="attribution-apply"${locked || !review?.valid || !draft.approved ? ' disabled' : ''}>Apply reviewed import</button></div>
-  ${draft.message ? `<p role="status">${esc(draft.message)}</p>` : ''}</div></section>`;
+  ${draft.message ? `<p role="status">${esc(draft.message)}</p>` : ''}
+  <div class="form-actions"><button class="btn" data-action="name-colors-open"${disabled}>Assign name colors</button></div></div></section>`;
 }
 
 export async function addressImportAction(action: string, context: Context): Promise<boolean> {
@@ -98,7 +99,7 @@ export async function addressImportAction(action: string, context: Context): Pro
     } else {
       const result = await context.post<{ changed: number }>(path, payload);
       if (owner === draft) {
-        invalidate(); draft.message = `Saved ${result.changed} assessments. The first/next run will use them. No trace was started.`;
+        invalidate(); draft.message = `Saved ${result.changed} assessments. Choose Assign name colors below to color the imported names. No trace was started.`;
         // Refresh the selected assessment as well as the list in the owning view.
         await context.refresh();
       }

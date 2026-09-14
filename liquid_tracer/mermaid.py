@@ -16,6 +16,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
+from .name_colors import color_text
 from .common import TraceError, save_json
 from .export import COLORS, edge_color, legend_lines
 from .attribution_presentation import register_html
@@ -93,7 +94,7 @@ def mermaid_source(graph):
         identifier = ids[node["id"]]
         label = ("★ " if node.get("convergence") else "") + node["label"]
         lines.append(f"  {identifier}{start}{_label(label)}{end}")
-        lines.append(f"  style {identifier} fill:{color},stroke:#334155,stroke-width:2px,color:#172033")
+        lines.append(f"  style {identifier} fill:{color},stroke:#334155,stroke-width:2px,color:{color_text(color)}")
     for edge in edges:
         caption = edge["label"] + (" · " + edge["quantity"] if edge.get("quantity") else "")
         lines.append(f"  {ids[edge['source']]} -->|{_label(caption)}| {ids[edge['target']]}")

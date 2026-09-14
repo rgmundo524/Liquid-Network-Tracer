@@ -895,6 +895,21 @@ class Handler(BaseHTTPRequestHandler):
             return self.server.case_summary(case, read_case(case), detail=True), 201
         if len(parts) == 4 and parts[:2] == ["api", "cases"]:
             case, metadata = self.server.case(parts[2])
+            if parts[3] == "name-colors":
+                from .name_colors import name_color_catalog, set_name_colors
+                if set(body) - {"query", "offset", "limit", "updates", "expected_revision"}:
+                    raise RequestError("Name colors accept a name search or reviewed color assignments only.")
+                try:
+                    if "updates" in body:
+                        if set(body) != {"updates", "expected_revision"}:
+                            raise RequestError("Saving colors requires updates and the current revision only.")
+                        return set_name_colors(case, body["updates"], expected_revision=body["expected_revision"]), 200
+                    if "expected_revision" in body:
+                        raise RequestError("A color update is missing.")
+                    return name_color_catalog(case, query=body.get("query", ""),
+                        offset=body.get("offset", 0), limit=body.get("limit", 100)), 200
+                except TraceError as error:
+                    raise RequestError(str(error)) from None
             if parts[3] == "address-import":
                 from .address_import import apply_import, preview_import
                 if set(body) - {"text", "format", "policy", "approve_plan"}:

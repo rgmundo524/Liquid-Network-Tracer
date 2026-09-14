@@ -76,14 +76,16 @@ class UnspentEndpointTests(unittest.TestCase):
                          {terminal["id"]})
         self.assertEqual(state, original)
 
-    def test_unspent_seed_overrides_address_seed_color_but_not_starting_transaction(self):
+    def test_seed_red_overrides_unspent_color_but_keeps_endpoint_evidence(self):
         self.responses["/tx/" + A + "/outspends"][0] = {"spent": False}
         save_json(self.fixture_file, self.responses)
         state = self.run_trace()
         graph = build_graph(state)
         selected = self.node(graph, A + ":0")
-        self.assertEqual(selected["role"], "unspent_endpoint")
-        self.assertEqual(selected["color"], COLORS["unspent_endpoint"])
+        self.assertEqual(selected["role"], "seed")
+        self.assertIn("Unspent endpoint", selected["label"])
+        self.assertEqual(selected["details"]["unspent_endpoints"], [A + ":0"])
+        self.assertEqual(selected["color"], COLORS["seed"])
         starting = next(node for node in graph["nodes"] if node["id"] == "tx:" + A)
         self.assertEqual(starting["role"], "starting_transaction")
         self.assertEqual(starting["color"], COLORS["starting_transaction"])
@@ -160,8 +162,8 @@ class UnspentEndpointTests(unittest.TestCase):
                     variant["transactions"] = dict(reversed(list(variant["transactions"].items())))
                     variant["outputs"] = dict(reversed(list(variant["outputs"].items())))
                 node = next(node for node in build_graph(variant, True)["nodes"] if node["id"] == key)
-                self.assertEqual(node["role"], "unspent_endpoint")
-                self.assertEqual(node["color"], COLORS["unspent_endpoint"])
+                self.assertEqual(node["role"], "seed")
+                self.assertEqual(node["color"], COLORS["seed"])
                 self.assertEqual(node["details"]["unspent_endpoints"], [ENDPOINT])
                 self.assertEqual({item["outpoint"] for item in node["details"]["occurrences"]}, {B + ":0", ENDPOINT})
                 self.assertIn("Unspent endpoint", node["label"].splitlines())
@@ -173,7 +175,8 @@ class UnspentEndpointTests(unittest.TestCase):
         state = self.run_trace(seeds=[A + ":0", A + ":1"])
         node = next(node for node in build_graph(state, True)["nodes"]
                     if node["id"] == "liquid:address:SYNTHETIC-branch-A")
-        self.assertEqual(node["role"], "unspent_endpoint")
+        self.assertEqual(node["role"], "seed")
+        self.assertEqual(node["color"], COLORS["seed"])
         self.assertEqual(node["details"]["unspent_endpoints"], sorted([A + ":1", ENDPOINT]))
         self.assertIn("Unspent endpoints: 2", node["label"].splitlines())
 
@@ -185,8 +188,8 @@ class UnspentEndpointTests(unittest.TestCase):
             with self.subTest(merge=merge):
                 graph = build_graph(state, merge)
                 node = next(node for node in graph["nodes"] if ENDPOINT in node["details"].get("unspent_endpoints", []))
-                self.assertEqual(node["role"], "suspected_service")
-                self.assertEqual(node["color"], COLORS["suspected_service"])
+                self.assertEqual(node["role"], "unspent_endpoint")
+                self.assertEqual(node["color"], COLORS["unspent_endpoint"])
                 self.assertIn("Unspent endpoint", node["label"].splitlines())
                 self.assertIn("Suspected Synthetic service", node["label"])
 

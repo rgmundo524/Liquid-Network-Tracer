@@ -10,6 +10,7 @@ import os
 import re
 from pathlib import Path
 
+from .name_colors import color_text
 from .common import TraceError, save_json
 from .export import COLORS, edge_color, legend_lines
 
@@ -295,11 +296,11 @@ def _svg(graph, nodes, edges):
         row_count = len(labels) + int(show_link_label)
         for offset, label in enumerate(labels):
             baseline = cy - (row_count - 1) * 8 + offset * 16 + 4
-            lines.append(f'<text x="{_fmt(cx)}" y="{_fmt(baseline)}" font-size="12">{_escape(label)}</text>')
+            lines.append(f'<text x="{_fmt(cx)}" y="{_fmt(baseline)}" font-size="12" fill="{color_text(node["color"])}">{_escape(label)}</text>')
         if show_link_label:
             baseline = cy + (row_count - 1) * 8 + 4
             lines.append(f'<text x="{_fmt(cx)}" y="{_fmt(baseline)}" font-size="11" '
-                         'fill="#155e75" text-decoration="underline">Explorer</text>')
+                         f'fill="{color_text(node["color"])}" text-decoration="underline">Explorer</text>')
         from .presentation_items import svg_badge
         lines.append('</g>' + svg_badge(node) + '</g>')
         if url:

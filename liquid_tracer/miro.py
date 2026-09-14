@@ -15,6 +15,7 @@ from pathlib import Path
 from .api import http
 from .common import TraceError, canonical, digest, now
 from .export import COLORS, edge_color, legend_lines
+from .name_colors import color_text
 from . import presentation_items
 from .miro_http import MiroHTTP
 from .miro_errors import creation_error
@@ -65,7 +66,8 @@ def make_plan(graph):
             "position": {"x": node["x"], "y": node["y"], "origin": "center"},
             "geometry": {"width": node["width"], "height": node["height"]},
             "style": {"fillColor": node["color"], "fillOpacity": "1", "borderColor": "#334155", "borderWidth": "2",
-                      "fontSize": "12", "textAlign": "center", "textAlignVertical": "middle"}}})
+                      "fontSize": "12", "color": color_text(node["color"]),
+                      "textAlign": "center", "textAlignVertical": "middle"}}})
     transaction_keys = {node["id"] for node in graph["nodes"] if node["kind"] == "transaction"}
     for edge in graph["edges"]:
         connector = {"key": edge["id"], "source": edge["source"], "target": edge["target"], "body": {

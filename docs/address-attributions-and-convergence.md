@@ -32,10 +32,11 @@ atomic, limited to 5,000 rows / 512 KiB, and make no blockchain or Miro calls.
 
 No `(confirmed)`, `(candidate)`, `Service`, or `Label` suffix is automatically
 added. Confidence is the investigator's assertion, not a verification performed
-by the tool. It controls the name prefix and color: cyan for suspected, green for
-confirmed. The independent **STOP TRACING** line appears on active stop nodes.
-Multiple assessments keep their individual names and notes; a confirmed
-assessment has color priority, without removing a competing suspected name.
+by the tool. It controls only the name prefix, never the color. Use **Assign
+name colors** after import to choose a color for each case-insensitive name.
+Selected seed outputs remain red even when attributed or unspent. The independent
+**STOP TRACING** line and all attribution names and notes remain present. See
+[name colors and seed priority](name-colors.md) for the full precedence rules.
 
 Stops apply to the first run and continuations, including selected seed outputs.
 There is no seed exemption. All address stop flags use the same reachability

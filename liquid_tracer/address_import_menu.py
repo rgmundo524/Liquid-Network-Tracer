@@ -37,6 +37,7 @@ def import_screen(base, button, case):
                 yield DataTable(id="import-rows", cursor_type="row")
                 yield Static("", id="import-detail", markup=False)
                 yield Checkbox("I reviewed these address attributions and tracing-stop settings", id="import-approved")
+                yield button("Assign name colors", id="import-name-colors")
                 yield Static("", id="import-error", markup=False)
             with Horizontal(classes="buttons form-actions"):
                 yield button("Back", id="import-back")
@@ -92,6 +93,9 @@ def import_screen(base, button, case):
             try:
                 if event.button.id == "import-back":
                     self.action_back()
+                elif event.button.id == "import-name-colors":
+                    from .name_colors_menu import name_color_screen
+                    self.app.push_screen(name_color_screen(base, button, case))
                 elif event.button.id == "import-template":
                     self.query_one("#import-file", Input).value = ""
                     self.query_one("#import-text", TextArea).text = TEMPLATE
@@ -123,7 +127,7 @@ def import_screen(base, button, case):
                     self.invalidate()
                     self.query_one("#import-summary", Static).update(
                         f"Saved {result['changed']} address assessments. The first/next run will use them. "
-                        "Open Address review to edit individual entries. No trace was started.")
+                        "Choose Assign name colors to color these names, or Address review to edit entries. No trace was started.")
                     error.update("")
             except (TraceError, OSError, ValueError, TypeError) as exc:
                 self.invalidate()

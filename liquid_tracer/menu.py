@@ -608,6 +608,7 @@ def create_app(root=None):
                 yield Label("Address review", classes="title")
                 yield Static("Review address activity, record a name and confidence, and choose whether tracing stops. "
                              "Opening this screen does not call Blockstream.", markup=False)
+                yield Button("Assign name colors", id="review-name-colors")
                 yield Input(placeholder="Search addresses or service names", id="address-search")
                 yield Checkbox("Show suspected attributions only", id="address-suspected-only")
                 with Horizontal(classes="buttons"):
@@ -736,7 +737,10 @@ def create_app(root=None):
                 return
             try:
                 action = event.button.id
-                if action == "address-back":
+                if action == "review-name-colors":
+                    from .name_colors_menu import name_color_screen
+                    self.app.push_screen(name_color_screen(BaseScreen, Button, self.case))
+                elif action == "address-back":
                     self.action_back()
                 elif action in ("address-find", "address-previous", "address-next"):
                     self.page_offset = (max(0, self.page_offset - self.page_size) if action == "address-previous" else
@@ -996,6 +1000,7 @@ def create_app(root=None):
                     yield Button("Address review", id="addresses-review")
                 with Horizontal(classes="buttons"):
                     yield Button("Import address attributions", id="addresses-import")
+                    yield Button("Assign name colors", id="name-colors")
                 yield Button("Merge duplicate addresses", id="address-merge")
                 with Horizontal(classes="buttons"):
                     yield Button("Compact graph (offline preview)", id="compact-preview")
@@ -1101,6 +1106,9 @@ def create_app(root=None):
                     self.app.push_screen(ReviewScreen(self.case))
                 elif action == "address-merge":
                     self.app.push_screen(AddressMergeScreen(self.case), self.perform)
+                elif action == "name-colors":
+                    from .name_colors_menu import name_color_screen
+                    self.app.push_screen(name_color_screen(BaseScreen, Button, self.case))
                 elif action == "addresses-import":
                     from .address_import_menu import import_screen
                     self.app.push_screen(import_screen(BaseScreen, Button, self.case))
