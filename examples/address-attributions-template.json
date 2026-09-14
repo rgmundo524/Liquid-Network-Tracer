@@ -1,0 +1,4 @@
+[
+  {"Address": "REPLACE_WITH_LIQUID_ADDRESS_1", "Name": "Example Exchange", "confidence": "suspected", "stop_tracing": true, "source": "Investigator research", "notes": "Explain the evidence"},
+  {"Address": "REPLACE_WITH_LIQUID_ADDRESS_2", "Name": "Client wallet", "confidence": "confirmed", "stop_tracing": false, "source": "Client records", "notes": "Continue tracing"}
+]

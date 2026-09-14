@@ -9,6 +9,9 @@ description = "Bounded, evidence-preserving Liquid UTXO tracing and Miro graph e
 requires-python = ">=3.11"
 dependencies = []
 
+[project.optional-dependencies]
+tui = ["textual==8.2.8"]
+
 [project.scripts]
 liquid-trace = "liquid_tracer.cli:main"
 

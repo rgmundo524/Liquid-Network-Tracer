@@ -1,0 +1,3 @@
+Address,Name,confidence,stop_tracing,source,notes
+REPLACE_WITH_LIQUID_ADDRESS_1,Example Exchange,suspected,true,Investigator research,Explain the evidence
+REPLACE_WITH_LIQUID_ADDRESS_2,Client wallet,confirmed,false,Client records,Continue tracing

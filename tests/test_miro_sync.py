@@ -1,12 +1,15 @@
 import copy
 import json
 import tempfile
+import time
 import unittest
+from urllib.parse import parse_qs, urlsplit
 from pathlib import Path
 from unittest.mock import patch
 
-from liquid_tracer.common import TraceError, canonical, digest, read_json
-from liquid_tracer.miro import make_plan, publish, resolve, sync
+from liquid_tracer.common import TraceError, canonical, digest, read_json, save_json
+from liquid_tracer.miro import _retry_delay, make_plan, publish, resolve, sync
+from liquid_tracer.miro_state import _write_snapshot
 
 
 NAMESPACE = {"case_id": "case-123", "source": "fixture:liquid-demo", "address_mode": "merged"}
@@ -51,26 +54,37 @@ class FakeMiro:
         payload = json.loads(body) if body is not None else None
         self.calls.append((method, url, copy.deepcopy(payload)))
         parts = url.split("/")
+        if method == "GET" and urlsplit(url).path.endswith("/items"):
+            parent = parse_qs(urlsplit(url).query).get("parent_item_id", [None])[0]
+            children = [item for item in self.items.values() if (item.get("parent") or {}).get("id") == parent]
+            return 200, {}, canonical({"data": children, "size": len(children), "limit": 50})
         if method == "POST":
-            self.counter += 1
-            item_id = "remote-" + str(self.counter)
-            result = copy.deepcopy(payload)
-            result["id"] = item_id
-            result["type"] = "shape" if parts[-1] == "shapes" else "connector"
-            if self.normalize and "data" in result:
-                result["data"]["content"] = result["data"]["content"].replace("<br>", "<br />")
-            if self.normalize and "fontSize" in result.get("style", {}):
-                result["style"]["fontSize"] = float(result["style"]["fontSize"])
-            self.items[item_id] = result
+            batch = payload if parts[-2:] == ["items", "bulk"] else [payload]
+            results = []
+            for entry in batch:
+                self.counter += 1
+                item_id = "remote-" + str(self.counter)
+                result = copy.deepcopy(entry)
+                result["id"] = item_id
+                result["type"] = "shape" if parts[-1] in ("shapes", "bulk") else ("frame" if parts[-1] == "frames" else "connector")
+                if self.normalize and "content" in result.get("data", {}):
+                    result["data"]["content"] = result["data"]["content"].replace("<br>", "<br />")
+                if self.normalize and "fontSize" in result.get("style", {}):
+                    result["style"]["fontSize"] = float(result["style"]["fontSize"])
+                self.items[item_id] = result
+                results.append(result)
             if self.lose_next_post:
                 self.lose_next_post = False
                 raise TraceError("Synthetic lost response")
-            return 201, {}, canonical(result)
+            return 201, {}, canonical({"type": "bulk-list", "data": results} if isinstance(payload, list) else results[0])
         item_id = parts[-1]
         if item_id not in self.items:
             return 404, {}, b"{}"
         if method == "GET":
             return 200, {}, canonical(self.items[item_id])
+        if method == "DELETE":
+            del self.items[item_id]
+            return 204, {}, b""
         if method == "PATCH":
             for key, value in payload.items():
                 if isinstance(value, dict):
@@ -116,6 +130,151 @@ class MiroSyncTests(unittest.TestCase):
         self.assertEqual(len(self.remote.items), 12)
         self.assertIn("run:one", mapping)
         self.assertIn("run:two", mapping)
+
+    def test_continuation_reports_checked_items_before_any_board_writes(self):
+        self.sync(make_plan(graph()))
+        self.remote.calls.clear()
+        events, writes_during_preflight = [], []
+
+        def progress(event):
+            events.append(event)
+            if event["phase"] in ("preflight", "layout"):
+                writes_during_preflight.extend(self.remote.writes)
+
+        report = self.sync(make_plan(graph("two", True)), progress=progress)
+        preflight = [event for event in events if event["phase"] == "preflight"]
+        self.assertEqual([event["completed"] for event in preflight], list(range(8)))
+        self.assertEqual({event["total"] for event in preflight}, {7})
+        creating = [event for event in events if event["phase"] == "creating"]
+        self.assertEqual([event["completed"] for event in creating], list(range(6)))
+        self.assertEqual({event["total"] for event in creating}, {5})
+        self.assertEqual(events[-1]["phase"], "complete")
+        self.assertEqual(writes_during_preflight, [])
+        self.assertEqual(report["created"], 5)
+        for event in events:
+            self.assertEqual(set(event), {"phase", "completed", "total", "message"})
+            self.assertNotIn("test-token", json.dumps(event))
+            self.assertNotIn("board=", json.dumps(event))
+            self.assertNotIn("remote-", json.dumps(event))
+
+    def test_unchanged_repeat_preserves_manual_edits_without_per_item_state_rewrites(self):
+        plan = make_plan(graph())
+        self.sync(plan)
+        self.item("addr:a")["data"]["content"] = "An analyst's private annotation"
+        original = copy.deepcopy(self.item("addr:a"))
+        writes = len(self.remote.writes)
+        with patch("liquid_tracer.miro_state._write_snapshot", wraps=_write_snapshot) as save:
+            report = self.sync(plan)
+        self.assertEqual(len(self.remote.writes), writes)
+        self.assertEqual(self.item("addr:a"), original)
+        self.assertEqual(report["created"], 0)
+        self.assertEqual(report["updated"], 0)
+        self.assertEqual(len(report["conflicts"]), 1)
+        # Only session start and finalization rewrite the full portable snapshot.
+        self.assertEqual(save.call_count, 2)
+        self.assertIsNone(read_json(self.state_path)["active_run_id"])
+
+    def test_default_pacing_is_shared_across_workers_and_reads_have_shorter_gaps(self):
+        self.sync(make_plan(graph()))
+        starts = []
+
+        def transport(method, url, *args):
+            starts.append((method, time.monotonic()))
+            return self.remote(method, url, *args)
+
+        sync(make_plan(graph("two", True)), "board=", self.state_path,
+             token="test-token", transport=transport, workers=4)
+        self.assertEqual([method for method, _ in starts], ["GET"] * 7 + ["POST"] * 3)
+        # Request starts share one gate: four workers do not multiply the quota.
+        for (method, before), (_, after) in zip(starts, starts[1:]):
+            minimum_gap = .02
+            self.assertGreaterEqual(after - before, minimum_gap * .9)
+
+    def test_rate_limited_preflight_reports_wait_and_then_resumes_same_count(self):
+        plan = make_plan(graph())
+        self.sync(plan)
+        remote, events = self.remote, []
+        rejected = False
+
+        def transport(method, url, *args):
+            nonlocal rejected
+            if method == "GET" and not rejected:
+                rejected = True
+                return 429, {"Retry-After": "1"}, b"{}"
+            return remote(method, url, *args)
+
+        report = sync(plan, "board=", self.state_path, token="test-token",
+                      transport=transport, interval=0, workers=1, progress=events.append)
+        waiting = next(index for index, event in enumerate(events) if event["phase"] == "waiting")
+        self.assertGreater(events[waiting]["retry_after"], 0)
+        self.assertLessEqual(events[waiting]["retry_after"], 1)
+        self.assertEqual(events[waiting]["reason"], "rate_limit")
+        self.assertEqual((events[waiting]["completed"], events[waiting]["total"]), (0, 7))
+        self.assertIn("rate limit", events[waiting]["message"])
+        self.assertEqual(events[waiting + 1], events[waiting - 1])
+        self.assertEqual((report["created"], report["updated"]), (0, 0))
+
+    def test_rate_limited_post_reports_wait_without_duplicate_creation(self):
+        remote, events = self.remote, []
+        rejected = False
+
+        def transport(method, url, *args):
+            nonlocal rejected
+            if method == "POST" and not rejected:
+                rejected = True
+                return 429, {"Retry-After": "1"}, b"{}"
+            return remote(method, url, *args)
+
+        report = sync(make_plan(graph()), "board=", self.state_path, token="test-token",
+                      transport=transport, interval=0, workers=1, progress=events.append)
+        waiting = [event for event in events if event["phase"] == "waiting"]
+        self.assertEqual(len(waiting), 1)
+        self.assertEqual((waiting[0]["completed"], waiting[0]["total"]), (0, 7))
+        self.assertEqual(report["created"], 7)
+        self.assertEqual(len(self.remote.items), 7)
+        self.assertIsNone(read_json(self.state_path)["pending"])
+
+    def test_server_read_retry_reports_wait_and_keeps_preflight_before_writes(self):
+        self.sync(make_plan(graph()))
+        remote, events = self.remote, []
+        rejected = False
+        self.remote.calls.clear()
+
+        def transport(method, url, *args):
+            nonlocal rejected
+            if method == "GET" and not rejected:
+                rejected = True
+                return 503, {}, b"{}"
+            return remote(method, url, *args)
+
+        sync(make_plan(graph("two", True)), "board=", self.state_path, token="test-token",
+             transport=transport, interval=0, workers=1, progress=events.append)
+        waiting = [event for event in events if event["phase"] == "waiting"]
+        self.assertEqual(len(waiting), 1)
+        self.assertIn("retrying a Miro read", waiting[0]["message"])
+        self.assertEqual(waiting[0]["reason"], "server_retry")
+        self.assertEqual([call[0] for call in self.remote.calls[:7]], ["GET"] * 7)
+
+    def test_failed_progress_reporting_cannot_lose_acknowledged_remote_ids(self):
+        def fail(event):
+            raise OSError("Synthetic closed progress file")
+
+        report = self.sync(make_plan(graph()), progress=fail)
+        state = read_json(self.state_path)
+        self.assertEqual(report["created"], 7)
+        self.assertEqual({record["id"] for record in state["items"].values()}, set(self.remote.items))
+        self.assertIsNone(state["pending"])
+        self.assertIsNone(state["active_run_id"])
+
+    def test_rate_limit_reset_header_and_bounded_waits(self):
+        with patch("liquid_tracer.miro.time.time", return_value=1000):
+            self.assertEqual(_retry_delay({"X-RateLimit-Reset": "1005"}), 5)
+            self.assertEqual(_retry_delay({"X-RateLimit-Reset": "999"}), 1)
+            self.assertEqual(_retry_delay({"Retry-After": "2", "X-RateLimit-Reset": "1005"}), 2)
+            self.assertEqual(_retry_delay({}), 2)
+            for headers in ({"Retry-After": "31"}, {"X-RateLimit-Reset": "1031"}, {"Retry-After": "nan"}):
+                with self.subTest(headers=headers), self.assertRaisesRegex(TraceError, "wait for the limit to reset"):
+                    _retry_delay(headers)
 
     def test_manual_layout_content_and_style_survive_new_run(self):
         self.sync(make_plan(graph()))
@@ -222,17 +381,24 @@ class MiroSyncTests(unittest.TestCase):
         with self.assertRaisesRegex(TraceError, "lost response"):
             self.sync(plan)
         state = read_json(self.state_path)
-        self.assertEqual(state["pending"]["key"], "legend")
-        self.assertIn("body", state["pending"])
+        pending = state["pending_creations"]
+        self.assertEqual(set(pending), {item["key"] for item in plan["shapes"]})
+        self.assertTrue(all("body" in item for item in pending.values()))
         with self.assertRaisesRegex(TraceError, "outcome is uncertain"):
             self.sync(plan)
         self.assertEqual(len(self.remote.writes), 1)
-        resolve(self.state_path, item_id="remote-1")
+        with self.assertRaisesRegex(TraceError, "Multiple Miro items"):
+            resolve(self.state_path, item_id="remote-1")
+        for key, entry in pending.items():
+            found = [item_id for item_id, item in self.remote.items.items()
+                     if item.get("data", {}).get("content") == entry["body"]["data"]["content"]]
+            self.assertEqual(len(found), 1)
+            resolve(self.state_path, item_id=found[0], key=key)
         record = read_json(self.state_path)["items"]["legend"]
         self.assertIn("managed", record)
         self.assertIn("intent", record)
         result = self.sync(plan)
-        self.assertEqual(result["created"], 6)
+        self.assertEqual(result["created"], 2)
         self.assertEqual(len(self.remote.items), 7)
         self.assertEqual(self.item("legend")["id"], "remote-1")
 
@@ -244,8 +410,8 @@ class MiroSyncTests(unittest.TestCase):
                 original.lose_next_post = True
             return original(method, url, *args)
         with self.assertRaisesRegex(TraceError, "lost response"):
-            sync(plan, "board=", self.state_path, token="test-token", transport=transport, interval=0)
-        pending = read_json(self.state_path)["pending"]
+            sync(plan, "board=", self.state_path, token="test-token", transport=transport, interval=0, workers=1)
+        pending = next(iter(read_json(self.state_path)["pending_creations"].values()))
         self.assertEqual(pending["endpoint"], "connectors")
         resolve(self.state_path, item_id="remote-6")
         result = self.sync(plan)
@@ -332,7 +498,11 @@ class MiroSyncTests(unittest.TestCase):
         self.remote.lose_next_post = True
         with self.assertRaisesRegex(TraceError, "lost response"):
             self.sync(make_plan(graph("two", True)))
-        resolve(self.state_path, item_id="remote-8")
+        for key, entry in read_json(self.state_path)["pending_creations"].items():
+            found = [item_id for item_id, item in self.remote.items.items()
+                     if item.get("data", {}).get("content") == entry["body"]["data"]["content"]]
+            self.assertEqual(len(found), 1)
+            resolve(self.state_path, item_id=found[0], key=key)
         calls = len(self.remote.calls)
         with self.assertRaisesRegex(TraceError, "interrupted Miro sync for run two"):
             self.sync(make_plan(graph()))
@@ -352,7 +522,11 @@ class MiroSyncTests(unittest.TestCase):
                 call = publish if legacy else sync
                 with self.assertRaisesRegex(TraceError, "HTTP 408"):
                     call(make_plan(g), "board=", target, token="test-token", transport=timeout, interval=0)
-                self.assertEqual(read_json(target)["pending"]["key"], "legend")
+                saved = read_json(target)
+                if legacy:
+                    self.assertEqual(saved["pending"]["key"], "legend")
+                else:
+                    self.assertEqual(set(saved["pending_creations"]), {item["key"] for item in make_plan(g)["shapes"]})
 
 
 if __name__ == "__main__":
