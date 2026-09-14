@@ -130,6 +130,11 @@ class RoleColorGraphTests(unittest.TestCase):
             for svg, key in ((svg_graph(graph), 'data-key'), (render_svg(graph), 'data-node-id')):
                 group = next(e for e in ET.fromstring(svg).iter() if e.get(key) == node['id'])
                 self.assertTrue(any(e.get('fill') == palette[role] for e in group.iter()))
+        from liquid_tracer.mermaid import _preview_html
+        preview = _preview_html(graph, render_svg(graph))
+        self.assertIn(palette["event"] + " diamonds: events.", preview)
+        self.assertNotIn("Pink diamonds: events.", preview)
+        self.assertIn("Pink diamonds: events.", _preview_html(original, render_svg(original)))
         source = mermaid_source(graph)
         for color in palette.values(): self.assertIn('fill:' + color, source)
         self.assertIn(palette['seed'], '\n'.join(legend_lines(graph)))

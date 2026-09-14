@@ -110,7 +110,7 @@ def _preview_html(graph, svg):
     # makes this page portable and keeps viewing independent of a web server.
     encoded = base64.b64encode(svg).decode("ascii")
     legend = legend_lines(graph)
-    legend[1] = "Pink diamonds: events. Arrows show the direction of UTXO links."
+    legend[1] = legend[1].split(". ", 1)[0] + ". Arrows show the direction of UTXO links."
     items = "".join("<li>" + html.escape(line) + "</li>" for line in legend)
     run_id = html.escape(str(graph.get("run_id", "")))
     notice = html.escape(str(graph.get("notice", "")))
