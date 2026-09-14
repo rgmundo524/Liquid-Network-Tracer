@@ -1,0 +1,23 @@
+name: Seed color development source
+on:
+  push:
+    branches: [codex/protonpass-development]
+    paths: [.github/workflows/seed-color-development.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bundle version-controlled source only
+        run: git archive --format=tar.gz --output=seed-color-source.tar.gz HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: seed-color-source
+          path: seed-color-source.tar.gz
+          retention-days: 1
