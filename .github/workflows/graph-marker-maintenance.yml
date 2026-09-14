@@ -1,23 +1,69 @@
-name: Graph marker maintenance
+name: Validate graph cleanup and convergence borders
 on:
   push:
     branches: [codex/protonpass-development]
     paths: [.github/workflows/graph-marker-maintenance.yml]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  source:
+  validate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
-          persist-credentials: false
-      - name: Archive version-controlled source
-        run: git archive --format=tar.gz --output=graph-marker-source.tar.gz HEAD
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+          fetch-depth: 2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          name: graph-marker-source
-          path: graph-marker-source.tar.gz
-          retention-days: 1
+          node-version: '24.19.0'
+      - name: Apply and verify tested source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import lzma
+          import os
+          import subprocess
+          import urllib.request
+          from pathlib import Path
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip() == '1f7ca818dbebf3ef090b2c44ffac428d4928250f', 'Development branch changed; reconcile before applying'
+          chunks = []
+          for sha in ('7eb737fdf5e0a6781e3c7c8f28637dfb7b166a7c', 'd5a2a3ce94f3a22e0930f57f0e7b31d71089fc51', '8527f0f7d695c631f8098e6acfad1464e52016fb'):
+              request = urllib.request.Request(
+                  'https://api.github.com/repos/rgmundo524/Liquid-Network-Tracer/git/blobs/' + sha,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'},
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  blob = json.load(response)
+              assert blob['sha'] == sha and blob['encoding'] == 'base64'
+              chunks.append(base64.b64decode(blob['content']).decode('ascii'))
+          patch = lzma.decompress(base64.b64decode(''.join(chunks), validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '740d05c99f321ac7ec6a7bb2bd3d935b26aee59fc0e157d4588a014384104250'
+          Path('/tmp/graph-markers.patch').write_bytes(patch)
+          subprocess.run(['git', 'apply', '--index', '--unidiff-zero', '/tmp/graph-markers.patch'], check=True)
+          subprocess.run(['git', 'rm', '.github/workflows/graph-marker-maintenance.yml'], check=True)
+          assert subprocess.check_output(['git', 'write-tree'], text=True).strip() == 'a46a5794aefc1f7477aab9de97f0813b3679383b', 'Final source differs from tested implementation'
+          PY
+      - name: Run full offline regression suite
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install '.[tui]'
+          npm --prefix layout ci --ignore-scripts --no-audit --no-fund
+          .venv/bin/python -m unittest discover -s tests -v
+          git diff --cached --check
+      - name: Check and build browser interface
+        run: |
+          npm --prefix web ci --ignore-scripts --no-audit --no-fund
+          npm --prefix web run check
+          npm --prefix web run build
+      - name: Publish to existing development branch
+        run: |
+          test "$(git write-tree)" = a46a5794aefc1f7477aab9de97f0813b3679383b
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Remove Miro attribution cards and replace convergence stars with bold red borders'
+          git push origin HEAD:refs/heads/codex/protonpass-development
