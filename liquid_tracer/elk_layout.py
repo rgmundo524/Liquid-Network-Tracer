@@ -220,9 +220,12 @@ def layout_metrics(graph, *, routed=True, max_comparisons=MAX_COMPARISONS):
             "labels_measured": False, "curves_approximated": True}
 
 
-def _report_progress(progress, message, *, completed=0, elapsed_seconds=None):
+def _report_progress(progress, message, *, completed=0, elapsed_seconds=None, stage=None, **counts):
     if progress:
         event = {"phase": "optimizing", "message": message, "completed": completed, "total": 1 if completed else 0}
+        if stage is not None:
+            event["stage"] = stage
+        event.update(counts)
         if elapsed_seconds is not None:
             event["elapsed_seconds"] = elapsed_seconds
         try:
@@ -248,7 +251,8 @@ def _worker(graph, seeds, progress=None):
     environment = {name: os.environ[name] for name in ("PATH", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT") if name in os.environ}
     process = None
     try:
-        _report_progress(progress, f"Calculating local ELK layout ({context}); cancel to stop")
+        _report_progress(progress, f"Calculating local ELK layout ({context}); cancel to stop",
+                         stage="calculating", node_count=node_count, edge_count=edge_count, heap_mb=heap_mb)
         with defer_cancellation_during_spawn():
             process = subprocess.Popen([node, f"--max-old-space-size={heap_mb}", str(runner)],
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -266,7 +270,8 @@ def _worker(graph, seeds, progress=None):
                 payload = None
                 elapsed = max(0, int(time.monotonic() - started))
                 _report_progress(progress, f"Calculating local ELK layout ({context}; {elapsed:,} seconds elapsed); cancel to stop",
-                                 elapsed_seconds=elapsed)
+                                 elapsed_seconds=elapsed, stage="calculating",
+                                 node_count=node_count, edge_count=edge_count, heap_mb=heap_mb)
         if process.returncode:
             detail = renderer_failure(errors, process.returncode, "ELK", heap_mb)
             raise TraceError(f"{detail} Graph: {graph_size}. No Miro changes were made")
@@ -557,9 +562,11 @@ def optimize_graph(graph, connector_style="straight", progress=None):
     measurement has a separate work budget that never removes graph elements.
     """
     nodes = _validate_graph(graph, connector_style)
-    _report_progress(progress, "Calculating local ELK layout; cancel to stop")
+    _report_progress(progress, "Calculating local ELK layout; cancel to stop", stage="preparing",
+                     node_count=len(graph["nodes"]), edge_count=len(graph["edges"]))
     request, ports, fee_ids = _request_graph(graph)
     seeds = [1, 7, 19] if len(request["children"]) <= 300 else [1]
+    _report_progress(progress, "Measuring input layout", stage="measuring_input")
     before = layout_metrics(graph)
     if request["children"]:
         candidates = _worker(request, seeds, progress=progress)
@@ -567,10 +574,12 @@ def optimize_graph(graph, connector_style="straight", progress=None):
         candidates = [{"seed": 1, "nodes": [], "edges": []}]
     scored = []
     for candidate in candidates:
+        _report_progress(progress, "Validating ELK coordinates and routes", stage="applying")
         try:
             result = _apply_candidate(graph, candidate, ports, fee_ids, connector_style)
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
             raise TraceError("ELK returned an invalid layout; no Miro changes were made") from exc
+        _report_progress(progress, "Measuring completed ELK layout", stage="measuring_output")
         metrics = layout_metrics(result)
         main = {"nodes": [node for node in result["nodes"] if node["id"] not in fee_ids],
                 "edges": [edge for edge in result["edges"] if edge["source"] not in fee_ids and edge["target"] not in fee_ids]}
@@ -582,5 +591,5 @@ def optimize_graph(graph, connector_style="straight", progress=None):
                                     "candidate_count": len(candidates), "selected_seed": seed,
                                     "routing_exceptions": result["layout"]["routing_exceptions"],
                                     "miro_routes_exact": False, "time_limit_seconds": None}
-    _report_progress(progress, "Local ELK layout ready", completed=1)
+    _report_progress(progress, "Local ELK layout ready", completed=1, stage="ready")
     return result
