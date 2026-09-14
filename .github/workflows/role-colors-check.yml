@@ -37,24 +37,30 @@ jobs:
           new = 'self.assertNotIn("SHARED ADDRESS", content.decode("utf-8") if isinstance(content, bytes) else content)'
           assert text.count(old) == 1, 'Unexpected SVG text assertion'
           path.write_text(text.replace(old, new))
+          path = Path('tests/test_miro_graph_cleanup.py')
+          text = path.read_text()
+          old = 'self.assertEqual(plan["presentation_version"], 15)'
+          new = 'self.assertEqual(plan["presentation_version"], 16)'
+          assert text.count(old) == 1, 'Unexpected presentation version assertion'
+          path.write_text(text.replace(old, new))
           PY
           git rm .github/role-colors-change.b64 .github/workflows/role-colors-check.yml
-          git add liquid_tracer/name_colors.py liquid_tracer/role_colors.py liquid_tracer/services.py liquid_tracer/export.py liquid_tracer/attribution_presentation.py liquid_tracer/name_colors_menu.py liquid_tracer/layout_preview.py liquid_tracer/mermaid.py liquid_tracer/miro.py web/src/scripts/name-colors.ts tests/test_role_colors.py tests/test_branch_interactions.py docs/name-colors.md
+          git add liquid_tracer/name_colors.py liquid_tracer/role_colors.py liquid_tracer/services.py liquid_tracer/export.py liquid_tracer/attribution_presentation.py liquid_tracer/name_colors_menu.py liquid_tracer/layout_preview.py liquid_tracer/mermaid.py liquid_tracer/miro.py web/src/scripts/name-colors.ts tests/test_role_colors.py tests/test_branch_interactions.py tests/test_miro_graph_cleanup.py docs/name-colors.md
           git diff --cached --check
       - name: Install terminal and layout dependencies
         run: |
           python3 -m venv .venv
           .venv/bin/python -m pip install '.[tui]'
           npm --prefix layout ci --ignore-scripts --no-audit --no-fund
-      - name: Run focused role-color and border-only presentation tests
-        run: .venv/bin/python -m unittest tests.test_role_colors tests.test_branch_interactions -v
-      - name: Run full offline regression suite
-        run: .venv/bin/python -m unittest discover -s tests -v
+      - name: Run focused role-color and presentation tests
+        run: .venv/bin/python -m unittest tests.test_role_colors tests.test_branch_interactions tests.test_miro_graph_cleanup -v
       - name: Check and build browser interface
         run: |
           npm --prefix web ci --ignore-scripts --no-audit --no-fund
           npm --prefix web run check
           npm --prefix web run build
+      - name: Run full offline regression suite
+        run: .venv/bin/python -m unittest discover -s tests -v
       - name: Publish validated source to working branch
         run: |
           git diff --cached --check
