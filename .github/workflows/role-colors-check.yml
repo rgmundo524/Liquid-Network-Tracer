@@ -31,9 +31,15 @@ jobs:
           new = 'shared-address receipts from distinct branches also highlight the receiving address and all participating senders.'
           assert text.count(old) == 1, 'Unexpected border legend'
           path.write_text(text.replace(old, new))
+          path = Path('tests/test_branch_interactions.py')
+          text = path.read_text()
+          old = 'self.assertNotIn("SHARED ADDRESS", content)'
+          new = 'self.assertNotIn("SHARED ADDRESS", content.decode("utf-8") if isinstance(content, bytes) else content)'
+          assert text.count(old) == 1, 'Unexpected SVG text assertion'
+          path.write_text(text.replace(old, new))
           PY
           git rm .github/role-colors-change.b64 .github/workflows/role-colors-check.yml
-          git add liquid_tracer/name_colors.py liquid_tracer/role_colors.py liquid_tracer/services.py liquid_tracer/export.py liquid_tracer/attribution_presentation.py liquid_tracer/name_colors_menu.py liquid_tracer/layout_preview.py liquid_tracer/mermaid.py liquid_tracer/miro.py web/src/scripts/name-colors.ts tests/test_role_colors.py docs/name-colors.md
+          git add liquid_tracer/name_colors.py liquid_tracer/role_colors.py liquid_tracer/services.py liquid_tracer/export.py liquid_tracer/attribution_presentation.py liquid_tracer/name_colors_menu.py liquid_tracer/layout_preview.py liquid_tracer/mermaid.py liquid_tracer/miro.py web/src/scripts/name-colors.ts tests/test_role_colors.py tests/test_branch_interactions.py docs/name-colors.md
           git diff --cached --check
       - name: Install terminal and layout dependencies
         run: |
