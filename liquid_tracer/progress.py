@@ -13,6 +13,9 @@ MESSAGES = {
     "compacting": "Compacting address positions and activity components",
     "preflight": "Checking existing Miro items before making changes",
     "layout": "Preparing the graph layout",
+    "checking_layout": "Checking completed ELK previews for this full graph",
+    "reusing_layout": "Reusing the completed ELK layout; no recalculation",
+    "building_plan": "Building and validating the Miro publication plan",
     "updating": "Updating mapped Miro items",
     "removing": "Removing obsolete generated items",
     "framing": "Updating graph export frames",
@@ -20,6 +23,16 @@ MESSAGES = {
     "creating": "Adding new Miro items",
     "waiting": "Waiting before retrying a Miro request",
     "complete": "Miro synchronization completed",
+}
+
+
+ELK_STAGES = {
+    "preparing": "Preparing the graph for ELK",
+    "measuring_input": "Measuring the input layout before ELK",
+    "calculating": "Calculating the graph layout with ELK",
+    "applying": "Validating ELK coordinates and connector routes",
+    "measuring_output": "Measuring the completed ELK layout",
+    "ready": "ELK layout completed",
 }
 
 
@@ -37,6 +50,18 @@ def public_progress(event):
         return None
     value = {"phase": event["phase"], "completed": done, "total": total,
              "message": MESSAGES[event["phase"]]}
+    if value["phase"] == "optimizing":
+        stage = event.get("stage")
+        if isinstance(stage, str) and stage in ELK_STAGES:
+            value.update(stage=stage, message=ELK_STAGES[stage])
+        for field in ("node_count", "edge_count", "heap_mb"):
+            number = event.get(field)
+            if type(number) is int and 0 <= number <= 2 ** 53 - 1:
+                value[field] = number
+        if "node_count" in value and "edge_count" in value:
+            value["message"] += f" ({value['node_count']:,} objects, {value['edge_count']:,} connections)"
+        if "heap_mb" in value:
+            value["message"] += f"; Node heap budget {value['heap_mb']:,} MiB"
     if value["phase"] == "waiting":
         reason = event.get("reason")
         if reason == "rate_limit":
@@ -63,6 +88,7 @@ class ProgressReporter:
     def __init__(self, path=None):
         self.path = Path(path) if path is not None else None
         self.previous_phase = None
+        self.previous_stage = None
         self.file_time = self.terminal_time = float("-inf")
 
     def __call__(self, event):
@@ -70,9 +96,11 @@ class ProgressReporter:
         if value is None:
             return
         now = time.monotonic()
-        urgent = (value["phase"] != self.previous_phase or value["phase"] == "waiting"
+        urgent = (value["phase"] != self.previous_phase or value.get("stage") != self.previous_stage
+                  or value["phase"] == "waiting"
                   or (value["total"] > 0 and value["completed"] == value["total"]))
         self.previous_phase = value["phase"]
+        self.previous_stage = value.get("stage")
         if self.path is not None and (urgent or now - self.file_time >= .1):
             temporary = self.path.with_name(self.path.name + ".tmp")
             try:

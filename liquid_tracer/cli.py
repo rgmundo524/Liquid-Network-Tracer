@@ -353,7 +353,7 @@ def connector_appearance(metadata, explicit=None):
 
 
 def refresh_presentation(plan, trace_path, include_fees=False, connector_style="straight", progress=None,
-                         service_settings=None):
+                         service_settings=None, preview_directory=None):
     """Verify historical topology, then create a current shared-address view."""
     namespace = _namespace(plan)
     state = read_json(trace_path)
@@ -394,7 +394,12 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
     # Layout is a derivative of verified evidence, never a rewrite of the archive.
     from .elk_layout import optimize_graph
     graph = build_graph(state, merge_addresses=True, include_fees=include_fees)
-    refreshed = make_plan(optimize_graph(graph, connector_style=connector_style, progress=progress))
+    from .layout_reuse import reusable_elk_preview, report_phase
+    laid_out = reusable_elk_preview(graph, preview_directory, connector_style, progress)
+    if laid_out is None:
+        laid_out = optimize_graph(graph, connector_style=connector_style, progress=progress)
+    report_phase(progress, "building_plan")
+    refreshed = make_plan(laid_out)
     validate_plan(refreshed)
     expected = topology(make_plan(graph))
     if (_namespace(refreshed) != {**namespace, "address_mode": "merged"}
@@ -493,7 +498,7 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
     if plan_path is None and compact_preview is None:
         plan = refresh_presentation(plan, default_plan.parent / "trace.json", include_fee_flows(metadata, include_fees),
                                     connector_appearance(metadata, connector_style), progress=progress,
-                                    service_settings=load_services(case))
+                                    service_settings=load_services(case), preview_directory=Path(case) / "previews")
     # Validate the mapping, lineage, and item budget locally before saving a selection.
     options = {"reorganize": True} if reorganize else {}
     if progress is not None:
