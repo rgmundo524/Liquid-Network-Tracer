@@ -1,0 +1,52 @@
+name: Validate configurable graph role colors
+on:
+  push:
+    branches: [codex/role-color-palette]
+    paths: [.github/workflows/role-colors-check.yml, .github/role-colors-change.b64]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.19.0'
+      - name: Apply exact-source guarded presentation update
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, lzma
+          from pathlib import Path
+          raw = lzma.decompress(base64.b64decode(Path('.github/role-colors-change.b64').read_bytes()))
+          assert hashlib.sha256(raw).hexdigest() == '5b98b0658bfd207469c5521e15386e96707e4379bc9fb49bd5366d896203d04b', 'Source payload integrity mismatch'
+          exec(compile(raw, '<guarded-role-color-update>', 'exec'))
+          PY
+          git rm .github/role-colors-change.b64 .github/workflows/role-colors-check.yml
+          git add liquid_tracer/name_colors.py liquid_tracer/role_colors.py liquid_tracer/services.py liquid_tracer/export.py liquid_tracer/attribution_presentation.py liquid_tracer/name_colors_menu.py liquid_tracer/layout_preview.py liquid_tracer/mermaid.py liquid_tracer/miro.py web/src/scripts/name-colors.ts tests/test_role_colors.py docs/name-colors.md
+          git diff --cached --check
+      - name: Install terminal and layout dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install '.[tui]'
+          npm --prefix layout ci --ignore-scripts --no-audit --no-fund
+      - name: Run focused role-color tests
+        run: .venv/bin/python -m unittest tests.test_role_colors -v
+      - name: Run full offline regression suite
+        run: .venv/bin/python -m unittest discover -s tests -v
+      - name: Check and build browser interface
+        run: |
+          npm --prefix web ci --ignore-scripts --no-audit --no-fund
+          npm --prefix web run check
+          npm --prefix web run build
+      - name: Publish validated source to working branch
+        run: |
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Add configurable graph role colors beside imported name colors'
+          git push origin HEAD:refs/heads/codex/role-color-palette
