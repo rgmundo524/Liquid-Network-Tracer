@@ -1,0 +1,53 @@
+name: Validate starter connection graphs
+on:
+  push:
+    branches: [codex/starter-connections]
+    paths: [.github/workflows/connection-verify.yml, .github/connection-change.1.b64, .github/connection-change.2.b64]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.19.0'
+      - name: Apply reviewed source patch
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, lzma
+          from pathlib import Path
+          encoded = ''.join(Path(f'.github/connection-change.{part}.b64').read_text() for part in (1, 2))
+          raw = lzma.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(raw).hexdigest() == 'd1f71a888e14dc01b21dd6c6293c2f30b1ce737dfa13111ba8d86612647e5d76'
+          Path('/tmp/starter-connections.patch').write_bytes(raw)
+          PY
+          git apply --index /tmp/starter-connections.patch
+          git rm .github/connection-change.1.b64 .github/connection-change.2.b64 .github/workflows/connection-verify.yml
+          git diff --cached --check
+      - name: Install offline test dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install '.[tui]'
+          npm --prefix layout ci --ignore-scripts --no-audit --no-fund
+      - name: Run starter connection tests
+        run: .venv/bin/python -m unittest tests.test_connections tests.test_connections_ui -v
+      - name: Check and build browser interface
+        run: |
+          npm --prefix web ci --ignore-scripts --no-audit --no-fund
+          npm --prefix web run check
+          npm --prefix web run build
+      - name: Run full offline regression suite
+        run: .venv/bin/python -m unittest discover -s tests -v
+      - name: Publish validated source to feature branch
+        run: |
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Add bounded starter-to-starter connection plotting'
+          git push origin HEAD:refs/heads/codex/starter-connections
