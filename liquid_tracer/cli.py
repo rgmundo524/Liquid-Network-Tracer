@@ -150,6 +150,16 @@ def parser():
     layout.add_argument("--open", dest="open_browser", action="store_true", help="Open the completed local layout in your browser")
     fee_arguments(layout)
     connector_arguments(layout)
+    connections = commands.add_parser("connections", help="Plot only saved directed paths between starting transactions")
+    connections.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    connections.add_argument("--run", default="latest")
+    connections.add_argument("--hops", type=int, default=10, help="Maximum transaction hops per starter-to-starter path (default: 10)")
+    connections.add_argument("--open", dest="open_browser", action="store_true")
+    connection_publish = commands.add_parser("connections-publish", help="Publish a reviewed connection-only snapshot to a separate Miro board")
+    connection_publish.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    connection_publish.add_argument("--preview", required=True)
+    connection_publish.add_argument("--board", required=True)
+    connection_publish.add_argument("--max-items", type=int, default=750)
     compact = commands.add_parser("compact-preview", help="Compact an ELK layout locally and save a before/after comparison for review")
     compact.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     compact.add_argument("--run", default="latest")
@@ -806,6 +816,13 @@ def main(argv=None, *, progress=None):
         elif args.command == "layout-preview":
             print(json.dumps(layout_preview_run(args.case, args.run, args.out, args.include_fees,
                                                 args.connector_style, args.open_browser, progress), indent=2))
+        elif args.command == "connections":
+            from .connections import preview_connections
+            print(json.dumps(preview_connections(args.case, args.run, args.hops,
+                                                open_browser=args.open_browser, progress=progress), indent=2))
+        elif args.command == "connections-publish":
+            from .connections import publish_connections
+            print(json.dumps(publish_connections(args.case, args.preview, args.board, max_items=args.max_items), indent=2))
         elif args.command == "compact-preview":
             print(json.dumps(compact_preview_run(args.case, args.run, args.include_fees,
                                                  args.connector_style, args.open_browser, progress), indent=2))

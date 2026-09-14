@@ -32,7 +32,7 @@ from .progress import public_progress
 MAX_BODY = 64 * 1024
 CASE_ID = re.compile(r"[0-9a-f]{32}")
 RUN_ID = re.compile(r"[a-zA-Z0-9]{16}")
-ARTIFACT_DIR = re.compile(r"[a-zA-Z0-9]{16}-(?:csv|mermaid|elk|compact)-[0-9a-f]{8}")
+ARTIFACT_DIR = re.compile(r"[a-zA-Z0-9]{16}-(?:csv|mermaid|elk|compact|connections)-[0-9a-f]{8}")
 COMPACTION_DIR = re.compile(r"[a-zA-Z0-9]{16}-compact-[0-9a-f]{8}")
 EXPORT_NAMES = {"nodes.csv", "edges.csv", "inputs.csv", "outputs.csv", "spends.csv",
                 "events.csv", "frontier.csv", "export.json", "SHA256SUMS"}
@@ -42,7 +42,8 @@ LAYOUT_NAMES = {"graph.html", "graph.svg", "graph.json", "layout-report.json"}
 COMPACTION_NAMES = LAYOUT_NAMES | {"before.html", "before.svg", "before.json", "compaction.json", "SHA256SUMS"}
 LAYOUT_ALGORITHMS = ("elk_layered_v1", "dependency_layers_v1")
 FALLBACK_REASONS = ("size_limit", "timeout", "mermaid_size_limit", "mermaid_timeout")
-CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact"}
+from .connections import FILES as CONNECTION_NAMES
+CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact", "connections"}
 
 
 def public_service(rule):
@@ -317,6 +318,7 @@ class LocalServer(ThreadingHTTPServer):
             ("previews", "mermaid", PREVIEW_NAMES, "graph.json"),
             ("previews", "elk", LAYOUT_NAMES, "graph.json"),
             ("previews", "compact", COMPACTION_NAMES, "graph.json"),
+            ("previews", "connections", CONNECTION_NAMES, "graph.json"),
             ("exports", "csv", EXPORT_NAMES, "export.json"),
         ):
             try:
@@ -335,6 +337,9 @@ class LocalServer(ThreadingHTTPServer):
                     files = {name: self.artifact(case, [folder, directory.name, name]) for name in names}
                     if not all(path.is_file() for path in files.values()):
                         continue
+                    if kind == "connections":
+                        from .connections import reviewed_connections
+                        reviewed_connections(case, directory.name)
                     compact_meta = None
                     if kind == "compact":
                         from .cli import compaction_preview_metadata
@@ -369,6 +374,10 @@ class LocalServer(ThreadingHTTPServer):
                         continue
                     product = self.artifact_links(case, [folder, directory.name], names)
                     product["include_fees"] = fees
+                    if kind == "connections":
+                        report = info["connections"]
+                        product.update(preview_id=directory.name, max_hops=report["max_hops"],
+                                       connection_count=report["connection_count"], connection_status=report["status"])
                     if kind in ("elk", "compact"):
                         style = options.get("connector_style")
                         layout = info.get("layout")
@@ -599,11 +608,17 @@ class LocalServer(ThreadingHTTPServer):
         metrics = public_layout_metrics(result.get("layout_metrics"))
         if metrics is not None:
             value["layout_metrics"] = metrics
-        if action in ("mermaid", "csv", "layout", "compact"):
+        if action in ("mermaid", "csv", "layout", "compact", "connections"):
             directory = Path(result["directory"])
             relative = directory.relative_to(case)
             names = {"mermaid": PREVIEW_NAMES, "csv": EXPORT_NAMES, "layout": LAYOUT_NAMES,
-                     "compact": COMPACTION_NAMES}[action]
+                     "compact": COMPACTION_NAMES, "connections": CONNECTION_NAMES}[action]
+            if action == "connections":
+                from .connections import reviewed_connections
+                graph, _ = reviewed_connections(case, directory.name)
+                report = graph["connections"]
+                value.update(preview_id=directory.name, max_hops=report["max_hops"],
+                             connection_count=report["connection_count"], connection_status=report["status"])
             if action == "compact":
                 from .cli import compaction_preview_metadata
 
@@ -625,7 +640,7 @@ class LocalServer(ThreadingHTTPServer):
         if (parts[0] == "exports") != (kind == "csv"):
             raise RequestError("File not found", 404)
         expected = {"mermaid": PREVIEW_NAMES, "csv": EXPORT_NAMES, "elk": LAYOUT_NAMES,
-                    "compact": COMPACTION_NAMES}[kind]
+                    "compact": COMPACTION_NAMES, "connections": CONNECTION_NAMES}[kind]
         if parts[2] not in expected:
             raise RequestError("File not found", 404)
         return safe_path(case, parts)
@@ -652,6 +667,29 @@ class LocalServer(ThreadingHTTPServer):
                 raise RequestError("Continue from the latest saved run.")
             arguments, live = _trace_arguments(case, metadata, settings)
             update_case(case, {"run_defaults": settings})
+        elif action == "connections":
+            from .connections import validate_hops
+            hops = validate_hops(body.get("connection_hops", 10))
+            selected = resolve_latest(case, selected)
+            safe_path(case, ["runs", selected, "trace.json"])
+            verify_export(run_path(case, selected))
+            arguments = ["connections", "--case", str(case), "--run", selected, "--hops", str(hops)]
+        elif action == "miro-connections":
+            from .connections import reviewed_connections
+            from .cli import board_id
+            if body.get("confirm_connections") is not True:
+                raise RequestError("Review the connection snapshot and confirm publication to a separate Miro board.")
+            preview_id = body.get("preview_id")
+            graph, _ = reviewed_connections(case, preview_id)
+            selected = resolve_latest(case, selected)
+            if graph["run_id"] != selected:
+                raise RequestError("Select a connection preview of the chosen saved run.")
+            target = board_id(body.get("board"))
+            if metadata.get("miro_board") and target == board_id(metadata["miro_board"]):
+                raise RequestError("Choose a separate Miro board; the full-trace board is protected.")
+            arguments = ["connections-publish", "--case", str(case), "--preview", preview_id,
+                         "--board", target, "--max-items", str(settings["max_new_items"])]
+            live = bool(graph["nodes"])
         elif action == "address-inspect":
             from .address_activity import validate_address
 
@@ -861,7 +899,7 @@ class Handler(BaseHTTPRequestHandler):
             content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             self.send(200, path.read_bytes(), content_type, preview=path.suffix in (".html", ".svg"),
                       download=None if path.suffix == ".html" else path.name,
-                      explorer_links=parts[3].split("-")[1] in ("elk", "compact") and path.suffix in (".html", ".svg"))
+                      explorer_links=parts[3].split("-")[1] in ("elk", "compact", "connections") and path.suffix in (".html", ".svg"))
         else:
             path = safe_path(self.server.assets, ["index.html"] if parts == [""] else parts)
             if not path.is_file():
