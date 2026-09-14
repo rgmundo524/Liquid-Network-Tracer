@@ -135,7 +135,7 @@ class ExplicitAttributionTests(unittest.TestCase):
         self.assertEqual(row["source"], label["source"])
         plan = make_plan(graph); validate_plan(plan)
         register = [s["body"]["data"]["content"] for s in plan["shapes"] if s["key"] in plan["presentation_items"]]
-        self.assertTrue(any('Review A' in content and 'Review B' in content and 'Supplied records' in content for content in register))
+        self.assertEqual(register, [])  # Full notes live in HTML/JSON/CSV, not Miro cards.
         self.assertEqual(graph, before)
 
 
@@ -173,6 +173,18 @@ class ConvergenceTests(unittest.TestCase):
     def test_split_after_merge_then_identical_lineages_rejoin_has_no_new_star(self):
         state = graph_state((("a:0", "c"), ("b:0", "c"), ("c:0", "d"), ("c:1", "d")))
         self.assertEqual([n["id"] for n in build_graph(state)["nodes"] if n.get("convergence")], ["tx:" + tx("c")])
+
+    def test_different_overlapping_or_new_origin_sets_are_new_interactions(self):
+        for links, seeds in (
+            ((("a:0", "c"), ("b:0", "c"), ("c:0", "e"), ("b:1", "e")),
+             ("a:0", "b:0", "b:1")),
+            ((("a:0", "c"), ("b:0", "c"), ("c:0", "e"), ("f:0", "e")),
+             ("a:0", "b:0", "f:0")),
+        ):
+            with self.subTest(seeds=seeds):
+                graph = build_graph(graph_state(links, seeds=seeds))
+                flagged = {n["id"] for n in graph["nodes"] if n.get("convergence")}
+                self.assertEqual(flagged, {"tx:" + tx("c"), "tx:" + tx("e")})
 
     def test_stop_rules_remove_only_blocked_convergence_not_saved_evidence(self):
         state = graph_state((("a:0", "c"), ("b:0", "c")), labels=[annotation()])

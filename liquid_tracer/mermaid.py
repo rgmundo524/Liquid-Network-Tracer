@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .name_colors import color_text
+from .graph_markers import node_border
 from .common import TraceError, save_json
 from .export import COLORS, edge_color, legend_lines
 from .attribution_presentation import register_html
@@ -92,9 +93,10 @@ def mermaid_source(graph):
         if not isinstance(color, str) or not _COLOR.fullmatch(color):
             raise TraceError("The graph contains an invalid node color")
         identifier = ids[node["id"]]
-        label = ("★ " if node.get("convergence") else "") + node["label"]
+        label = node["label"]
+        border, thickness = node_border(node)
         lines.append(f"  {identifier}{start}{_label(label)}{end}")
-        lines.append(f"  style {identifier} fill:{color},stroke:#334155,stroke-width:2px,color:{color_text(color)}")
+        lines.append(f"  style {identifier} fill:{color},stroke:{border},stroke-width:{thickness}px,color:{color_text(color)}")
     for edge in edges:
         caption = edge["label"] + (" · " + edge["quantity"] if edge.get("quantity") else "")
         lines.append(f"  {ids[edge['source']]} -->|{_label(caption)}| {ids[edge['target']]}")

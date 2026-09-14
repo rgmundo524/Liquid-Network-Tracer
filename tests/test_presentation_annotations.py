@@ -14,6 +14,7 @@ from liquid_tracer.layout_preview import render_svg
 from liquid_tracer.mermaid import mermaid_source, _preview_html
 from liquid_tracer.miro import make_plan, sync, validate_plan
 from liquid_tracer.presentation_items import corner
+from tests.legacy_presentation_items import legacy_plan
 from tests.test_miro_sync import FakeMiro
 from tests.test_attribution_convergence import graph_state, annotation, tx
 
@@ -45,7 +46,7 @@ class AnnotationTests(unittest.TestCase):
         self.graph = build_graph(self.state)
 
     def plan(self, graph=None):
-        plan = make_plan(graph or self.graph)
+        plan = legacy_plan(graph or self.graph)
         validate_plan(plan)
         return plan
 
@@ -64,11 +65,12 @@ class AnnotationTests(unittest.TestCase):
             self.assertFalse(any(e[side] == key for e in plan["connectors"] for side in ("source", "target")))
         self.assertEqual(original, self.graph)
 
-    def test_star_rendered_in_svg_and_mermaid_without_extra_forensic_nodes(self):
+    def test_border_rendered_in_svg_and_mermaid_without_extra_forensic_nodes(self):
         for content in (svg_graph(self.graph), render_svg(self.graph)):
             root = ET.fromstring(content)
-            self.assertEqual(len([e for e in root.iter() if e.get("class") == "convergence-badge"]), 1)
-        self.assertIn("★", mermaid_source(self.graph))
+            self.assertFalse(any(e.get("class") == "convergence-badge" for e in root.iter()))
+            self.assertTrue(any(e.get("stroke") == "#ff0000" and e.get("stroke-width") == "12" for e in root.iter()))
+        self.assertNotIn("★", mermaid_source(self.graph))
         self.assertIn("Address attribution register", _preview_html(self.graph, b"<svg/>"))
 
     def test_initial_sync_idempotence_actual_corner_and_untouched_transaction(self):

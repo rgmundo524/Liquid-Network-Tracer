@@ -31,7 +31,8 @@ Address,Name,confidence,stop_tracing,source,notes
 No special color is automatically assigned for a perpetrator, a service, or a
 confidence level. **Suspected** still appears before a suspected name; confirmed
 names have no prefix. Confidence, stop flags, source, notes, and the starting
-transaction convergence stars keep their existing meanings.
+transaction convergence detection keep their existing meanings. Convergence now
+uses a thick red transaction border rather than a separate star.
 
 ## Color priority
 
@@ -50,12 +51,13 @@ the displayed color came from that role or a name assignment. Exact UTXO records
 address identities, and edges are never merged or expanded by coloring a name.
 
 Attribution names, STOP TRACING indicators, unspent evidence labels, sources,
-notes and register references stay present when seed red wins. A red seed still
+notes and local-register references stay present when seed red wins. Miro no
+longer creates register cards or shows their A- references. A red seed still
 obeys its active tracing-stop rule: color priority is not a seed-stop override.
 
 If independent assessments on one displayed address have conflicting assigned
 colors, no name is selected by confidence or input order. The normal trace-role
-color remains and the attribution register reports the conflict. Several names
+color remains and the local attribution register reports the conflict. Several names
 with the same assigned color are compatible. Graph JSON and node CSV include the
 assigned name colors, conflict flag, displayed color, and color source.
 

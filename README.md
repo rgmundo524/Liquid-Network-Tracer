@@ -38,6 +38,18 @@ The pink diamonds identify special outputs. **PEG-OUT REQUEST** records Esplora'
 
 **UNSPENDABLE** means the recorded script is identified as `OP_RETURN`, preventing that output from being spent later. The individual output branch ends there; other spendable outputs from the transaction can still be traced. Such an output may carry data or represent a burn, but Liquid can also add zero-value unspendable outputs when constructing confidential transactions. When the amount or asset is `??`, do not infer a positive-value L-BTC burn from the diamond alone. See the [Elements blinding documentation](https://elementsproject.org/en/doc/22.0.0/rpc/wallet/blindrawtransaction/) and [null-data script explanation](https://developer.bitcoin.org/devguide/transactions.html#null-data).
 
+## Convergence highlighting and attribution notes
+
+Transactions where different starting lineages meet through verified saved UTXO
+spends use a **12-pixel red border** (ordinary borders are 2 pixels). Starting
+transactions can qualify. A shared address circle alone is not a convergence.
+There are no separate star objects or Miro attribution cards. Names, stop labels,
+seed-red priority and assigned name colors are unchanged; source and notes stay
+in Address review and local HTML/JSON/CSV exports. Normal **Sync to Miro** safely
+retires proven, unmodified old cards/stars and updates the transaction borders
+without retracing. Preserve manual annotations/comments before cleanup. See
+[exact trigger conditions and upgrade behavior](docs/address-attributions-and-convergence.md).
+
 ## Start the program
 
 The project has **one main `devenv.nix`** for Python, Node.js, commands, and environment defaults. SecretSpec retrieves API credentials from Proton Pass when a selected action needs them. Investigation names, board IDs, and run history are saved as case data; you do not need another Nix file or shell variables for each investigation.
@@ -206,7 +218,7 @@ Confidence has just **suspected** and **confirmed**. A suspected entry is displa
 as **Suspected Example Exchange**; confirmed is **Example Exchange** with no added
 qualifier. **stop_tracing** is independent and accepts true/false. Active stops
 show **STOP TRACING**. Classification has been removed. Source and notes appear
-in the graph's attribution register, not just in exported metadata. Templates
+in the local HTML attribution register and JSON/CSV exports, not in Miro cards. Templates
 are in `examples/address-attributions-template.csv` and `.json`.
 
 Only Address is required. Address-only lists default to suspected confidence and
@@ -220,7 +232,7 @@ Existing saved assessments retain their explicit stop decisions; legacy
 candidate/corroborated confidence is interpreted as suspected without rewriting
 archived evidence. Remove classification and choose the new confidence spelling
 when preparing a new CSV upload. See [explicit attributions and convergence
-stars](docs/address-attributions-and-convergence.md) for output details,
+highlighting](docs/address-attributions-and-convergence.md) for output details,
 compatibility, and safe Miro updates.
 
 ```bash
@@ -508,12 +520,13 @@ New and refreshed Miro presentations automatically include one **Complete graph*
 
 Starting transactions are numbered globally by recorded confirmation time, oldest first. Frames list their actual numbers, for example **Activity 1 · Starting transactions 1, 4, 7**, and the corresponding boxes show **Starting TX 1**, **Starting TX 4**, and **Starting TX 7**. Multiple seed outputs of one transaction share one number. Equal timestamps use full transaction keys as a deterministic tie-breaker; undated or unconfirmed starts sort last. Ordinary **Sync to Miro** refreshes generated titles while preserving manual edits and existing frame IDs, without retracing. See [chronological starting-transaction numbers](docs/starting-transaction-index.md) for the saved mapping and historical-preview behavior.
 
-A small gold **★** marks a transaction where different starting-transaction
+A **12-pixel red transaction border** marks where different starting-transaction
 lineages meet through verified saved UTXO spends. Starting transactions themselves
-are eligible. Address reuse alone and simple descendants of an earlier merge are
-not starred. Attributed addresses have **A-...** references to source/notes cards
-beside the Miro graph. Ordinary sync adds and refreshes these generated
-annotations without retracing. See [attribution and star behavior](docs/address-attributions-and-convergence.md).
+can qualify; simple downstream propagation of an already merged lineage does not.
+Miro attribution cards and separate stars are no longer generated. Source and notes
+remain in local exports and Address review. Normal sync retires unmodified old
+annotations and refreshes borders without retracing. See
+[attribution and convergence behavior](docs/address-attributions-and-convergence.md).
 
 Groups follow visible UTXO connections, including displayed context links. They do not infer common ownership or identify services. The default shared-address display joins activity groups through a common address circle. This visual connection does not establish a spend between unrelated UTXOs. Explicit legacy outpoint exports keep repeated address occurrences separate. Fee visibility follows the investigation setting.
 

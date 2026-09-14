@@ -17,6 +17,7 @@ from .common import TraceError, canonical, digest, now
 from .export import COLORS, edge_color, legend_lines
 from .name_colors import color_text
 from . import presentation_items
+from .graph_markers import node_border
 from .miro_http import MiroHTTP
 from .miro_errors import creation_error
 from .miro_requests import MiroRequestNotSent, MiroRequests
@@ -58,14 +59,19 @@ def make_plan(graph):
             "geometry": {"width": 1300, "height": 280},
             "style": {"fillColor": "#e0f2fe", "fontSize": "14", "textAlign": "left"}}})
     for node in graph["nodes"]:
-        content = "<p>" + "<br>".join(html.escape(line) for line in node["label"].splitlines()) + "</p>"
+        # References remain in local registers/exports, not as dangling Miro
+        # labels after the on-board cards have been retired.
+        labels = [line for line in node["label"].splitlines()
+                  if line != node.get("attribution_reference")]
+        content = "<p>" + "<br>".join(html.escape(line) for line in labels) + "</p>"
+        border, thickness = node_border(node)
         if node.get("url"):
             content += '<p><a href="' + html.escape(node["url"], quote=True) + '">Explorer</a></p>'
         shapes.append({"key": node["id"], "body": {
             "data": {"shape": {"address": "circle", "transaction": "rectangle", "event": "rhombus"}[node["kind"]], "content": content},
             "position": {"x": node["x"], "y": node["y"], "origin": "center"},
             "geometry": {"width": node["width"], "height": node["height"]},
-            "style": {"fillColor": node["color"], "fillOpacity": "1", "borderColor": "#334155", "borderWidth": "2",
+            "style": {"fillColor": node["color"], "fillOpacity": "1", "borderColor": border, "borderWidth": str(thickness),
                       "fontSize": "12", "color": color_text(node["color"]),
                       "textAlign": "center", "textAlignVertical": "middle"}}})
     transaction_keys = {node["id"] for node in graph["nodes"] if node["kind"] == "transaction"}

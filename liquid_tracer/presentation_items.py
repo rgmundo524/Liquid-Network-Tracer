@@ -1,14 +1,11 @@
-"""Non-evidence Miro items: corner badges and an on-board attribution register.
+"""Retirement and historical compatibility for former Miro cards and badges.
 
 These objects never enter ELK, UTXO traversal or activity connectivity. Logical
 identities and dedicated proofs let sync retire only its own obsolete items.
 """
-import html
 import math
-import textwrap
 
 from .common import TraceError, digest
-from .attribution_presentation import attribution_lines
 
 PREFIX = "annotation:"
 BADGE_SIZE = 24.0
@@ -32,46 +29,13 @@ def corner(body, position=None):
 
 
 def make_items(graph, existing_bounds=()):
-    items, catalog = [], {}
-    right = max((n["x"] + n["width"] / 2 for n in graph["nodes"]), default=200)
-    top = min((n["y"] - n["height"] / 2 for n in graph["nodes"]), default=0)
-    for x, by, width, height in existing_bounds:
-        right, top = max(right, x + width / 2), min(top, by - height / 2)
-    y = top
-    for node in sorted(graph["nodes"], key=lambda n: n["id"]):
-        if node.get("convergence"):
-            marker = proof("convergence", node["id"])
-            body = {"position": {"x": node["x"], "y": node["y"]},
-                    "geometry": {"width": node["width"], "height": node["height"]}}
-            x, by = corner(body)
-            items.append({"key": marker["key"], "body": {
-                "data": {"shape": "rectangle", "content": "<p>★</p>"},
-                "position": {"x": x, "y": by, "origin": "center"},
-                "geometry": {"width": BADGE_SIZE, "height": BADGE_SIZE},
-                "style": {"fillOpacity": "0", "borderOpacity": "0", "fontSize": "22", "color": "#b45309",
-                          "textAlign": "center", "textAlignVertical": "middle"}}})
-            catalog[marker["key"]] = marker
-        lines = attribution_lines(node)
-        if not lines:
-            continue
-        # Wrap explicitly so even long URLs/notes cannot overflow a fixed-width
-        # register card. Pagination bounds each REST shape's content size.
-        wrapped = [part for value in lines for line in (value.splitlines() or [""])
-                   for part in (textwrap.wrap(line, 82, replace_whitespace=False) or [""])]
-        for page, start in enumerate(range(0, len(wrapped), 48)):
-            marker = proof("attribution", node["id"], page)
-            chunk = wrapped[start:start + 48]
-            title = lines[0] + (" · continued " + str(page + 1) if page else " · Address attribution")
-            height = 70 + 18 * len(chunk)
-            items.append({"key": marker["key"], "body": {
-                "data": {"shape": "rectangle", "content": '<p><strong>' + html.escape(title) + '</strong></p><p>'
-                         + '<br>'.join(html.escape(line) for line in chunk) + '</p>'},
-                "position": {"x": right + 490, "y": y + height / 2, "origin": "center"},
-                "geometry": {"width": 740, "height": height},
-                "style": {"fillColor": "#ffffff", "fontSize": "12", "textAlign": "left", "textAlignVertical": "top"}}})
-            catalog[marker["key"]] = marker
-            y += height + 80
-    return items, catalog
+    """New plans create no attribution cards or separate convergence badges.
+
+    Keep an explicit empty catalog so sync can safely retire proven historical
+    annotations. Legacy plans are still validated and resumed without rewriting
+    archived exports; proof/placement helpers below support that compatibility.
+    """
+    return [], {}
 
 
 def validate_items(plan):
@@ -168,18 +132,3 @@ def place_badges(plan, state, remote, removed, reorganize, placement):
 def note_geometry(planned, actual=None):
     before = (actual or planned)["geometry"]
     return {axis: max(float(before[axis]), float(planned["geometry"][axis])) for axis in ("width", "height")}
-
-
-def svg_badge(node):
-    if not node.get("convergence"):
-        return ""
-    width, height = node["width"], node["height"]
-    cx, cy = node["x"] + width / 2 - 18, node["y"] - height / 2 + 18
-    points = []
-    for index in range(10):
-        angle = -math.pi / 2 + index * math.pi / 5
-        radius = 11 if index % 2 == 0 else 5
-        points.append(f"{cx + radius * math.cos(angle):.3f},{cy + radius * math.sin(angle):.3f}")
-    numbers = ", ".join(map(str, node["convergence"]["starting_transaction_indices"]))
-    return ('<g class="convergence-badge"><title>' + html.escape("Starting branches " + numbers + " meet here; UTXO connectivity only")
-            + '</title><polygon points="' + " ".join(points) + '" fill="#fbbf24" stroke="#92400e" stroke-width="1"/></g>')

@@ -11,11 +11,12 @@ from .common import (LBTC, TraceError, canonical, digest, match_labels, output_k
 from .trace import TERMINAL
 from .layout import arrange, fee_date, transaction_ranks
 from .miro_frames import activity_frames
+from .graph_markers import node_border
 from .services import confidence_value
 from .attribution_presentation import display_name, attribution_reference
 from .name_colors import apply_name_colors, color_text
 
-PRESENTATION_VERSION = 13
+PRESENTATION_VERSION = 14
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -48,8 +49,8 @@ def legend_lines():
         f"{name('unspent_endpoint')} circles: traced branch ends at a UTXO observed unspent. Unchecked or hop-limited outputs do not qualify.",
         f"Arrows: {name('traced_edge').lower()} = traced UTXO links; {name('context_edge').lower()} = context only.",
         "Captions: vin/vout number · amount asset. ?? = not publicly available. Known amounts are in base units.",
-        "STOP TRACING: an explicit address boundary, independent of confidence. Source and notes are in the address attribution register (A- references).",
-        "★ at a transaction corner: distinct starting-transaction lineages meet through saved UTXO spends. Not proof of ownership or value allocation.",
+        "STOP TRACING: an explicit address boundary, independent of confidence. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards.",
+        "Thick red transaction border: distinct starting-transaction lineages meet through saved UTXO spends. Not proof of ownership or value allocation.",
         "Unspent refers to tracked outputs at their last check, not all funds or inactivity at that address. Arrows do not allocate stolen value.",
     ]
 
@@ -398,12 +399,11 @@ def svg_graph(graph):
             shape = f'<rect x="{x-80}" y="{y-80}" width="160" height="160"'
         else:
             shape = f'<polygon points="{x},{y-80} {x+80},{y} {x},{y+80} {x-80},{y}"'
-        chunks.append(shape + f' fill="{fill}" stroke="#334155" stroke-width="2"/>')
+        border, thickness = node_border(node)
+        chunks.append(shape + f' fill="{fill}" stroke="{border}" stroke-width="{thickness}"/>')
         lines = node["label"].splitlines()
         for i, line in enumerate(lines):
             chunks.append(f'<text x="{x}" y="{y + (i-(len(lines)-1)/2)*18}" text-anchor="middle" dominant-baseline="middle" font-size="12" fill="{color_text(fill)}">{html.escape(line)}</text>')
-        from .presentation_items import svg_badge
-        chunks.append(svg_badge(node))
         chunks.append('</g>')
     chunks.append('</g></svg>')
     return "".join(chunks)
@@ -413,7 +413,7 @@ def html_graph(graph, svg):
     # JSON cannot close the script tag; all detail displays use textContent.
     encoded = json.dumps(graph, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
     return '''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Liquid UTXO trace</title><style>body{margin:0;font:14px system-ui;color:#15253b}header{padding:16px;background:#15253b;color:white}button,input{padding:8px;margin:0 5px}main{display:grid;grid-template-columns:1fr 360px;height:calc(100vh - 82px)}#canvas{overflow:auto;background:#f3f5f8}aside{padding:18px;overflow:auto;border-left:1px solid #ccc}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}svg{max-width:none}.selected>*:not(text):not(title){stroke:#e11d48;stroke-width:5}a{color:#0369a1}</style>
+<title>Liquid UTXO trace</title><style>body{margin:0;font:14px system-ui;color:#15253b}header{padding:16px;background:#15253b;color:white}button,input{padding:8px;margin:0 5px}main{display:grid;grid-template-columns:1fr 360px;height:calc(100vh - 82px)}#canvas{overflow:auto;background:#f3f5f8}aside{padding:18px;overflow:auto;border-left:1px solid #ccc}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}svg{max-width:none}.selected{filter:drop-shadow(0 0 5px #e11d48)}a{color:#0369a1}</style>
 <header><strong>Liquid UTXO trace</strong> <input id="search" placeholder="Search address or txid"><button id="find">Find</button><button id="minus">−</button><button id="plus">+</button><button id="fit">Fit</button><label><input id="context" type="checkbox" checked>Context edges</label></header>
 <main><div id="canvas">''' + svg + '''</div><aside><p id="notice"></p><p>Click a node to inspect full identifiers and evidence. Hover an edge for its outpoint and public quantity.</p><a id="link" target="_blank" rel="noopener noreferrer" hidden>Open explorer</a><pre id="details"></pre></aside></main>
 <script type="application/json" id="graph-data">''' + encoded + '''</script><script>

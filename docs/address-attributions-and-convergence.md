@@ -1,4 +1,4 @@
-# Explicit address attributions and convergence stars
+# Explicit address attributions and convergence highlighting
 
 ## Six import fields
 
@@ -46,89 +46,99 @@ exclusive descendants on continuation, rather than only stopping new encounters.
 The old internal `suspected_service_stop` / `held_behind_service` output status
 names remain for archive compatibility; they are not confidence claims.
 
-## Evidence in the graph output
+## Attribution information without Miro cards
 
-Each attributed address has a stable `A-...` reference. On Miro, generated
-register cards in a separate column contain that reference, full address, name,
-confidence, stop flag, source, notes, and observation date. Long entries are
-wrapped and paginated. The cards are native editable Miro objects, not blockchain
-nodes. They have no UTXO edges and never join activity components. The Complete
-graph frame includes them. New cards count against the normal Miro new-item
-budget. Main-graph compaction measurements exclude them; full-board measurements
-include their estimated footprint.
+New Miro plans no longer create attribution register cards or separate stars.
+Names, suspected prefixes, STOP TRACING indicators, and assigned name colors stay
+on address circles. The A- reference is removed from the Miro circle's visible
+label because there is no longer a matching on-board card. The reference and all
+source/notes data remain in local HTML, graph JSON, and node CSV exports and
+Address review. Local HTML's expandable attribution register remains available.
+Removing cards does not delete or change any assessment or evidence archive.
 
-Local ELK, Mermaid and compact HTML previews provide an expandable attribution
-register. The basic HTML inspection export also exposes the node's evidence
-record. JSON and CSV retain the full fields; nodes.csv includes name, confidence,
-source, notes, stop_tracing and the reference. Legacy service_* export aliases
-remain readable for existing consumers, but classification is no longer a
-standalone node CSV column. Individual old raw evidence records are not rewritten.
+No register column is generated or included in new full-board compaction metrics.
+Longer notes therefore do not increase the Miro graph's item count or its bounds.
 
-Normal sync refreshes generated card content and refits the register beside the
-current managed graph; manually edited content/style is preserved as a conflict.
-Card dimensions may grow to fit longer generated content. Disabling/removing the
-last assessment retires its generated cards. Modified cards or board connectors
-attached to retiring annotations block removal before writes. Preserve Miro
-comments separately before retiring cards: the REST item snapshot does not expose
-comments. Do not edit the board concurrently with sync.
+## Thick red borders: where starting lineages meet
 
-## Corner stars: where starting lineages meet
+Eligible transactions now have a native **red (#ff0000), 12-pixel border**, six
+times the ordinary 2-pixel border. The detector is unchanged. A starting
+transaction can qualify and keeps its purple fill; subsequent transactions keep
+their blue fill. Selected seed address circles still have highest-priority red
+fill. The transaction border does not use attribution confidence or name colors.
+There is no extra marker shape to hide behind another object or drift away when
+the transaction is moved. Miro, basic SVG, ELK/compact SVG, and Mermaid use the same
+border policy. The old corner/inline star is no longer generated.
 
-A small gold star appears inside the upper-right corner of a transaction when
-different starting-transaction lineages meet there. A starting transaction is
-eligible: its own explicitly selected starting origin can meet an earlier origin
-arriving through a verified spend. Origin numbers use the existing global,
-chronological Starting TX indexes, not numbering per activity.
+The exact rule is in `transaction_convergences()` in `liquid_tracer/convergence.py`:
 
-The detector follows only saved, validated UTXO spending links. It checks the
-exact funding output against the spending input. It never follows an edge merely
-because an address is shared, two addresses have the same name, transactions are
-in the same frame, timestamps are close, or inputs are shown as untraced context.
-Multiple selected outputs from one starting transaction count as one origin.
-Active address stops prevent propagation through the blocked path, while
-independent permitted paths can still contribute.
+1. At least two distinct starting transactions must be present in the graph's
+   chronological starting catalog. Multiple selected outputs of one transaction
+   share one origin.
+2. Only `state["links"]` spending links contribute. The exact funding output must
+   be tracked and the recorded spending input must match that outpoint. Merely
+   showing an input as untraced context, sharing an address, sharing a name,
+   being in the same activity frame, or being close in time never creates a link.
+3. Origin sets propagate forward through those saved links. A spendable output
+   at an active stop address does not contribute. Own starting-origin propagation
+   begins only at selected outputs, not unselected sibling outputs.
+4. At a transaction, gather the nonempty incoming origin sets and its own origin
+   when it is itself a starting transaction. Highlight only when there are at
+   least two *different* sets and at least two distinct starting origins in their
+   union: `len(groups) > 1 and combined.bit_count() > 1`.
 
-A transaction is marked when at least two different nonempty origin sets meet,
-counting its own starting origin where applicable. A simple downstream spend
-carrying an already merged lineage is not marked again. Two inputs carrying the
-same previously merged origin set are also not a new convergence. A different
-incoming lineage set meeting that merged set is a new interaction and is marked.
-This definition highlights convergence points, not every multi-input transaction.
+| Situation at a transaction | Highlight? |
+| --- | --- |
+| Inputs carrying {1} and {2} | Yes |
+| Starting TX 2 receives an allowed verified input from Starting TX 1 | Yes |
+| Inputs carrying {1} and {1} | No |
+| One input carrying an already merged {1, 2} | No |
+| Two inputs both carrying the same already merged {1, 2} | No |
+| Inputs carrying {1, 2} and {2}, or {1, 2} and {3} | Yes |
+| Two starting transactions only pay the same shared address circle | No |
+| An apparent second branch is untraced context or blocked by an active stop | No, unless other qualifying branches remain |
 
-The graph JSON and node CSV convergence record list the contributing Starting TX
-numbers and exact input outpoints. A star indicates structural connectivity,
-**not common ownership, stolen-value allocation, or proof that confidential
-inputs/outputs contain the same asset**. Star detection makes no API requests.
+This is convergence of saved UTXO paths, **not common ownership, allocation of
+stolen value, or proof that confidential inputs/outputs have the same asset**.
+The graph JSON and node CSV `convergence` record keep the exact input outpoints
+and chronological Starting TX numbers. No API requests are made by the detector.
+A bounded run cannot highlight a merge whose spending transaction/link has not
+yet been collected.
 
-Miro stars are small transparent shape objects containing a star glyph. Their
-identities are derived from the transaction, not its index or coordinates. They
-are excluded from ELK topology and re-anchor to the actual transaction corner on
-sync, including resized/rotated boxes; they do not follow a manual drag until the
-next sync. Very small transaction boxes are rejected rather than drawing a badge
-outside them. Local SVG shows a polygon star in the same corner. Mermaid's own
-layout uses an inline star in the transaction heading. Stars have no connectors.
+## Diagnosing missing highlights
 
-## Existing investigations and safety
+Check a newly regenerated `graph.json`, not an old reviewed preview. An eligible
+transaction node has a nonempty `convergence` object. The generated Miro plan's
+matching transaction shape should have `style.borderColor="#ff0000"` and
+`style.borderWidth="12"`. These distinguish a detection/scope problem from a
+render/sync issue. Changing the marker from a star to a border does not make a
+transaction qualify when it has no convergence record.
 
-Pull the development branch and restart the application, then use **Sync to
-Miro** to refresh names, stop indicators, register cards and eligible stars.
-Retracing and address-merge migration are not required. Normal sync retains
-transaction positions and IDs and preserves manual labels. Reorganization is
-needed only when new automatic graph positions are desired. Regenerate already
-saved previews: an approved compact preview remains a frozen artifact.
+The old star was a separate 24-by-24 transparent shape containing a glyph. A
+successful synthetic detector test does not establish why a particular live
+board did not display that item. Without the affected saved graph/plan and board
+state, that specific failure remains unverified. Manually edited Miro borders
+remain protected by the usual field-conflict logic and are reported as conflicts.
 
-Historical rules are read without rewriting their files. Candidate and
-corroborated confidence are conservatively interpreted as suspected; confirmed
-stays confirmed. Existing explicit stop flags are preserved. Missing historical
-flags use the historical default once during normalization. New rules have no
-classification field. A later edit records the original previous value in the
-audit history, including old fields. Evidence archives are never migrated in
-place.
+## Updating existing boards safely
 
-Generated annotation creations, updates and removals use the existing durable
-sync journals. An interrupted operation must be retried with the same intended
-presentation. Unknown outcomes are reconciled rather than blindly repeated.
-Only dedicated, proven annotation identities can be retired; ordinary graph
-objects cannot be reclassified as disposable notes or stars. This is not an
-atomic cross-item Miro transaction or an automatic undo mechanism. No live board
-was modified as part of development; tests use synthetic traces and transports.
+Pull the development branch, restart the application, and choose **Sync to
+Miro**. New plans deliberately include an empty presentation-item catalog. This
+allows existing sync to retire previously generated cards and stars using their
+saved creation proofs. Transaction/address/connector identities, positions, labels,
+name colors, and evidence are not recreated or retraced. Generated complete-frame
+bounds are refitted without the old register. Reorganization is optional.
+
+Only proven managed annotations are eligible for deletion. Edited card/star
+content or styles, or connectors attached to retiring annotations, block cleanup
+before writes. Copy important manual notes into Address review or another medium
+first. Preserve comments separately: the REST item snapshot does not back them
+up. Do not remove Miro mapping/checkpoint files or edit the board during sync.
+Interrupted cleanup uses the existing journals; retry the same intended sync.
+This is not an atomic cross-item transaction or an automatic undo operation.
+
+Already saved explicit plans/previews remain historical artifacts. Their legacy
+annotation proofs and placement are still accepted for recovery and validation;
+regenerate a new presentation for the new behavior. Finish or reconcile an
+interrupted old sync before switching presentations. No archived `runs/` files
+or live investigation data are changed by the code update itself.

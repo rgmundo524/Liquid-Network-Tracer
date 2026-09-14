@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 
 from .name_colors import color_text
+from .graph_markers import node_border
 from .common import TraceError, save_json
 from .export import COLORS, edge_color, legend_lines
 
@@ -244,8 +245,8 @@ def _svg(graph, nodes, edges):
              '<title id="title">Liquid trace · ' + _escape(layout_title(graph)) + '</title>',
              '<desc id="desc">' + _escape(layout_notice(graph) + " " + str(graph.get("notice", ""))) + '</desc>',
              '<style>.explorer-link { cursor:pointer; } '
-             '.explorer-link:focus-visible > g > rect, .explorer-link:focus-visible > g > ellipse '
-             '{ stroke:#0f766e; stroke-width:4; }</style>',
+             '.explorer-link:focus-visible > g '
+             '{ filter:drop-shadow(0 0 5px #0f766e); }</style>',
              '<defs>']
     for key, color in (("traced", COLORS["traced_edge"]), ("context", COLORS["context_edge"])):
         lines.append(f'<marker id="arrow-{key}" markerWidth="9" markerHeight="7" refX="8" refY="3.5" '
@@ -264,7 +265,8 @@ def _svg(graph, nodes, edges):
     lines.append('</g><g id="nodes" font-family="sans-serif" text-anchor="middle" fill="#172033">')
     for index, node in enumerate(nodes):
         cx, cy, width, height = node["x"], node["y"], node["width"], node["height"]
-        style = f'fill="{node["color"]}" stroke="#334155" stroke-width="2"'
+        border, thickness = node_border(node)
+        style = f'fill="{node["color"]}" stroke="{border}" stroke-width="{thickness}"'
         url = _explorer_url(graph, node)
         title = str(node.get("label", ""))
         if url:
@@ -301,8 +303,7 @@ def _svg(graph, nodes, edges):
             baseline = cy + (row_count - 1) * 8 + 4
             lines.append(f'<text x="{_fmt(cx)}" y="{_fmt(baseline)}" font-size="11" '
                          f'fill="{color_text(node["color"])}" text-decoration="underline">Explorer</text>')
-        from .presentation_items import svg_badge
-        lines.append('</g>' + svg_badge(node) + '</g>')
+        lines.append('</g></g>')
         if url:
             lines.append('</a>')
     lines.append('</g><g id="captions" font-family="sans-serif" font-size="11" text-anchor="middle" fill="#334155">')
