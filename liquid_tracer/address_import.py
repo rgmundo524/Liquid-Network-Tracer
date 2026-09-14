@@ -94,7 +94,7 @@ def _row(value):
             raise TraceError("Unsupported field; use the supplied Liquid address-import template")
         fields[name] = item
     address = validate_address(fields.get("address"))
-    metadata = {"confidence": _text(_value(fields, "confidence", "suspected"), "Confidence", 30),
+    metadata = {"confidence": _text(_value(fields, "confidence", "suspected"), "Confidence", 30).casefold(),
                 "source": _text(_value(fields, "source", "Investigator designation"), "Source", 1000, required=True),
                 "observed_at": _text(_value(fields, "observed_at"), "Observation date", 80),
                 "stop_tracing": _boolean(fields.get("stop_tracing"), "Stop tracing", True)}
@@ -155,7 +155,7 @@ def parse_import(text, format="auto"):
                 row = _row(raw)
                 existing = accepted.get(row["address"])
                 if existing:
-                    if existing["rule"] != row:
+                    if not _same_assessment(existing["rule"], row):
                         raise TraceError("Conflicting entries for the same address (first at row " + str(existing["row"]) + ")")
                     duplicates += 1
                 else:
@@ -176,6 +176,17 @@ def _semantic(rule):
     return {key: rule[key] for key in ("address", "name", "enabled")} | {"notes": notes_for(rule)} | rule_fields(rule)
 
 
+def _same_assessment(left, right):
+    """Compare names without case, preserving original spelling and all other fields.
+
+    Only this comparison copy is folded. Address identity, source references,
+    notes, reviewed input hashes, and stored/displayed names stay unchanged.
+    """
+    left, right = _semantic(left), _semantic(right)
+    left["name"], right["name"] = left["name"].casefold(), right["name"].casefold()
+    return left == right
+
+
 def _plan(settings, parsed, policy):
     if not isinstance(policy, str) or policy not in ("keep", "replace"):
         raise TraceError("Conflict policy must be keep or replace")
@@ -184,7 +195,7 @@ def _plan(settings, parsed, policy):
     for entry in parsed["rows"]:
         new = entry["rule"]
         previous = settings["rules"].get(new["address"])
-        action = "add" if previous is None else "unchanged" if _semantic(previous) == new else policy
+        action = "add" if previous is None else "unchanged" if _same_assessment(previous, new) else policy
         counts[action] += 1
         changes.append({**entry, "action": action, "previous": _semantic(previous) if previous else None})
     valid = not parsed["errors"]
