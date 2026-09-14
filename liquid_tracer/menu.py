@@ -993,6 +993,8 @@ def create_app(root=None):
                     yield Button("Preview Miro", id="preview")
                     yield Button("Sync to Miro", id="sync")
                 with Horizontal(classes="buttons"):
+                    yield Button("Starter connections", id="connections")
+                    yield Button("Publish starter connections to Miro", id="connections-publish")
                     yield Button("Mermaid chart", id="mermaid")
                     yield Button("Export CSV", id="csv")
                 with Horizontal(classes="buttons"):
@@ -1033,6 +1035,8 @@ def create_app(root=None):
                 self.query_one("#layout", Button).disabled = self.app.busy or not (board and metadata.get("latest_run"))
                 self.query_one("#address-merge", Button).disabled = self.app.busy or not (board and metadata.get("latest_run"))
                 self.query_one("#mermaid", Button).disabled = self.app.busy or not metadata.get("latest_run")
+                for action in ("connections", "connections-publish"):
+                    self.query_one("#" + action, Button).disabled = self.app.busy or not metadata.get("latest_run")
                 self.query_one("#csv", Button).disabled = self.app.busy or not metadata.get("latest_run")
                 self.query_one("#elk-preview", Button).disabled = self.app.busy or not metadata.get("latest_run")
                 self.query_one("#compact-preview", Button).disabled = self.app.busy or not metadata.get("latest_run")
@@ -1080,6 +1084,10 @@ def create_app(root=None):
                     self.app.push_screen(FormScreen("case", self.case))
                 elif action == "create-board":
                     self.app.push_screen(CreateBoardScreen(self.case), self.perform)
+                elif action in ("connections", "connections-publish"):
+                    from .connections_menu import connection_screen
+                    self.app.push_screen(connection_screen(BaseScreen, Button, self.case,
+                                         publish=action == "connections-publish"), self.perform)
                 elif action == "mermaid":
                     _latest(self.case, read_case(self.case), verify=True)
                     self.perform((["mermaid", "--case", str(self.case), "--run", "latest", "--open"], False))
@@ -1137,7 +1145,7 @@ def create_app(root=None):
             self.current_action = arguments[0]
             self.reorganizing = "--reorganize" in arguments
             self.applying_compaction = "--compact-preview" in arguments
-            if not live and self.current_action in ("layout-preview", "compact-preview", "mermaid"):
+            if not live and self.current_action in ("layout-preview", "compact-preview", "mermaid", "connections"):
                 self.app.active_calculation = _OfflineCalculation()
                 self.calculation_started = time.monotonic()
             self.set_busy(True)
@@ -1190,6 +1198,17 @@ def create_app(root=None):
             elif getattr(self, "current_action", None) == "miro-create-board":
                 message = ("Miro board saved. Choose Preview Miro, then Sync to Miro to add the traced graph."
                            if status == 0 else "Board creation did not complete. Check the terminal result before retrying.")
+            elif getattr(self, "current_action", None) == "connections":
+                message = "Connection preview did not complete; saved evidence is unchanged."
+                if status == 0:
+                    try:
+                        result = json.loads(output)
+                        message = ("No connection found in the saved searched data. Nothing was plotted. "
+                                   if result.get("connection_count") == 0 else
+                                   f"Connection-only chart saved: {result.get('connection_count')} starter pair(s). ")
+                        message += "Full Miro graph unchanged. " + str(result.get("html", ""))
+                    except (ValueError, AttributeError):
+                        pass
             elif getattr(self, "current_action", None) == "mermaid":
                 message = ("Mermaid chart saved. Preview paths are listed below." if status == 0
                            else "Mermaid chart did not complete. Check the result below; saved evidence remains available.")
