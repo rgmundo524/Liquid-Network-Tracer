@@ -1,0 +1,23 @@
+name: Graph marker maintenance
+on:
+  push:
+    branches: [codex/protonpass-development]
+    paths: [.github/workflows/graph-marker-maintenance.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Archive version-controlled source
+        run: git archive --format=tar.gz --output=graph-marker-source.tar.gz HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: graph-marker-source
+          path: graph-marker-source.tar.gz
+          retention-days: 1
