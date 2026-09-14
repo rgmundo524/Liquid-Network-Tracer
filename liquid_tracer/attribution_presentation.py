@@ -33,7 +33,10 @@ def attribution_lines(node):
     if details.get("name_colors"):
         lines.append("Assigned name colors: " + ", ".join(name + " = " + color for name, color in details["name_colors"].items()))
         if node.get("role") == "seed":
-            lines.append("Display: selected seed red takes priority over assigned colors.")
+            if node.get("color_source") == "role_palette":
+                lines.append("Display: selected seed color " + node["color"] + " takes priority over assigned colors.")
+            else:
+                lines.append("Display: selected seed red takes priority over assigned colors.")
         elif details.get("name_color_conflict"):
             lines.append("Display: conflicting name colors; normal trace-role color retained.")
     return lines

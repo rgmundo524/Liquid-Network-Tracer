@@ -2,6 +2,7 @@
 
 from .common import TraceError
 from .name_colors import COLOR_PRESETS, NOTICE, name_color_catalog, set_name_colors
+from .role_colors import ROLE_LABELS
 
 
 def name_color_screen(base, button, case):
@@ -19,7 +20,7 @@ def name_color_screen(base, button, case):
         def compose(self):
             yield Header()
             with VerticalScroll(classes="form-panel"):
-                yield Label("Assign name colors", classes="title")
+                yield Label("Assign colors", classes="title")
                 yield Static(NOTICE, markup=False)
                 yield Input(placeholder="Search attribution names", id="name-color-search")
                 with Horizontal(classes="buttons"):
@@ -30,6 +31,9 @@ def name_color_screen(base, button, case):
                 table = DataTable(id="name-color-rows", cursor_type="row")
                 table.styles.height = 10
                 yield table
+                yield Label("Or choose a graph role (no imported name required)")
+                yield Select([("Choose graph role", "")] + [(label, role) for role, label in ROLE_LABELS.items()],
+                             value="", allow_blank=False, id="name-color-role")
                 yield Static("Select a name with Enter. No colors are assigned automatically.", id="name-color-selected", markup=False)
                 yield Label("Palette (fills the color field)")
                 yield Select([("Custom / default", "")] + list(COLOR_PRESETS),
@@ -39,7 +43,7 @@ def name_color_screen(base, button, case):
                 yield Static("", id="name-color-error", markup=False)
             with Horizontal(classes="buttons form-actions"):
                 yield button("Back", id="name-color-back")
-                yield button("Clear assignment", id="name-color-clear", disabled=True)
+                yield button("Clear / reset to default", id="name-color-clear", disabled=True)
                 yield button("Save color", id="name-color-save", variant="primary", disabled=True)
             yield Footer()
 
@@ -53,6 +57,9 @@ def name_color_screen(base, button, case):
 
         def load(self):
             self.selected = None
+            self.query_one("#name-color-role", Select).value = ""
+            self.query_one("#name-color-value", Input).value = ""
+            self.query_one("#name-color-palette", Select).value = ""
             self.query_one("#name-color-save", button).disabled = True
             self.query_one("#name-color-clear", button).disabled = True
             self.report = name_color_catalog(case, query=self.query_one("#name-color-search", Input).value,
@@ -72,6 +79,7 @@ def name_color_screen(base, button, case):
         def on_data_table_row_selected(self, event: DataTable.RowSelected):
             if event.data_table.id != "name-color-rows" or not self.report:
                 return
+            self.query_one("#name-color-role", Select).value = ""
             self.selected = self.report["rows"][int(event.row_key.value)]
             self.query_one("#name-color-selected", Static).update(
                 "Name: " + self.selected["name"] + "\nSpellings: " + ", ".join(self.selected["variants"]))
@@ -81,7 +89,16 @@ def name_color_screen(base, button, case):
             self.query_one("#name-color-clear", button).disabled = False
 
         def on_select_changed(self, event: Select.Changed):
-            if event.select.id == "name-color-palette" and event.value:
+            if event.select.id == "name-color-role" and event.value and self.report:
+                self.selected = next(row for row in self.report["roles"] if row["role"] == event.value)
+                self.query_one("#name-color-selected", Static).update(
+                    "Role: " + self.selected["name"] + "\nDefault: " + self.selected["default_color"]
+                    + ". Seed priority and existing borders are unchanged.")
+                self.query_one("#name-color-palette", Select).value = ""
+                self.query_one("#name-color-value", Input).value = self.selected["color"] or self.selected["default_color"]
+                self.query_one("#name-color-save", button).disabled = False
+                self.query_one("#name-color-clear", button).disabled = False
+            elif event.select.id == "name-color-palette" and event.value:
                 self.query_one("#name-color-value", Input).value = event.value
 
         def on_input_submitted(self, event: Input.Submitted):
@@ -108,9 +125,10 @@ def name_color_screen(base, button, case):
                     error.update("")
                 elif action in ("name-color-save", "name-color-clear"):
                     if not self.selected or not self.report:
-                        raise TraceError("Select a name first")
+                        raise TraceError("Select a name or graph role first")
                     color = None if action == "name-color-clear" else self.query_one("#name-color-value", Input).value
-                    result = set_name_colors(case, [{"name": self.selected["name"], "color": color}],
+                    target = {"role": self.selected["role"]} if "role" in self.selected else {"name": self.selected["name"]}
+                    result = set_name_colors(case, [{**target, "color": color}],
                                              expected_revision=self.report["revision"])
                     self.load()
                     error.update(f"Saved {result['changed']} color assignment(s). Regenerate previews or sync Miro; no tracing is needed.")

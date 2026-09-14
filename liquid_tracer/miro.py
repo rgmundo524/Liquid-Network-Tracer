@@ -37,7 +37,7 @@ def make_plan(graph):
         title += " · " + graph["run_id"]
     shapes.append({"key": "legend", "body": {"data": {"shape": "rectangle", "content":
         "<p><strong>" + html.escape(title) + "</strong></p><p>"
-        + "<br>".join(html.escape(line) for line in legend_lines())
+        + "<br>".join(html.escape(line) for line in legend_lines(graph))
         + "</p><p>" + html.escape(graph["notice"]) + "</p>"},
         "position": {"x": 700, "y": -160, "origin": "center"}, "geometry": {"width": 1300, "height": 260},
         "style": {"fillColor": COLORS["address"], "fontSize": "14", "textAlign": "left"}}})

@@ -80,6 +80,8 @@ def _validate(data, identity):
         _text(notes_for(rule), "Notes", 4000, multiline=True)
     from .name_colors import validate_name_colors
     validate_name_colors(data.get("name_colors", {}))
+    from .role_colors import validate_role_colors
+    validate_role_colors(data.get("role_colors", {}))
     return data
 
 

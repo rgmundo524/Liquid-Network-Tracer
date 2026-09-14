@@ -295,7 +295,7 @@ class SharedReceiptPresentationTests(unittest.TestCase):
                 self.assertEqual(shape["body"]["style"]["fillColor"], COLORS["seed"])
                 self.assertIn("Suspected Example Exchange", shape["body"]["data"]["content"])
             for content, attr in ((svg_graph(graph), "data-key"), (render_svg(graph), "data-node-id")):
-                self.assertNotIn("SHARED ADDRESS", content)
+                self.assertNotIn("SHARED ADDRESS", content.decode("utf-8") if isinstance(content, bytes) else content)
                 element = next(e for e in ET.fromstring(content).iter() if e.get(attr) == node["id"])
                 self.assertTrue(any(e.get("stroke") == "#ff0000" and e.get("stroke-width") == "12" for e in element.iter()))
         source = mermaid_source(graph)

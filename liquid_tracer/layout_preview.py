@@ -344,7 +344,7 @@ def _preview_html(graph, svg, metrics):
     # allowlisted renderer output so links work offline and in the local UI.
     from .attribution_presentation import register_html
     inline_svg = svg.decode("utf-8")
-    legend = "".join("<li>" + _escape(line) + "</li>" for line in legend_lines())
+    legend = "".join("<li>" + _escape(line) + "</li>" for line in legend_lines(graph))
     simulated = " · Synthetic demonstration data" if graph.get("simulated") else ""
     fees = "included" if graph.get("include_fees") else "hidden"
     return f'''<!doctype html>
