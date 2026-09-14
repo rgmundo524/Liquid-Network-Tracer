@@ -25,6 +25,12 @@ jobs:
           raw = lzma.decompress(base64.b64decode(Path('.github/role-colors-change.b64').read_bytes()))
           assert hashlib.sha256(raw).hexdigest() == '5b98b0658bfd207469c5521e15386e96707e4379bc9fb49bd5366d896203d04b', 'Source payload integrity mismatch'
           exec(compile(raw, '<guarded-role-color-update>', 'exec'))
+          path = Path('liquid_tracer/export.py')
+          text = path.read_text()
+          old = 'SHARED ADDRESS = receipts from distinct branches at one address, including earlier senders.'
+          new = 'shared-address receipts from distinct branches also highlight the receiving address and all participating senders.'
+          assert text.count(old) == 1, 'Unexpected border legend'
+          path.write_text(text.replace(old, new))
           PY
           git rm .github/role-colors-change.b64 .github/workflows/role-colors-check.yml
           git add liquid_tracer/name_colors.py liquid_tracer/role_colors.py liquid_tracer/services.py liquid_tracer/export.py liquid_tracer/attribution_presentation.py liquid_tracer/name_colors_menu.py liquid_tracer/layout_preview.py liquid_tracer/mermaid.py liquid_tracer/miro.py web/src/scripts/name-colors.ts tests/test_role_colors.py docs/name-colors.md
@@ -34,8 +40,8 @@ jobs:
           python3 -m venv .venv
           .venv/bin/python -m pip install '.[tui]'
           npm --prefix layout ci --ignore-scripts --no-audit --no-fund
-      - name: Run focused role-color tests
-        run: .venv/bin/python -m unittest tests.test_role_colors -v
+      - name: Run focused role-color and border-only presentation tests
+        run: .venv/bin/python -m unittest tests.test_role_colors tests.test_branch_interactions -v
       - name: Run full offline regression suite
         run: .venv/bin/python -m unittest discover -s tests -v
       - name: Check and build browser interface
