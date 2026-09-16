@@ -1,0 +1,82 @@
+name: Validate inline address transaction counts
+on:
+  push:
+    branches: [codex/inline-address-counts]
+    paths: [.github/inline-counts.b64, .github/workflows/inline-counts-verify.yml]
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.19.0'
+      - name: Apply exact locally checked source changes
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma
+          from pathlib import Path
+          raw = lzma.decompress(base64.b64decode(Path('.github/inline-counts.b64').read_bytes(), validate=False))
+          assert hashlib.sha256(raw).hexdigest() == 'ddb35b482af6ce3aaa5b84fbb7048f5523f4d1bada7f32628bd3c2d2ff16e137'
+          prepared = {}
+          for change in json.loads(raw):
+              path = Path(change['path'])
+              assert not path.is_absolute() and '..' not in path.parts
+              assert path.parts[0] in ('liquid_tracer', 'tests', 'docs')
+              assert path not in prepared and not path.is_symlink()
+              old = path.read_bytes() if path.exists() else b''
+              assert hashlib.sha256(old).hexdigest() == change['before'], str(path)
+              text = old.decode('utf-8')
+              end = len(text)
+              for start, stop, replacement in reversed(change['ops']):
+                  assert type(start) is int and type(stop) is int and 0 <= start <= stop <= end
+                  text = text[:start] + replacement + text[stop:]
+                  end = start
+              updated = text.encode('utf-8')
+              assert hashlib.sha256(updated).hexdigest() == change['after'], str(path)
+              prepared[path] = updated
+          path = Path('tests/test_miro_sync.py')
+          old = path.read_bytes()
+          assert hashlib.sha1(b'blob ' + str(len(old)).encode() + b'\0' + old).hexdigest() == '388e55b2c009893d5c7db0545c4408ea389f83d6'
+          text = old.decode('utf-8').replace('        self.groups = {}\n        self.group_counter = 0\n', '')
+          start = text.index('        path = urlsplit(url).path\n')
+          stop = text.index('        if method == "GET" and urlsplit(url).path.endswith("/items"):', start)
+          text = text[:start] + '        if "/groups" in urlsplit(url).path:\n            raise AssertionError("Grouping API has been retired")\n' + text[stop:]
+          updated = text.encode('utf-8')
+          assert hashlib.sha256(updated).hexdigest() == 'a7674e3fde972973e781f2997dd921b3b61f9da460f9671eb3bad036fe9c3f15'
+          prepared[path] = updated
+          for path, content in prepared.items():
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_bytes(content)
+          PY
+          git rm liquid_tracer/miro_address_groups.py tests/test_miro_address_groups.py tests/test_miro_group_verification.py tests/test_miro_group_response_shapes.py docs/address-count-groups.md docs/address-group-verification.md docs/group-response-pagination.md
+          git rm .github/inline-counts.b64 .github/workflows/inline-counts-verify.yml
+          git add liquid_tracer tests docs
+          git diff --cached --check
+      - name: Install regression dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install '.[tui]'
+          npm --prefix layout ci --ignore-scripts --no-audit --no-fund
+      - name: Verify inline labels, migration, and no grouping calls
+        run: .venv/bin/python -m unittest tests.test_inline_address_counts tests.test_address_count_labels tests.test_automatic_address_counts tests.test_presentation_annotations tests.test_miro_sync tests.test_mermaid tests.test_layout_preview -v
+      - name: Check and build browser interface
+        run: |
+          npm --prefix web ci --ignore-scripts --no-audit --no-fund
+          npm --prefix web run check
+          npm --prefix web run build
+      - name: Run full offline regression suite
+        run: .venv/bin/python -m unittest discover -s tests -v
+      - name: Publish validated source on feature branch
+        run: |
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Embed transaction counts inside address circles and remove Miro grouping'
+          git push origin HEAD:refs/heads/codex/inline-address-counts
