@@ -1,0 +1,39 @@
+name: Transaction CSV checks
+on:
+  push:
+    branches: [codex/transaction-csv]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Capture source snapshot
+        run: git archive --format=tar HEAD > /tmp/transaction-csv-source.tar
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: transaction-csv-source
+          path: /tmp/transaction-csv-source.tar
+          retention-days: 2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        if: hashFiles('tests/test_transaction_csv.py') != ''
+        with:
+          node-version: '24.19.0'
+      - name: Test transaction CSV and all offline regressions
+        if: hashFiles('tests/test_transaction_csv.py') != ''
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install '.[tui]'
+          npm --prefix layout ci --ignore-scripts --no-audit --no-fund
+          .venv/bin/python -m unittest tests.test_transaction_csv -v
+          .venv/bin/python -m unittest discover -s tests -v
+      - name: Check and build browser interface
+        if: hashFiles('tests/test_transaction_csv.py') != ''
+        run: |
+          npm --prefix web ci --ignore-scripts --no-audit --no-fund
+          npm --prefix web run check
+          npm --prefix web run build
