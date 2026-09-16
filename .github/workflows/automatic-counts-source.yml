@@ -1,0 +1,21 @@
+name: Prepare automatic count test source
+on:
+  push:
+    branches: [codex/automatic-address-counts]
+    paths: [.github/workflows/automatic-counts-source.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: d96028a4419a7f7b622bf1c86a779a4da36136dc
+      - run: git archive HEAD > /tmp/automatic-counts-source.tar
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: automatic-counts-source
+          path: /tmp/automatic-counts-source.tar
+          retention-days: 2
