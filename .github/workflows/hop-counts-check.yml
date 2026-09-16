@@ -1,0 +1,18 @@
+name: Attribution hop limits and address counts
+on:
+  push:
+    branches: [codex/attribution-hop-counts]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Package tracked source
+        run: git archive --format=tar HEAD > /tmp/hop-counts-source.tar
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hop-counts-source
+          path: /tmp/hop-counts-source.tar
+          retention-days: 2
