@@ -2,7 +2,10 @@
 
 The **Starter connections** option builds a separate, connection-only graph from
 an existing saved run. The ordinary full graph and original trace archives stay
-unchanged. It does not start another blockchain search or use Blockstream credits.
+unchanged. Path selection uses saved evidence and does not retrace transactions.
+Missing transaction counts for displayed addresses are fetched automatically;
+these statistics requests can use Blockstream credits. See [automatic address
+counts](automatic-address-counts.md). An empty connection graph makes no requests.
 
 ## Example: three starters and ten hops
 
