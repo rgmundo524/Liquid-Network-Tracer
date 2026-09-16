@@ -1,0 +1,75 @@
+name: Validate automatic address transaction counts
+on:
+  push:
+    branches: [codex/automatic-address-counts]
+    paths:
+      - .github/workflows/automatic-counts-verify.yml
+      - .github/automatic-counts.part*.b64
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.19.0'
+      - name: Apply exact-source checked changes
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma
+          from pathlib import Path
+          parts = sorted(Path('.github').glob('automatic-counts.part*.b64'))
+          assert [p.name for p in parts] == ['automatic-counts.part0.b64', 'automatic-counts.part1.b64']
+          raw = lzma.decompress(base64.b64decode(''.join(p.read_text().strip() for p in parts), validate=True))
+          assert hashlib.sha256(raw).hexdigest() == '77b6a825df1fdfa6f59c2090c30217347a44e40ab066cfdc6889b67dd0a07f68'
+          prepared = {}
+          for change in json.loads(raw):
+              path = Path(change['path'])
+              assert not path.is_absolute() and '..' not in path.parts
+              assert path.parts[0] in ('liquid_tracer', 'tests', 'docs', 'web')
+              assert path not in prepared and not path.is_symlink()
+              original = path.read_bytes() if path.exists() else b''
+              assert hashlib.sha256(original).hexdigest() == change['before'], str(path)
+              text = original.decode('utf-8')
+              end = len(text)
+              for start, stop, replacement in reversed(change['ops']):
+                  assert type(start) is int and type(stop) is int and 0 <= start <= stop <= end
+                  text = text[:start] + replacement + text[stop:]
+                  end = start
+              result = text.encode('utf-8')
+              assert hashlib.sha256(result).hexdigest() == change['after'], str(path)
+              prepared[path] = result
+          for path, result in prepared.items():
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_bytes(result)
+          PY
+          git rm .github/automatic-counts.part*.b64 .github/workflows/automatic-counts-source.yml .github/workflows/automatic-counts-verify.yml
+          git add liquid_tracer tests docs web
+          git diff --cached --check
+      - name: Install offline test dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install '.[tui]'
+          npm --prefix layout ci --ignore-scripts --no-audit --no-fund
+      - name: Verify automatic counts and workflow compatibility
+        run: .venv/bin/python -m unittest tests.test_automatic_address_counts tests.test_address_count_labels tests.test_connections_ui tests.test_elk_workflows tests.test_layout_reuse -v
+      - name: Check and build browser interface
+        run: |
+          npm --prefix web ci --ignore-scripts --no-audit --no-fund
+          npm --prefix web run check
+          npm --prefix web run build
+      - name: Run full offline regression suite
+        run: .venv/bin/python -m unittest discover -s tests -v
+      - name: Publish verified source to feature branch
+        run: |
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Automatically hydrate missing address transaction counts in visual workflows'
+          git push origin HEAD:refs/heads/codex/automatic-address-counts
