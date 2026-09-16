@@ -51,6 +51,24 @@ jobs:
           updated = text.encode('utf-8')
           assert hashlib.sha256(updated).hexdigest() == 'a7674e3fde972973e781f2997dd921b3b61f9da460f9671eb3bad036fe9c3f15'
           prepared[path] = updated
+          path = Path('liquid_tracer/export.py')
+          text = prepared[path].decode('utf-8')
+          old = '        chunks.append(f\'<g class="node" data-key="{html.escape(node["id"], quote=True)}" tabindex="0" style="cursor:pointer"><title>{html.escape(json.dumps(node["details"], ensure_ascii=False))}</title>\')'
+          new = '        title = node["label"] + "\\n" + json.dumps(node["details"], ensure_ascii=False)\n        chunks.append(f\'<g class="node" data-key="{html.escape(node["id"], quote=True)}" tabindex="0" style="cursor:pointer"><title>{html.escape(title)}</title>\')'
+          assert text.count(old) == 1
+          prepared[path] = text.replace(old, new).encode('utf-8')
+          assert hashlib.sha256(prepared[path]).hexdigest() == 'b7dc89ec970bb1effaccb048d41a9c99ee9e005233427ca13b9b6f14ed4abd03'
+          path = Path('tests/test_inline_address_counts.py')
+          text = prepared[path].decode('utf-8')
+          old = '    def test_svg_count_is_below_explorer_and_inside_address(self):\n        for renderer'
+          new = '    def test_svg_count_is_below_explorer_and_inside_address(self):\n        for node in self.addresses:\n            node["label"] = "Suspected Synthetic exchange with a long label\\n" + node["label"]\n        for renderer'
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+          old = "                texts = list(group.iter(NS + 'text'))"
+          new = "                self.assertIn(node['label'], group.find(NS + 'title').text)\n                texts = list(group.iter(NS + 'text'))"
+          assert text.count(old) == 1
+          prepared[path] = text.replace(old, new).encode('utf-8')
+          assert hashlib.sha256(prepared[path]).hexdigest() == '800152930c91c990264475f4e22f6c30432ffcbc07d6223aa04d6338b7ebc943'
           for path, content in prepared.items():
               path.parent.mkdir(parents=True, exist_ok=True)
               path.write_bytes(content)
@@ -65,7 +83,7 @@ jobs:
           .venv/bin/python -m pip install '.[tui]'
           npm --prefix layout ci --ignore-scripts --no-audit --no-fund
       - name: Verify inline labels, migration, and no grouping calls
-        run: .venv/bin/python -m unittest tests.test_inline_address_counts tests.test_address_count_labels tests.test_automatic_address_counts tests.test_presentation_annotations tests.test_miro_sync tests.test_mermaid tests.test_layout_preview -v
+        run: .venv/bin/python -m unittest tests.test_inline_address_counts tests.test_address_count_labels tests.test_automatic_address_counts tests.test_presentation_annotations tests.test_miro_sync tests.test_mermaid tests.test_layout_preview tests.test_service_presentation -v
       - name: Check and build browser interface
         run: |
           npm --prefix web ci --ignore-scripts --no-audit --no-fund
