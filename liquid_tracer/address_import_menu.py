@@ -45,7 +45,7 @@ def import_screen(base, button, case):
             yield Footer()
 
         def on_mount(self):
-            self.query_one("#import-rows", DataTable).add_columns("Row", "Address", "Action", "Name", "Confidence", "Stop")
+            self.query_one("#import-rows", DataTable).add_columns("Row", "Address", "Action", "Name", "Confidence", "Stop", "hop_limit")
             self.query_one("#import-file", Input).focus()
 
         def invalidate(self):
@@ -111,7 +111,8 @@ def import_screen(base, button, case):
                         row = entry["rule"]
                         table.add_row(str(entry["row"]), Text(row["address"]), entry["action"], Text(row["name"]),
                                       row["confidence"],
-                                      "Yes" if row["enabled"] and row["stop_tracing"] else "No", key=str(index))
+                                      "Yes" if row["enabled"] and row["stop_tracing"] else "No",
+                                      str(row["hop_limit"]) if row.get("hop_limit") is not None else "", key=str(index))
                     counts = self.review["counts"]
                     self.query_one("#import-summary", Static).update(
                         f"{self.review['unique_addresses']} unique addresses; {counts['add']} new, "

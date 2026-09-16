@@ -21,7 +21,7 @@ assignments. These settings are per investigation, not global.
 | Child / downstream transactions | Blue, `#a6ccf5` | `transaction` |
 | Context addresses | Light gray, `#f5f6f8` | `address` |
 | Child / reachable addresses | Yellow, `#fff9b1` | `candidate` |
-| Unspent endpoints | Orange, `#fdba74` | `unspent_endpoint` |
+| Unspent | Orange, `#fdba74` | `unspent_endpoint` |
 | Events, fees and unspendable outputs | Pink, `#ea94bb` | `event` |
 
 Only fills are configured here. Connector colors, border colors, border widths,
@@ -36,7 +36,7 @@ address remains a seed whenever any displayed Liquid occurrence is a selected
 seed. Starting-transaction role similarly takes priority over downstream role.
 
 For other Liquid addresses, an assigned name color overrides the role fill.
-Without an applicable name assignment, precedence remains unspent endpoint,
+Without an applicable name assignment, precedence remains unspent,
 reachable child/candidate, then context, using each role's configured color.
 Colors never assign ownership, allocate value, change confidence, or override a
 tracing stop. Text switches between light and dark for readability.
@@ -52,10 +52,10 @@ Conflicting assigned colors on independent assessments retain the applicable
 role color and report the conflict in the local attribution register. Several
 names with the same assigned color are compatible. Name and role assignments
 are independent of confidence, sources, notes, observation dates and stop flags.
-The six-column attribution format is unchanged:
+The attribution format includes an optional hop limit:
 
 ```csv
-Address,Name,confidence,stop_tracing,source,notes
+Address,Name,confidence,stop_tracing,hop_limit,source,notes
 ```
 
 ## Persistence and existing diagrams

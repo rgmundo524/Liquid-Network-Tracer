@@ -122,9 +122,13 @@ class PresentationRefreshTests(unittest.TestCase):
         self.assertEqual((repeated["created"], repeated["updated"]), (0, 0))
         self.assertEqual(len(self.remote.writes), writes)
         self.assertEqual(len([call for call in self.remote.calls if call[0] == "POST"]), posts)
+        count_ids = {ids[k] for k,p in self.current_plan["presentation_items"].items() if p["kind"] == "address_count"}
         for method, url, body in self.remote.writes:
             if method == "PATCH" and "/frames/" not in url:
-                self.assertFalse({"position", "geometry", "startItem", "endItem"} & body.keys())
+                forbidden = {"geometry", "startItem", "endItem"}
+                if url.rsplit("/",1)[-1] not in count_ids:
+                    forbidden.add("position")
+                self.assertFalse(forbidden & body.keys())
         self.assertEqual(self.snapshot(self.run), self.archive)
         self.assertEqual(read_json(self.case / "case.json")["latest_run"], latest)
         verify_export(self.run)

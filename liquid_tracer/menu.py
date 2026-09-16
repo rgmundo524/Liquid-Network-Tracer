@@ -629,6 +629,8 @@ def create_app(root=None):
                 yield Button("Refresh address activity", id="address-refresh", disabled=True)
                 yield Checkbox("Enable this address assessment", id="service-enabled")
                 yield Checkbox("Stop tracing through this address", value=True, id="service-stop")
+                yield Label("hop_limit (blank = no local cap; 0 = stop; 1 = one consolidation hop)")
+                yield Input(id="service-hop-limit", placeholder="No local cap")
                 yield Label("Confidence (your assessment, not automatic verification)")
                 yield Select([("Suspected", "suspected"), ("Confirmed", "confirmed")],
                              value="suspected", allow_blank=False, id="service-confidence")
@@ -693,6 +695,7 @@ def create_app(root=None):
             from .services import rule_fields
             fields = rule_fields(rule)
             self.query_one("#service-stop", Checkbox).value = fields["stop_tracing"]
+            self.query_one("#service-hop-limit", Input).value = (str(fields["hop_limit"]) if fields["hop_limit"] is not None else "")
             self.query_one("#service-confidence", Select).value = fields["confidence"]
             self.query_one("#service-source", Input).value = fields["source"]
             self.query_one("#service-observed", Input).value = fields["observed_at"]
@@ -760,11 +763,12 @@ def create_app(root=None):
                                 confidence=self.query_one("#service-confidence", Select).value,
                                 source=self.query_one("#service-source", Input).value,
                                 observed_at=self.query_one("#service-observed", Input).value,
-                                stop_tracing=self.query_one("#service-stop", Checkbox).value)
+                                stop_tracing=self.query_one("#service-stop", Checkbox).value,
+                                hop_limit=self.query_one("#service-hop-limit", Input).value)
                     self.load_page()
                     self.query_one("#address-error", Static).update(
                         ("Address stop saved. It applies to the next run." if self.query_one("#service-stop", Checkbox).value
-                         else "Attribution saved without a tracing stop.") if enabled else
+                         else "Attribution and hop limit saved. Blank means no local cap.") if enabled else
                         "Assessment disabled. Future runs may trace through this address.")
             except ACTION_ERRORS as error:
                 self.query_one("#address-error", Static).update(str(error))
@@ -1003,6 +1007,8 @@ def create_app(root=None):
                 with Horizontal(classes="buttons"):
                     yield Button("Import address attributions", id="addresses-import")
                     yield Button("Assign name colors", id="name-colors")
+                yield Button("Fetch address transaction counts", id="address-counts")
+                yield Static("Counts use one statistics request per uncached address, within this investigation's API/time budget. Then regenerate a preview or sync Miro.", markup=False)
                 yield Button("Merge duplicate addresses", id="address-merge")
                 with Horizontal(classes="buttons"):
                     yield Button("Compact graph (offline preview)", id="compact-preview")
@@ -1037,6 +1043,7 @@ def create_app(root=None):
                 self.query_one("#mermaid", Button).disabled = self.app.busy or not metadata.get("latest_run")
                 for action in ("connections", "connections-publish"):
                     self.query_one("#" + action, Button).disabled = self.app.busy or not metadata.get("latest_run")
+                self.query_one("#address-counts", Button).disabled = self.app.busy or not metadata.get("latest_run")
                 self.query_one("#csv", Button).disabled = self.app.busy or not metadata.get("latest_run")
                 self.query_one("#elk-preview", Button).disabled = self.app.busy or not metadata.get("latest_run")
                 self.query_one("#compact-preview", Button).disabled = self.app.busy or not metadata.get("latest_run")
@@ -1105,6 +1112,11 @@ def create_app(root=None):
                         raise TraceError("Create a compact comparison for the latest saved run before applying it.")
                     verified_compaction_preview(self.case, state["run_id"], preview_id)
                     self.app.push_screen(CompactApplyScreen(self.case, state["run_id"], preview_id), self.perform)
+                elif action == "address-counts":
+                    metadata = read_case(self.case)
+                    settings = validate_settings(metadata.get("run_defaults", {}))
+                    self.perform((["address-counts", "--case", str(self.case), "--run", "latest",
+                                   "--max-requests", str(settings["max_requests"]), "--max-seconds", str(settings["max_seconds"])], not bool(metadata.get("fixture"))))
                 elif action == "csv":
                     _latest(self.case, read_case(self.case), verify=True)
                     self.perform((["csv-export", "--case", str(self.case), "--run", "latest"], False))

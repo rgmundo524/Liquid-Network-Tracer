@@ -283,6 +283,9 @@ def _svg(graph, nodes, edges):
             polygon = [(cx, cy - height / 2), (cx + width / 2, cy), (cx, cy + height / 2), (cx - width / 2, cy)]
             shape = '<polygon points="' + ' '.join(_fmt(a) + ',' + _fmt(b) for a, b in polygon) + f'" {style}/>'
         lines.append(shape)
+        if node["kind"] == "address" and "tx_count" in node:
+            from .address_counts import label as count_label
+            lines.append(f'<text class="address-tx-count" x="{_fmt(cx)}" y="{_fmt(cy-height/2-14)}" font-size="18" fill="#334155">{count_label(node)}</text>')
         inset_x, inset_y = width * .22, height * .22
         if node["kind"] == "address":
             inset_x = width * .10  # Match the label width; keep the Suspected prefix visible.

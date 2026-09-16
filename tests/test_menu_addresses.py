@@ -150,6 +150,24 @@ class AddressMenuTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Repeated deposit consolidation", stored["rules"][ADDRESS]["notes"])
         process.assert_not_called()
 
+    async def test_hop_limit_can_be_saved_reopened_and_cleared(self):
+        from textual.widgets import Checkbox, Input
+        app=create_app(self.root)
+        with patch("liquid_tracer.address_review.list_addresses",side_effect=self.report), \
+                patch("liquid_tracer.address_review.saved_activity",return_value=SUMMARY):
+            async with app.run_test(size=(115,55)) as pilot:
+                screen=await self.open_review(app,pilot);await self.select_row(screen,pilot)
+                screen.query_one("#service-stop",Checkbox).value=False
+                screen.query_one("#service-hop-limit",Input).value="1"
+                await self.click(app,pilot,"#service-save")
+                self.assertEqual(load_services(self.case)["rules"][ADDRESS]["hop_limit"],1)
+                await self.click(app,pilot,"#address-back");await self.click(app,pilot,"#addresses-review")
+                screen=app.screen;await self.select_row(screen,pilot)
+                self.assertEqual(screen.query_one("#service-hop-limit",Input).value,"1")
+                screen.query_one("#service-hop-limit",Input).value=""
+                await self.click(app,pilot,"#service-save")
+                self.assertIsNone(load_services(self.case)["rules"][ADDRESS]["hop_limit"])
+
     async def test_live_refresh_is_bounded_and_uses_provider_terminal(self):
         from textual.widgets import Input, Static
         app = create_app(self.root)

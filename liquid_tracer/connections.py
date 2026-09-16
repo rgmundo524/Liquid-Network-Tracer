@@ -112,18 +112,22 @@ def connecting_outpoints(state, max_hops=10):
                     queue.append(other)
         return distance
 
-    retained, pairs = set(), []
-    for root in roots:
-        downstream = distances([root], forward, root)
-        targets = [target for target in roots if target != root and target in downstream]
-        if not targets: continue
-        upstream = distances(targets, backward)
-        for parent, child, key, _ in eligible:
-            if parent == root and key not in seeds: continue
-            if (parent in downstream and child in upstream
-                    and downstream[parent] + 1 + upstream[child] <= limit):
-                retained.add(key)
-        pairs.extend({"source": root, "target": target, "shortest_hops": downstream[target]} for target in targets)
+    from .hop_limits import has_hop_limits, bounded_connections
+    if has_hop_limits(state["labels"]):
+        retained, pairs = bounded_connections(state, roots, seeds, eligible, limit)
+    else:
+        retained, pairs = set(), []
+        for root in roots:
+            downstream = distances([root], forward, root)
+            targets = [target for target in roots if target != root and target in downstream]
+            if not targets: continue
+            upstream = distances(targets, backward)
+            for parent, child, key, _ in eligible:
+                if parent == root and key not in seeds: continue
+                if (parent in downstream and child in upstream
+                        and downstream[parent] + 1 + upstream[child] <= limit):
+                    retained.add(key)
+            pairs.extend({"source": root, "target": target, "shortest_hops": downstream[target]} for target in targets)
     return {"schema_version": 1, "max_hops": limit, "starting_transactions": roots,
             "pairs": pairs, "outpoints": sorted(retained), "scope": SCOPE,
             "source_run_status": state.get("status"), "source_stop_reason": state.get("stop_reason"),
@@ -201,6 +205,8 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
     settings = load_services(case)
     state["labels"] = apply_service_labels(state["labels"], settings)
     state["service_controls"] = {k: v for k, v in settings.items() if k != "history"}
+    from .address_counts import apply_saved_counts
+    apply_saved_counts(case, state)
     graph = connection_graph(state, max_hops)
     if graph["nodes"]:
         graph = optimize_graph(graph, connector_style=connector_appearance(metadata), progress=progress)

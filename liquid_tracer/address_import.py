@@ -19,7 +19,7 @@ MAX_BYTES = 512 * 1024
 MAX_ROWS = 5000
 MAX_ERRORS = 50
 FIELDS = {"address", "name", "notes", "confidence", "source",
-          "observed_at", "stop_tracing", "enabled"}
+          "observed_at", "stop_tracing", "hop_limit", "enabled"}
 ALIASES = {"value": "address", "entity": "name", "service_name": "name", "label": "name",
            "rationale": "notes", "stop": "stop_tracing"}
 FORMATS = {"auto", "csv", "json", "text"}
@@ -28,9 +28,10 @@ NOTICE = ("Importing records your assessment, not independent verification of ow
           "Use the public address form shown by the trace, not a confidential-address alias. "
           "Active address stops apply to the first run and continuations, including seed outputs. "
           "No blockchain requests or Miro changes are made. Existing evidence is retained.")
-TEMPLATE = ("Address,Name,confidence,stop_tracing,source,notes\n"
-            "REPLACE_WITH_LIQUID_ADDRESS_1,Example Exchange,suspected,true,Investigator research,Explain the evidence\n"
-            "REPLACE_WITH_LIQUID_ADDRESS_2,Client wallet,confirmed,false,Client records,Continue tracing\n")
+TEMPLATE = ("Address,Name,confidence,stop_tracing,hop_limit,source,notes\n"
+            "REPLACE_WITH_LIQUID_ADDRESS_1,Example Exchange,suspected,true,,Investigator research,Explain the evidence\n"
+            "REPLACE_WITH_LIQUID_ADDRESS_2,Client wallet,confirmed,false,,Client records,Continue tracing\n"
+            "REPLACE_WITH_LIQUID_ADDRESS_3,Service deposit,suspected,false,1,Investigator research,Follow one consolidation hop\n")
 
 
 def read_import(path):
@@ -97,7 +98,8 @@ def _row(value):
     metadata = {"confidence": _text(_value(fields, "confidence", "suspected"), "Confidence", 30).casefold(),
                 "source": _text(_value(fields, "source", "Investigator designation"), "Source", 1000, required=True),
                 "observed_at": _text(_value(fields, "observed_at"), "Observation date", 80),
-                "stop_tracing": _boolean(fields.get("stop_tracing"), "Stop tracing", True)}
+                "stop_tracing": _boolean(fields.get("stop_tracing"), "Stop tracing", True),
+                "hop_limit": fields.get("hop_limit")}
     validate_rule_fields(metadata)
     return {"address": address, "name": _text(_value(fields, "name"), "Name", 120),
             "notes": _text(_value(fields, "notes"), "Notes", 4000, multiline=True),

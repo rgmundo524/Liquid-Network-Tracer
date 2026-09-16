@@ -285,8 +285,8 @@ class SharedReceiptPresentationTests(unittest.TestCase):
         plan = make_plan(graph)
         validate_plan(plan)
         self.assertEqual(plan["address_convergences"], graph["address_convergences"])
-        self.assertEqual(plan["presentation_items"], {})
-        self.assertEqual(len(plan["shapes"]), len(graph["nodes"]) + 2)
+        self.assertTrue(all(p["kind"] == "address_count" for p in plan["presentation_items"].values()))
+        self.assertEqual(len(plan["shapes"]), len(graph["nodes"]) + 2 + len(plan["presentation_items"]))
         for node in graph["nodes"]:
             shape = next(s for s in plan["shapes"] if s["key"] == node["id"])
             self.assertEqual((shape["body"]["style"]["borderColor"], shape["body"]["style"]["borderWidth"]), ("#ff0000", "12"))

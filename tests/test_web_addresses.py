@@ -47,6 +47,30 @@ class WebAddressTests(unittest.TestCase):
         self.assertEqual(before, {str(file.relative_to(archive)): file.read_bytes() for file in archive.iterdir() if file.is_file()})
         self.assertEqual(len(read_json(path / "services.json")["history"]), 2)
 
+    def test_hop_limit_edit_and_clear_stay_separate_from_stop(self):
+        _, case = self.create(); route = "/api/cases/" + case["id"]
+        body = {"address":"SYNTHETIC-deposit", "name":"Service", "enabled":True, "stop_tracing":False, "hop_limit":1}
+        with patch.object(self.server, "start_job") as start:
+            result=self.success(route+"/services",body)
+            self.assertEqual(result["service"]["hop_limit"],1)
+            self.assertFalse(result["service"]["stop_tracing"])
+            self.assertEqual(self.success(route+"/services",{**body,"hop_limit":""})["service"]["hop_limit"],None)
+            self.assertEqual(self.request(route+"/services",{**body,"hop_limit":True})[0],400)
+            start.assert_not_called()
+
+    def test_bulk_address_counts_use_saved_limits_and_no_client_supplied_endpoints(self):
+        from tests.test_connections import saved_case
+        _,case=self.create();route="/api/cases/"+case["id"]
+        path,_=self.server.case(case["id"]);saved_case(path)
+        with patch.object(self.server,"start_job",return_value={"id":"synthetic","status":"running"}) as start:
+            self.success(route+"/actions",{"action":"address-counts","source":"https://attacker.invalid",
+                "max_requests":999999,"arguments":["--shell"]},202)
+            args=start.call_args.args[0]
+            self.assertEqual(args[0],"address-counts")
+            self.assertNotIn("--shell",args);self.assertNotIn("999999",args)
+            self.assertNotIn("https://attacker.invalid",args)
+            self.assertFalse(start.call_args.kwargs["live"])
+
     def test_pasted_address_works_without_a_run_or_network_lookup(self):
         _, case = self.create()
         route = "/api/cases/" + case["id"]

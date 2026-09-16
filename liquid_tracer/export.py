@@ -16,7 +16,7 @@ from .services import confidence_value
 from .attribution_presentation import display_name, attribution_reference
 from .name_colors import apply_name_colors, color_text
 
-PRESENTATION_VERSION = 16
+PRESENTATION_VERSION = 17
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -53,6 +53,7 @@ def legend_lines(graph=None):
         "Captions: vin/vout number · amount asset. ?? = not publicly available. Known amounts are in base units.",
         "STOP TRACING: an explicit address boundary, independent of confidence. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards.",
         "Thick red border: INPUT MERGE = distinct starting lineages meet in a transaction; shared-address receipts from distinct branches also highlight the receiving address and all participating senders. Neither proves ownership or value allocation.",
+        "Numbers above circles: confirmed + mempool transaction count at last lookup; ?? = not fetched. Not the number of visible arrows.",
         "Unspent refers to tracked outputs at their last check, not all funds or inactivity at that address. Arrows do not allocate stolen value.",
     ]
 
@@ -71,6 +72,11 @@ def graph_quantity(output):
 
 def short(value):
     return value if len(value) <= 20 else value[:10] + "…" + value[-7:]
+
+
+def short_address(value):
+    """Display only; full addresses remain graph identities and CSV values."""
+    return value if len(value) <= 13 else value[:6] + "..." + value[-4:]
 
 
 def transaction_date(transaction):
@@ -137,7 +143,7 @@ def build_graph(state, merge_addresses=True, include_fees=False):
             label = "PEG-OUT REQUEST" if kind == "pegout" else ("FEE" if kind == "fee" else "UNSPENDABLE")
             peg = output.get("pegout") or {}
             destination = peg.get("scriptpubkey_address")
-            label += "\n" + (short(destination) if destination else "vout " + key.rsplit(":", 1)[-1])
+            label += "\n" + (short_address(destination) if destination else "vout " + key.rsplit(":", 1)[-1])
             return add_node("event:" + key, "event", label, column,
                             {"outpoint": key, "output": output, "trace": tracked})
         # Display identity is independent of the UTXO evidence. Never deduplicate
@@ -145,7 +151,7 @@ def build_graph(state, merge_addresses=True, include_fees=False):
         # Network separation is explicit; the enclosing namespace fixes source.
         node_key = (network + ":address:" + addr if merge_addresses and addr
                     else network + ":outpoint:" + key)
-        label = short(addr) if addr else "Address ??"
+        label = short_address(addr) if addr else "Address ??"
         if network != "liquid":
             label = network.upper() + "\n" + label
         role = "address"
@@ -222,6 +228,9 @@ def build_graph(state, merge_addresses=True, include_fees=False):
         node["details"]["address_attributions"] = records
         names = sorted({display_name(m) for m in records})
         parts = names + [node["label"]]
+        limits = sorted({m["hop_limit"] for m in records if m.get("hop_limit") is not None})
+        if limits and not any(m.get("stop") is True for m in records):
+            parts.append("Hop limit: " + str(min(limits)))
         if any(m.get("stop") is True for m in records):
             parts.append("STOP TRACING")
         node["attribution_reference"] = attribution_reference(node["id"])
@@ -234,8 +243,7 @@ def build_graph(state, merge_addresses=True, include_fees=False):
                             if item["outpoint"] in unspent_endpoints})
         if endpoints:
             node["details"]["unspent_endpoints"] = endpoints
-            node["label"] += "\n" + ("Unspent endpoint" if len(endpoints) == 1
-                                      else f"Unspent endpoints: {len(endpoints)}")
+            node["label"] += "\nUnspent"
 
     name_colors = state.get("service_controls", {}).get("name_colors", {})
     apply_name_colors(nodes.values(), name_colors,
@@ -272,6 +280,8 @@ def build_graph(state, merge_addresses=True, include_fees=False):
         node["label"] = node["label"].replace("TX\n", f"Starting TX {entry['index']}\n", 1)
     from .convergence import annotate_branch_interactions
     annotate_branch_interactions(graph, state)
+    from .address_counts import annotate
+    annotate(graph, state)
     return graph
 
 
@@ -402,6 +412,9 @@ def svg_graph(graph):
             shape = f'<polygon points="{x},{y-80} {x+80},{y} {x},{y+80} {x-80},{y}"'
         border, thickness = node_border(node)
         chunks.append(shape + f' fill="{fill}" stroke="{border}" stroke-width="{thickness}"/>')
+        if node["kind"] == "address" and "tx_count" in node:
+            from .address_counts import label as count_label
+            chunks.append(f'<text class="address-tx-count" x="{x}" y="{y-94}" text-anchor="middle" font-size="18" fill="#334155">{count_label(node)}</text>')
         lines = node["label"].splitlines()
         for i, line in enumerate(lines):
             chunks.append(f'<text x="{x}" y="{y + (i-(len(lines)-1)/2)*18}" text-anchor="middle" dominant-baseline="middle" font-size="12" fill="{color_text(fill)}">{html.escape(line)}</text>')

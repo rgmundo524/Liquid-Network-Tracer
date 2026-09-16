@@ -12,7 +12,7 @@ BADGE_SIZE = 24.0
 
 
 def proof(kind, host, page=0):
-    if kind not in ("convergence", "attribution") or not isinstance(host, str) or not host or type(page) is not int or page < 0:
+    if kind not in ("convergence", "attribution", "address_count") or not isinstance(host, str) or not host or type(page) is not int or page < 0:
         raise TraceError("Invalid presentation annotation identity")
     key = PREFIX + kind + ":" + digest((host + ":" + str(page)).encode())
     return {"schema_version": 1, "key": key, "kind": kind, "host": host, "page": page}
@@ -29,13 +29,26 @@ def corner(body, position=None):
 
 
 def make_items(graph, existing_bounds=()):
-    """New plans create no attribution cards or separate convergence badges.
-
-    Keep an explicit empty catalog so sync can safely retire proven historical
-    annotations. Legacy plans are still validated and resumed without rewriting
-    archived exports; proof/placement helpers below support that compatibility.
-    """
-    return [], {}
+    """Address counts above circles; no attribution cards or convergence stars."""
+    import html
+    from .address_counts import label, position, COUNT_HEIGHT
+    shapes, catalog = [], {}
+    for node in graph["nodes"]:
+        if node["kind"] != "address" or "tx_count" not in node:
+            continue
+        item = proof("address_count", node["id"])
+        value = label(node)
+        body = {"position": {"x":node["x"], "y":node["y"]},
+                "geometry":{"width":node["width"], "height":node["height"]}}
+        x, y = position(body)
+        shapes.append({"key":item["key"], "body":{
+            "data":{"shape":"rectangle", "content":"<p>"+html.escape(value)+"</p>"},
+            "position":{"x":x, "y":y, "origin":"center"},
+            "geometry":{"width":max(96, len(value)*12), "height":COUNT_HEIGHT},
+            "style":{"fillColor":"#ffffff", "fillOpacity":"0.0", "borderOpacity":"0.0",
+                     "borderWidth":"1", "fontSize":"18", "color":"#334155", "textAlign":"center"}}})
+        catalog[item["key"]] = item
+    return shapes, catalog
 
 
 def validate_items(plan):
@@ -52,6 +65,18 @@ def validate_items(plan):
                     or item["host"] not in shapes or item["host"].startswith(PREFIX)
                     or shapes[key]["body"]["data"]["shape"] != "rectangle"):
                 raise ValueError
+            if item["kind"] == "address_count":
+                import re
+                from .address_counts import position, COUNT_HEIGHT
+                body = shapes[key]["body"]
+                if (shapes[item["host"]]["body"]["data"]["shape"] != "circle" or item["page"] != 0
+                        or not re.fullmatch(r"<p>(?:[0-9][0-9,]*|\?\?)</p>", body["data"]["content"])
+                        or body["geometry"]["height"] != COUNT_HEIGHT):
+                    raise ValueError
+                expected = position(shapes[item["host"]]["body"])
+                if any(not math.isclose(float(body["position"][axis]), value, abs_tol=1e-7)
+                       for axis, value in zip(("x", "y"), expected)):
+                    raise ValueError
             if item["kind"] == "convergence":
                 if not item["host"].startswith("tx:") or item["page"] != 0 or shapes[key]["body"]["data"]["content"] != "<p>★</p>":
                     raise ValueError
@@ -120,6 +145,9 @@ def place_badges(plan, state, remote, removed, reorganize, placement):
             if key in remote and any(float(remote[key]["geometry"][axis]) != BADGE_SIZE for axis in ("width", "height")):
                 raise TraceError("A convergence badge was resized; restore its 24 by 24 size before syncing")
             positions[key] = corner(body, positions.get(host))
+        elif item["kind"] == "address_count":
+            from .address_counts import position
+            positions[key] = position(remote.get(host, shapes[host]), positions.get(host))
         else:
             geometry = note_geometry(shapes[key], remote.get(key))
             from .miro import _bounds

@@ -134,7 +134,7 @@ class ExplicitAttributionTests(unittest.TestCase):
         self.assertEqual(row["notes"], label["notes"])
         self.assertEqual(row["source"], label["source"])
         plan = make_plan(graph); validate_plan(plan)
-        register = [s["body"]["data"]["content"] for s in plan["shapes"] if s["key"] in plan["presentation_items"]]
+        register = [s["body"]["data"]["content"] for s in plan["shapes"] if plan["presentation_items"].get(s["key"], {}).get("kind") == "attribution"]
         self.assertEqual(register, [])  # Full notes live in HTML/JSON/CSV, not Miro cards.
         self.assertEqual(graph, before)
 
