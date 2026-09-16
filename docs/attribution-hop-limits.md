@@ -60,15 +60,16 @@ statistics lookup**, not the number of chart arrows, UTXOs, or visible transacti
 Unknown counts show `??`; an observed zero displays `0`. Counts include their source
 and observation time in local graph details. They are not ownership evidence.
 
-Use **Fetch address transaction counts** in the investigation workspace or terminal
-menu. This is an explicit API lookup: one statistics endpoint per uncached Liquid
+Normal traces, chart generation and ordinary live Miro sync now fetch missing
+counts automatically. **Fetch address transaction counts** remains an optional
+separate lookup/refresh. The lookup uses: one statistics endpoint per uncached Liquid
 address, with the normal request/time bounds. It does not enumerate history, trace
 more funds, run ELK, or contact Miro. Each response is saved so another invocation
 fetches only remaining missing counts. Existing verified address-review statistics
 are reused. API authentication/retries can also consume the request budget.
 
-After fetching, regenerate the local preview or use normal **Sync to Miro** to show
-the saved counts. No retracing is needed for display-only changes. Normal Miro sync
+New local previews and normal **Sync to Miro** obtain and display missing counts
+without a separate fetch step. Existing rendered files are not rewritten. No retracing is needed for display-only changes. Normal Miro sync
 adds one managed text shape per address circle and follows the circle's current
 position, including manual moves; those shapes count against the new-item budget.
 No additional transaction CSV rows are created. Old run archives and immutable
@@ -90,3 +91,5 @@ liquid-trace address-counts --case /path/to/investigation --run latest --refresh
 The second command refreshes counts that are already cached. Pull the development
 branch and restart the application; rebuild a compiled browser frontend. Display
 changes may require a fresh ELK preview because old labels no longer match.
+
+See [Automatic address transaction counts](automatic-address-counts.md) for authentication, budgets and failure reporting.

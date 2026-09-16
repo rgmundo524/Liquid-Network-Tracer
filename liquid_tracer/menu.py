@@ -1155,6 +1155,14 @@ def create_app(root=None):
                 return
             arguments, live = selection
             self.current_action = arguments[0]
+            if not live and self.current_action in ("layout-preview", "compact-preview", "mermaid", "connections"):
+                from .address_counts import count_credentials_required
+                selected = arguments[arguments.index("--run") + 1] if "--run" in arguments else "latest"
+                try:
+                    live = count_credentials_required(self.case, selected)
+                except ACTION_ERRORS as error:
+                    self.show_error(error)
+                    return
             self.reorganizing = "--reorganize" in arguments
             self.applying_compaction = "--compact-preview" in arguments
             if not live and self.current_action in ("layout-preview", "compact-preview", "mermaid", "connections"):

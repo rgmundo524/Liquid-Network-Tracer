@@ -10,7 +10,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 from .api import ENTERPRISE, Esplora, Limits
 from .hop_limits import UNSET
-from .address_counts import apply_saved_counts
+from .address_counts import apply_saved_counts, ensure_counts, ensure_graph_counts
 from .boards import create_board
 from .common import HEX64, TraceError, digest, load_labels, output_kind, parse_outpoint, read_json, save_json
 from .export import build_graph, export_run
@@ -362,7 +362,7 @@ def connector_appearance(metadata, explicit=None):
 
 
 def refresh_presentation(plan, trace_path, include_fees=False, connector_style="straight", progress=None,
-                         service_settings=None, preview_directory=None):
+                         service_settings=None, preview_directory=None, fetch_address_counts=False, count_report=None):
     """Verify historical topology, then create a current shared-address view."""
     namespace = _namespace(plan)
     state = read_json(trace_path)
@@ -406,6 +406,10 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
     # Layout is a derivative of verified evidence, never a rewrite of the archive.
     from .elk_layout import optimize_graph
     graph = build_graph(state, merge_addresses=True, include_fees=include_fees)
+    if fetch_address_counts:
+        report = ensure_counts(count_case, state, graph=graph, progress=progress)
+        if count_report is not None:
+            count_report.update(report)
     from .layout_reuse import reusable_elk_preview, report_phase
     laid_out = reusable_elk_preview(graph, preview_directory, connector_style, progress)
     if laid_out is None:
@@ -485,6 +489,7 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
     run_id = resolve_latest(case, run_id)
     default_plan = run_path(case, run_id) / "miro-plan.json"
     compaction_meta = None
+    count_report = {}
     if compact_preview is not None:
         plan, compaction_meta = verified_compaction_preview(case, run_id, compact_preview)
     else:
@@ -510,7 +515,8 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
     if plan_path is None and compact_preview is None:
         plan = refresh_presentation(plan, default_plan.parent / "trace.json", include_fee_flows(metadata, include_fees),
                                     connector_appearance(metadata, connector_style), progress=progress,
-                                    service_settings=load_services(case), preview_directory=Path(case) / "previews")
+                                    service_settings=load_services(case), preview_directory=Path(case) / "previews",
+                                    fetch_address_counts=not dry_run, count_report=count_report)
     # Validate the mapping, lineage, and item budget locally before saving a selection.
     options = {"reorganize": True} if reorganize else {}
     if progress is not None:
@@ -528,6 +534,8 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
               "include_fees": plan.get("include_fees", True),
               "reorganize": bool(reorganize),
               "presentation_refreshed": plan["sha256"] != archived_plan_sha256}
+    if count_report:
+        report["address_counts"] = count_report
     if compaction_meta is not None:
         report.update(compact_preview=compact_preview, compaction=compaction_meta["compaction"],
                       connector_style=compaction_meta["connector_style"])
@@ -605,12 +613,16 @@ def run_trace(args, progress=None):
             destination = run_path(args.case, state["run_id"])
             only = {f"{t}:{i}" for t, i in map(parse_outpoint, args.only)} if args.only else None
             state = trace(api, state, limits, destination / "trace.json", args.include_unconfirmed, only)
-            apply_saved_counts(args.case, state)
+            if state["status"] != "error" and state.get("stop_reason") != "interrupted":
+                count_report = ensure_counts(args.case, state, fixture=args.fixture, progress=progress)
+            else:
+                apply_saved_counts(args.case, state)
+                count_report = {}
             export_run(store, state, destination, merge_addresses, args.offline_preview)
             save_latest(args.case, state["run_id"])
             summary = {"run_id": state["run_id"], "status": state["status"],
                 "stop_reason": state.get("stop_reason"), "stats": state["stats"], "errors": state["errors"],
-                "directory": str(destination.resolve())}
+                "directory": str(destination.resolve()), "address_counts": count_report}
             failed = state["status"] == "error"
             if args.miro_board:
                 try:
@@ -665,7 +677,7 @@ def saved_graph(case, run_id="latest", include_fees=None):
     return run_id, archive, graph
 
 
-def mermaid_run(case, run_id="latest", out=None, include_fees=None, open_browser=False):
+def mermaid_run(case, run_id="latest", out=None, include_fees=None, open_browser=False, progress=None):
     from .mermaid import export_mermaid
 
     case = Path(case)
@@ -673,7 +685,9 @@ def mermaid_run(case, run_id="latest", out=None, include_fees=None, open_browser
     destination = Path(out) if out is not None else case / "previews" / (run_id + "-mermaid-" + uuid.uuid4().hex[:8])
     if destination.resolve().is_relative_to((case / "runs").resolve()):
         raise TraceError("Save Mermaid previews outside runs/ to preserve archived evidence")
+    counts = ensure_graph_counts(case, graph, progress=progress)
     result = export_mermaid(graph, destination)
+    result["address_counts"] = counts
     result.update({"run_id": run_id, "include_fees": graph["include_fees"],
                    "browser_opened": open_preview(result["html"]) if open_browser else False})
     return result
@@ -690,8 +704,10 @@ def layout_preview_run(case, run_id="latest", out=None, include_fees=None,
     destination = Path(out) if out is not None else case / "previews" / (run_id + "-elk-" + uuid.uuid4().hex[:8])
     if destination.resolve().is_relative_to((case / "runs").resolve()):
         raise TraceError("Save ELK previews outside runs/ to preserve archived evidence")
+    counts = ensure_graph_counts(case, graph, progress=progress)
     graph = optimize_graph(graph, connector_style=style, progress=progress)
     result = export_layout(graph, destination)
+    result["address_counts"] = counts
     result.update({"run_id": run_id, "include_fees": graph["include_fees"], "connector_style": style,
                    "layout_algorithm": graph["layout"]["algorithm"],
                    "browser_opened": open_preview(result["html"]) if open_browser else False})
@@ -714,6 +730,7 @@ def compact_preview_run(case, run_id="latest", include_fees=None, connector_styl
     run_id, archive, graph = saved_graph(case, run_id, include_fees)
     archive_sha256 = digest((archive / "SHA256SUMS").read_bytes())
     style = connector_appearance(read_case(case), connector_style)
+    counts = ensure_graph_counts(case, graph, progress=progress)
     before = optimize_graph(graph, connector_style=style, progress=progress)
     after = compact_graph(before, progress=progress)
     if services_before != service_fingerprint(case):
@@ -721,7 +738,7 @@ def compact_preview_run(case, run_id="latest", include_fees=None, connector_styl
     destination = case / "previews" / (run_id + "-compact-" + uuid.uuid4().hex[:8])
     result = export_compaction(before, after, destination, archive_sha256=archive_sha256,
                                service_sha256=services_before)
-    result.update(run_id=run_id, include_fees=after["include_fees"], connector_style=style,
+    result.update(address_counts=counts, run_id=run_id, include_fees=after["include_fees"], connector_style=style,
                   layout_algorithm=after["layout"]["algorithm"],
                   browser_opened=open_preview(result["html"]) if open_browser else False)
     return result
@@ -832,12 +849,13 @@ def main(argv=None, *, progress=None):
                 state["graph_options"] = {**state.get("graph_options", {}),
                                           "include_fees": include_fee_flows(read_case(args.case), args.include_fees)}
                 merged = bool(args.merge_addresses)
+                ensure_counts(args.case, state, progress=progress)
                 export_run(store, state, args.out, merged, args.offline_preview)
             finally:
                 store.close()
             print(args.out.resolve())
         elif args.command == "mermaid":
-            print(json.dumps(mermaid_run(args.case, args.run, args.out, args.include_fees, args.open_browser), indent=2))
+            print(json.dumps(mermaid_run(args.case, args.run, args.out, args.include_fees, args.open_browser, progress), indent=2))
         elif args.command == "layout-preview":
             print(json.dumps(layout_preview_run(args.case, args.run, args.out, args.include_fees,
                                                 args.connector_style, args.open_browser, progress), indent=2))

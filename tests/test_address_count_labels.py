@@ -38,7 +38,9 @@ class AddressCountsTests(unittest.TestCase):
                 'mempool_stats':{'tx_count':2, 'funded_txo_count':2, 'spent_txo_count':1}}
         self.fixture = self.root/'fixture.json'; save_json(self.fixture, data)
         self.case = create_investigation(self.root/'cases', 'Counts', fixture=self.fixture, seeds=[A+':0'])
-        self.invoke(['trace','--case',str(self.case),'--fixture',str(self.fixture),'--seed',A+':0','--hops','2'])
+        # Model an older saved run before automatic count hydration.
+        with patch("liquid_tracer.cli.ensure_counts", return_value={}):
+            self.invoke(['trace','--case',str(self.case),'--fixture',str(self.fixture),'--seed',A+':0','--hops','2'])
         self.run, self.archive, self.graph = saved_graph(self.case)
         self.state = read_json(self.archive/'trace.json')
 

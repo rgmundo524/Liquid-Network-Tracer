@@ -92,8 +92,11 @@ class ElkWorkflowTests(unittest.TestCase):
         self.assertEqual(graph["graph_options"]["connector_style"], "elbowed")
         self.assertEqual(report["layout_metrics"], graph["layout"]["metrics"])
         self.assertEqual(report["connector_style"], "elbowed")
-        self.assertTrue(all(event["phase"] == "optimizing" for event in events))
-        self.assertTrue(any("heap budget" in event["message"] for event in events))
+        self.assertTrue(all(event["phase"] in ("optimizing", "address_counts", "address_counts_ready",
+                                               "address_counts_incomplete") for event in events))
+        self.assertTrue(any(event["phase"] == "optimizing" for event in events))
+        self.assertIn("address_counts", output)
+        self.assertTrue(any("heap budget" in event.get("message", "") for event in events))
         self.assertEqual(events[-1]["completed"], 1)
         self.assertEqual(self.snapshot(path / "runs"), before)
         with self.assertRaisesRegex(TraceError, "outside runs"):

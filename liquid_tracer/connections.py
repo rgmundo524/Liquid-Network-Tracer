@@ -205,9 +205,10 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
     settings = load_services(case)
     state["labels"] = apply_service_labels(state["labels"], settings)
     state["service_controls"] = {k: v for k, v in settings.items() if k != "history"}
-    from .address_counts import apply_saved_counts
+    from .address_counts import apply_saved_counts, ensure_counts
     apply_saved_counts(case, state)
     graph = connection_graph(state, max_hops)
+    counts = ensure_counts(case, state, graph=graph, progress=progress) if graph["nodes"] else None
     if graph["nodes"]:
         graph = optimize_graph(graph, connector_style=connector_appearance(metadata), progress=progress)
     report = graph["connections"]
@@ -237,7 +238,7 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
     except BaseException:
         (destination / "SHA256SUMS").unlink(missing_ok=True)
         raise
-    return {**result, "directory": str(destination.resolve()), "preview_id": destination.name,
+    return {**result, "address_counts": counts, "directory": str(destination.resolve()), "preview_id": destination.name,
             "run_id": run_id, "include_fees": False, "max_hops": max_hops,
             "connection_count": report["connection_count"], "transaction_count": report["transaction_count"],
             "status": report["status"], "notice": graph["notice"],
