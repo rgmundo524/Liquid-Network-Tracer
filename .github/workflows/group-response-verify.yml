@@ -1,0 +1,63 @@
+name: Validate Miro group response envelopes
+on:
+  push:
+    branches: [codex/group-response-pagination]
+    paths:
+      - .github/group-response-fix.patch
+      - .github/workflows/group-response-verify.yml
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.19.0'
+      - name: Apply exact locally tested response parser patch
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          path = Path('.github/group-response-fix.patch')
+          text = path.read_text().replace('\n diff --git ', '\ndiff --git ')
+          assert hashlib.sha256(text.encode()).hexdigest() == '36b03007e4558674c3052656673ad15e095dade4233c3ea41107460cab243c2e', 'Patch differs from local tested source'
+          Path('/tmp/group-response-fix.patch').write_text(text)
+          PY
+          git apply --check /tmp/group-response-fix.patch
+          git apply /tmp/group-response-fix.patch
+          python3 - <<'PY'
+          import subprocess
+          expected = {
+              'liquid_tracer/miro_address_groups.py': '664dae86c80d678c20ece80693302d94a51782c8',
+              'tests/test_miro_group_response_shapes.py': '371f0e934b428f355fa255d9c69fa882f1b6eff5',
+              'tests/test_miro_sync.py': '388e55b2c009893d5c7db0545c4408ea389f83d6',
+              'docs/group-response-pagination.md': 'cddaa445bf6160b1f59aa78ffc704d812112f495',
+          }
+          for path, sha in expected.items():
+              assert subprocess.check_output(['git', 'hash-object', path], text=True).strip() == sha, path
+          PY
+          git rm .github/group-response-fix.patch .github/workflows/group-response-source.yml .github/workflows/group-response-verify.yml
+          git add liquid_tracer/miro_address_groups.py tests/test_miro_group_response_shapes.py tests/test_miro_sync.py docs/group-response-pagination.md
+          git diff --cached --check
+      - name: Install offline regression dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install '.[tui]'
+          npm --prefix layout ci --ignore-scripts --no-audit --no-fund
+      - name: Verify nested envelopes, all 25 pairs, and interrupted-group recovery
+        run: .venv/bin/python -m unittest tests.test_miro_group_response_shapes tests.test_miro_address_groups tests.test_miro_group_verification tests.test_miro_sync tests.test_miro_recovery_cli -v
+      - name: Run full offline regression suite
+        run: .venv/bin/python -m unittest discover -s tests -v
+      - name: Publish verified source on feature branch
+        run: |
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Parse native Miro group member envelopes and resume pending grouping'
+          git push origin HEAD:refs/heads/codex/group-response-pagination
