@@ -58,7 +58,7 @@ jobs:
           .venv/bin/python -m pip install '.[tui]'
           npm --prefix layout ci --ignore-scripts --no-audit --no-fund
       - name: Verify hop limits and native address count labels
-        run: .venv/bin/python -m unittest tests.test_attribution_hop_limits tests.test_address_count_labels tests.test_address_import tests.test_web_addresses tests.test_services_ui -v
+        run: .venv/bin/python -m unittest tests.test_attribution_hop_limits tests.test_address_count_labels tests.test_address_import tests.test_web_addresses tests.test_menu_addresses -v
       - name: Check and build browser interface
         run: |
           npm --prefix web ci --ignore-scripts --no-audit --no-fund
