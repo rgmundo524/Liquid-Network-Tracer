@@ -1,0 +1,31 @@
+name: Capture group response test source
+on:
+  push:
+    branches: [codex/group-response-pagination]
+    paths: [.github/workflows/group-response-source.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 88fa478db1eb3182b02c5d9964e1b4f9f954d809
+          persist-credentials: false
+      - name: Capture repository and official public response schemas
+        run: |
+          mkdir -p /tmp/group-response-source
+          git archive HEAD > /tmp/group-response-source/source.tar
+          for page in getitemsbygroupid get-all-groups creategroup; do
+            curl --fail --silent --show-error --location --max-time 30 "https://developers.miro.com/reference/$page" -o "/tmp/group-response-source/$page.html"
+            curl --fail --silent --show-error --location --max-time 30 "https://developers.miro.com/reference/$page.md" -o "/tmp/group-response-source/$page.md" || true
+          done
+          npm --prefix layout ci --ignore-scripts --no-audit --no-fund
+          tar -cf /tmp/group-response-source/layout-deps.tar -C layout node_modules
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: group-response-source
+          path: /tmp/group-response-source
+          retention-days: 2
