@@ -41,8 +41,63 @@ def _json(raw):
         raise TraceError('Miro group response is malformed; no group outcome was assumed') from None
 
 
+def _page_data(body, path, group_id):
+    """Decode endpoint-specific collections, never arbitrary nested item data.
+
+    /groups has a data array. /groups/items documents a group object in data,
+    with ItemPagedResponse objects in that group's data array. Also accept the
+    direct member-array form and older flat collections. A wrapper's identity
+    must match the requested group before any member IDs are trusted.
+    """
+    data = body.get('data')
+    metadata = [body]
+    if path == '/groups/items' and isinstance(data, dict):
+        if data.get('id') != group_id or data.get('type', 'group') != 'group':
+            raise TraceError('Miro group-members response does not identify the requested group')
+        metadata.append(data)
+        data = data.get('data')
+        # A single ItemPagedResponse may be returned directly or in an array.
+        pages = [data] if isinstance(data, dict) else data
+        if isinstance(pages, list) and pages and all(
+                isinstance(page, dict) and 'id' not in page and 'data' in page for page in pages):
+            data = []
+            for page in pages:
+                values = page['data']
+                if not isinstance(values, list):
+                    raise TraceError('Miro group-members response has an invalid nested item page')
+                size = page.get('size')
+                if size is not None and (type(size) is not int or size != len(values)):
+                    raise TraceError('Miro group-members page size disagrees with its item list')
+                metadata.append(page)
+                data.extend(values)
+    if not isinstance(data, list):
+        collection = 'group-members' if path == '/groups/items' else 'group-inventory'
+        raise TraceError('Miro ' + collection + ' response has an invalid collection envelope; '
+                         'grouping cannot be verified')
+    return data, metadata
+
+
+def _page_metadata(metadata):
+    """One continuation token across supported envelopes; never follow links."""
+    cursors, totals = set(), set()
+    for container in metadata:
+        cursor = container.get('cursor')
+        if cursor is not None and not isinstance(cursor, str):
+            raise TraceError('Miro group pagination contains an invalid cursor type')
+        if cursor:
+            cursors.add(cursor)
+        total = container.get('total')
+        if total is not None:
+            if type(total) is not int or total < 0:
+                raise TraceError('Miro group pagination contains an invalid total')
+            totals.add(total)
+    if len(cursors) > 1 or len(totals) > 1:
+        raise TraceError('Miro group pagination has conflicting envelope metadata; retry sync')
+    return next(iter(cursors), None), next(iter(totals), None)
+
+
 def _pages(requests, base, headers, path, params=None):
-    cursor, seen = None, set()
+    cursor, seen, received, expected = None, set(), 0, None
     while True:
         query = {'limit': 50, **(params or {})}
         if cursor:
@@ -50,11 +105,21 @@ def _pages(requests, base, headers, path, params=None):
         status, _, raw = requests.request('GET', base + path + '?' + urlencode(query), headers)
         if not 200 <= status < 300:
             raise TraceError(f'Miro group preflight returned HTTP {status}; grouping cannot be verified')
-        body = _json(raw)
-        data, cursor = body.get('data'), body.get('cursor')
-        if (not isinstance(data, list) or (cursor is not None and not isinstance(cursor, str))
-                or (cursor and (cursor in seen or not data))):
-            raise TraceError('Miro group pagination is incomplete or malformed; grouping cannot be verified')
+        data, metadata = _page_data(_json(raw), path, query.get('group_item_id'))
+        cursor, total = _page_metadata(metadata)
+        if cursor and (cursor in seen or not data):
+            raise TraceError('Miro group pagination is incomplete or malformed; '
+                             'repeated cursor or empty continuation page')
+        # Group-inventory totals can count items rather than groups. Only member
+        # collections can safely compare an advertised total with member count.
+        received += len(data)
+        if path == '/groups/items' and total is not None:
+            if expected is not None and expected != total:
+                raise TraceError('Miro group membership total changed between pages; retry sync')
+            expected = total
+        if expected is not None and (received > expected or (not cursor and received != expected)):
+            raise TraceError('Miro group-members pagination is incomplete; advertised members '
+                             'were not all returned with a usable continuation cursor')
         # Never follow response links to another endpoint or host.
         if cursor:
             seen.add(cursor)
@@ -72,8 +137,14 @@ def inventory(requests, base, headers):
         # REST group data is an array of item IDs. Generic summaries may omit
         # membership; use the documented paginated member endpoint in that case.
         members = group.get('items')
-        if members is None and isinstance(group.get('data'), dict):
-            members = group['data'].get('items')
+        wrapper = group.get('data')
+        # GroupResponseShort.data references Group, which itself wraps items
+        # inside data. Support both that documented form and direct data.items.
+        for _ in range(2):
+            if members is not None or not isinstance(wrapper, dict):
+                break
+            members = wrapper.get('items')
+            wrapper = wrapper.get('data')
         if members is None:
             members = list(_pages(requests, base, headers, '/groups/items', {'group_item_id': group_id}))
         if not isinstance(members, list):
