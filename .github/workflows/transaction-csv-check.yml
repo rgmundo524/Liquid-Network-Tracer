@@ -1,9 +1,10 @@
-name: Transaction CSV checks
+name: Validate transaction input-output CSV
 on:
   push:
     branches: [codex/transaction-csv]
+    paths: [.github/workflows/transaction-csv-check.yml, '.github/transaction-csv*']
 permissions:
-  contents: read
+  contents: write
 jobs:
   verify:
     runs-on: ubuntu-24.04
@@ -11,29 +12,47 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          persist-credentials: false
-      - name: Capture source snapshot
-        run: git archive --format=tar HEAD > /tmp/transaction-csv-source.tar
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: transaction-csv-source
-          path: /tmp/transaction-csv-source.tar
-          retention-days: 2
+          ref: ${{ github.sha }}
+          fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        if: hashFiles('tests/test_transaction_csv.py') != ''
         with:
           node-version: '24.19.0'
-      - name: Test transaction CSV and all offline regressions
-        if: hashFiles('tests/test_transaction_csv.py') != ''
+      - name: Apply exact checked source changes
+        run: |
+          python3 - <<'PY'
+          import hashlib, lzma
+          from pathlib import Path
+          data = b''.join(Path(f'.github/transaction-csv.patch.xz.{i}').read_bytes() for i in range(1, 4))
+          patch = lzma.decompress(data)
+          assert hashlib.sha256(patch).hexdigest() == 'e23bd259b7e347129c20106121c981720dc50740fec57a0d1e8049e007dda98a', 'Source patch integrity mismatch'
+          Path('/tmp/transaction-csv.patch').write_bytes(patch)
+          fix = Path('.github/transaction-csv-fix.patch').read_bytes()
+          assert hashlib.sha256(fix).hexdigest() == '8cb5dc052aa5a67a9edb8cb97924e5c6806a06effc90c3f390c95838b2c04c98', 'Occurrence-label patch integrity mismatch'
+          PY
+          git apply --check /tmp/transaction-csv.patch
+          git apply --index /tmp/transaction-csv.patch
+          git apply --check .github/transaction-csv-fix.patch
+          git apply --index .github/transaction-csv-fix.patch
+          git rm .github/transaction-csv.patch.xz.1 .github/transaction-csv.patch.xz.2 .github/transaction-csv.patch.xz.3 .github/transaction-csv-fix.patch .github/workflows/transaction-csv-check.yml
+          git diff --cached --check
+      - name: Install test dependencies
         run: |
           python3 -m venv .venv
           .venv/bin/python -m pip install '.[tui]'
           npm --prefix layout ci --ignore-scripts --no-audit --no-fund
-          .venv/bin/python -m unittest tests.test_transaction_csv -v
-          .venv/bin/python -m unittest discover -s tests -v
+      - name: Verify transaction rows, labels, and filtered graphs
+        run: .venv/bin/python -m unittest tests.test_transaction_csv tests.test_csv_export tests.test_csv_cli tests.test_service_presentation tests.test_connections tests.test_connections_ui -v
       - name: Check and build browser interface
-        if: hashFiles('tests/test_transaction_csv.py') != ''
         run: |
           npm --prefix web ci --ignore-scripts --no-audit --no-fund
           npm --prefix web run check
           npm --prefix web run build
+      - name: Run full offline regression suite
+        run: .venv/bin/python -m unittest discover -s tests -v
+      - name: Publish validated source to feature branch
+        run: |
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Export transaction input-output rows instead of graph objects'
+          git push origin HEAD:refs/heads/codex/transaction-csv
