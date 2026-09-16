@@ -201,43 +201,44 @@ class ServicePresentationTests(unittest.TestCase):
         for field in ("role", "color", "label", "details", "url"):
             self.assertEqual(node[field], self.node(graph)[field])
 
-    def test_csv_appends_explicit_service_fields_and_leaves_archive_untouched(self):
+    def test_transaction_csv_preserves_current_legacy_labels_and_original_archive(self):
+        from liquid_tracer.transaction_csv import TRANSACTION_CSV_FIELDS
         archive = self.root / "saved-run"
         export_run(self.store, self.state, archive)
         before = {path.name: path.read_bytes() for path in archive.iterdir() if path.is_file()}
         label = designation(entity="=Synthetic service", rationale="@Manual hypothesis, not attribution")
         self.state["labels"] = [label]
+        # Historical graph metadata was not always a complete modern settings
+        # document. Exact occurrence labels, not rebuilt rules, are authoritative.
         self.state["service_controls"] = {"revision": 3, "rules": {ADDRESS: {"enabled": True}}}
         destination = self.root / "export"
         export_csv(build_graph(self.state), archive, destination)
-        node = next(row for row in read_csv(destination / "nodes.csv") if row["id"] == "liquid:address:" + ADDRESS)
-        self.assertEqual(tuple(node), NODE_CSV_FIELDS)
-        self.assertEqual(tuple(node)[:6], ("id", "kind", "label", "url", "color", "details"))
-        self.assertEqual(node["role"], "candidate")
-        self.assertNotIn("classification", node)
-        self.assertEqual(node["service_name"], "'" + label["entity"])
-        self.assertEqual(node["service_rationale"], "'" + label["rationale"])
-        self.assertEqual(node["service_source"], "Investigator designation")
-        self.assertEqual(node["service_confidence"], "suspected")
-        self.assertEqual(node["service_observed_at"], label["observed_at"])
-        self.assertEqual(node["stop_tracing"], "True")
-        self.assertEqual(json.loads(node["details"])["address_attributions"], [label])
+        rows = [row for row in read_csv(destination / "transactions.csv") if row["Address Hash"] == ADDRESS]
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertEqual(tuple(row), TRANSACTION_CSV_FIELDS)
+            self.assertEqual(row["Address Label"], "Suspected " + label["entity"])
+            self.assertEqual(row["Address Entities"], "'" + label["entity"])
+            self.assertIn("STOP TRACING", row["Address Flags"])
         info = json.loads((destination / "export.json").read_text())
         self.assertEqual(info["service_controls"], self.state["service_controls"])
         self.assertEqual(before, {path.name: path.read_bytes() for path in archive.iterdir() if path.is_file()})
-        for name in ("inputs.csv", "outputs.csv", "spends.csv", "events.csv", "frontier.csv"):
-            self.assertEqual((destination / name).read_bytes(), before[name])
+        self.assertEqual({p.name for p in destination.glob("*.csv")}, {"transactions.csv"})
 
-    def test_csv_multiple_designations_keep_name_and_rationale_associations(self):
+    def test_transaction_csv_multiple_designations_are_occurrence_scoped(self):
         archive = self.root / "saved-run"
         export_run(self.store, self.state, archive)
         self.state["labels"] = [designation(entity="Synthetic Z", rationale="Z rationale"),
                                 designation(entity="Synthetic A", rationale="A rationale")]
         destination = self.root / "export"
         export_csv(build_graph(self.state, merge_addresses=True), archive, destination)
-        node = next(row for row in read_csv(destination / "nodes.csv") if row["id"] == "liquid:address:" + ADDRESS)
-        names, reasons = json.loads(node["service_name"]), json.loads(node["service_rationale"])
-        self.assertEqual(dict(zip(names, reasons)), {"Synthetic A": "A rationale", "Synthetic Z": "Z rationale"})
+        rows = [row for row in read_csv(destination / "transactions.csv") if row["Address Hash"] == ADDRESS]
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertEqual(row["Address Entities"], "Synthetic A; Synthetic Z")
+            self.assertEqual(row["Address Label"], "Suspected Synthetic A; Suspected Synthetic Z")
+        other = [row for row in read_csv(destination / "transactions.csv") if row["Address Hash"] != ADDRESS]
+        self.assertTrue(all(not row["Address Label"] for row in other))
 
 
 if __name__ == "__main__":

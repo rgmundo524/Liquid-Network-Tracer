@@ -446,6 +446,8 @@ def export_run(store, state, destination, merge_addresses=True, offline_preview=
         svg = svg_graph(graph)
         (destination / "graph.svg").write_text(svg, encoding="utf-8")
         (destination / "graph.html").write_text(html_graph(graph, svg), encoding="utf-8")
+    from .transaction_csv import write_transaction_csv
+    write_transaction_csv(destination / "transactions.csv", graph, state)
     write_csv(destination / "nodes.csv", node_csv_rows(graph), NODE_CSV_FIELDS)
     write_csv(destination / "edges.csv", graph["edges"],
         ["id", "source", "target", "role", "outpoint", "label", "quantity", "details"])

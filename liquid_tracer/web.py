@@ -34,15 +34,16 @@ CASE_ID = re.compile(r"[0-9a-f]{32}")
 RUN_ID = re.compile(r"[a-zA-Z0-9]{16}")
 ARTIFACT_DIR = re.compile(r"[a-zA-Z0-9]{16}-(?:csv|mermaid|elk|compact|connections)-[0-9a-f]{8}")
 COMPACTION_DIR = re.compile(r"[a-zA-Z0-9]{16}-compact-[0-9a-f]{8}")
-EXPORT_NAMES = {"nodes.csv", "edges.csv", "inputs.csv", "outputs.csv", "spends.csv",
-                "events.csv", "frontier.csv", "export.json", "SHA256SUMS"}
+LEGACY_EXPORT_NAMES = {"nodes.csv", "edges.csv", "inputs.csv", "outputs.csv", "spends.csv",
+                       "events.csv", "frontier.csv", "export.json", "SHA256SUMS"}
+EXPORT_NAMES = {"transactions.csv", "export.json", "SHA256SUMS"}
 PREVIEW_NAMES = {"graph.html", "graph.svg", "graph.mmd", "graph.json",
                  "mermaid-node-map.json", "mermaid-config.json"}
 LAYOUT_NAMES = {"graph.html", "graph.svg", "graph.json", "layout-report.json"}
 COMPACTION_NAMES = LAYOUT_NAMES | {"before.html", "before.svg", "before.json", "compaction.json", "SHA256SUMS"}
 LAYOUT_ALGORITHMS = ("elk_layered_v1", "dependency_layers_v1")
 FALLBACK_REASONS = ("size_limit", "timeout", "mermaid_size_limit", "mermaid_timeout")
-from .connections import FILES as CONNECTION_NAMES
+from .connections import FILES as CONNECTION_NAMES, LEGACY_FILES as LEGACY_CONNECTION_NAMES, preview_files
 CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact", "connections"}
 
 
@@ -334,7 +335,8 @@ class LocalServer(ThreadingHTTPServer):
                 if run_id not in runs:
                     continue
                 try:
-                    files = {name: self.artifact(case, [folder, directory.name, name]) for name in names}
+                    selected_names = preview_files(directory) if kind == "connections" else names
+                    files = {name: self.artifact(case, [folder, directory.name, name]) for name in selected_names}
                     if not all(path.is_file() for path in files.values()):
                         continue
                     if kind == "connections":
@@ -372,7 +374,7 @@ class LocalServer(ThreadingHTTPServer):
                     order = (finished, directory.name)
                     if order <= newest.get((run_id, kind), (-1, "")):
                         continue
-                    product = self.artifact_links(case, [folder, directory.name], names)
+                    product = self.artifact_links(case, [folder, directory.name], selected_names)
                     product["include_fees"] = fees
                     if kind == "connections":
                         report = info["connections"]
@@ -614,6 +616,7 @@ class LocalServer(ThreadingHTTPServer):
             names = {"mermaid": PREVIEW_NAMES, "csv": EXPORT_NAMES, "layout": LAYOUT_NAMES,
                      "compact": COMPACTION_NAMES, "connections": CONNECTION_NAMES}[action]
             if action == "connections":
+                names = preview_files(directory)
                 from .connections import reviewed_connections
                 graph, _ = reviewed_connections(case, directory.name)
                 report = graph["connections"]
@@ -639,8 +642,8 @@ class LocalServer(ThreadingHTTPServer):
         kind = parts[1].split("-")[1]
         if (parts[0] == "exports") != (kind == "csv"):
             raise RequestError("File not found", 404)
-        expected = {"mermaid": PREVIEW_NAMES, "csv": EXPORT_NAMES, "elk": LAYOUT_NAMES,
-                    "compact": COMPACTION_NAMES, "connections": CONNECTION_NAMES}[kind]
+        expected = {"mermaid": PREVIEW_NAMES, "csv": EXPORT_NAMES | LEGACY_EXPORT_NAMES, "elk": LAYOUT_NAMES,
+                    "compact": COMPACTION_NAMES, "connections": CONNECTION_NAMES | LEGACY_CONNECTION_NAMES}[kind]
         if parts[2] not in expected:
             raise RequestError("File not found", 404)
         return safe_path(case, parts)

@@ -15,7 +15,13 @@ from .common import TraceError, canonical, digest, match_labels, output_kind, pa
 
 PREVIEW_ID = re.compile(r"[0-9a-f]{16}-connections-[0-9a-f]{8}\Z")
 FILES = frozenset({"graph.html", "graph.svg", "graph.json", "layout-report.json", "graph.mmd",
-                   "nodes.csv", "edges.csv", "connections.json", "miro-plan.json", "SHA256SUMS"})
+                   "transactions.csv", "connections.json", "miro-plan.json", "SHA256SUMS"})
+LEGACY_FILES = (FILES - {"transactions.csv"}) | {"nodes.csv", "edges.csv"}
+
+
+def preview_files(directory):
+    """Historical connection snapshots remain readable without being rewritten."""
+    return FILES if (Path(directory) / "transactions.csv").exists() else LEGACY_FILES
 SCOPE = ("Search scope: verified spends in the selected saved run, from the selected starting outputs. "
          "This view does not fetch additional transactions. Unsearched, paused, stopped or hop-limited "
          "branches may contain undiscovered connections; no result is not proof of no connection.")
@@ -181,7 +187,7 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
     from .layout_preview import export_layout
     from .mermaid import mermaid_source
     from .miro import make_plan, validate_plan
-    from .export import write_csv, node_csv_rows, NODE_CSV_FIELDS
+    from .transaction_csv import write_transaction_csv
 
     validate_hops(max_hops)
     case = Path(case)
@@ -219,8 +225,7 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
         save_json(destination / "miro-plan.json", plan)
         save_json(destination / "connections.json", report)
         (destination / "graph.mmd").write_text(mermaid_source(graph) if graph["nodes"] else "flowchart LR\n  %% No connection found in saved searched data.\n", encoding="utf-8")
-        write_csv(destination / "nodes.csv", node_csv_rows(graph), NODE_CSV_FIELDS)
-        write_csv(destination / "edges.csv", graph["edges"], ["id", "source", "target", "role", "outpoint", "label", "quantity", "details"])
+        write_transaction_csv(destination / "transactions.csv", graph, state)
         manifest = "".join(digest((destination / name).read_bytes()) + "  " + name + "\n" for name in sorted(FILES - {"SHA256SUMS"}))
         (destination / "SHA256SUMS").write_text(manifest, encoding="utf-8")
     except BaseException:
@@ -242,19 +247,20 @@ def reviewed_connections(case, preview_id):
     directory = case / "previews" / preview_id
     if any(p.is_symlink() for p in (directory, *directory.parents)):
         raise TraceError("Connection previews cannot contain symbolic links")
-    for name in FILES:
+    files = preview_files(directory)
+    for name in files:
         if (directory / name).is_symlink() or not (directory / name).is_file():
             raise TraceError("The connection preview is incomplete; regenerate it")
     seen = set()
     for line in (directory / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
         fields = line.split("  ", 1)
-        if len(fields) != 2 or fields[1] not in FILES - {"SHA256SUMS"} or fields[1] in seen:
+        if len(fields) != 2 or fields[1] not in files - {"SHA256SUMS"} or fields[1] in seen:
             raise TraceError("Invalid connection-preview manifest")
         checksum, name = fields
         if digest((directory / name).read_bytes()) != checksum:
             raise TraceError("Connection preview changed; regenerate and review it")
         seen.add(name)
-    if seen != FILES - {"SHA256SUMS"}:
+    if seen != files - {"SHA256SUMS"}:
         raise TraceError("Connection-preview manifest is incomplete")
     graph, plan = read_json(directory / "graph.json"), read_json(directory / "miro-plan.json")
     if (graph.get("namespace", {}).get("case_id") != read_case(case)["case_id"]

@@ -4,11 +4,9 @@ import json
 from pathlib import Path
 
 from .common import HEX64, TraceError, digest, save_json
-from .export import NODE_CSV_FIELDS, node_csv_rows, write_csv
+from .transaction_csv import TRANSACTION_CSV_FIELDS, VALUE_NOTICE, transaction_csv_rows, write_transaction_csv
 
 _DETAIL_FILES = ("inputs.csv", "outputs.csv", "spends.csv", "events.csv", "frontier.csv")
-_NODE_FIELDS = NODE_CSV_FIELDS
-_EDGE_FIELDS = ("id", "source", "target", "role", "outpoint", "label", "quantity", "details")
 
 
 def _source_files(archive):
@@ -48,11 +46,7 @@ def _source_files(archive):
 
 
 def export_csv(graph, archive, directory):
-    """Create a new CSV bundle, preserving all archived detailed table bytes.
-
-    Graph tables reflect the selected presentation, including fee visibility.
-    The detailed tables retain every saved output and event, including fees.
-    """
+    """Export displayed transaction I/O only; original evidence tables stay archived."""
     archive, directory = Path(archive), Path(directory)
     if directory.exists() or directory.is_symlink():
         raise TraceError("CSV export directory already exists; choose a new directory")
@@ -67,16 +61,21 @@ def export_csv(graph, archive, directory):
         raise TraceError("CSV graph does not match the saved run")
     if state.get("case_id") != graph.get("namespace", {}).get("case_id"):
         raise TraceError("CSV graph does not match the saved case")
+    # Validate every selected occurrence before creating an output directory.
+    transaction_csv_rows(graph, state)
     try:
         directory.mkdir(parents=True, exist_ok=False)
     except FileExistsError as error:
         raise TraceError("CSV export directory already exists; choose a new directory") from error
-    write_csv(directory / "nodes.csv", node_csv_rows(graph), _NODE_FIELDS)
-    write_csv(directory / "edges.csv", graph["edges"], _EDGE_FIELDS)
-    for name in _DETAIL_FILES:
-        (directory / name).write_bytes(captured[name])
+    row_count = write_transaction_csv(directory / "transactions.csv", graph, state)
     save_json(directory / "export.json", {
-        "schema_version": 1,
+        "schema_version": 2,
+        "format": "transaction_io",
+        "columns": list(TRANSACTION_CSV_FIELDS),
+        "row_count": row_count,
+        "value_units": "base_units",
+        "time_zone": "UTC",
+        "io_index_base": 0,
         "run_id": graph["run_id"],
         "case_id": state["case_id"],
         "source_archive": str(archive.resolve()),
@@ -86,10 +85,11 @@ def export_csv(graph, archive, directory):
         "presentation_version": graph.get("presentation_version"),
         "graph_options": graph.get("graph_options", {}),
         **({"service_controls": graph["service_controls"]} if "service_controls" in graph else {}),
-        "notice": "Graph tables use the selected presentation. Detailed tables retain all saved fees. "
+        "notice": "One row per displayed transaction input/output arrow. " + VALUE_NOTICE + " "
+                  "Original detailed tables remain in the saved-run archive. "
                   "These checksums detect byte changes; they are not signatures or independent timestamps.",
     })
-    files = ("nodes.csv", "edges.csv", *_DETAIL_FILES)
+    files = ("transactions.csv",)
     # The manifest marks a complete bundle for local download discovery. Its
     # final name must never expose a partial write after interruption.
     temporary = directory / "SHA256SUMS.tmp"

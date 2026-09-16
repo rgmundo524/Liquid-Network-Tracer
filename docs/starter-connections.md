@@ -88,9 +88,13 @@ liquid-trace connections-publish --case /path/to/investigation \
 
 The first command returns the actual `preview_id` for the second command. Each
 preview is saved under the case's `previews/` directory with `graph.json`,
-`graph.svg`, `graph.html`, `graph.mmd`, node/edge CSVs, `connections.json`,
+`graph.svg`, `graph.html`, `graph.mmd`, `transactions.csv`, `connections.json`,
 `miro-plan.json`, a layout report and a checksum manifest. The Miro plan is a
 schema-1 snapshot and deliberately cannot enter normal cumulative sync.
 
 Connections establish UTXO reachability, not ownership, common control, the asset
 or amount of a confidential output, or allocation of stolen value.
+
+Transaction CSV downloads contain only the input/output arrows in this filtered
+view, using the [transaction CSV schema](transaction-csv.md). Historical snapshots
+with node/edge CSVs remain valid; regenerate them to get the new transaction table.

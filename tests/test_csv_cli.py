@@ -61,15 +61,10 @@ class CsvCliTests(unittest.TestCase):
         self.assertEqual(directory.parent, self.case / "exports")
         self.assertEqual(result["run_id"], self.archive.name)
         self.assertFalse(result["include_fees"])
-        self.assertEqual({Path(path).name for path in result["files"]},
-                         {"nodes.csv", "edges.csv", "inputs.csv", "outputs.csv", "spends.csv", "events.csv", "frontier.csv"})
-        self.assertTrue(all(Path(path).is_absolute() and Path(path).is_file() for path in result["files"]))
-        nodes = self.rows(directory / "nodes.csv")
-        edges = self.rows(directory / "edges.csv")
-        self.assertIn("tx:" + A, {row["id"] for row in nodes})
-        self.assertTrue(any("2023-11-14 UTC" in row["label"] for row in nodes))
-        self.assertTrue(all(edge["source"] in {node["id"] for node in nodes}
-                            and edge["target"] in {node["id"] for node in nodes} for edge in edges))
+        self.assertEqual([Path(path).name for path in result["files"]], ["transactions.csv"])
+        rows = self.rows(directory / "transactions.csv")
+        self.assertIn(A, {row["Transaction Hash"] for row in rows})
+        self.assertTrue(all(row["Time"] == "2023-11-14T22:13:20Z" for row in rows))
         for relative, contents in before.items():
             self.assertEqual((self.case / relative).read_bytes(), contents)
         self.assertFalse((self.case / "evidence.sqlite").exists())
@@ -82,12 +77,9 @@ class CsvCliTests(unittest.TestCase):
         excluded = self.success(self.arguments + ["--exclude-fees"])
         self.assertNotEqual(included["directory"], excluded["directory"])
         for result, expected in ((included, True), (excluded, False)):
-            directory = Path(result["directory"])
+            rows = self.rows(Path(result["directory"]) / "transactions.csv")
             self.assertEqual(result["include_fees"], expected)
-            self.assertEqual(any(row["label"].startswith("FEE\n") for row in self.rows(directory / "nodes.csv")), expected)
-            self.assertTrue(any(row["kind"] == "fee" for row in self.rows(directory / "outputs.csv")))
-            for name in ("inputs.csv", "outputs.csv", "spends.csv", "events.csv", "frontier.csv"):
-                self.assertEqual((directory / name).read_bytes(), (self.archive / name).read_bytes())
+            self.assertEqual(any("FEE" in row["Address Flags"] for row in rows), expected)
         self.assertTrue(read_json(self.case / "case.json")["run_defaults"]["include_fees"])
         self.assertEqual(self.snapshot(self.archive), before)
 
@@ -97,7 +89,7 @@ class CsvCliTests(unittest.TestCase):
         result = self.success(self.arguments + ["--run", self.archive.name, "--out", str(directory)])
         self.assertEqual(result["run_id"], self.archive.name)
         self.assertEqual(result["directory"], str(directory))
-        self.assertEqual((directory / "outputs.csv").read_bytes(), (self.archive / "outputs.csv").read_bytes())
+        self.assertEqual((directory / "transactions.csv").read_bytes(), (self.archive / "transactions.csv").read_bytes())
         self.assertEqual(read_json(self.case / "case.json")["latest_run"], latest["run_id"])
         before = self.snapshot(directory)
         status, _, errors = self.invoke(self.arguments + ["--out", str(directory)])
