@@ -45,6 +45,8 @@ class FakeMiro:
         self.counter = 0
         self.lose_next_post = False
         self.normalize = False
+        self.groups = {}
+        self.group_counter = 0
 
     @property
     def writes(self):
@@ -54,6 +56,20 @@ class FakeMiro:
         payload = json.loads(body) if body is not None else None
         self.calls.append((method, url, copy.deepcopy(payload)))
         parts = url.split("/")
+        path = urlsplit(url).path
+        if path.endswith("/groups"):
+            if method == "GET":
+                return 200, {}, canonical({"data": list(self.groups.values())})
+            if method == "POST":
+                members = payload["data"]["items"]
+                if (len(members) != 2 or len(set(members)) != 2
+                        or any(member not in self.items for member in members)
+                        or any(set(members) & set(group["items"]) for group in self.groups.values())):
+                    return 400, {}, b"{}"
+                self.group_counter += 1
+                group = {"id": "remote-group-" + str(self.group_counter), "items": list(members)}
+                self.groups[group["id"]] = group
+                return 201, {}, canonical(group)
         if method == "GET" and urlsplit(url).path.endswith("/items"):
             parent = parse_qs(urlsplit(url).query).get("parent_item_id", [None])[0]
             children = [item for item in self.items.values() if (item.get("parent") or {}).get("id") == parent]

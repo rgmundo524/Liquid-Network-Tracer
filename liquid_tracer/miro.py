@@ -17,6 +17,8 @@ from .common import TraceError, canonical, digest, now
 from .export import COLORS, edge_color, legend_lines
 from .name_colors import color_text
 from . import presentation_items
+from .miro_address_groups import (AddressCountGroups, PENDING as PENDING_GROUPS,
+                                   resolve_pending as resolve_pending_group)
 from .graph_markers import node_border
 from .miro_http import MiroHTTP
 from .miro_errors import creation_error
@@ -1357,6 +1359,8 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
         return report
 
     report = preview(state)
+    grouping = AddressCountGroups(plan, state)
+    report["address_groups_to_check"] = len(grouping.pairs)
     if dry_run:
         report["remote_preflight_required"] = True
         report["notice"] = "Local preview only; live sync checks mapped objects, manual edits, and current layout before writing."
@@ -1389,6 +1393,9 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
                 finish_creation_detaches(state, recovery_journal, requests, base, headers)
         # The complete live preflight must succeed before new sync writes.
         remote = preflight(requests, base, headers, state, {**removals, **frame_removals}, progress=status_progress)
+        grouping = AddressCountGroups(plan, state)
+        grouping.prepare(requests, base, headers)
+        report["address_groups_to_check"] = len(grouping.pairs)
         live_frame_records = {key: record for key, record in state["items"].items()
                               if record["endpoint"] == "frames" and key in remote}
         live_frame_ids = {record["id"] for record in live_frame_records.values()}
@@ -1615,6 +1622,8 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
             mapped_ids.remove(record["id"])
             report["deleted"] += 1
             status_progress.emit("framing", index, len(frame_removals), "Updating graph export frames")
+        report["address_groups"] = grouping.apply(requests, base, headers, journal, status_progress)
+        conflicts.extend({**entry, "field": "group"} for entry in report["address_groups"]["conflicts"])
         summary = state["runs"].setdefault(plan["run_id"], {"first_synced_at": now(), "plan_sha256s": []})
         if plan["sha256"] not in summary["plan_sha256s"]:
             summary["plan_sha256s"].append(plan["sha256"])
@@ -1659,7 +1668,7 @@ def publish(plan, board_id, state_path, max_items=750, token=None, transport=htt
         raise TraceError(f"Plan has {count} items, above max-items={max_items}; select a smaller trace or explicitly raise the limit")
     token = token or os.getenv("MIRO_ACCESS_TOKEN")
     if not token:
-        raise TraceError("Set MIRO_ACCESS_TOKEN locally (boards:write scope)")
+        raise TraceError("Set MIRO_ACCESS_TOKEN locally (boards:read and boards:write scopes)")
     if not board_id or len(board_id) > 200:
         raise TraceError("Provide the Miro board ID, not its full URL")
     state_path = Path(state_path)
@@ -1678,6 +1687,15 @@ def publish(plan, board_id, state_path, max_items=750, token=None, transport=htt
                              "; inspect the board and use miro-resolve before retrying")
         journal = resources.enter_context(SyncState(state_path, state))
         base = "https://api.miro.com/v2/boards/" + urllib.parse.quote(board_id, safe="")
+        group_headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json", "Accept": "application/json"}
+        grouping = AddressCountGroups(plan, state)
+        group_transport, group_quota = transport, None
+        if (grouping.pairs or state.get(PENDING_GROUPS)) and transport is http:
+            group_quota = resources.enter_context(SharedMiroQuota(token))
+            group_transport = resources.enter_context(MiroHTTP())
+        group_requests = resources.enter_context(MiroRequests(group_transport, interval=interval,
+                                                                workers=1, quota=group_quota))
+        grouping.prepare(group_requests, base, group_headers)
         for endpoint, collection in (("shapes", plan["shapes"]), ("connectors", plan["connectors"]),
                                      ("frames", plan.get("frames", []))):
             for item in collection:
@@ -1723,8 +1741,9 @@ def publish(plan, board_id, state_path, max_items=750, token=None, transport=htt
                                                      request_headers={"Authorization": "Bearer " + token}) +
                                      ("; reconcile pending item" if status >= 500 or status == 408 else ""))
                 time.sleep(max(0., interval))
+        group_report = grouping.apply(group_requests, base, group_headers, journal, _SyncProgress(None))
         return {"board_url": "https://miro.com/app/board/" + urllib.parse.quote(board_id, safe="") + "/",
-                "items": len(state["items"]), "state_path": str(state_path)}
+                "items": len(state["items"]), "state_path": str(state_path), "address_groups": group_report}
 
 
 def resolve(state_path, item_id=None, absent=False, key=None):
@@ -1751,6 +1770,10 @@ def resolve(state_path, item_id=None, absent=False, key=None):
             if legacy["key"] in pending:
                 raise TraceError("Duplicate pending Miro item; restore its last intact version")
             pending[legacy["key"]] = legacy
+        group_pending = state.get(PENDING_GROUPS, {})
+        if not isinstance(group_pending, dict) or set(group_pending) & set(pending):
+            raise TraceError("Malformed Miro group reconciliation journal")
+        pending.update(group_pending)
         if not pending:
             raise TraceError("No pending item to reconcile")
         if key is None:
@@ -1759,6 +1782,10 @@ def resolve(state_path, item_id=None, absent=False, key=None):
             key = next(iter(pending))
         if key not in pending:
             raise TraceError("That key is not a pending Miro item; choose one of: " + ", ".join(pending))
+        if key in group_pending:
+            with SyncState(state_path, state) as journal:
+                resolve_pending_group(state, journal, key, item_id)
+            return
         entry = pending[key]
         sets = []
         if item_id:
