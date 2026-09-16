@@ -35,7 +35,7 @@
     LIQUID_MERMAID_BIN = "${pkgs.mermaid-cli}/bin/mmdc";
     LIQUID_NODE_BIN = "${pkgs.nodejs_24}/bin/node";
     # V8 old-space budget for ELK and Mermaid, chosen at each render. Auto uses
-    # half available RAM, accounting for standard Linux cgroup limits. A number
+    # 75% of available RAM, accounting for standard Linux cgroup limits. A number
     # sets MiB explicitly, e.g. "32768" for a 32 GiB heap on a 64 GiB workstation.
     LIQUID_RENDER_HEAP_MB = "auto";
   };
