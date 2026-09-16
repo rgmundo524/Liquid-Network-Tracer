@@ -124,7 +124,7 @@ class LocalWebTests(unittest.TestCase):
         self.assertGreaterEqual(detail["latest"]["transaction_count"], 2)
         csv = self.wait(self.success(route + "/actions", {"action": "csv", "run_id": initial["run_id"]}, 202))
         self.assertEqual(csv["run_id"], initial["run_id"])
-        self.assertEqual(len(csv["downloads"]), 9)
+        self.assertEqual({item["name"] for item in csv["downloads"]}, {"transactions.csv", "export.json", "SHA256SUMS"})
         self.assertNotIn("directory", csv)
         for file in csv["downloads"]:
             status, data, response = self.request(file["url"])

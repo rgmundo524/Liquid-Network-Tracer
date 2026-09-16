@@ -47,46 +47,31 @@ class CSVExportTests(unittest.TestCase):
         self.graph = build_graph(self.state)
 
     def test_bundle_preserves_full_ids_table_headers_archive_and_provenance(self):
+        from liquid_tracer.transaction_csv import TRANSACTION_CSV_FIELDS
         before = {str(path.relative_to(self.archive)): path.read_bytes()
                   for path in self.archive.rglob("*") if path.is_file()}
         result = export_csv(self.graph, self.archive, self.destination)
         self.assertEqual(set(result), {"directory", "files"})
         self.assertEqual(result["directory"], str(self.destination.resolve()))
-        self.assertEqual({Path(path).name for path in result["files"]},
-                         {"nodes.csv", "edges.csv", *DETAIL_FILES})
-        self.assertTrue(all(Path(path).is_absolute() and Path(path).is_file() for path in result["files"]))
-        node_fields, nodes = read_csv(self.destination / "nodes.csv")
-        edge_fields, edges = read_csv(self.destination / "edges.csv")
-        self.assertEqual(node_fields, read_csv(self.archive / "nodes.csv")[0])
-        self.assertEqual(edge_fields, read_csv(self.archive / "edges.csv")[0])
-        ids = {node["id"] for node in nodes}
-        self.assertEqual(ids, {node["id"] for node in self.graph["nodes"]})
-        self.assertIn("tx:" + A, ids)
-        self.assertIn("liquid:address:SYNTHETIC-branch-A", ids)
-        self.assertEqual({edge["id"] for edge in edges}, {edge["id"] for edge in self.graph["edges"]})
-        self.assertTrue(all(edge["source"] in ids and edge["target"] in ids for edge in edges))
-        transaction = next(node for node in nodes if node["id"] == "tx:" + A)
-        self.assertIn("2023-11-14 UTC", transaction["label"])
-        self.assertEqual(transaction["color"], COLORS["starting_transaction"])
-        self.assertEqual(json.loads(transaction["details"])["transaction"]["txid"], A)
-        for name in DETAIL_FILES:
-            self.assertEqual((self.destination / name).read_bytes(), before[name])
+        self.assertEqual([Path(path).name for path in result["files"]], ["transactions.csv"])
+        fields, rows = read_csv(self.destination / "transactions.csv")
+        self.assertEqual(tuple(fields), TRANSACTION_CSV_FIELDS)
+        self.assertEqual(len(rows), len(self.graph["edges"]))
+        self.assertIn(A, {row["Transaction Hash"] for row in rows})
+        self.assertEqual({p.name for p in self.destination.glob("*.csv")}, {"transactions.csv"})
         info = json.loads((self.destination / "export.json").read_text())
-        self.assertEqual(info["run_id"], self.state["run_id"])
-        self.assertEqual(info["case_id"], self.state["case_id"])
+        self.assertEqual(info["row_count"], len(rows))
+        self.assertEqual(info["format"], "transaction_io")
         self.assertEqual(info["source_trace_sha256"], digest(before["trace.json"]))
         self.assertEqual(info["source_files"], {name: digest(before[name]) for name in DETAIL_FILES})
-        self.assertEqual(info["graph_options"], {"include_fees": False})
-        self.assertEqual(info["address_mode"], "merged")
         manifest = (self.destination / "SHA256SUMS").read_text().splitlines()
-        self.assertEqual(len(manifest), 8)
+        self.assertEqual(len(manifest), 2)
         for line in manifest:
             checksum, name = line.split("  ", 1)
             self.assertEqual(checksum, digest((self.destination / name).read_bytes()))
         self.assertFalse((self.destination / "SHA256SUMS.tmp").exists())
-        after = {str(path.relative_to(self.archive)): path.read_bytes()
-                 for path in self.archive.rglob("*") if path.is_file()}
-        self.assertEqual(after, before)
+        self.assertEqual(before, {str(path.relative_to(self.archive)): path.read_bytes()
+                                 for path in self.archive.rglob("*") if path.is_file()})
 
     def test_interrupted_final_manifest_write_does_not_publish_completion_name(self):
         before = {str(path.relative_to(self.archive)): path.read_bytes()
@@ -109,36 +94,27 @@ class CSVExportTests(unittest.TestCase):
                                  for path in self.archive.rglob("*") if path.is_file()})
 
     def test_current_graph_fee_setting_does_not_remove_raw_fee_evidence(self):
+        before = (self.archive / "outputs.csv").read_bytes()
         for fees in (False, True):
-            with self.subTest(include_fees=fees):
-                graph = build_graph(self.state, include_fees=fees)
-                destination = self.root / ("fees-shown" if fees else "fees-hidden")
-                export_csv(graph, self.archive, destination)
-                nodes = read_csv(destination / "nodes.csv")[1]
-                edges = read_csv(destination / "edges.csv")[1]
-                fee_nodes = {node["id"] for node in nodes if node["label"].startswith("FEE\n")}
-                self.assertEqual(bool(fee_nodes), fees)
-                self.assertEqual(bool({edge["target"] for edge in edges} & fee_nodes), fees)
-                self.assertTrue(any(row["kind"] == "fee" for row in read_csv(destination / "outputs.csv")[1]))
-                self.assertTrue(any(row["kind"] == "fee" for row in read_csv(destination / "events.csv")[1]))
-                self.assertEqual((destination / "outputs.csv").read_bytes(), (self.archive / "outputs.csv").read_bytes())
-                info = json.loads((destination / "export.json").read_text())
-                self.assertEqual(info["graph_options"], {"include_fees": fees})
+            graph = build_graph(self.state, include_fees=fees)
+            destination = self.root / ("fees-shown" if fees else "fees-hidden")
+            export_csv(graph, self.archive, destination)
+            rows = read_csv(destination / "transactions.csv")[1]
+            self.assertEqual(len(rows), len(graph["edges"]))
+            self.assertEqual(any("FEE" in row["Address Flags"] for row in rows), fees)
+            self.assertEqual((self.archive / "outputs.csv").read_bytes(), before)
+            self.assertTrue(any(row["kind"] == "fee" for row in read_csv(self.archive / "outputs.csv")[1]))
 
     def test_csv_quoting_and_formula_protection_preserve_literal_graph_text(self):
         graph = copy.deepcopy(self.graph)
-        caption = '=SUM(1,2),"Synthetic"\nUnicode café'
-        graph["nodes"][0]["label"] = caption
+        graph["nodes"][0]["label"] = '=SUM(1,2),"Synthetic"\nUnicode café'
         graph["edges"][0]["quantity"] = '@SUM(1,2),"Synthetic"\n??'
         export_csv(graph, self.archive, self.destination)
-        nodes = read_csv(self.destination / "nodes.csv")[1]
-        edges = read_csv(self.destination / "edges.csv")[1]
-        self.assertEqual(nodes[0]["label"], "'" + caption)
-        self.assertEqual(edges[0]["quantity"], "'" + graph["edges"][0]["quantity"])
-        outputs = read_csv(self.destination / "outputs.csv")[1]
-        output = next(row for row in outputs if row["outpoint"] == A + ":0")
-        self.assertEqual(output["scriptpubkey_address"], '\'=SUM(1,2),"Synthetic"\nAddress')
-        self.assertEqual((self.destination / "outputs.csv").read_bytes(), (self.archive / "outputs.csv").read_bytes())
+        rows = read_csv(self.destination / "transactions.csv")[1]
+        output = next(row for row in rows if row["Transaction Hash"] == A
+                      and row["Direction"] == "OUT" and row["Number of I/O"] == "0")
+        self.assertEqual(output["Address Hash"], '\'=SUM(1,2),"Synthetic"\nAddress')
+        self.assertEqual(output["Crypto Value"], "1000000")
 
     def test_each_reused_file_and_trace_must_have_a_manifest_entry(self):
         manifest = self.archive / "SHA256SUMS"

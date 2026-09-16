@@ -166,7 +166,7 @@ def parser():
     compact.add_argument("--open", dest="open_browser", action="store_true")
     fee_arguments(compact)
     connector_arguments(compact)
-    csv = commands.add_parser("csv-export", help="Export CSV tables from a saved run without API calls")
+    csv = commands.add_parser("csv-export", help="Export displayed transaction input/output rows without API calls")
     csv.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                      help="Case directory (default: LIQUID_CASE_DIR)")
     csv.add_argument("--run", default="latest", help="Saved run ID (default: latest)")
