@@ -16,7 +16,7 @@ from .services import confidence_value
 from .attribution_presentation import display_name, attribution_reference
 from .name_colors import apply_name_colors, color_text
 
-PRESENTATION_VERSION = 17
+PRESENTATION_VERSION = 18
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -53,7 +53,7 @@ def legend_lines(graph=None):
         "Captions: vin/vout number · amount asset. ?? = not publicly available. Known amounts are in base units.",
         "STOP TRACING: an explicit address boundary, independent of confidence. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards.",
         "Thick red border: INPUT MERGE = distinct starting lineages meet in a transaction; shared-address receipts from distinct branches also highlight the receiving address and all participating senders. Neither proves ownership or value allocation.",
-        "Numbers above circles: confirmed + mempool transaction count at last lookup; ?? = not fetched. Not the number of visible arrows.",
+        "TX count inside circles: confirmed + mempool transactions at last lookup; ?? = unavailable. Not the number of visible arrows.",
         "Unspent refers to tracked outputs at their last check, not all funds or inactivity at that address. Arrows do not allocate stolen value.",
     ]
 
@@ -403,7 +403,8 @@ def svg_graph(graph):
             f'<text x="{label_x}" y="{label_y-10}" text-anchor="middle" font-size="11" fill="{color}">{html.escape(edge["label"])}</text></g>')
     for node in graph["nodes"]:
         x, y, fill = node["x"], node["y"], node["color"]
-        chunks.append(f'<g class="node" data-key="{html.escape(node["id"], quote=True)}" tabindex="0" style="cursor:pointer"><title>{html.escape(json.dumps(node["details"], ensure_ascii=False))}</title>')
+        title = node["label"] + "\n" + json.dumps(node["details"], ensure_ascii=False)
+        chunks.append(f'<g class="node" data-key="{html.escape(node["id"], quote=True)}" tabindex="0" style="cursor:pointer"><title>{html.escape(title)}</title>')
         if node["kind"] == "address":
             shape = f'<circle cx="{x}" cy="{y}" r="80"'
         elif node["kind"] == "transaction":
@@ -412,12 +413,25 @@ def svg_graph(graph):
             shape = f'<polygon points="{x},{y-80} {x+80},{y} {x},{y+80} {x-80},{y}"'
         border, thickness = node_border(node)
         chunks.append(shape + f' fill="{fill}" stroke="{border}" stroke-width="{thickness}"/>')
-        if node["kind"] == "address" and "tx_count" in node:
-            from .address_counts import label as count_label
-            chunks.append(f'<text class="address-tx-count" x="{x}" y="{y-94}" text-anchor="middle" font-size="18" fill="#334155">{count_label(node)}</text>')
-        lines = node["label"].splitlines()
-        for i, line in enumerate(lines):
-            chunks.append(f'<text x="{x}" y="{y + (i-(len(lines)-1)/2)*18}" text-anchor="middle" dominant-baseline="middle" font-size="12" fill="{color_text(fill)}">{html.escape(line)}</text>')
+        from .address_counts import caption as count_caption
+        from .layout_preview import _explorer_url, _short_lines
+        url = _explorer_url(graph, node)
+        count = count_caption(node)
+        labels = _short_lines(node["label"], 160, 160, node["kind"], int(bool(url)) + int(count is not None))
+        rows = [(text, "label") for text in labels]
+        if url:
+            rows.append(("Explorer", "explorer"))
+        if count is not None:
+            rows.append((count, "count"))
+        for i, (line, role) in enumerate(rows):
+            if role == "explorer":
+                chunks.append(f'<a href="{html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">')
+            attributes = ' class="address-tx-count"' if role == "count" else ''
+            if role == "explorer":
+                attributes += ' text-decoration="underline"'
+            chunks.append(f'<text{attributes} x="{x}" y="{y + (i-(len(rows)-1)/2)*16}" text-anchor="middle" dominant-baseline="middle" font-size="11" fill="{color_text(fill)}">{html.escape(line)}</text>')
+            if role == "explorer":
+                chunks.append('</a>')
         chunks.append('</g>')
     chunks.append('</g></svg>')
     return "".join(chunks)

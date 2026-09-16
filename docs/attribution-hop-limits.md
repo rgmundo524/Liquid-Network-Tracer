@@ -53,7 +53,7 @@ Internal saved role names remain compatible with older investigations. The label
 still means a tracked output was unspent at its last observation, not that an
 entire address is dormant or contains only unspent funds.
 
-## The number above each address circle
+## The transaction count inside each address circle
 
 The number is the address's **confirmed plus mempool transaction count at the last
 statistics lookup**, not the number of chart arrows, UTXOs, or visible transactions.
@@ -68,20 +68,19 @@ more funds, run ELK, or contact Miro. Each response is saved so another invocati
 fetches only remaining missing counts. Existing verified address-review statistics
 are reused. API authentication/retries can also consume the request budget.
 
-New local previews and normal **Sync to Miro** obtain and display missing counts
-without a separate fetch step. Existing rendered files are not rewritten. No retracing is needed for display-only changes. Normal Miro sync
-adds one managed text shape per address circle and follows the circle's current
-position, including manual moves; those shapes count against the new-item budget.
-No additional transaction CSV rows are created. Old run archives and immutable
-connection/compact previews are not rewritten. Generate a fresh connection/compact
-preview to include updated counts.
+New local previews and normal **Sync to Miro** obtain missing counts automatically.
+In Miro, `TX count: 1,234` is the final text row inside the address circle, below
+Explorer. It is part of the same shape, not a separate label or group. ELK/basic
+SVG counts are also inside the circle; standalone Mermaid includes the count
+directly in its node label and needs no SVG postprocessing.
 
-ELK/basic SVG and Miro place counts above circles. The local Mermaid SVG adds them
-after rendering, using actual circle positions. Standalone Mermaid source carries
-counts as comments because Mermaid has no equivalent external-node-label syntax;
-an unrelated Mermaid renderer will not show the external text automatically.
-Bitcoin peg-in context circles currently show `??`: a Liquid lookup is not used to
-invent a Bitcoin address-history count.
+Normal sync safely retires old generated external labels using their saved
+creation proofs. Failed grouping journals no longer trigger requests or block
+this change. Keep the existing Miro mapping. No extra transaction CSV rows are
+created, and full addresses and transaction-count observations stay unchanged.
+Old run archives and immutable connection/compact previews are not rewritten;
+regenerate a preview with external labels before publishing it. Bitcoin peg-in
+context circles still have unknown counts rather than invented Liquid statistics.
 
 ```sh
 liquid-trace address-counts --case /path/to/investigation --run latest

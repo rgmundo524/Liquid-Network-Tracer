@@ -94,9 +94,10 @@ def mermaid_source(graph):
             raise TraceError("The graph contains an invalid node color")
         identifier = ids[node["id"]]
         label = node["label"]
-        if node["kind"] == "address" and "tx_count" in node:
-            from .address_counts import label as count_label
-            lines.append(f"  %% {identifier} total address transactions: {count_label(node)} (external label in local SVG)")
+        from .address_counts import caption as count_caption
+        count = count_caption(node)
+        if count is not None:
+            label += "\n" + count
         border, thickness = node_border(node)
         lines.append(f"  {identifier}{start}{_label(label)}{end}")
         lines.append(f"  style {identifier} fill:{color},stroke:{border},stroke-width:{thickness}px,color:{color_text(color)}")
@@ -106,48 +107,6 @@ def mermaid_source(graph):
     for index, edge in enumerate(edges):
         lines.append(f"  linkStyle {index} stroke:{edge_color(edge['role'])},stroke-width:2px,color:#334155")
     return "\n".join(lines) + "\n"
-
-
-def _address_counts_svg(graph, svg):
-    """Add external count text to actual Mermaid circles, never synthetic edges.
-
-    Mermaid's source language has no external node-label API. The local SVG
-    post-pass places these labels on its generated circle geometry instead.
-    """
-    from .address_counts import label
-    nodes, _, ids = _items(graph)
-    counts = {ids[n["id"]]: label(n) for n in nodes if n["kind"] == "address" and "tx_count" in n}
-    root = ET.fromstring(svg)
-    ns = "{http://www.w3.org/2000/svg}"
-    changed = False
-    for group in root.iter(ns + "g"):
-        if "node" not in group.get("class", "").split():
-            continue
-        found = re.fullmatch(r"flowchart-(n[0-9]+)-[0-9]+", group.get("id", ""))
-        if not found or found[1] not in counts:
-            continue
-        circle = group.find(ns + "circle")
-        if circle is None:
-            continue
-        x, y, radius = (float(circle.get(k, "0")) for k in ("cx", "cy", "r"))
-        import math
-        if not all(math.isfinite(v) for v in (x, y, radius)) or radius <= 0:
-            continue
-        text = ET.SubElement(group, ns + "text", {"x": str(x), "y": str(y - radius - 14),
-            "text-anchor": "middle", "font-size": "18", "fill": "#334155", "class": "address-tx-count"})
-        text.text = counts[found[1]]
-        changed = True
-    if not changed:
-        return svg
-    # Extra top padding covers the external labels on the topmost nodes.
-    bounds = root.get("viewBox", "").split()
-    if len(bounds) == 4:
-        x, y, width, height = map(float, bounds)
-        root.set("viewBox", f"{x} {y - 42} {width} {height + 42}")
-        old_height = root.get("height", "")
-        if old_height.replace(".", "", 1).isdigit():
-            root.set("height", str(float(old_height) + 42))
-    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
 def _preview_html(graph, svg):
@@ -320,10 +279,6 @@ def export_mermaid(graph, directory):
         if (root.tag != "{http://www.w3.org/2000/svg}svg" or not len(root)
                 or root.get("aria-roledescription") == "error"):
             raise ValueError("Not a graph SVG")
-        updated_svg = _address_counts_svg(graph, svg)
-        if updated_svg != svg:
-            paths["svg"].write_bytes(updated_svg)
-            svg = updated_svg
         # Discovery treats graph.html as the completion marker. Publish its
         # name only after the entire preview is written, so interruption cannot
         # make an incomplete new preview hide a previous complete one.
