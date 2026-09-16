@@ -1,0 +1,21 @@
+name: Prepare address grouping source
+on:
+  push:
+    branches: [codex/address-count-groups]
+    paths: [.github/workflows/address-groups-source.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 5457ea856dddb8cce5e08698ef313b13624b1b1b
+      - run: git archive HEAD > /tmp/address-groups-source.tar
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: address-groups-source
+          path: /tmp/address-groups-source.tar
+          retention-days: 2
