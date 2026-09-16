@@ -19,6 +19,7 @@ from .presentation_items import proof, validate_items
 GROUPS = 'address_count_groups'
 PENDING = 'pending_address_count_groups'
 PREFIX = 'group:address_count:'
+VERIFIED = 'membership_verified'
 
 
 def _id(value):
@@ -87,6 +88,15 @@ def inventory(requests, base, headers):
     return groups
 
 
+def _members(requests, base, headers, group_id):
+    """Read actual members, rather than trusting a successful creation response."""
+    values = list(_pages(requests, base, headers, '/groups/items', {'group_item_id': group_id}))
+    ids = [_item_id(value) for value in values]
+    if any(not _id(value) for value in ids) or len(ids) != len(set(ids)):
+        raise TraceError('Miro group verification returned invalid or duplicated members')
+    return frozenset(ids)
+
+
 def _validate_saved(state):
     for field in (GROUPS, PENDING):
         values = state.get(field, {})
@@ -95,6 +105,10 @@ def _validate_saved(state):
         for key, entry in values.items():
             if not isinstance(entry, dict):
                 raise TraceError('Invalid address-count grouping journal entry')
+            if VERIFIED in entry and entry[VERIFIED] is not True:
+                raise TraceError('Invalid address-count membership verification marker')
+            if 'response_id' in entry and not _id(entry['response_id']):
+                raise TraceError('Invalid pending Miro group response ID')
             host, label, members = entry.get('host'), entry.get('label'), entry.get('members')
             if (not isinstance(host, str) or not host or not isinstance(label, str)
                     or label != proof('address_count', host)['key']
@@ -116,15 +130,21 @@ class AddressCountGroups:
         _validate_saved(state)
         self.groups = {}
         self.memberships = {}
+        self.prepared_groups = {}
+
+    def _refresh(self, requests, base, headers):
+        self.groups = inventory(requests, base, headers)
+        self.memberships = {}
+        for group_id, members in self.groups.items():
+            for member in members:
+                self.memberships.setdefault(member, set()).add(group_id)
 
     def prepare(self, requests, base, headers):
         """Read complete live membership before any shape/connector mutations."""
         if not self.pairs and not self.state.get(PENDING):
             return
-        self.groups = inventory(requests, base, headers)
-        for group_id, members in self.groups.items():
-            for member in members:
-                self.memberships.setdefault(member, set()).add(group_id)
+        self._refresh(requests, base, headers)
+        self.prepared_groups = dict(self.groups)
         for key, entry in self.state.get(PENDING, {}).items():
             found = self._exact(entry['members'])
             if found is None:
@@ -140,13 +160,23 @@ class AddressCountGroups:
         return None
 
     def apply(self, requests, base, headers, journal, progress):
-        report = {'created': 0, 'reused': 0, 'preserved': 0, 'conflicts': []}
+        report = {'created': 0, 'reused': 0, 'preserved': 0, 'repaired': 0,
+                  'verified': 0, 'total': len(self.pairs), 'status': 'complete', 'conflicts': []}
         if not self.pairs and not self.state.get(PENDING):
             return report
+        # Shape/parent/frame updates have run since prepare(). Its inventory is
+        # no longer evidence that a group still exists. Re-read before deciding
+        # whether a pair can be reused or needs repair.
+        self._refresh(requests, base, headers)
         # Recover successful writes even when the current plan no longer needs
         # that pair. The group and its objects are never automatically deleted.
         for key, entry in list(self.state.get(PENDING, {}).items()):
-            journal.commit(sets=[((GROUPS, key), {**entry, 'id': self._exact(entry['members'])})],
+            group_id = self._exact(entry['members'])
+            if group_id is None or _members(requests, base, headers, group_id) != frozenset(entry['members']):
+                raise TraceError('Pending address-count group cannot be verified; preserve the mapping '
+                                 'and reconcile with miro-resolve before retrying')
+            saved = {name: entry[name] for name in ('host', 'label', 'members')}
+            journal.commit(sets=[((GROUPS, key), {**saved, 'id': group_id, VERIFIED: True})],
                            deletes=[(PENDING, key)])
         mapped_ids = {_item_id(value) for value in self.state['items'].values()}
         for index, (key, (host, label)) in enumerate(sorted(self.pairs.items()), 1):
@@ -157,16 +187,24 @@ class AddressCountGroups:
             record = {'host': host, 'label': label, 'members': members}
             group_id = self._exact(members)
             if group_id is not None:
-                saved = {**record, 'id': group_id}
+                saved = {**record, 'id': group_id, VERIFIED: True}
                 if self.state.get(GROUPS, {}).get(key) != saved:
                     journal.commit(sets=[((GROUPS, key), saved)])
                 report['reused'] += 1
+                report['verified'] += 1
                 continue
             previous = self.state.get(GROUPS, {}).get(key)
-            if any(self.memberships.get(member) for member in members) or previous is not None:
-                # Preserve larger user groups, regrouped items and intentional
-                # ungrouping of a pair we had previously acknowledged.
+            occupied = any(self.memberships.get(member) for member in members)
+            # Keep a deliberate removal of a previously *verified* pair, and
+            # preserve larger/different user groups. Older releases marked an ID
+            # as success without a membership GET, so their missing records must
+            # not permanently suppress repair. A pair lost during this sync is
+            # also repaired if neither item has joined a different group.
+            manually_removed = (previous is not None and previous.get(VERIFIED) is True
+                                and previous['id'] not in self.prepared_groups)
+            if occupied or manually_removed:
                 report['preserved'] += 1
+                report['status'] = 'incomplete'
                 report['conflicts'].append({'key': key, 'reason': 'Existing or manually changed grouping preserved'})
                 continue
             journal.commit(sets=[((PENDING, key), record)])
@@ -189,13 +227,25 @@ class AddressCountGroups:
                     or group_id in mapped_ids):
                 raise TraceError('Miro accepted grouping but returned an invalid or reused group ID; '
                                  'retry sync to reconcile live membership')
-            journal.commit(sets=[((GROUPS, key), {**record, 'id': group_id})], deletes=[(PENDING, key)])
+            # Retain the returned ID as an unacknowledged intent before GET.
+            # A 201 alone must never become proof that the pair moves together.
+            journal.commit(sets=[((PENDING, key), {**record, 'response_id': group_id})])
+            if _members(requests, base, headers, group_id) != frozenset(members):
+                raise TraceError('Miro returned success but the address/count pair was not verified '
+                                 'in the created group; grouping is incomplete. The pending intent '
+                                 'is saved; retry sync to check live membership without replaying POST')
+            journal.commit(sets=[((GROUPS, key), {**record, 'id': group_id, VERIFIED: True})],
+                           deletes=[(PENDING, key)])
             self.groups[group_id] = frozenset(members)
             for member in members:
                 self.memberships[member] = {group_id}
             report['created'] += 1
+            report['verified'] += 1
+            report['repaired'] += previous is not None
         if self.pairs:
-            progress.emit('grouping', len(self.pairs), len(self.pairs), 'Address-count grouping complete')
+            phase = 'grouping' if report['status'] == 'complete' else 'grouping_incomplete'
+            progress.emit(phase, report['verified'], len(self.pairs),
+                          'Address-count group membership checked')
         return report
 
 

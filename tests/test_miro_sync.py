@@ -70,6 +70,12 @@ class FakeMiro:
                 group = {"id": "remote-group-" + str(self.group_counter), "items": list(members)}
                 self.groups[group["id"]] = group
                 return 201, {}, canonical(group)
+        if method == "GET" and path.endswith("/groups/items"):
+            group_id = parse_qs(urlsplit(url).query).get("group_item_id", [None])[0]
+            group = self.groups.get(group_id)
+            if group is None:
+                return 404, {}, b"{}"
+            return 200, {}, canonical({"data": [{"id": item_id} for item_id in group["items"]]})
         if method == "GET" and urlsplit(url).path.endswith("/items"):
             parent = parse_qs(urlsplit(url).query).get("parent_item_id", [None])[0]
             children = [item for item in self.items.values() if (item.get("parent") or {}).get("id") == parent]
