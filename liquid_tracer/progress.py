@@ -25,6 +25,7 @@ MESSAGES = {
     "recovery": "Checking the confirmed-empty Miro board",
     "creating": "Adding new Miro items",
     "grouping": "Grouping addresses with their transaction counts",
+    "grouping_incomplete": "Graph synced but some address/count pairs are not grouped; see the grouping report",
     "waiting": "Waiting before retrying a Miro request",
     "complete": "Miro synchronization completed",
 }

@@ -1635,7 +1635,12 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
                              (("latest_run_id",), state["latest_run_id"]), (("active_run_id",), None)])
         report["items"] = len(state["items"])
         report["runs"] = len(state["runs"])
-        status_progress.emit("complete", 1, 1, "Miro sync complete")
+        group_report = report["address_groups"]
+        if group_report.get("status") == "incomplete":
+            status_progress.emit("grouping_incomplete", group_report["verified"], group_report["total"],
+                                 "Graph synced but some address/count pairs are not grouped")
+        else:
+            status_progress.emit("complete", 1, 1, "Miro sync complete")
         return report
 
 
