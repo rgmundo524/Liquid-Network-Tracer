@@ -8,21 +8,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 import csv
 
-from .common import TraceError, canonical, output_kind
+from .common import HEX64, LBTC, TraceError, canonical, output_kind
 from .attribution_presentation import display_name
 
 TRANSACTION_CSV_FIELDS = (
     "Block", "Time", "Transaction Label", "Transaction Hash", "Address Label",
-    "Address Flags", "Address Entities", "Address Hash", "Crypto Value",
-    "USD Value", "PegOut Value", "Direction", "Number of I/O",
+    "Address Flags", "Address Hash", "Asset Value", "Asset",
+    "PegOut Value", "Direction", "Number of I/O",
 )
 VALUE_NOTICE = (
-    "Crypto Value and PegOut Value are exact explicit base units (satoshis for L-BTC), "
-    "not inferred whole-token amounts. This fixed-column format has no asset column; "
-    "consult the saved transaction for the asset and do not sum different assets. "
-    "Blank amounts are unknown, not zero. USD Value is blank because no historical "
-    "USD valuation source is recorded. PegOut Value repeats the peg-out request output "
-    "amount; it is not a second transfer or proof of a Bitcoin payout."
+    "Asset Value and PegOut Value are exact explicit base units (satoshis for BTC/L-BTC), "
+    "not inferred whole-token amounts. Asset is L-BTC for its recognized explicit asset ID, "
+    "BTC for a Bitcoin peg-in input, or the full explicit Liquid asset ID otherwise. "
+    "Confidential or missing asset identities are blank, never inferred from an amount, "
+    "address label or graph color. Do not sum different assets. Blank amounts are unknown, "
+    "not zero. PegOut Value repeats the peg-out request output amount; it is not a second "
+    "transfer or proof of a Bitcoin payout."
 )
 
 
@@ -33,6 +34,20 @@ def _amount(output):
     if type(value) is not int or value < 0:
         raise TraceError("Transaction CSV requires explicit nonnegative integer base-unit amounts")
     return value
+
+
+def _asset(output, *, pegin=False):
+    """Identify this occurrence's asset without consulting labels or a registry."""
+    if pegin:
+        # This occurrence is the Bitcoin prevout consumed by a Liquid peg-in,
+        # not an L-BTC output minted in the receiving transaction.
+        return "BTC"
+    asset = output.get("asset")
+    if asset is None:
+        return ""
+    if not isinstance(asset, str) or not HEX64.fullmatch(asset):
+        raise TraceError("Transaction CSV requires a full explicit hexadecimal asset ID")
+    return "L-BTC" if asset.lower() == LBTC else asset
 
 
 def _block_time(transaction):
@@ -170,8 +185,6 @@ def transaction_csv_rows(graph, state):
                 else:
                     matches = [label for target in targets for label in index[target]]
             names = sorted({display_name(label) for label in matches})
-            entities = sorted({label.get("entity") or label.get("name") for label in matches
-                               if label.get("entity") or label.get("name")})
             if any(label.get("stop") is True for label in matches):
                 flags.append("STOP TRACING")
             if not pegin and not coinbase and outpoint in seeds:
@@ -194,8 +207,8 @@ def transaction_csv_rows(graph, state):
             amount = _amount(output)
             row = dict(zip(TRANSACTION_CSV_FIELDS, (
                 block, timestamp, f"Starting TX {starts[tx_key]}" if tx_key in starts else "", txid,
-                "; ".join(names), "; ".join(flags), "; ".join(entities), address,
-                amount, "", amount if pegout else "", direction.upper(), io_index,
+                "; ".join(names), "; ".join(flags), address,
+                amount, _asset(output, pegin=pegin), amount if pegout else "", direction.upper(), io_index,
             )))
             rows.append(row)
         rows.sort(key=lambda row: (row["Time"] == "", row["Time"],

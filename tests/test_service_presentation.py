@@ -218,7 +218,7 @@ class ServicePresentationTests(unittest.TestCase):
         for row in rows:
             self.assertEqual(tuple(row), TRANSACTION_CSV_FIELDS)
             self.assertEqual(row["Address Label"], "Suspected " + label["entity"])
-            self.assertEqual(row["Address Entities"], "'" + label["entity"])
+            self.assertNotIn("Address Entities", row)
             self.assertIn("STOP TRACING", row["Address Flags"])
         info = json.loads((destination / "export.json").read_text())
         self.assertEqual(info["service_controls"], self.state["service_controls"])
@@ -235,7 +235,7 @@ class ServicePresentationTests(unittest.TestCase):
         rows = [row for row in read_csv(destination / "transactions.csv") if row["Address Hash"] == ADDRESS]
         self.assertTrue(rows)
         for row in rows:
-            self.assertEqual(row["Address Entities"], "Synthetic A; Synthetic Z")
+            self.assertNotIn("Address Entities", row)
             self.assertEqual(row["Address Label"], "Suspected Synthetic A; Suspected Synthetic Z")
         other = [row for row in read_csv(destination / "transactions.csv") if row["Address Hash"] != ADDRESS]
         self.assertTrue(all(not row["Address Label"] for row in other))

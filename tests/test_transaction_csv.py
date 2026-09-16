@@ -47,7 +47,7 @@ class TransactionCSVTests(unittest.TestCase):
         self.assertTrue(all(tuple(row) == TRANSACTION_CSV_FIELDS for row in rows))
         self.assertEqual(TRANSACTION_CSV_FIELDS, (
             "Block", "Time", "Transaction Label", "Transaction Hash", "Address Label",
-            "Address Flags", "Address Entities", "Address Hash", "Crypto Value", "USD Value",
+            "Address Flags", "Address Hash", "Asset Value", "Asset",
             "PegOut Value", "Direction", "Number of I/O"))
         self.assertFalse({"id", "source", "target", "color", "x", "y", "details"} & set(rows[0]))
 
@@ -64,7 +64,7 @@ class TransactionCSVTests(unittest.TestCase):
         rows = transaction_csv_rows(self.graph, self.state)
         sent, received = find(rows, A, "OUT", 0), find(rows, B, "IN", 0)
         self.assertEqual(sent["Address Hash"], received["Address Hash"])
-        self.assertEqual(sent["Crypto Value"], received["Crypto Value"])
+        self.assertEqual(sent["Asset Value"], received["Asset Value"])
         self.assertNotEqual(sent["Transaction Hash"], received["Transaction Hash"])
 
     def test_utc_block_belongs_to_the_host_transaction_not_the_funding_transaction(self):
@@ -85,18 +85,18 @@ class TransactionCSVTests(unittest.TestCase):
     def test_pegout_value_is_actual_request_output_and_destination_not_payout_claim(self):
         row = find(transaction_csv_rows(self.graph, self.state), D, "OUT", 0)
         self.assertEqual(row["PegOut Value"], 1234)
-        self.assertEqual(row["Crypto Value"], 1234)
+        self.assertEqual(row["Asset Value"], 1234)
         self.assertEqual(row["Address Hash"], "SYNTHETIC-bitcoin-payout-request")
         self.assertIn("PEG-OUT REQUEST", row["Address Flags"])
-        self.assertEqual(row["USD Value"], "")
+        self.assertNotIn("USD Value", row)
         self.assertEqual(find(transaction_csv_rows(self.graph, self.state), D, "IN", 0)["PegOut Value"], "")
 
     def test_hidden_amounts_are_empty_and_real_zero_is_preserved(self):
         rows = transaction_csv_rows(self.graph, self.state)
-        self.assertEqual(find(rows, B, "OUT", 0)["Crypto Value"], "")
+        self.assertEqual(find(rows, B, "OUT", 0)["Asset Value"], "")
         self.assertIn("CONFIDENTIAL VALUE", find(rows, B, "OUT", 0)["Address Flags"])
-        self.assertEqual(find(rows, C, "OUT", 1)["Crypto Value"], 0)
-        self.assertTrue(all(row["USD Value"] == "" for row in rows))
+        self.assertEqual(find(rows, C, "OUT", 1)["Asset Value"], 0)
+        self.assertTrue(all("USD Value" not in row for row in rows))
         self.state["transactions"][D]["data"]["vout"][0].pop("value")
         row = find(transaction_csv_rows(build_graph(self.state), self.state), D, "OUT", 0)
         self.assertEqual(row["PegOut Value"], "")
@@ -111,7 +111,7 @@ class TransactionCSVTests(unittest.TestCase):
             write_transaction_csv(path, graph, self.state)
             rows = list(csv.DictReader(io.StringIO(path.read_text())))
         row = next(r for r in rows if r["Transaction Hash"] == D and r["Direction"] == "OUT")
-        self.assertEqual(row["Crypto Value"], str(value))
+        self.assertEqual(row["Asset Value"], str(value))
         self.assertEqual(row["PegOut Value"], str(value))
 
     def test_invalid_explicit_values_fail_before_writing(self):
@@ -137,7 +137,7 @@ class TransactionCSVTests(unittest.TestCase):
         rows = transaction_csv_rows(build_graph(state), state)
         first, second = find(rows, tx("a"), "OUT", 0), find(rows, tx("a"), "OUT", 1)
         self.assertEqual(first["Address Label"], "Suspected Only output zero")
-        self.assertEqual(first["Address Entities"], "Only output zero")
+        self.assertNotIn("Address Entities", first)
         self.assertIn("STOP TRACING", first["Address Flags"])
         self.assertEqual(second["Address Label"], "")
         self.assertNotIn("STOP TRACING", second["Address Flags"])
@@ -153,7 +153,7 @@ class TransactionCSVTests(unittest.TestCase):
         self.assertIn("PEG-IN", row["Address Flags"])
         transaction["vin"] = [{"is_coinbase": True}]
         row = find(transaction_csv_rows(build_graph(self.state), self.state), A, "IN", 0)
-        self.assertEqual((row["Address Hash"], row["Crypto Value"]), ("", ""))
+        self.assertEqual((row["Address Hash"], row["Asset Value"]), ("", ""))
         self.assertIn("COINBASE", row["Address Flags"])
 
     def test_caption_styles_positions_and_truncation_are_never_evidence(self):
