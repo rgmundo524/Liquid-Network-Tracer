@@ -446,9 +446,10 @@ class LocalServer(ThreadingHTTPServer):
         self.jobs[identity] = {"id": identity, "status": "running", "action": action,
                                "case_id": case_id, "live": bool(live),
                                "started_at": time.time(),
-                               "cancellable": action in CANCELLABLE_ACTIONS and not live,
+                               "cancellable": action in CANCELLABLE_ACTIONS,
                                "message": ("Working. Check the launching terminal if Proton Pass needs to unlock."
-                                           if live else "Working with saved local evidence…")}
+                                           if live else "Preparing the graph and checking missing address counts…"
+                                           if action in CANCELLABLE_ACTIONS else "Working with saved local evidence…")}
         self.active_job = identity
         # Keep a bounded history for tabs that remain open. Evidence persists in
         # the case, independently of this transient browser job history.
@@ -466,8 +467,8 @@ class LocalServer(ThreadingHTTPServer):
         job = self.jobs[identity]
         if self.active_job != identity or job["status"] not in ("running", "cancelling"):
             raise RequestError("This action has already finished. Refresh the investigation.", 409)
-        if job["action"] not in CANCELLABLE_ACTIONS or job["live"]:
-            raise RequestError("Only local ELK and Mermaid calculations can be canceled here.", 409)
+        if job["action"] not in CANCELLABLE_ACTIONS:
+            raise RequestError("Only chart preparation and layout calculations can be canceled here.", 409)
         if job["status"] == "cancelling":
             return dict(job)
         # If completion already won, leave its result available to the browser.
@@ -608,6 +609,10 @@ class LocalServer(ThreadingHTTPServer):
                               if isinstance(item, (int, float)) and not isinstance(item, bool)}
         if result.get("connector_style") in ("straight", "curved", "elbowed"):
             value["connector_style"] = result["connector_style"]
+        from .address_counts import public_count_report
+        counts = public_count_report(result.get("address_counts"))
+        if counts is not None:
+            value["address_counts"] = counts
         value.update(public_rendering_metadata(result))
         metrics = public_layout_metrics(result.get("layout_metrics"))
         if metrics is not None:
@@ -781,6 +786,9 @@ class LocalServer(ThreadingHTTPServer):
                 arguments.extend(["--connector-style", settings["connector_style"]])
         else:
             raise RequestError("Choose a supported investigation action.")
+        if action in CANCELLABLE_ACTIONS:
+            from .address_counts import count_credentials_required
+            live = count_credentials_required(case, selected)
         return self.start_job(arguments, action=action, live=live, case=case)
 
     def server_close(self):

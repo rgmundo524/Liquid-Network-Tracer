@@ -7,7 +7,7 @@ import subprocess
 from unittest.mock import patch
 
 from liquid_tracer.cli import main
-from liquid_tracer.common import read_json
+from liquid_tracer.common import canonical, digest, read_json, save_json
 from liquid_tracer.connections import preview_connections, reviewed_connections
 from liquid_tracer.investigations import read_case
 from liquid_tracer.menu import create_app
@@ -27,6 +27,17 @@ class ConnectionWebTests(unittest.TestCase):
         _, info = self.create()
         case, _ = self.server.case(info["id"])
         state, _ = saved_case(case)
+        # This synthetic graph differs from the demo used to create the case.
+        # Attach a matching statistics fixture now that previews fetch counts.
+        from liquid_tracer.address_counts import addresses
+        data = {"/address/" + address: {"address": address,
+                    "chain_stats": {"tx_count": 23}, "mempool_stats": {"tx_count": 1}}
+                for address in addresses(state)}
+        fixture = case / "synthetic-counts-api.json"
+        save_json(fixture, data)
+        state["source"] = "fixture://" + digest(canonical(data))
+        save_json(case / "case.json", {**read_case(case), "fixture": str(fixture)})
+        state, _ = saved_case(case, state)
         return case, "/api/cases/"+info["id"], state
 
     def test_offline_action_returns_files_and_reopens_selected_snapshot(self):
@@ -36,6 +47,8 @@ class ConnectionWebTests(unittest.TestCase):
         result = self.wait(job)
         self.assertEqual(result["connection_count"], 1)
         self.assertEqual(result["max_hops"], 2)
+        self.assertEqual(result["address_counts"]["remaining"], 0)
+        self.assertGreater(result["address_counts"]["known"], 0)
         self.assertEqual({f["name"] for f in result["downloads"] if f["name"].endswith(".csv")}, {"transactions.csv"})
         csv_url = next(f["url"] for f in result["downloads"] if f["name"] == "transactions.csv")
         self.assertIn(b"Block,Time,Transaction Label,Transaction Hash", self.success(csv_url))

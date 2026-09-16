@@ -804,7 +804,10 @@ finally:
     Path(sys.argv[2]).write_text('cleaned')
 """, str(ready), str(cleaned)]
         app = create_app(self.root)
-        with patch("liquid_tracer.menu._command", return_value=command):
+        # This process-lifecycle test intentionally has no saved trace. The
+        # credential preflight has separate coverage with real saved snapshots.
+        with patch("liquid_tracer.menu._command", return_value=command), \
+                patch("liquid_tracer.address_counts.count_credentials_required", return_value=False):
             async with app.run_test(size=(80, 24)) as pilot:
                 case = await self.new_demo(app, pilot)
                 snapshot = {p.relative_to(case): p.read_bytes() for p in case.rglob("*") if p.is_file()}

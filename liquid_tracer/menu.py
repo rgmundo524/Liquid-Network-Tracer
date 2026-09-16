@@ -1011,7 +1011,7 @@ def create_app(root=None):
                 yield Static("Counts use one statistics request per uncached address, within this investigation's API/time budget. Then regenerate a preview or sync Miro.", markup=False)
                 yield Button("Merge duplicate addresses", id="address-merge")
                 with Horizontal(classes="buttons"):
-                    yield Button("Compact graph (offline preview)", id="compact-preview")
+                    yield Button("Compact graph (local preview)", id="compact-preview")
                     yield Button("Apply compact layout to Miro", id="compact-apply", disabled=True)
                 yield Static("", id="compact-status", markup=False)
                 with Horizontal(classes="buttons"):
@@ -1059,7 +1059,7 @@ def create_app(root=None):
                 self.query_one("#compact-status", Static).update(
                     "Miro sync needs recovery before a compact layout can be applied." if blocked else
                     "Saved compact comparison: " + self.compact_preview_id if self.compact_preview_id else
-                    "Create an offline compact comparison to review before applying it to Miro.")
+                    "Create a local compact comparison; missing address counts are fetched automatically.")
             except ACTION_ERRORS as error:
                 self.show_error(error)
 
@@ -1155,6 +1155,14 @@ def create_app(root=None):
                 return
             arguments, live = selection
             self.current_action = arguments[0]
+            if not live and self.current_action in ("layout-preview", "compact-preview", "mermaid", "connections"):
+                from .address_counts import count_credentials_required
+                selected = arguments[arguments.index("--run") + 1] if "--run" in arguments else "latest"
+                try:
+                    live = count_credentials_required(self.case, selected)
+                except ACTION_ERRORS as error:
+                    self.show_error(error)
+                    return
             self.reorganizing = "--reorganize" in arguments
             self.applying_compaction = "--compact-preview" in arguments
             if not live and self.current_action in ("layout-preview", "compact-preview", "mermaid", "connections"):
