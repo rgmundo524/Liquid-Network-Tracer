@@ -17,13 +17,44 @@ class MemoryBudgetTests(unittest.TestCase):
                 patch("liquid_tracer.render_runtime.os.sysconf", side_effect=ValueError):
             return _available_bytes()
 
-    def test_64_gib_host_keeps_half_currently_available_memory(self):
+    def test_64_gib_host_uses_75_percent_of_currently_available_memory(self):
         files = {"/proc/meminfo": "MemTotal:       67108864 kB\nMemAvailable:   50331648 kB\n"}
         available = self.available(files)
         self.assertEqual(available, 48 * GIB)
         with patch.dict(os.environ, {"LIQUID_RENDER_HEAP_MB": "auto"}), \
                 patch("liquid_tracer.render_runtime._available_bytes", return_value=available):
-            self.assertEqual(renderer_heap_mb(), 24576)
+            self.assertEqual(renderer_heap_mb(), 36864)
+
+    def test_auto_recalculates_75_percent_for_each_render(self):
+        with patch.dict(os.environ, {"LIQUID_RENDER_HEAP_MB": "auto"}), \
+                patch("liquid_tracer.render_runtime._available_bytes", side_effect=[28 * GIB, 16 * GIB]):
+            self.assertEqual(renderer_heap_mb(), 21504)
+            self.assertEqual(renderer_heap_mb(), 12288)
+
+    def test_auto_rounds_down_to_whole_mib(self):
+        mib = 1024 ** 2
+        for available, expected in ((2 * mib, 1), (4 * mib - 1, 2), (4 * mib, 3), (5 * mib, 3)):
+            with self.subTest(available=available), \
+                    patch.dict(os.environ, {"LIQUID_RENDER_HEAP_MB": "auto"}), \
+                    patch("liquid_tracer.render_runtime._available_bytes", return_value=available):
+                self.assertEqual(renderer_heap_mb(), expected)
+                self.assertLessEqual(renderer_heap_mb() * mib * 4, available * 3)
+
+    def test_auto_uses_75_percent_of_cgroup_headroom_not_host_memory(self):
+        files = {"/proc/meminfo": "MemAvailable: 50331648 kB\n",
+                 "/sys/fs/cgroup/memory.max": str(4 * GIB),
+                 "/sys/fs/cgroup/memory.current": str(2 * GIB)}
+        with patch.dict(os.environ, {"LIQUID_RENDER_HEAP_MB": "auto"}), \
+                patch("liquid_tracer.render_runtime._read", side_effect=lambda path: files.get(str(path), "")):
+            self.assertEqual(renderer_heap_mb(), 1536)
+
+    def test_auto_preserves_integer_limit_and_rejects_sub_mib_budget(self):
+        with patch.dict(os.environ, {"LIQUID_RENDER_HEAP_MB": "auto"}):
+            with patch("liquid_tracer.render_runtime._available_bytes", return_value=10 ** 30):
+                self.assertEqual(renderer_heap_mb(), 2147483647)
+            with patch("liquid_tracer.render_runtime._available_bytes", return_value=1024 ** 2):
+                with self.assertRaisesRegex(TraceError, "Too little available memory"):
+                    renderer_heap_mb()
 
     def test_v2_nested_and_ancestor_remaining_memory_constrain_host(self):
         files = {"/proc/meminfo": "MemTotal: 67108864 kB\nMemAvailable: 50331648 kB\n",
