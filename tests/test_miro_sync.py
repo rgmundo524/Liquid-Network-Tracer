@@ -59,7 +59,9 @@ class FakeMiro:
         path = urlsplit(url).path
         if path.endswith("/groups"):
             if method == "GET":
-                return 200, {}, canonical({"data": list(self.groups.values())})
+                return 200, {}, canonical({"data": [
+                    {"id": group["id"], "type": "group", "data": {"data": {"items": group["items"]}}}
+                    for group in self.groups.values()]})
             if method == "POST":
                 members = payload["data"]["items"]
                 if (len(members) != 2 or len(set(members)) != 2
@@ -75,7 +77,10 @@ class FakeMiro:
             group = self.groups.get(group_id)
             if group is None:
                 return 404, {}, b"{}"
-            return 200, {}, canonical({"data": [{"id": item_id} for item_id in group["items"]]})
+            # Official group-items envelope, not the flat /items collection.
+            return 200, {}, canonical({"data": {"id": group_id, "type": "group", "data": [
+                {"data": [{"id": item_id} for item_id in group["items"]],
+                 "size": len(group["items"]), "total": len(group["items"]), "limit": 50}]}})
         if method == "GET" and urlsplit(url).path.endswith("/items"):
             parent = parse_qs(urlsplit(url).query).get("parent_item_id", [None])[0]
             children = [item for item in self.items.values() if (item.get("parent") or {}).get("id") == parent]
