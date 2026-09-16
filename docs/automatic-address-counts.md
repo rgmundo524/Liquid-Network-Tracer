@@ -1,6 +1,7 @@
 # Automatic address transaction counts
 
-Address totals are now populated as part of the normal visual workflow. A separate
+Address totals appear inside each address circle, below the Explorer link in
+Miro, and are populated as part of the normal visual workflow. A separate
 **Fetch address transaction counts** action is no longer required to obtain them.
 
 After a successful/bounded trace or continuation, missing counts are requested
@@ -64,3 +65,11 @@ a matching completed ELK layout after count hydration.
 
 Tests use synthetic cases and mocked public/Enterprise statistics. No private case
 addresses, provider credentials or live Miro writes are required for the suite.
+
+## Inline display and migration
+
+New graphs use one native circle containing its address label, Explorer link
+when available, and final `TX count: ...` row. There is no separate count object
+and no grouping phase or group API call. The automatic retrieval and calculation
+above have not changed. See `inline-address-counts.md` for old-board migration
+and immutable-preview compatibility.

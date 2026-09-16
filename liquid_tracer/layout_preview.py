@@ -283,9 +283,6 @@ def _svg(graph, nodes, edges):
             polygon = [(cx, cy - height / 2), (cx + width / 2, cy), (cx, cy + height / 2), (cx - width / 2, cy)]
             shape = '<polygon points="' + ' '.join(_fmt(a) + ',' + _fmt(b) for a, b in polygon) + f'" {style}/>'
         lines.append(shape)
-        if node["kind"] == "address" and "tx_count" in node:
-            from .address_counts import label as count_label
-            lines.append(f'<text class="address-tx-count" x="{_fmt(cx)}" y="{_fmt(cy-height/2-14)}" font-size="18" fill="#334155">{count_label(node)}</text>')
         inset_x, inset_y = width * .22, height * .22
         if node["kind"] == "address":
             inset_x = width * .10  # Match the label width; keep the Suspected prefix visible.
@@ -297,15 +294,22 @@ def _svg(graph, nodes, edges):
         # Reserve a label row inside the existing shape rather than changing
         # ELK geometry or putting link text over a neighboring connector.
         show_link_label = bool(url and width - inset_x * 2 >= 64 and height - inset_y * 2 >= 36)
-        labels = _short_lines(node.get("label", ""), width, height, node["kind"], int(show_link_label))
-        row_count = len(labels) + int(show_link_label)
+        from .address_counts import caption as count_caption
+        count = count_caption(node)
+        reserved = int(show_link_label) + int(count is not None)
+        labels = _short_lines(node.get("label", ""), width, height, node["kind"], reserved)
+        row_count = len(labels) + reserved
         for offset, label in enumerate(labels):
             baseline = cy - (row_count - 1) * 8 + offset * 16 + 4
             lines.append(f'<text x="{_fmt(cx)}" y="{_fmt(baseline)}" font-size="12" fill="{color_text(node["color"])}">{_escape(label)}</text>')
         if show_link_label:
-            baseline = cy + (row_count - 1) * 8 + 4
+            baseline = cy - (row_count - 1) * 8 + len(labels) * 16 + 4
             lines.append(f'<text x="{_fmt(cx)}" y="{_fmt(baseline)}" font-size="11" '
                          f'fill="{color_text(node["color"])}" text-decoration="underline">Explorer</text>')
+        if count is not None:
+            baseline = cy + (row_count - 1) * 8 + 4
+            lines.append(f'<text class="address-tx-count" x="{_fmt(cx)}" y="{_fmt(baseline)}" '
+                         f'font-size="11" fill="{color_text(node["color"])}">{_escape(count)}</text>')
         lines.append('</g></g>')
         if url:
             lines.append('</a>')

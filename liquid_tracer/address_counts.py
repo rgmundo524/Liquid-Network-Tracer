@@ -21,8 +21,15 @@ def label(node):
     return f"{value:,}" if type(value) is int and value >= 0 else "??"
 
 
+def caption(node):
+    """The bottom row of an address shape; never a separate board item."""
+    if node.get("kind") == "address" and "tx_count" in node:
+        return "TX count: " + label(node)
+    return None
+
+
 def position(body, current=None):
-    """Center a count just above its host, including live Miro rotations."""
+    """Historical external-label geometry, retained only for old plan validation."""
     import math
     x, y = current if current is not None else (body['position'][axis] for axis in ('x', 'y'))
     width, height = (float(body['geometry'][axis]) for axis in ('width', 'height'))

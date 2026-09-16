@@ -9,13 +9,13 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 
-from liquid_tracer.address_counts import addresses, annotate, apply_saved_counts, fetch_counts, position
+from liquid_tracer.address_counts import addresses, annotate, apply_saved_counts, fetch_counts
 from liquid_tracer.cli import main, saved_graph, verify_export
 from liquid_tracer.common import TraceError, canonical, digest, read_json, save_json
 from liquid_tracer.export import build_graph, short_address, svg_graph
 from liquid_tracer.investigations import create_investigation
 from liquid_tracer.layout_preview import render_svg
-from liquid_tracer.mermaid import _address_counts_svg, _items
+from liquid_tracer.mermaid import mermaid_source
 from liquid_tracer.miro import make_plan, sync, validate_plan
 from liquid_tracer.transaction_csv import transaction_csv_rows
 from tests.fixtures import A, B, fixture
@@ -122,46 +122,6 @@ class AddressDisplayTests(unittest.TestCase):
         self.assertTrue(all(n['details']['transaction']['txid'] in state['transactions']
                             for n in graph['nodes'] if n['kind']=='transaction'))
 
-    def test_native_count_labels_are_above_circles_not_csv_rows(self):
-        state=graph_state();graph=build_graph(state)
-        address=next(n for n in graph['nodes'] if n['kind']=='address')
-        address['tx_count']=1234
-        plan=make_plan(graph);validate_plan(plan)
-        shapes={s['key']:s['body'] for s in plan['shapes']}
-        for key,proof in plan['presentation_items'].items():
-            self.assertEqual(proof['kind'],'address_count')
-            host=shapes[proof['host']];count=shapes[key]
-            self.assertEqual(tuple(count['position'][axis] for axis in ('x','y')),position(host))
-            self.assertLess(count['position']['y']+14,host['position']['y']-host['geometry']['height']/2)
-        for svg in (svg_graph(graph),render_svg(graph)):
-            text=' '.join(ET.fromstring(svg).itertext());self.assertIn('1,234',text)
-        self.assertEqual(len(transaction_csv_rows(graph,state)),len(graph['edges']))
 
-    def test_count_refresh_keeps_ids_and_follows_manually_moved_address(self):
-        state=graph_state();graph=build_graph(state);remote=AnnotationMiro()
-        with tempfile.TemporaryDirectory() as tmp:
-            path=Path(tmp)/'miro.json'
-            def send(): return sync(make_plan(graph),'synthetic-board',path,token='test',transport=remote,interval=0)
-            send();mapping=read_json(path)['items']
-            host=next(n for n in graph['nodes'] if n['kind']=='address')
-            proof=next(p for p in make_plan(graph)['presentation_items'].values() if p['host']==host['id'])
-            key=proof['key'];remote.items[mapping[host['id']]['id']]['position'].update(x=777,y=555)
-            host['tx_count']=5432;send()
-            after=read_json(path)['items'];self.assertEqual(mapping[key]['id'],after[key]['id'])
-            count=remote.items[after[key]['id']]
-            self.assertEqual(count['data']['content'],'<p>5,432</p>')
-            self.assertEqual((count['position']['x'],count['position']['y']),
-                             position(remote.items[after[host['id']]['id']]))
-            writes=len(remote.writes);send();self.assertEqual(writes,len(remote.writes))
-
-    def test_mermaid_svg_count_uses_actual_circle_coordinates(self):
-        graph=build_graph(graph_state());nodes,_,ids=_items(graph)
-        node=next(n for n in nodes if n['kind']=='address');node['tx_count']=120
-        svg=(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500">'
-             f'<g class="node default" id="flowchart-{ids[node["id"]]}-12" transform="translate(100,100)">'
-             '<circle cx="0" cy="0" r="80"/></g></svg>').encode()
-        root=ET.fromstring(_address_counts_svg(graph,svg));text=root.find('.//'+NS+'text')
-        self.assertEqual(text.text,'120');self.assertEqual(float(text.get('y')),-94)
-        self.assertEqual(root.get('viewBox'),'0.0 -42.0 500.0 542.0')
 
 if __name__=='__main__':unittest.main()

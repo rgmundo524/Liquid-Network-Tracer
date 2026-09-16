@@ -121,7 +121,7 @@ class AddressMigrationTests(unittest.TestCase):
                         min(i for i,m in enumerate(methods) if m == 'DELETE'))
         after = sync(self.new, 'SYNTHETIC-BOARD=', self.path, transport=self.remote, token='synthetic', interval=0)
         self.assertEqual(after['new_shapes'], len(self.new.get('presentation_items', {})))
-        self.assertTrue(all(p['kind'] == 'address_count' for p in self.new.get('presentation_items', {}).values()))
+        self.assertEqual(self.new.get('presentation_items', {}), {})
         self.assertEqual(after['new_connectors'], 0)
         self.assert_archive_intact()
 

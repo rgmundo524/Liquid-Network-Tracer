@@ -41,7 +41,7 @@ class GraphCleanupTests(unittest.TestCase):
     def test_new_plan_has_no_cards_no_stars_and_no_dangling_miro_references(self):
         before = copy.deepcopy(self.graph)
         plan = make_plan(self.graph); validate_plan(plan)
-        self.assertTrue(all(p["kind"] == "address_count" for p in plan["presentation_items"].values()))
+        self.assertEqual(plan["presentation_items"], {})
         self.assertEqual(len(plan["shapes"]), len(self.graph["nodes"]) + 2 + len(plan["presentation_items"]))
         self.assertFalse(any(s["key"].startswith(("annotation:attribution:", "annotation:convergence:")) for s in plan["shapes"]))
         self.assertFalse(any("★" in s["body"]["data"]["content"] for s in plan["shapes"]))
@@ -128,8 +128,8 @@ class GraphCleanupTests(unittest.TestCase):
         before = trace_path.read_bytes()
         with patch("liquid_tracer.cli.Esplora", side_effect=AssertionError("Must not retrace")):
             plan = refresh_presentation(old, trace_path)
-        self.assertEqual(plan["presentation_version"], 17)
-        self.assertTrue(all(p["kind"] == "address_count" for p in plan["presentation_items"].values()))
+        self.assertEqual(plan["presentation_version"], 18)
+        self.assertEqual(plan["presentation_items"], {})
         self.sync(plan, max_items=len(plan["presentation_items"]))
         self.assertEqual(self.item(self.host)["style"]["borderWidth"], "12")
         self.assertEqual(trace_path.read_bytes(), before)
@@ -184,7 +184,7 @@ class GraphCleanupTests(unittest.TestCase):
         plan = make_plan(compacted); validate_plan(plan)
         self.sync(plan, reorganize=True)
         self.assertEqual(self.item(self.host)["style"]["borderWidth"], "12")
-        self.assertTrue(all(p["kind"] == "address_count" for p in plan["presentation_items"].values()))
+        self.assertEqual(plan["presentation_items"], {})
         self.assertEqual(self.graph, original)
 
     def test_long_notes_do_not_inflate_miro_shape_count_or_board_metrics(self):

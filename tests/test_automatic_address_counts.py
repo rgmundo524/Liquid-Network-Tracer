@@ -106,7 +106,7 @@ class AutomaticCountsTests(unittest.TestCase):
         self.assertGreater(result["address_counts"]["fetched"], 0)
         self.check_counts(read_json(Path(result["directory"]) / "graph.json"))
 
-    def test_ordinary_miro_sync_fetches_then_builds_count_shapes_with_trace_lock_held(self):
+    def test_ordinary_miro_sync_fetches_then_embeds_counts_with_trace_lock_held(self):
         self.trace(legacy=True); before = self.snapshot(); plans = []
         def fake_sync(plan, *args, **kwargs):
             plans.append(copy.deepcopy(plan)); return {"created": 0, "dry_run": kwargs["dry_run"]}
@@ -116,8 +116,9 @@ class AutomaticCountsTests(unittest.TestCase):
                 result = sync_run(self.case, "latest", "SYNTHETIC=")
         self.assertEqual(result["address_counts"]["remaining"], 0)
         for plan in plans:
-            keys = {key for key, item in plan["presentation_items"].items() if item["kind"] == "address_count"}
-            labels = [item["body"]["data"]["content"] for item in plan["shapes"] if item["key"] in keys]
+            self.assertEqual(plan["presentation_items"], {})
+            labels = [item["body"]["data"]["content"] for item in plan["shapes"]
+                      if item["body"]["data"]["shape"] == "circle"]
             self.assertTrue(labels); self.assertFalse(any("??" in text for text in labels))
         self.assertEqual(before, self.snapshot())
 

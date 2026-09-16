@@ -29,26 +29,12 @@ def corner(body, position=None):
 
 
 def make_items(graph, existing_bounds=()):
-    """Address counts above circles; no attribution cards or convergence stars."""
-    import html
-    from .address_counts import label, position, COUNT_HEIGHT
-    shapes, catalog = [], {}
-    for node in graph["nodes"]:
-        if node["kind"] != "address" or "tx_count" not in node:
-            continue
-        item = proof("address_count", node["id"])
-        value = label(node)
-        body = {"position": {"x":node["x"], "y":node["y"]},
-                "geometry":{"width":node["width"], "height":node["height"]}}
-        x, y = position(body)
-        shapes.append({"key":item["key"], "body":{
-            "data":{"shape":"rectangle", "content":"<p>"+html.escape(value)+"</p>"},
-            "position":{"x":x, "y":y, "origin":"center"},
-            "geometry":{"width":max(96, len(value)*12), "height":COUNT_HEIGHT},
-            "style":{"fillColor":"#ffffff", "fillOpacity":"0.0", "borderOpacity":"0.0",
-                     "borderWidth":"1", "fontSize":"18", "color":"#334155", "textAlign":"center"}}})
-        catalog[item["key"]] = item
-    return shapes, catalog
+    """New plans have no separate cards, badges, or address-count shapes.
+
+    Historical creation proofs below remain readable so normal sync can safely
+    retire previously generated count labels without touching unrelated notes.
+    """
+    return [], {}
 
 
 def validate_items(plan):
