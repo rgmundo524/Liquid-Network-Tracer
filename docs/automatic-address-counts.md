@@ -69,7 +69,7 @@ addresses, provider credentials or live Miro writes are required for the suite.
 ## Inline display and migration
 
 New graphs use one native circle containing its address label, Explorer link
-when available, and final `TX count: ...` row. There is no separate count object
+when available, and final `TX: ...` row. There is no separate count object
 and no grouping phase or group API call. The automatic retrieval and calculation
 above have not changed. See `inline-address-counts.md` for old-board migration
 and immutable-preview compatibility.

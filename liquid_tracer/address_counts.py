@@ -24,7 +24,7 @@ def label(node):
 def caption(node):
     """The bottom row of an address shape; never a separate board item."""
     if node.get("kind") == "address" and "tx_count" in node:
-        return "TX count: " + label(node)
+        return "TX: " + label(node)
     return None
 
 

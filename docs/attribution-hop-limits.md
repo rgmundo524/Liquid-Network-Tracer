@@ -69,7 +69,7 @@ fetches only remaining missing counts. Existing verified address-review statisti
 are reused. API authentication/retries can also consume the request budget.
 
 New local previews and normal **Sync to Miro** obtain missing counts automatically.
-In Miro, `TX count: 1,234` is the final text row inside the address circle, below
+In Miro, `TX: 1,234` is the final text row inside the address circle, below
 Explorer. It is part of the same shape, not a separate label or group. ELK/basic
 SVG counts are also inside the circle; standalone Mermaid includes the count
 directly in its node label and needs no SVG postprocessing.

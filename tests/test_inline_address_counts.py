@@ -102,7 +102,7 @@ class InlineCountTests(unittest.TestCase):
 
     def test_caption_handles_unknown_zero_and_count_without_guessing(self):
         for value, expected in ((None, '??'), (0, '0'), (1234, '1,234'), (True, '??'), (-1, '??')):
-            self.assertEqual(caption({'kind': 'address', 'tx_count': value}), 'TX count: ' + expected)
+            self.assertEqual(caption({'kind': 'address', 'tx_count': value}), 'TX: ' + expected)
         self.assertIsNone(caption({'kind': 'transaction', 'tx_count': 3}))
         self.assertIsNone(caption({'kind': 'address'}))
 
@@ -118,8 +118,8 @@ class InlineCountTests(unittest.TestCase):
             body = shapes[node['id']]
             self.assertEqual(body['data']['shape'], 'circle')
             content = body['data']['content']
-            self.assertTrue(content.endswith('</a></p><p>TX count: 1,234</p>'))
-            self.assertEqual(content.count('TX count:'), 1)
+            self.assertTrue(content.endswith('</a></p><p>TX: 1,234</p>'))
+            self.assertEqual(content.count('TX:'), 1)
             self.assertIn(node['url'], content)
         self.assertEqual(canonical(self.graph), before)
         self.assertEqual(transaction_csv_rows(self.graph, self.state), rows)
@@ -147,7 +147,7 @@ class InlineCountTests(unittest.TestCase):
         self.send(max_items=0)
         self.assertEqual(actual['position']['x'], 7000)
         self.assertEqual(actual['geometry']['width'], 210)
-        self.assertIn('<p>TX count: 2,345</p>', actual['data']['content'])
+        self.assertIn('<p>TX: 2,345</p>', actual['data']['content'])
         self.assertEqual(ids, {k: v['id'] for k, v in read_json(self.path)['items'].items()})
         self.assertEqual(connectors, {k: v for k, v in self.remote.items.items() if v['type'] == 'connector'})
         writes = len(self.remote.writes)
@@ -201,7 +201,7 @@ class InlineCountTests(unittest.TestCase):
         for _ in range(2):
             publish(plan, 'board=', self.path, token='test', transport=self.remote, interval=0)
         self.assertEqual(len(self.remote.items), len(plan['shapes']) + len(plan['connectors']) + len(plan.get('frames', [])))
-        self.assertTrue(any('TX count:' in i.get('data', {}).get('content', '') for i in self.remote.items.values()))
+        self.assertTrue(any('TX:' in i.get('data', {}).get('content', '') for i in self.remote.items.values()))
 
     def test_old_external_snapshot_requires_regeneration_before_any_write(self):
         plan = external_plan(self.graph)
@@ -222,7 +222,7 @@ class InlineCountTests(unittest.TestCase):
                 texts = list(group.iter(NS + 'text'))
                 count = next(t for t in texts if t.get('class') == 'address-tx-count')
                 link = next(t for t in texts if t.text == 'Explorer')
-                self.assertEqual(count.text, 'TX count: 1,234')
+                self.assertEqual(count.text, 'TX: 1,234')
                 self.assertGreater(float(count.get('y')), float(link.get('y')))
                 self.assertLess(float(count.get('y')), node['y'] + node['height'] / 2)
                 self.assertGreater(float(count.get('y')), node['y'] - node['height'] / 2)
@@ -230,9 +230,37 @@ class InlineCountTests(unittest.TestCase):
 
     def test_mermaid_count_is_in_native_node_label_not_an_external_postpass(self):
         source = mermaid_source(self.graph)
-        self.assertEqual(source.count('<br/>TX count: 1,234'), len(self.addresses))
+        self.assertEqual(source.count('<br/>TX: 1,234'), len(self.addresses))
         self.assertNotIn('external label', source)
-        self.assertFalse(any('TX count:' in line and '%%' in line for line in source.splitlines()))
+        self.assertFalse(any('TX:' in line and '%%' in line for line in source.splitlines()))
+
+    def test_long_inline_caption_refreshes_in_place_without_grouping(self):
+        old = make_plan(self.graph)
+        for shape in old['shapes']:
+            content = shape['body']['data']['content']
+            shape['body']['data']['content'] = content.replace('<p>TX: ', '<p>TX count: ')
+        old['sha256'] = digest(canonical({k: v for k, v in old.items() if k != 'sha256'}))
+        self.send(old)
+        before = read_json(self.path)
+        ids = {key: item['id'] for key, item in before['items'].items()}
+        self.assertTrue(all('TX count: 1,234' in self.remote.items[ids[n['id']]]['data']['content']
+                  for n in self.addresses))
+        node = self.addresses[0]
+        self.remote.items[ids[node['id']]]['position'].update(x=7000, y=-300)
+        self.remote.calls.clear()
+        result = self.send(max_items=0)
+        self.assertEqual(result['created'], 0)
+        self.assertEqual(result['deleted'], 0)
+        self.assertEqual(ids, {key: item['id'] for key, item in read_json(self.path)['items'].items()})
+        for node in self.addresses:
+            content = self.remote.items[ids[node['id']]]['data']['content']
+            self.assertTrue(content.endswith('</a></p><p>TX: 1,234</p>'))
+            self.assertNotIn('TX count:', content)
+        self.assertEqual(self.remote.items[ids[self.addresses[0]['id']]]['position']['x'], 7000)
+        self.assertFalse(any('/groups' in call[1] for call in self.remote.calls))
+        writes = len(self.remote.writes)
+        self.send(max_items=0)
+        self.assertEqual(len(self.remote.writes), writes)
 
     def test_dry_run_is_offline_and_never_changes_legacy_group_state(self):
         self.seed_legacy()

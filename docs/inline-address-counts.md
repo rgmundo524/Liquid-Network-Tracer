@@ -6,14 +6,14 @@ row below its **Explorer** link:
 ```text
 [Address and attribution labels]
 Explorer
-TX count: 1,234
+TX: 1,234
 ```
 
 There is one Miro shape for the address and count, with one object ID. Moving
 or resizing that shape moves its contents together. No extra label, group,
 frame, image, connector, or CSV row is created for the count. With no Explorer
-link, the count follows the address labels. Known zero is `TX count: 0`; missing
-statistics remain `TX count: ??`. Automatic statistics fetching, caching, and
+link, the count follows the address labels. Known zero is `TX: 0`; missing
+statistics remain `TX: ??`. Automatic statistics fetching, caching, and
 the confirmed-plus-mempool calculation are unchanged.
 
 ELK and basic SVG render the count inside the circle. Mermaid source now puts
