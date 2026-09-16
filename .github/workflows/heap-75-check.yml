@@ -1,0 +1,118 @@
+name: Validate 75 percent automatic renderer heap
+on:
+  push:
+    branches: [codex/renderer-heap-75]
+    paths: [.github/workflows/heap-75-check.yml]
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.19.0'
+      - name: Apply checked memory-policy update
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+
+          expected = {
+              'liquid_tracer/render_runtime.py': 'face7687e2b9effff151972aa67782f591058377',
+              'tests/test_render_runtime.py': '97d099fbae330ec6d9e16594d22565c4d19c10a9',
+              'devenv.nix': '4a60288f8cc7b4ee7a2d3d2054d5d32282ffb65e',
+              'README.md': '6788263b4e9b1f3565fc781ebceaa0d97c7eb5c0',
+          }
+          prepared = {}
+          for name, expected_sha in expected.items():
+              path = Path(name)
+              data = path.read_bytes()
+              actual = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              assert actual == expected_sha, f'Unexpected original source: {name}'
+              prepared[name] = data.decode('utf-8')
+
+          def replace(name, before, after):
+              assert prepared[name].count(before) == 1, f'Unexpected match count: {name}: {before}'
+              prepared[name] = prepared[name].replace(before, after)
+
+          replace('liquid_tracer/render_runtime.py',
+                  'Choose half currently available memory, or an explicit old-space MiB cap.',
+                  'Choose 75% of currently available memory, or an explicit old-space MiB cap.')
+          replace('liquid_tracer/render_runtime.py',
+                  'budget = available // (2 * _MIB)',
+                  'budget = (available * 3) // (4 * _MIB)')
+          replace('devenv.nix',
+                  '# half available RAM, accounting for standard Linux cgroup limits. A number',
+                  '# 75% of available RAM, accounting for standard Linux cgroup limits. A number')
+          replace('README.md',
+                  'a JavaScript heap allowance equal to half the currently available memory',
+                  'a JavaScript heap allowance equal to 75% of the currently available memory')
+          replace('README.md',
+                  'so it may choose less than half installed RAM.',
+                  'so it may choose less than 75% of installed RAM.')
+          replace('tests/test_render_runtime.py',
+                  'test_64_gib_host_keeps_half_currently_available_memory',
+                  'test_64_gib_host_uses_75_percent_of_currently_available_memory')
+          replace('tests/test_render_runtime.py',
+                  'self.assertEqual(renderer_heap_mb(), 24576)',
+                  'self.assertEqual(renderer_heap_mb(), 36864)')
+
+          extra_tests = '''    def test_auto_recalculates_75_percent_for_each_render(self):
+                  with patch.dict(os.environ, {"LIQUID_RENDER_HEAP_MB": "auto"}), \\
+                          patch("liquid_tracer.render_runtime._available_bytes", side_effect=[28 * GIB, 16 * GIB]):
+                      self.assertEqual(renderer_heap_mb(), 21504)
+                      self.assertEqual(renderer_heap_mb(), 12288)
+
+              def test_auto_rounds_down_to_whole_mib(self):
+                  mib = 1024 ** 2
+                  for available, expected in ((2 * mib, 1), (4 * mib - 1, 2), (4 * mib, 3), (5 * mib, 3)):
+                      with self.subTest(available=available), \\
+                              patch.dict(os.environ, {"LIQUID_RENDER_HEAP_MB": "auto"}), \\
+                              patch("liquid_tracer.render_runtime._available_bytes", return_value=available):
+                          self.assertEqual(renderer_heap_mb(), expected)
+                          self.assertLessEqual(renderer_heap_mb() * mib * 4, available * 3)
+
+              def test_auto_uses_75_percent_of_cgroup_headroom_not_host_memory(self):
+                  files = {"/proc/meminfo": "MemAvailable: 50331648 kB\\n",
+                           "/sys/fs/cgroup/memory.max": str(4 * GIB),
+                           "/sys/fs/cgroup/memory.current": str(2 * GIB)}
+                  with patch.dict(os.environ, {"LIQUID_RENDER_HEAP_MB": "auto"}), \\
+                          patch("liquid_tracer.render_runtime._read", side_effect=lambda path: files.get(str(path), "")):
+                      self.assertEqual(renderer_heap_mb(), 1536)
+
+              def test_auto_preserves_integer_limit_and_rejects_sub_mib_budget(self):
+                  with patch.dict(os.environ, {"LIQUID_RENDER_HEAP_MB": "auto"}):
+                      with patch("liquid_tracer.render_runtime._available_bytes", return_value=10 ** 30):
+                          self.assertEqual(renderer_heap_mb(), 2147483647)
+                      with patch("liquid_tracer.render_runtime._available_bytes", return_value=1024 ** 2):
+                          with self.assertRaisesRegex(TraceError, "Too little available memory"):
+                              renderer_heap_mb()
+
+          '''
+          replace('tests/test_render_runtime.py',
+                  '    def test_v2_nested_and_ancestor_remaining_memory_constrain_host(self):\n',
+                  extra_tests + '    def test_v2_nested_and_ancestor_remaining_memory_constrain_host(self):\n')
+          for name, text in prepared.items():
+              Path(name).write_text(text, encoding='utf-8')
+              print('Updated', name)
+          PY
+          git rm .github/workflows/heap-75-check.yml
+          git add liquid_tracer/render_runtime.py tests/test_render_runtime.py devenv.nix README.md
+          git diff --cached --check
+      - name: Run renderer budget and integration regressions
+        run: |
+          npm --prefix layout ci --ignore-scripts --no-audit --no-fund
+          python3 -m unittest tests.test_render_runtime tests.test_elk_layout tests.test_mermaid -v
+      - name: Commit verified source on feature branch
+        run: |
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Use 75 percent of available memory for automatic renderer heap'
+          git push origin HEAD:refs/heads/codex/renderer-heap-75
