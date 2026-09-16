@@ -114,7 +114,7 @@ class ServicePresentationTests(unittest.TestCase):
                 self.assertEqual(node["role"], role)
                 self.assertEqual(node["color"], COLORS[role])
                 if outpoint == C + ":0":
-                    self.assertIn("Unspent endpoint", node["label"].splitlines())
+                    self.assertIn("Unspent", node["label"].splitlines())
 
     def test_service_stop_and_held_statuses_do_not_claim_an_unspent_endpoint(self):
         for status in ("suspected_service_stop", "held_behind_service"):
@@ -128,7 +128,7 @@ class ServicePresentationTests(unittest.TestCase):
                     state["labels"] = [designation()] if labelled else []
                     node = self.node(build_graph(state), C + ":0")
                     self.assertEqual(node["role"], "candidate")
-                    self.assertNotIn("Unspent endpoint", node["label"])
+                    self.assertNotIn("Unspent", node["label"])
                     self.assertNotIn("unspent_endpoints", node["details"])
 
     def test_confidence_controls_display_without_hiding_alternative_assessment(self):

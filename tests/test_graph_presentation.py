@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from liquid_tracer.api import Esplora, Limits
 from liquid_tracer.common import LBTC, save_json
+from liquid_tracer.export import short_address
 from liquid_tracer.export import (COLORS, PALETTE, PRESENTATION_VERSION,
                                   build_graph, edge_color, graph_quantity,
                                   short, svg_graph, transaction_date)
@@ -91,11 +92,11 @@ class GraphPresentationTests(unittest.TestCase):
         graph = build_graph(self.state)
         nodes = {node["id"]: node for node in graph["nodes"]}
         funding = nodes["liquid:address:SYNTHETIC-funding-context"]
-        self.assertEqual(funding["label"], short("SYNTHETIC-funding-context"))
+        self.assertEqual(funding["label"], short_address("SYNTHETIC-funding-context"))
         self.assertEqual(funding["details"]["occurrences"][0]["outpoint"], X + ":0")
         for node in nodes.values():
             if node["kind"] == "address":
-                self.assertEqual(node["label"], short(node["details"]["address"]))
+                self.assertEqual(node["label"], short_address(node["details"]["address"]))
         input_edge = next(edge for edge in graph["edges"] if edge["id"] == "in:" + A + ":0")
         self.assertEqual(input_edge["label"], "vin 0")
         self.assertEqual(input_edge["outpoint"], X + ":0")
@@ -269,7 +270,7 @@ class GraphPresentationTests(unittest.TestCase):
                 self.assertIn(X + ":0", {item["outpoint"] for item in merged["details"]["occurrences"]})
                 self.assertIn(A + ":0", {item["outpoint"] for item in merged["details"]["occurrences"]})
                 if labels:
-                    self.assertEqual(merged["label"].splitlines()[:2], ["Suspected Synthetic service", short(shared)])
+                    self.assertEqual(merged["label"].splitlines()[:2], ["Suspected Synthetic service", short_address(shared)])
                     shape = next(item for item in make_plan(build_graph(variant, True))["shapes"]
                                  if item["key"] == key)
                     self.assertEqual(shape["body"]["style"]["fillColor"], COLORS["seed"])
@@ -293,7 +294,7 @@ class GraphPresentationTests(unittest.TestCase):
         self.assertEqual(plan["presentation_version"], PRESENTATION_VERSION)
         self.assertEqual(plan["namespace"], graph["namespace"])
         self.assertEqual({item["key"] for item in plan["shapes"]},
-                         {node["id"] for node in graph["nodes"]} | {"legend", "run:" + graph["run_id"]})
+                         {node["id"] for node in graph["nodes"]} | {"legend", "run:" + graph["run_id"]} | set(plan["presentation_items"]))
         self.assertEqual({(item["key"], item["source"], item["target"]) for item in plan["connectors"]},
                          {(edge["id"], edge["source"], edge["target"]) for edge in graph["edges"]})
 

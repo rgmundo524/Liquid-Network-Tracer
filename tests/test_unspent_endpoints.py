@@ -71,7 +71,7 @@ class UnspentEndpointTests(unittest.TestCase):
         self.assertEqual(terminal["role"], "unspent_endpoint")
         self.assertEqual(terminal["color"], "#fdba74")
         self.assertEqual(terminal["details"]["unspent_endpoints"], [ENDPOINT])
-        self.assertIn("Unspent endpoint", terminal["label"].splitlines())
+        self.assertIn("Unspent", terminal["label"].splitlines())
         self.assertEqual({node["id"] for node in graph["nodes"] if node.get("role") == "unspent_endpoint"},
                          {terminal["id"]})
         self.assertEqual(state, original)
@@ -83,7 +83,7 @@ class UnspentEndpointTests(unittest.TestCase):
         graph = build_graph(state)
         selected = self.node(graph, A + ":0")
         self.assertEqual(selected["role"], "seed")
-        self.assertIn("Unspent endpoint", selected["label"])
+        self.assertIn("Unspent", selected["label"])
         self.assertEqual(selected["details"]["unspent_endpoints"], [A + ":0"])
         self.assertEqual(selected["color"], COLORS["seed"])
         starting = next(node for node in graph["nodes"] if node["id"] == "tx:" + A)
@@ -100,7 +100,7 @@ class UnspentEndpointTests(unittest.TestCase):
         self.assertEqual(sibling["role"], "address")
         self.assertEqual(sibling["color"], COLORS["address"])
         self.assertFalse(sibling["details"].get("unspent_endpoints"))
-        self.assertNotIn("Unspent endpoint", sibling["label"])
+        self.assertNotIn("Unspent", sibling["label"])
         self.assertNotIn(X, state["transactions"])
         self.assertEqual(state["stats"]["requests_this_run"], 6)
 
@@ -114,7 +114,7 @@ class UnspentEndpointTests(unittest.TestCase):
                 node = self.node(build_graph(variant))
                 self.assertEqual(node["role"], "candidate")
                 self.assertFalse(node["details"].get("unspent_endpoints"))
-                self.assertNotIn("Unspent endpoint", node["label"])
+                self.assertNotIn("Unspent", node["label"])
         boundary = self.run_trace(hops=2)
         self.assertEqual(boundary["outputs"][ENDPOINT]["status"], "hop_limit")
         self.assertEqual(self.node(build_graph(boundary))["role"], "candidate")
@@ -166,7 +166,7 @@ class UnspentEndpointTests(unittest.TestCase):
                 self.assertEqual(node["color"], COLORS["seed"])
                 self.assertEqual(node["details"]["unspent_endpoints"], [ENDPOINT])
                 self.assertEqual({item["outpoint"] for item in node["details"]["occurrences"]}, {B + ":0", ENDPOINT})
-                self.assertIn("Unspent endpoint", node["label"].splitlines())
+                self.assertIn("Unspent", node["label"].splitlines())
 
     def test_merged_multiple_endpoints_are_deduplicated_and_sorted(self):
         self.responses["/tx/" + A]["vout"][1] = output("SYNTHETIC-branch-A")
@@ -178,7 +178,7 @@ class UnspentEndpointTests(unittest.TestCase):
         self.assertEqual(node["role"], "seed")
         self.assertEqual(node["color"], COLORS["seed"])
         self.assertEqual(node["details"]["unspent_endpoints"], sorted([A + ":1", ENDPOINT]))
-        self.assertIn("Unspent endpoints: 2", node["label"].splitlines())
+        self.assertIn("Unspent", node["label"].splitlines())
 
     def test_attribution_keeps_color_and_endpoint_label_and_evidence(self):
         state = self.run_trace()
@@ -190,7 +190,7 @@ class UnspentEndpointTests(unittest.TestCase):
                 node = next(node for node in graph["nodes"] if ENDPOINT in node["details"].get("unspent_endpoints", []))
                 self.assertEqual(node["role"], "unspent_endpoint")
                 self.assertEqual(node["color"], COLORS["unspent_endpoint"])
-                self.assertIn("Unspent endpoint", node["label"].splitlines())
+                self.assertIn("Unspent", node["label"].splitlines())
                 self.assertIn("Suspected Synthetic service", node["label"])
 
     def test_event_and_bitcoin_input_colors_are_not_terminal_output_colors(self):
@@ -209,7 +209,7 @@ class UnspentEndpointTests(unittest.TestCase):
         for node in graph["nodes"]:
             if node["kind"] == "event":
                 self.assertEqual(node["color"], COLORS["event"])
-                self.assertNotIn("Unspent endpoint", node["label"])
+                self.assertNotIn("Unspent", node["label"])
 
     def test_continuation_rechecks_spend_and_preserves_previous_export(self):
         # A fake transport lets the same source observe a later spend without
@@ -246,17 +246,17 @@ class UnspentEndpointTests(unittest.TestCase):
         plan = make_plan(graph)
         shape = next(item for item in plan["shapes"] if item["key"] == node["id"])
         self.assertEqual(shape["body"]["style"]["fillColor"], COLORS["unspent_endpoint"])
-        self.assertIn("Unspent endpoint", shape["body"]["data"]["content"])
+        self.assertIn("Unspent", shape["body"]["data"]["content"])
         source = mermaid_source(graph)
         identifier = "n" + str(next(index for index, item in enumerate(sorted(graph["nodes"], key=lambda n: n["id"]))
                                     if item["id"] == node["id"]))
         self.assertIn(f"style {identifier} fill:{COLORS['unspent_endpoint']},", source)
-        self.assertIn("Unspent endpoint", source)
+        self.assertIn("Unspent", source)
         for svg, attribute in ((svg_graph(graph), "data-key"), (render_svg(graph), "data-node-id")):
             document = ET.fromstring(svg)
             group = next(element for element in document.iter() if element.get(attribute) == node["id"])
             self.assertTrue(any(child.get("fill") == COLORS["unspent_endpoint"] for child in group.iter()))
-            self.assertIn("Unspent endpoint", " ".join(group.itertext()))
+            self.assertIn("Unspent", " ".join(group.itertext()))
 
     @unittest.skipUnless(HAS_ELK, "local Node and pinned ELK dependency are required")
     def test_real_elk_keeps_terminal_evidence_and_fill(self):
@@ -270,7 +270,7 @@ class UnspentEndpointTests(unittest.TestCase):
             self.assertEqual(node[field], original[field])
         rendered = render_svg(optimized)
         self.assertIn(b'fill="#fdba74"', rendered)
-        self.assertIn(b"Unspent endpoint", rendered)
+        self.assertIn(b"Unspent", rendered)
         self.assertEqual(graph, before)
 
 

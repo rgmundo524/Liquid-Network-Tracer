@@ -9,6 +9,8 @@ from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 
 from .api import ENTERPRISE, Esplora, Limits
+from .hop_limits import UNSET
+from .address_counts import apply_saved_counts
 from .boards import create_board
 from .common import HEX64, TraceError, digest, load_labels, output_kind, parse_outpoint, read_json, save_json
 from .export import build_graph, export_run
@@ -90,6 +92,7 @@ def parser():
     service.add_argument("--notes", "--rationale", dest="notes", default=None, help="Notes supporting the attribution")
     service.add_argument("--confidence", choices=("suspected", "confirmed"), default=None)
     service.add_argument("--source", default=None)
+    service.add_argument("--hop-limit", default=UNSET, help="Additional hops after this address; blank clears the cap")
     service.add_argument("--stop-tracing", choices=("true", "false"), default=None)
     service.add_argument("--disable", action="store_true", help="Disable this designation so future continuation can resume its branches")
     run = commands.add_parser("trace", help="Start or extend a bounded run")
@@ -166,6 +169,12 @@ def parser():
     compact.add_argument("--open", dest="open_browser", action="store_true")
     fee_arguments(compact)
     connector_arguments(compact)
+    counts = commands.add_parser("address-counts", help="Fetch missing address transaction counts without tracing or layout")
+    counts.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    counts.add_argument("--run", default="latest")
+    counts.add_argument("--max-requests", type=int, default=1000)
+    counts.add_argument("--max-seconds", type=int, default=300)
+    counts.add_argument("--refresh", action="store_true", help="Refresh already cached counts too")
     csv = commands.add_parser("csv-export", help="Export displayed transaction input/output rows without API calls")
     csv.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                      help="Case directory (default: LIQUID_CASE_DIR)")
@@ -365,6 +374,9 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
         state["labels"] = apply_service_labels(state["labels"], service_settings)
         state["service_controls"] = {key: value for key, value in service_settings.items() if key != "history"}
     try:
+        count_case = Path(trace_path).resolve().parents[2]
+        if (count_case / "case.json").is_file():
+            apply_saved_counts(count_case, state)
         merged = namespace["address_mode"] == "merged"
         full_graph = build_graph(state, merged, include_fees=True)
         full_plan = make_plan(full_graph)
@@ -593,6 +605,7 @@ def run_trace(args, progress=None):
             destination = run_path(args.case, state["run_id"])
             only = {f"{t}:{i}" for t, i in map(parse_outpoint, args.only)} if args.only else None
             state = trace(api, state, limits, destination / "trace.json", args.include_unconfirmed, only)
+            apply_saved_counts(args.case, state)
             export_run(store, state, destination, merge_addresses, args.offline_preview)
             save_latest(args.case, state["run_id"])
             summary = {"run_id": state["run_id"], "status": state["status"],
@@ -646,6 +659,7 @@ def saved_graph(case, run_id="latest", include_fees=None):
     service_settings = load_services(case)
     state["labels"] = apply_service_labels(state["labels"], service_settings)
     state["service_controls"] = {key: value for key, value in service_settings.items() if key != "history"}
+    apply_saved_counts(case, state)
     fees = include_fee_flows(metadata, include_fees)
     graph = build_graph(state, merge_addresses=True, include_fees=fees)
     return run_id, archive, graph
@@ -744,6 +758,12 @@ def main(argv=None, *, progress=None):
                       if args.approve_plan else preview_import(args.case, text, **options))
             print(json.dumps(result, indent=2, ensure_ascii=False))
             return 0 if result.get("valid", True) else 1
+        if args.command == "address-counts":
+            from .address_counts import fetch_counts
+            result = fetch_counts(args.case, args.run, max_requests=args.max_requests,
+                                  max_seconds=args.max_seconds, refresh=args.refresh, progress=progress)
+            print(json.dumps(result, indent=2))
+            return 0
         if args.command == "address-inspect":
             from .address_review import inspect_case_address
             print(json.dumps(inspect_case_address(args.case, args.address, max_pages=args.max_pages,
@@ -757,7 +777,7 @@ def main(argv=None, *, progress=None):
             return 0
         if args.command == "service-set":
             settings = (disable_service(args.case, args.address) if args.disable else
-                        set_service(args.case, args.address, name=args.name, notes=args.notes, confidence=args.confidence, source=args.source, stop_tracing=None if args.stop_tracing is None else args.stop_tracing == "true"))
+                        set_service(args.case, args.address, name=args.name, notes=args.notes, confidence=args.confidence, source=args.source, stop_tracing=None if args.stop_tracing is None else args.stop_tracing == "true", hop_limit=args.hop_limit))
             from .address_activity import validate_address
             print(json.dumps({"revision": settings["revision"],
                               "service": settings["rules"][validate_address(args.address)]}, indent=2))

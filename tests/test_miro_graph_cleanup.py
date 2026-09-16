@@ -41,9 +41,9 @@ class GraphCleanupTests(unittest.TestCase):
     def test_new_plan_has_no_cards_no_stars_and_no_dangling_miro_references(self):
         before = copy.deepcopy(self.graph)
         plan = make_plan(self.graph); validate_plan(plan)
-        self.assertEqual(plan["presentation_items"], {})
-        self.assertEqual(len(plan["shapes"]), len(self.graph["nodes"]) + 2)
-        self.assertFalse(any(s["key"].startswith("annotation:") for s in plan["shapes"]))
+        self.assertTrue(all(p["kind"] == "address_count" for p in plan["presentation_items"].values()))
+        self.assertEqual(len(plan["shapes"]), len(self.graph["nodes"]) + 2 + len(plan["presentation_items"]))
+        self.assertFalse(any(s["key"].startswith(("annotation:attribution:", "annotation:convergence:")) for s in plan["shapes"]))
         self.assertFalse(any("★" in s["body"]["data"]["content"] for s in plan["shapes"]))
         for node in self.graph["nodes"]:
             shape = next(s for s in plan["shapes"] if s["key"] == node["id"])
@@ -107,11 +107,11 @@ class GraphCleanupTests(unittest.TestCase):
         self.item(self.host)["geometry"].update(width=320, height=240)
         self.item(self.host)["rotation"] = 30
         before = copy.deepcopy(self.item(self.host))
-        report = self.sync(make_plan(self.graph), max_items=0)
+        report = self.sync(make_plan(self.graph), max_items=len(make_plan(self.graph)["presentation_items"]))
         self.assertEqual(report["deleted"], 2)
-        self.assertEqual(report["created"], 0)
+        self.assertEqual(report["created"], len(make_plan(self.graph)["presentation_items"]))
         after = read_json(self.path)["items"]
-        self.assertEqual({k:v["id"] for k,v in retained.items()}, {k:v["id"] for k,v in after.items()})
+        self.assertEqual({k:v["id"] for k,v in retained.items()}, {k:v["id"] for k,v in after.items() if k in retained})
         self.assertTrue(all(k not in after for k in old_catalog))
         for field in ("position", "geometry", "rotation"):
             self.assertEqual(self.item(self.host)[field], before[field])
@@ -128,9 +128,9 @@ class GraphCleanupTests(unittest.TestCase):
         before = trace_path.read_bytes()
         with patch("liquid_tracer.cli.Esplora", side_effect=AssertionError("Must not retrace")):
             plan = refresh_presentation(old, trace_path)
-        self.assertEqual(plan["presentation_version"], 16)
-        self.assertEqual(plan["presentation_items"], {})
-        self.sync(plan, max_items=0)
+        self.assertEqual(plan["presentation_version"], 17)
+        self.assertTrue(all(p["kind"] == "address_count" for p in plan["presentation_items"].values()))
+        self.sync(plan, max_items=len(plan["presentation_items"]))
         self.assertEqual(self.item(self.host)["style"]["borderWidth"], "12")
         self.assertEqual(trace_path.read_bytes(), before)
 
@@ -144,7 +144,7 @@ class GraphCleanupTests(unittest.TestCase):
     def test_manual_border_edits_remain_protected_and_reported(self):
         self.sync(legacy_plan(self.graph))
         self.item(self.host)["style"]["borderColor"] = "#123456"
-        report = self.sync(make_plan(self.graph), max_items=0)
+        report = self.sync(make_plan(self.graph), max_items=len(make_plan(self.graph)["presentation_items"]))
         self.assertEqual(self.item(self.host)["style"]["borderColor"], "#123456")
         self.assertTrue(report["conflicts"])
 
@@ -152,11 +152,11 @@ class GraphCleanupTests(unittest.TestCase):
         self.sync(legacy_plan(self.graph))
         plan = make_plan(self.graph); self.remote.lose_delete = True
         with self.assertRaisesRegex(TraceError, "lost"):
-            self.sync(plan, max_items=0)
-        self.sync(plan, max_items=0)
+            self.sync(plan, max_items=len(plan["presentation_items"]))
+        self.sync(plan, max_items=len(plan["presentation_items"]))
         mapping = read_json(self.path)
         self.assertFalse(mapping.get("pending_deletions"))
-        self.assertFalse(any(k.startswith("annotation:") for k in mapping["items"]))
+        self.assertFalse(any(k.startswith(("annotation:attribution:", "annotation:convergence:")) for k in mapping["items"]))
         self.assertEqual(self.item(self.host)["style"]["borderWidth"], "12")
 
     def test_manual_notes_block_removal_before_any_writes(self):
@@ -184,7 +184,7 @@ class GraphCleanupTests(unittest.TestCase):
         plan = make_plan(compacted); validate_plan(plan)
         self.sync(plan, reorganize=True)
         self.assertEqual(self.item(self.host)["style"]["borderWidth"], "12")
-        self.assertEqual(plan["presentation_items"], {})
+        self.assertTrue(all(p["kind"] == "address_count" for p in plan["presentation_items"].values()))
         self.assertEqual(self.graph, original)
 
     def test_long_notes_do_not_inflate_miro_shape_count_or_board_metrics(self):

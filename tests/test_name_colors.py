@@ -190,7 +190,7 @@ class NameColorGraphTests(unittest.TestCase):
                     self.state['service_controls'] = {'name_colors': {'btse': '#123abc'}}
                     graph = build_graph(self.state, merge); node = self.node(graph, A + ':0')
                     self.assertEqual((node['color'], node['role'], node['color_source']), (COLORS['seed'], 'seed', 'seed'))
-                    self.assertIn('Unspent endpoint', node['label'])
+                    self.assertIn('Unspent', node['label'])
                     self.assertEqual('STOP TRACING' in node['label'], stop)
                     self.assertEqual(node['details']['name_colors'], {'btse': '#123abc'})
                     start = next(n for n in graph['nodes'] if n['id'] == 'tx:' + A)
@@ -216,7 +216,7 @@ class NameColorGraphTests(unittest.TestCase):
         self.state['service_controls'] = {'name_colors': {'btse': '#123abc'}}
         graph = build_graph(self.state); node = self.node(graph)
         self.assertEqual(node['color'], '#123abc'); self.assertEqual(node['role'], 'unspent_endpoint')
-        self.assertIn('Unspent endpoint', node['label'])
+        self.assertIn('Unspent', node['label'])
         self.state['service_controls']['name_colors'] = {}
         self.assertEqual(self.node(build_graph(self.state))['color'], COLORS['unspent_endpoint'])
 

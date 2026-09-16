@@ -563,6 +563,8 @@ class LocalServer(ThreadingHTTPServer):
             pass
 
     def public_result(self, result, action, case, txids):
+        if action == "address-counts":
+            return {key:result[key] for key in ("run_id", "fetched", "known", "total", "remaining", "requests_this_lookup", "stop_reason") if key in result}
         if action == "address-inspect":
             return public_address_activity(result)
         if action == "address-merge":
@@ -693,6 +695,13 @@ class LocalServer(ThreadingHTTPServer):
             arguments = ["connections-publish", "--case", str(case), "--preview", preview_id,
                          "--board", target, "--max-items", str(settings["max_new_items"])]
             live = bool(graph["nodes"])
+        elif action == "address-counts":
+            selected = resolve_latest(case, selected)
+            safe_path(case, ["runs", selected, "trace.json"])
+            verify_export(run_path(case, selected))
+            arguments = ["address-counts", "--case", str(case), "--run", selected,
+                         "--max-requests", str(settings["max_requests"]), "--max-seconds", str(settings["max_seconds"])]
+            live = not bool(metadata.get("fixture"))
         elif action == "address-inspect":
             from .address_activity import validate_address
 
@@ -1013,7 +1022,7 @@ class Handler(BaseHTTPRequestHandler):
             raise RequestError("Classification has been removed. Use confidence and stop_tracing independently.")
         settings = set_service(case, address, name=body.get("name"),
                                notes=body.get("notes", body.get("rationale")), enabled=body["enabled"],
-                               **{key: body[key] for key in ("confidence", "source", "observed_at", "stop_tracing") if key in body})
+                               **{key: body[key] for key in ("confidence", "source", "observed_at", "stop_tracing", "hop_limit") if key in body})
         return {"service": public_service(settings["rules"][address]), "revision": settings["revision"]}
 
 

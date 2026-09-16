@@ -9,9 +9,10 @@ from pathlib import Path
 from .address_activity import validate_address
 from .common import TraceError, match_labels, now, output_kind, read_json, save_json
 from .investigations import read_case
+from .hop_limits import hop_limit_value, UNSET
 
 MANAGED_BY = "case_service_rules"
-SERVICE_STATUSES = {"suspected_service_stop", "held_behind_service"}
+SERVICE_STATUSES = {"suspected_service_stop", "held_behind_service", "attribution_hop_limit"}
 CONFIDENCES = {"suspected", "confirmed"}
 
 
@@ -29,10 +30,12 @@ def rule_fields(rule):
     return {"confidence": confidence_value(rule.get("confidence")),
             "source": rule.get("source", "Investigator designation"),
             "observed_at": rule.get("observed_at", ""),
-            "stop_tracing": rule.get("stop_tracing", rule.get("classification") != "label")}
+            "stop_tracing": rule.get("stop_tracing", rule.get("classification") != "label"),
+            "hop_limit": hop_limit_value(rule.get("hop_limit"))}
 
 
 def validate_rule_fields(fields):
+    fields["hop_limit"] = hop_limit_value(fields.get("hop_limit"))
     if fields["confidence"] not in CONFIDENCES:
         raise TraceError("Confidence must be suspected or confirmed")
     if type(fields["stop_tracing"]) is not bool:
@@ -100,7 +103,7 @@ def load_services(case):
 
 def set_service(case, address, *, name=None, notes=None, rationale=None, enabled=True,
                 confidence=None, source=None, observed_at=None, stop_tracing=None,
-                classification=None):
+                classification=None, hop_limit=UNSET):
     """Save an independent attribution and stop flag.
 
     ``rationale`` and ``classification`` are Python compatibility arguments only.
@@ -115,7 +118,8 @@ def set_service(case, address, *, name=None, notes=None, rationale=None, enabled
     return _update_service(case, address, name=name,
                            rationale=notes if notes is not None else rationale, enabled=enabled,
                            fields={"confidence": confidence, "source": source,
-                                   "observed_at": observed_at, "stop_tracing": stop_tracing})
+                                   "observed_at": observed_at, "stop_tracing": stop_tracing,
+                                   **({"hop_limit": hop_limit_value(hop_limit)} if hop_limit is not UNSET else {})})
 
 
 def _update_service(case, address, *, name=None, rationale=None, enabled=True, preserve_text=False, fields=None):
@@ -141,7 +145,7 @@ def _update_service(case, address, *, name=None, rationale=None, enabled=True, p
             name = name if name is not None else (previous or {}).get("name", "")
             rationale = rationale if rationale is not None else notes_for(previous or {})
             metadata = rule_fields(previous or {})
-            metadata.update({key: value for key, value in (fields or {}).items() if value is not None})
+            metadata.update({key: value for key, value in (fields or {}).items() if value is not None or key == "hop_limit"})
             metadata["source"] = _text(metadata["source"], "Source", 1000, required=True)
             metadata["observed_at"] = _text(metadata["observed_at"], "Observation date", 80)
             validate_rule_fields(metadata)
@@ -171,6 +175,7 @@ def service_labels(settings):
             "entity": rule["name"] or "Unnamed address",
             "source": fields["source"], "confidence": fields["confidence"],
             "managed_by": MANAGED_BY, "stop": fields["stop_tracing"],
+            **({"hop_limit": fields["hop_limit"]} if fields["hop_limit"] is not None else {}),
             "observed_at": fields["observed_at"] or rule["updated_at"], "notes": notes_for(rule)})
     return labels
 
@@ -250,7 +255,13 @@ class ServiceScope:
     def depth(self, item):
         return self.depths.get(item["outpoint"], item["depth"])
 
-    def admit(self, key, depth):
+    def refresh(self, key):
+        pass
+
+    def permits(self, item, output):
+        return not self.blocked(item["outpoint"])
+
+    def admit(self, key, depth, parent=None):
         """Return newly available outputs when a new unblocked path reaches them."""
         if not self.active:
             return []

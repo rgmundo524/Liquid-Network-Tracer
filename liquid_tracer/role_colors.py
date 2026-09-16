@@ -12,7 +12,7 @@ ROLE_LABELS = {
     "transaction": "Child / downstream transactions",
     "address": "Context addresses",
     "candidate": "Child / reachable addresses",
-    "unspent_endpoint": "Unspent endpoints",
+    "unspent_endpoint": "Unspent",
     "event": "Events / fees / unspendable outputs",
 }
 NOTICE = (

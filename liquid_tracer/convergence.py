@@ -44,6 +44,10 @@ def _lineage_analysis(state, catalog):
     by_tx = defaultdict(list)
     for key, item in outputs.items():
         by_tx[item["txid"]].append(key)
+    from .hop_limits import has_hop_limits, output_budget
+    import math
+    limited = has_hop_limits(state["labels"])
+    budgets = {}
     origins = {key: root_bits.get(key.rpartition(":")[0], 0) for key in seeds}
     ready = deque(sorted(key for key, count in indegree.items() if count == 0))
     result, visited = {}, 0
@@ -56,8 +60,19 @@ def _lineage_analysis(state, catalog):
     while ready:
         txid = ready.popleft()
         visited += 1
-        contributing = [(key, origins.get(key, 0)) for key in sorted(incoming[txid])
-                        if origins.get(key, 0) and allowed(key)]
+        def active_origins(key):
+            if not limited:
+                return origins.get(key, 0)
+            return sum(1 << (number - 1) for number, remaining in budgets.get(key, {}).items() if remaining > 0)
+
+        contributing = [(key, active_origins(key)) for key in sorted(incoming[txid])
+                        if active_origins(key) and allowed(key)]
+        incoming_budgets = {}
+        if limited:
+            for key, _ in contributing:
+                for number, remaining in budgets.get(key, {}).items():
+                    if remaining > 0:
+                        incoming_budgets[number] = max(incoming_budgets.get(number, -1), remaining - 1)
         input_bits = 0
         for _, bits in contributing:
             input_bits |= bits
@@ -83,6 +98,13 @@ def _lineage_analysis(state, catalog):
             bits = input_bits | (own if key in seeds else 0)
             if bits:
                 origins[key] = bits
+                if limited:
+                    values = dict(incoming_budgets)
+                    if key in seeds and txid in indices:
+                        values[indices[txid]] = math.inf
+                    item = outputs[key]
+                    cap = output_budget(state["labels"], key, transactions[txid]["data"]["vout"][item["vout"]])
+                    budgets[key] = {number: min(remaining, cap) for number, remaining in values.items()}
         for child in sorted(children[txid]):
             indegree[child] -= 1
             if indegree[child] == 0:
