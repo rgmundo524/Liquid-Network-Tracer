@@ -114,7 +114,7 @@ class CSVExportTests(unittest.TestCase):
         output = next(row for row in rows if row["Transaction Hash"] == A
                       and row["Direction"] == "OUT" and row["Number of I/O"] == "0")
         self.assertEqual(output["Address Hash"], '\'=SUM(1,2),"Synthetic"\nAddress')
-        self.assertEqual(output["Crypto Value"], "1000000")
+        self.assertEqual(output["Asset Value"], "1000000")
 
     def test_each_reused_file_and_trace_must_have_a_manifest_entry(self):
         manifest = self.archive / "SHA256SUMS"

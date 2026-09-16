@@ -15,19 +15,28 @@ The separate `export.json` and `SHA256SUMS` describe provenance and completion.
 | Transaction Hash | Full hash of the transaction receiving the input or creating the output. |
 | Address Label | Applicable saved/imported attribution names, with the existing `Suspected ` prefix when appropriate. |
 | Address Flags | Applicable facts and controls: selected seed, context, STOP TRACING, unspent at observation, confidential amount/asset, peg-in, peg-out request, fee, unspendable or coinbase. Not a risk score or ownership finding. |
-| Address Entities | Underlying attribution names without generated prefixes, separated by semicolons. These are analyst attributions, not verified ownership. |
 | Address Hash | Full input prevout/output address. For a peg-out, the explicit Bitcoin destination. Blank where there is no recorded address. |
-| Crypto Value | Explicit integer amount in **base units**, exactly as recorded. For L-BTC these are satoshis. Confidential or missing amounts are blank, never zero. |
-| USD Value | Blank. The tracer has no recorded historical USD-rate source; it does not guess prices or treat tokens as USD. |
+| Asset Value | Explicit integer amount in **base units**, exactly as recorded. For L-BTC these are satoshis. Confidential or missing amounts are blank, never zero. |
+| Asset | `L-BTC` for its recognized explicit asset ID; `BTC` for a Bitcoin peg-in input; otherwise the full explicit Liquid asset ID. Blank when confidential or unavailable. No asset registry lookup or guessed ticker. |
 | PegOut Value | Explicit amount of the peg-out request output, in the same base units. Blank for non-peg-outs or unavailable amounts. This is not independent confirmation of a Bitcoin payout. |
 | Direction | `IN` for transaction inputs, `OUT` for transaction outputs. Amounts remain nonnegative; direction is separate. |
 | Number of I/O | **Zero-based index**, not a count. `IN` uses the input's `vin` position in this transaction; `OUT` uses its `vout` position. |
 
-`PegOut Value` is included after `USD Value`, incorporating the separately
-requested peg-out column. It repeats a subset of `Crypto Value`; do not add the
-two columns together. This fixed-column format has no asset column. Consult the
-saved transaction for the asset identity and do not sum amounts across different
-assets. No asset is assumed to be L-BTC merely because it is on Liquid.
+`Asset` appears immediately after `Asset Value`. The CSV does not include
+`Address Entities`, `Crypto Value`, or `USD Value`. Attribution names remain in
+`Address Label`; the underlying saved/imported assessments are unchanged.
+
+`PegOut Value` follows `Asset` and repeats a subset of `Asset Value`; do not add
+the two value columns together. Values remain in exact base units, not decimal
+token amounts. Do not sum amounts across different assets or treat a blank
+asset as L-BTC. Asset identity is independent of whether the amount is public.
+A peg-out row identifies its Liquid request-output asset, not a guessed Bitcoin
+payout asset. Historical exports and connection snapshots keep their original
+headers; create a fresh export or connection preview to use the new columns.
+
+```csv
+Block,Time,Transaction Label,Transaction Hash,Address Label,Address Flags,Address Hash,Asset Value,Asset,PegOut Value,Direction,Number of I/O
+```
 
 A UTXO created at `A:vout 7` and spent by input 2 of B appears as `A, OUT, 7` and
 `B, IN, 2` when both arrows are displayed. Those are two transaction occurrences,
