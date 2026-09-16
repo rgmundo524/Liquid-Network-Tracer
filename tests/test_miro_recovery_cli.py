@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 from liquid_tracer.cli import main, miro_recovery_status, recover_miro_run, sync_run
 from liquid_tracer.common import TraceError, digest, read_json, save_json
@@ -37,6 +38,9 @@ class MiroRecoveryCliTests(unittest.TestCase):
     def fail_initial_batch(self):
         calls = []
         def failure(method, url, headers, body, timeout):
+            # Native grouping preflight succeeds; only the initial item POST fails.
+            if method == "GET" and urlsplit(url).path.endswith("/groups"):
+                return 200, {}, b'{"data": []}'
             calls.append((method, url))
             return 500, {}, b"{}"
         with self.assertRaisesRegex(TraceError, "HTTP 500"):

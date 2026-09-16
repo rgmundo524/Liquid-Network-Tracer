@@ -24,6 +24,7 @@ MESSAGES = {
     "framing": "Updating graph export frames",
     "recovery": "Checking the confirmed-empty Miro board",
     "creating": "Adding new Miro items",
+    "grouping": "Grouping addresses with their transaction counts",
     "waiting": "Waiting before retrying a Miro request",
     "complete": "Miro synchronization completed",
 }

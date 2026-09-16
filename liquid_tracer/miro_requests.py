@@ -45,7 +45,7 @@ def request_credits(method, url, body=None):
             raise MiroRequestNotSent("Miro bulk creation requires between 1 and 20 items")
         return 100 * len(items)
     if method == "GET":
-        return 100 if path.endswith(("/items", "/connectors")) else 50
+        return 100 if path.endswith(("/items", "/connectors", "/groups")) or "/groups/" in path else 50
     # Frame deletion is Level 3; shape/connector edits use Level 2.
     if method == "DELETE" and path.rsplit("/", 2)[-2:-1] == ["frames"]:
         return 500
