@@ -8,6 +8,7 @@ from pathlib import Path
 from . import __version__
 from .common import (HEX64, StopRun, TraceError, digest, match_labels, now,
                      output_kind, parse_outpoint, save_json)
+from .services import ServiceScope, is_service_stop
 
 TERMINAL = {"spent", "fee", "pegout", "provably_unspendable"}
 
@@ -63,17 +64,29 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None):
     labels = state["labels"]
     state["include_unconfirmed"] = include_unconfirmed
     state["selected_frontier"] = sorted(only) if only is not None else None
+    from .hop_limits import HopScope, has_hop_limits
+    scope = HopScope(state) if has_hop_limits(labels) else ServiceScope(state)
 
-    def add(txid, index, depth, origin):
+    def add(txid, index, depth, origin, parent=None):
         key = f"{txid}:{index}"
         existing = state["outputs"].get(key)
         if existing is None:
             state["outputs"][key] = {"outpoint": key, "txid": txid, "vout": index,
                 "depth": depth, "origin": origin, "status": "pending"}
-            heapq.heappush(queue, (depth, key))
+            scope.register(key)
         elif depth < existing["depth"]:
             existing["depth"] = depth
             existing["status"] = "pending"
+        if scope.active:
+            # A longer path can carry more allowance than an exhausted short
+            # path. Offer every verified arrival, not only depth improvements.
+            released = scope.admit(key, depth, parent=parent)
+            for candidate in set(released) | ({key} if existing is None else set()):
+                item = state["outputs"][candidate]
+                if not scope.blocked(candidate) and item["status"] not in TERMINAL:
+                    item["status"] = "pending"
+                    heapq.heappush(queue, (scope.depth(item), candidate))
+        elif existing is None or existing["status"] == "pending":
             heapq.heappush(queue, (depth, key))
 
     if state["parent_run"]:
@@ -81,8 +94,10 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None):
         if only is not None and not set(only).issubset(available):
             raise TraceError("Selected outpoint is not on the saved frontier")
         for key in sorted(available if only is None else only):
+            if scope.blocked(key):
+                continue
             state["outputs"][key]["status"] = "pending"
-            heapq.heappush(queue, (state["outputs"][key]["depth"], key))
+            heapq.heappush(queue, (scope.depth(state["outputs"][key]), key))
     else:
         for seed in state["seeds"]:
             txid, index = parse_outpoint(seed)
@@ -95,6 +110,19 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None):
             "transactions_cumulative": len(state["transactions"]),
             "outputs_cumulative": len(state["outputs"]),
             "frontier_count": sum(item["status"] not in TERMINAL for item in state["outputs"].values())}
+        if scope.active:
+            state["stats"]["service_stopped_outputs"] = sum(
+                item.get("trace_control", {}).get("reason") == "suspected_service_stop"
+                for item in state["outputs"].values())
+            state["stats"]["held_behind_service_outputs"] = sum(
+                item.get("trace_control", {}).get("reason") == "held_behind_service"
+                for item in state["outputs"].values())
+            state["stats"]["attribution_hop_limited_outputs"] = sum(
+                item.get("trace_control", {}).get("reason") == "attribution_hop_limit"
+                for item in state["outputs"].values())
+            state["stats"]["active_frontier_count"] = sum(
+                item["status"] not in TERMINAL and not item.get("trace_control")
+                for item in state["outputs"].values())
         save_json(checkpoint, state)
 
     def get_tx(txid, depth):
@@ -113,6 +141,94 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None):
             new_transactions += 1
         return data
 
+    prepared = set()
+
+    def prepare_frontier():
+        """Overlap only work already required by a bounded frontier window.
+
+        Traversal and checkpoints stay on this thread. Near a transaction or
+        request cap, use the ordinary serial path so speculative work cannot
+        consume the slots needed by the current output's spending transaction.
+        """
+        workers = getattr(api, "workers", 1)
+        if workers <= 1 or not callable(getattr(api, "prefetch", None)) or not queue:
+            return
+        if queue[0][1] in prepared:
+            return
+        depth = queue[0][0]
+        window = []
+        seen = set()
+        for candidate_depth, key in heapq.nsmallest(min(workers, limits.max_outpoints - count), queue):
+            item = state["outputs"][key]
+            if (candidate_depth != depth or candidate_depth != scope.depth(item)
+                    or item["status"] != "pending" or key in seen or scope.blocked(key)):
+                continue
+            seen.add(key)
+            window.append(item)
+        if not window:
+            return
+        funding_ids = list(dict.fromkeys(item["txid"] for item in window))
+        missing = [txid for txid in funding_ids if txid not in state["transactions"]]
+        # At most one previously unseen spending transaction per output. This
+        # bound also covers converging branches, without fetching any sibling
+        # outputs that the investigator did not select for this frontier.
+        possible_children = len(window) if depth < limits.max_hops else 0
+        if len(missing) + possible_children > limits.max_transactions - new_transactions:
+            return
+        fetch_ids = [txid for txid in funding_ids
+                     if not state["transactions"].get(txid, {}).get("data", {}).get("status", {}).get("confirmed")]
+        nominal_requests = len(fetch_ids) + (len(funding_ids) + possible_children if possible_children else 0)
+        if api.auth == "blockstream" and not api.token:
+            nominal_requests += 1
+        if nominal_requests > limits.max_requests - api.budget.requests:
+            return
+        prepared.update(seen)
+        fetched = api.prefetch(["/tx/" + txid for txid in fetch_ids])
+        funding = {}
+        for txid in funding_ids:
+            result = fetched.get("/tx/" + txid)
+            if isinstance(result, Exception):
+                continue  # The normal get() surfaces this saved failure in order.
+            transaction = result[0] if result is not None else state["transactions"][txid]["data"]
+            try:
+                validate_transaction(transaction, txid)
+            except TraceError:
+                continue
+            funding[txid] = transaction
+        eligible = []
+        for item in window:
+            transaction = funding.get(item["txid"])
+            if transaction is None or item["vout"] >= len(transaction["vout"]):
+                continue
+            output = transaction["vout"][item["vout"]]
+            if (output_kind(output) != "spendable" or depth >= limits.max_hops
+                    or not scope.permits(item, output)
+                    or any(label.get("stop") for label in match_labels(labels, item["outpoint"], output))
+                    or (not include_unconfirmed and not transaction["status"]["confirmed"])):
+                continue
+            eligible.append(item)
+        spends = api.prefetch(list(dict.fromkeys("/tx/" + item["txid"] + "/outspends" for item in eligible)))
+        children = []
+        for item in eligible:
+            result = spends.get("/tx/" + item["txid"] + "/outspends")
+            if result is None or isinstance(result, Exception):
+                continue
+            rows = result[0]
+            if not isinstance(rows, list) or len(rows) != len(funding[item["txid"]]["vout"]):
+                continue
+            spend = rows[item["vout"]]
+            if (not isinstance(spend, dict) or spend.get("spent") is not True
+                    or (not include_unconfirmed and
+                        (not isinstance(spend.get("status"), dict) or not spend["status"].get("confirmed")))):
+                continue
+            child_id, vin = spend.get("txid"), spend.get("vin")
+            if (not isinstance(child_id, str) or not HEX64.fullmatch(child_id)
+                    or type(vin) is not int or vin < 0 or child_id == item["txid"]):
+                continue
+            if not state["transactions"].get(child_id, {}).get("data", {}).get("status", {}).get("confirmed"):
+                children.append("/tx/" + child_id)
+        api.prefetch(list(dict.fromkeys(children)))
+
     current = None
     stop_reason = None
     try:
@@ -121,19 +237,28 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None):
             api.budget.check()
             if count >= limits.max_outpoints:
                 raise StopRun("outpoint_limit")
+            prepare_frontier()
             depth, key = heapq.heappop(queue)
             current = state["outputs"][key]
-            if depth != current["depth"] or current["status"] != "pending":
+            if depth != scope.depth(current) or current["status"] != "pending" or scope.blocked(key):
                 continue
             count += 1
             tx = get_tx(current["txid"], depth)
             if current["vout"] >= len(tx["vout"]):
                 raise TraceError("Seed or frontier output index does not exist: " + key)
             output = tx["vout"][current["vout"]]
+            scope.refresh(key)
+            depth = scope.depth(current)
+            if scope.blocked(key):
+                current = None
+                save()
+                continue
             kind = output_kind(output)
             current["labels"] = match_labels(labels, key, output)
             if kind != "spendable":
                 current["status"] = kind
+            elif any(is_service_stop(label) for label in current["labels"]):
+                scope.mark_stop(current, output.get("scriptpubkey_address"))
             elif any(label.get("stop") for label in current["labels"]):
                 current["status"] = "analyst_stop"
             elif not include_unconfirmed and not tx.get("status", {}).get("confirmed"):
@@ -173,7 +298,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None):
                             "hop": depth + 1, "relationship": "observed_utxo_spend"}
                         current["status"] = "spent"
                         for index in range(len(child["vout"])):
-                            add(child_id, index, depth + 1, "candidate_descendant")
+                            add(child_id, index, depth + 1, "candidate_descendant", parent=key)
             current = None
             save()
         state["status"] = "bounded_complete"

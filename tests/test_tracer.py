@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import os
 import tempfile
@@ -13,7 +14,7 @@ from liquid_tracer.export import build_graph, export_run, svg_graph
 from liquid_tracer.miro import make_plan, publish, resolve
 from liquid_tracer.store import Store
 from liquid_tracer.trace import new_state, trace
-from tests.fixtures import A, B, C, D, X, fixture
+from tests.fixtures import A, B, C, D, X, CONFIRMED, fixture, output
 
 
 class TraceTests(unittest.TestCase):
@@ -73,6 +74,63 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(state["links"][B + ":1"]["vin"], 1)
         self.assertEqual(state["stats"]["new_transactions_this_run"], 3)
 
+    def multi_seed_fixture(self):
+        txids = [hashlib.sha256(f"SYNTHETIC-start-{i}".encode()).hexdigest() for i in range(10)]
+        joined = hashlib.sha256(b"SYNTHETIC-shared-spend").hexdigest()
+        data, inputs = {}, []
+        for index, txid in enumerate(txids):
+            selected = output(f"SYNTHETIC-selected-{index}")
+            data["/tx/" + txid] = {"txid": txid, "vin": [],
+                "vout": [selected, output(f"SYNTHETIC-unselected-{index}")], "status": dict(CONFIRMED)}
+            data["/tx/" + txid + "/outspends"] = [
+                {"spent": True, "txid": joined, "vin": index, "status": dict(CONFIRMED)},
+                {"spent": False}]
+            inputs.append({"txid": txid, "vout": 0, "prevout": selected})
+        data["/tx/" + joined] = {"txid": joined, "vin": inputs,
+            "vout": [output("SYNTHETIC-shared-descendant")], "status": dict(CONFIRMED)}
+        save_json(self.fixture_file, data)
+        return txids, joined
+
+    def test_ten_initial_transactions_share_one_run_and_one_descendant(self):
+        txids, joined = self.multi_seed_fixture()
+        limits = Limits(max_hops=1, max_transactions=11)
+        api = Esplora(self.store, "pending", limits, fixture=self.fixture_file, min_interval=0)
+        seeds = [txid + ":0" for txid in txids]
+        state = new_state(seeds, api.base, limits, [])
+        api.run_id = state["run_id"]
+        state = trace(api, state, limits, self.root / "multi-seed.json")
+        self.assertEqual(set(state["seeds"]), set(seeds))
+        self.assertEqual(set(state["transactions"]), set(txids) | {joined})
+        self.assertEqual(state["stats"]["new_transactions_this_run"], 11)
+        self.assertEqual(len(state["links"]), 10)
+        self.assertEqual({link["vin"] for link in state["links"].values()}, set(range(10)))
+        self.assertTrue(all(txid + ":1" not in state["outputs"] for txid in txids))
+        self.assertEqual(state["outputs"][joined + ":0"]["status"], "hop_limit")
+        graph = build_graph(state)
+        self.assertEqual(sum(node["id"] == "tx:" + joined for node in graph["nodes"]), 1)
+
+    def test_multiple_seeds_share_transaction_budget_and_resume_remaining_roots(self):
+        txids, joined = self.multi_seed_fixture()
+        seeds = [txid + ":0" for txid in txids]
+        limits = Limits(max_hops=1, max_transactions=4)
+        api = Esplora(self.store, "pending", limits, fixture=self.fixture_file, min_interval=0)
+        state = new_state(seeds, api.base, limits, [])
+        api.run_id = state["run_id"]
+        state = trace(api, state, limits, self.root / "multi-paused.json")
+        self.assertEqual(state["stop_reason"], "transaction_limit")
+        self.assertEqual(state["stats"]["new_transactions_this_run"], 4)
+        self.assertEqual(set(state["seeds"]), set(seeds))
+        snapshot = copy.deepcopy(state)
+        continued_limits = Limits(max_hops=1, max_transactions=20)
+        api = Esplora(self.store, "pending", continued_limits, fixture=self.fixture_file, min_interval=0)
+        continued = new_state(seeds, api.base, continued_limits, [], parent=state)
+        api.run_id = continued["run_id"]
+        continued = trace(api, continued, continued_limits, self.root / "multi-continued.json")
+        self.assertEqual(state, snapshot)
+        self.assertEqual(continued["parent_run"], state["run_id"])
+        self.assertEqual(set(continued["transactions"]), set(txids) | {joined})
+        self.assertEqual(len(continued["links"]), 10)
+
     def test_request_budget_preserves_current_and_can_resume(self):
         state = self.run_trace(max_requests=2)
         self.assertEqual(state["status"], "paused")
@@ -126,7 +184,7 @@ class TraceTests(unittest.TestCase):
         labels = [{"kind": "address", "value": "SYNTHETIC-branch-A", "entity": "Demo service",
             "source": "case-record:synthetic", "confidence": "candidate", "observed_at": "2026-09-09", "stop": True}]
         state = self.run_trace(labels=labels)
-        self.assertEqual(state["outputs"][B + ":0"]["status"], "analyst_stop")
+        self.assertEqual(state["outputs"][B + ":0"]["status"], "suspected_service_stop")
         self.assertEqual(state["outputs"][B + ":0"]["labels"][0]["source"], labels[0]["source"])
 
     def test_selective_resume_keeps_unselected_branch(self):
@@ -135,9 +193,9 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(state["outputs"][B + ":1"]["status"], "hop_limit")
         self.assertNotIn(B + ":1", state["links"])
 
-    def test_default_graph_keeps_reused_address_outpoints_separate(self):
+    def test_legacy_graph_keeps_reused_address_outpoints_separate(self):
         state = self.run_trace()
-        graph = build_graph(state)
+        graph = build_graph(state, merge_addresses=False)
         repeated = [node for node in graph["nodes"] if node["details"].get("address") == "SYNTHETIC-branch-A"]
         self.assertEqual(len(repeated), 2)
         merged = build_graph(state, True)

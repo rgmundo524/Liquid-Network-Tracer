@@ -1,0 +1,13 @@
+{
+  "name": "liquid-tracer-layout",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local ELK layout worker for Liquid Network Tracer",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "elkjs": "0.12.0"
+  }
+}
