@@ -151,6 +151,28 @@ class PresentationRefreshTests(unittest.TestCase):
         self.assertEqual(self.snapshot(self.run), self.archive)
         verify_export(self.run)
 
+    def test_lbtc_refresh_updates_base_unit_captions_preserves_manual_edits_and_archive(self):
+        managed_key, manual_key = "out:" + A + ":0", "in:" + B + ":0"
+        for item in self.old_plan["connectors"]:
+            if item["key"] in (managed_key, manual_key):
+                label = "vout 0" if item["key"] == managed_key else "vin 0"
+                item["body"]["captions"][0]["content"] = label + " · 1000000 base units L-BTC"
+        self.old_plan["presentation_version"] = 18
+        self.save_old_plan()
+        archive = self.snapshot(self.run)
+        ids = self.populate_old_board()
+        self.remote.items[ids[manual_key]]["captions"][0]["content"] = "Analyst amount note"
+        with patch("liquid_tracer.cli.sync", self.adapter), \
+                patch("liquid_tracer.cli.Esplora", side_effect=AssertionError("Must not retrace")):
+            result = sync_run(self.case, "latest", "SYNTHETIC=", max_new_items=0)
+        self.assertEqual(result["created"], 0)
+        self.assertEqual(self.remote.items[ids[managed_key]]["captions"][0]["content"],
+                         "vout 0 · 0.01000000 L-BTC")
+        self.assertEqual(self.remote.items[ids[manual_key]]["captions"][0]["content"], "Analyst amount note")
+        self.assertEqual({key: record["id"] for key, record in read_json(self.state_path)["items"].items()}, ids)
+        self.assertEqual(self.snapshot(self.run), archive)
+        verify_export(self.run)
+
     def test_preview_refreshes_in_memory_without_credentials_network_or_writes(self):
         self.populate_old_board()
         before = self.snapshot(self.case)

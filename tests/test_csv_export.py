@@ -62,6 +62,13 @@ class CSVExportTests(unittest.TestCase):
         info = json.loads((self.destination / "export.json").read_text())
         self.assertEqual(info["row_count"], len(rows))
         self.assertEqual(info["format"], "transaction_io")
+        self.assertEqual(info["schema_version"], 3)
+        self.assertEqual(info["value_units"], "asset_dependent")
+        self.assertEqual(info["value_units_by_asset"], {
+            "L-BTC": "L-BTC", "BTC": "BTC", "other_explicit_assets": "base_units",
+            "unidentified_assets": "base_units",
+        })
+        self.assertEqual(info["bitcoin_decimal_places"], 8)
         self.assertEqual(info["source_trace_sha256"], digest(before["trace.json"]))
         self.assertEqual(info["source_files"], {name: digest(before[name]) for name in DETAIL_FILES})
         manifest = (self.destination / "SHA256SUMS").read_text().splitlines()
@@ -114,7 +121,7 @@ class CSVExportTests(unittest.TestCase):
         output = next(row for row in rows if row["Transaction Hash"] == A
                       and row["Direction"] == "OUT" and row["Number of I/O"] == "0")
         self.assertEqual(output["Address Hash"], '\'=SUM(1,2),"Synthetic"\nAddress')
-        self.assertEqual(output["Asset Value"], "1000000")
+        self.assertEqual(output["Asset Value"], "0.01000000")
 
     def test_each_reused_file_and_trace_must_have_a_manifest_entry(self):
         manifest = self.archive / "SHA256SUMS"

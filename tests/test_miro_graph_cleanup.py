@@ -128,7 +128,7 @@ class GraphCleanupTests(unittest.TestCase):
         before = trace_path.read_bytes()
         with patch("liquid_tracer.cli.Esplora", side_effect=AssertionError("Must not retrace")):
             plan = refresh_presentation(old, trace_path)
-        self.assertEqual(plan["presentation_version"], 18)
+        self.assertEqual(plan["presentation_version"], 19)
         self.assertEqual(plan["presentation_items"], {})
         self.sync(plan, max_items=len(plan["presentation_items"]))
         self.assertEqual(self.item(self.host)["style"]["borderWidth"], "12")

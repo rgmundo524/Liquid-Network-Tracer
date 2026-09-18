@@ -79,13 +79,39 @@ class GraphPresentationTests(unittest.TestCase):
         self.assertEqual(graph_quantity(hidden), "?? ??")
         self.assertEqual(graph_quantity({}), "?? ??")
         self.assertEqual(graph_quantity({"asset": LBTC}), "?? L-BTC")
-        self.assertEqual(graph_quantity({"value": 0, "asset": LBTC}), "0 base units L-BTC")
+        self.assertEqual(graph_quantity({"value": 0, "asset": LBTC}), "0.00000000 L-BTC")
         self.assertEqual(graph_quantity({"value": 9007199254740993}),
                          "9007199254740993 base units ??")
         other_asset = "12" * 32
         self.assertEqual(graph_quantity({"value": 42, "asset": other_asset}),
                          "42 base units " + short(other_asset))
         self.assertNotIn("L-BTC", graph_quantity(hidden))
+
+    def test_lbtc_units_reach_renderers_without_changing_evidence(self):
+        from liquid_tracer.mermaid import mermaid_source
+        original = copy.deepcopy(self.state)
+        graph = build_graph(self.state, include_fees=True)
+        plan = make_plan(graph)
+        captions = {item["key"]: item["body"]["captions"][0]["content"]
+                    for item in plan["connectors"]}
+        self.assertEqual(captions["out:" + A + ":0"], "vout 0 · 0.01000000 L-BTC")
+        self.assertEqual(captions["in:" + B + ":0"], "vin 0 · 0.01000000 L-BTC")
+        self.assertEqual(captions["out:" + A + ":2"], "vout 2 · 0.00000100 L-BTC")
+        self.assertEqual(captions["out:" + C + ":1"], "vout 1 · 0.00000000 L-BTC")
+        self.assertIn("0.01000000 L-BTC", svg_graph(graph))
+        self.assertIn("0.01000000 L-BTC", mermaid_source(graph))
+        self.assertEqual(self.state, original)
+        output_edge = next(edge for edge in graph["edges"] if edge["id"] == "out:" + A + ":0")
+        self.assertEqual(output_edge["details"]["value"], 1_000_000)
+
+    def test_graph_bitcoin_pegin_does_not_require_a_liquid_asset_id(self):
+        state = copy.deepcopy(self.state)
+        vin = state["transactions"][A]["data"]["vin"][0]
+        vin["is_pegin"] = True
+        vin["prevout"] = {"value": 123_456_789, "scriptpubkey_address": "SYNTHETIC-bitcoin"}
+        graph = build_graph(state)
+        edge = next(edge for edge in graph["edges"] if edge["id"] == "in:" + A + ":0")
+        self.assertEqual(edge["quantity"], "1.23456789 BTC")
 
     def test_address_and_input_captions_omit_prior_hash_but_keep_evidence(self):
         original = copy.deepcopy(self.state)

@@ -1,6 +1,8 @@
 """Transaction-centric CSV: one input/output occurrence per displayed arrow.
 
-Amounts are exact explicit base-unit integers, never floats or inferred values.
+Recognized L-BTC and Bitcoin peg-in amounts use exact eight-decimal whole units.
+Other or unidentified assets retain explicit base-unit integers. No values or
+asset identities are inferred, and saved transaction evidence stays unchanged.
 The graph selects occurrences; transaction facts come from the saved trace.
 """
 from collections import defaultdict
@@ -8,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import csv
 
-from .common import HEX64, LBTC, TraceError, canonical, output_kind
+from .common import HEX64, TraceError, bitcoin_units, canonical, is_lbtc, output_kind
 from .attribution_presentation import display_name
 
 TRANSACTION_CSV_FIELDS = (
@@ -17,23 +19,32 @@ TRANSACTION_CSV_FIELDS = (
     "PegOut Value", "Direction", "Number of I/O",
 )
 VALUE_NOTICE = (
-    "Asset Value and PegOut Value are exact explicit base units (satoshis for BTC/L-BTC), "
-    "not inferred whole-token amounts. Asset is L-BTC for its recognized explicit asset ID, "
+    "Asset Value and PegOut Value use exact L-BTC units for the recognized explicit L-BTC "
+    "asset and BTC units for Bitcoin peg-in inputs, with eight decimal places "
+    "(100,000,000 base units = 1 L-BTC or BTC). Other or unidentified assets retain "
+    "exact explicit integer base units; their precision is not guessed. "
+    "Asset is L-BTC for its recognized explicit asset ID, "
     "BTC for a Bitcoin peg-in input, or the full explicit Liquid asset ID otherwise. "
     "Confidential or missing asset identities are blank, never inferred from an amount, "
     "address label or graph color. Do not sum different assets. Blank amounts are unknown, "
     "not zero. PegOut Value repeats the peg-out request output amount; it is not a second "
     "transfer or proof of a Bitcoin payout."
 )
+VALUE_UNITS = {
+    "L-BTC": "L-BTC",
+    "BTC": "BTC",
+    "other_explicit_assets": "base_units",
+    "unidentified_assets": "base_units",
+}
 
 
-def _amount(output):
+def _amount(output, *, pegin=False):
     value = output.get("value")
     if value is None:
         return ""
     if type(value) is not int or value < 0:
         raise TraceError("Transaction CSV requires explicit nonnegative integer base-unit amounts")
-    return value
+    return bitcoin_units(value) if pegin or is_lbtc(output.get("asset")) else value
 
 
 def _asset(output, *, pegin=False):
@@ -47,7 +58,7 @@ def _asset(output, *, pegin=False):
         return ""
     if not isinstance(asset, str) or not HEX64.fullmatch(asset):
         raise TraceError("Transaction CSV requires a full explicit hexadecimal asset ID")
-    return "L-BTC" if asset.lower() == LBTC else asset
+    return "L-BTC" if is_lbtc(asset) else asset
 
 
 def _block_time(transaction):
@@ -204,7 +215,7 @@ def transaction_csv_rows(graph, state):
             if not pegin and output.get("asset") is None and output.get("assetcommitment"):
                 flags.append("CONFIDENTIAL ASSET")
             block, timestamp = _block_time(transaction)
-            amount = _amount(output)
+            amount = _amount(output, pegin=pegin)
             row = dict(zip(TRANSACTION_CSV_FIELDS, (
                 block, timestamp, f"Starting TX {starts[tx_key]}" if tx_key in starts else "", txid,
                 "; ".join(names), "; ".join(flags), address,

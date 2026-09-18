@@ -24,6 +24,7 @@ jobs:
       - name: Run offline tracing and local interface tests
         run: |
           npm --prefix layout ci --ignore-scripts --no-audit --no-fund
+          npm --prefix web test
           .venv/bin/python -m unittest discover -s tests -v
 
   devenv:

@@ -6,8 +6,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .common import (LBTC, TraceError, canonical, digest, match_labels, output_kind,
-                     public_fields, save_json)
+from .common import (TraceError, bitcoin_units, canonical, digest, display_amount,
+                     is_lbtc, match_labels, output_kind, public_fields, save_json)
 from .trace import TERMINAL
 from .layout import arrange, fee_date, transaction_ranks
 from .miro_frames import activity_frames
@@ -16,7 +16,7 @@ from .services import confidence_value
 from .attribution_presentation import display_name, attribution_reference
 from .name_colors import apply_name_colors, color_text
 
-PRESENTATION_VERSION = 18
+PRESENTATION_VERSION = 19
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -50,7 +50,7 @@ def legend_lines(graph=None):
         f"Color priority: selected seed {name('seed').lower()} > assigned name color > unspent {name('unspent_endpoint').lower()} > candidate {name('candidate').lower()} > context {name('address').lower()}. Shared seed addresses retain the seed color.",
         f"{name('unspent_endpoint')} circles: traced branch ends at a UTXO observed unspent. Unchecked or hop-limited outputs do not qualify.",
         f"Arrows: {name('traced_edge').lower()} = traced UTXO links; {name('context_edge').lower()} = context only.",
-        "Captions: vin/vout number · amount asset. ?? = not publicly available. Known amounts are in base units.",
+        "Captions: vin/vout number · amount asset. ?? = not publicly available. L-BTC/BTC use whole units with 8 decimals; other or unidentified assets use base units.",
         "STOP TRACING: an explicit address boundary, independent of confidence. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards.",
         "Thick red border: INPUT MERGE = distinct starting lineages meet in a transaction; shared-address receipts from distinct branches also highlight the receiving address and all participating senders. Neither proves ownership or value allocation.",
         "TX count inside circles: confirmed + mempool transactions at last lookup; ?? = unavailable. Not the number of visible arrows.",
@@ -62,11 +62,14 @@ def edge_color(role):
     return COLORS["context_edge" if role.startswith("context") else "traced_edge"]
 
 
-def graph_quantity(output):
+def graph_quantity(output, *, pegin=False):
     """Compact public quantity without inferring hidden assets or values."""
     value, asset = output.get("value"), output.get("asset")
-    amount = "??" if value is None else str(value) + " base units"
-    name = "L-BTC" if asset == LBTC else (short(asset) if asset else "??")
+    if pegin:
+        # An explicitly identified peg-in input spends a Bitcoin prevout.
+        return ("??" if value is None else bitcoin_units(value)) + " BTC"
+    amount = display_amount(output)
+    name = "L-BTC" if is_lbtc(asset) else (short(asset) if asset else "??")
     return amount + " " + name
 
 
@@ -199,7 +202,7 @@ def build_graph(state, merge_addresses=True, include_fees=False):
             traced = bool(link and link["spending_txid"] == txid and link["vin"] == index and network == "liquid")
             edges.append({"id": f"in:{txid}:{index}", "source": input_node, "target": txnode,
                           "role": "traced_input" if traced else "context_input", "outpoint": key,
-                          "label": f"vin {index}", "quantity": graph_quantity(prevout),
+                          "label": f"vin {index}", "quantity": graph_quantity(prevout, pegin=bool(vin.get("is_pegin"))),
                           "details": {"vin": vin, "validated_trace_link": link if traced else None}})
         for index, output in enumerate(tx["vout"]):
             key = f"{txid}:{index}"
