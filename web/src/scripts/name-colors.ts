@@ -1,4 +1,6 @@
 /** Case-local role and attribution-name colors; no changes to tracing evidence. */
+import {invalidateNameColorImport, nameColorImportAction, nameColorImportFile, nameColorImportInput,
+  nameColorImportPanel, nameColorImportPending, resetNameColorImport} from './name-color-import';
 type Row = {key: string; name: string; variants: string[]; addresses: number; enabled_addresses: number; color: string | null};
 type RoleRow = {role: string; name: string; color: string | null; default_color: string};
 type Catalog = {revision: number; rows: Row[]; roles?: RoleRow[]; role_notice?: string; total: number; offset: number; limit: number; presets: [string, string][]; notice: string};
@@ -10,6 +12,7 @@ const esc = (v: unknown): string => String(v ?? '').replace(/[&<>"']/g, c => ({'
 const safeColor = (v: unknown): v is string => typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v);
 
 export function resetNameColors(caseId: string): void {
+  resetNameColorImport(caseId);
   state = {caseId, open: false, query: '', offset: 0, pending: false, data: null,
     drafts: new Map(), roleDrafts: new Map(), message: ''};
 }
@@ -17,7 +20,7 @@ export function resetNameColors(caseId: string): void {
 export function nameColorsPanel(caseId: string, busy: boolean): string {
   if (state.caseId !== caseId) resetNameColors(caseId);
   if (!state.open) return '';
-  const disabled = busy || state.pending ? ' disabled' : '';
+  const disabled = busy || state.pending || nameColorImportPending() ? ' disabled' : '';
   const data = state.data;
   return `<section class="panel" id="name-colors-panel"><div class="panel-head"><h2 tabindex="-1" id="name-colors-title">Assign colors</h2><button class="btn" data-action="name-colors-close"${disabled}>Close</button></div>
   <div class="panel-body"><h3>Graph role colors</h3><p class="address-note">${esc(data?.role_notice || 'Loading graph-role palette...')}</p>
@@ -30,6 +33,7 @@ export function nameColorsPanel(caseId: string, busy: boolean): string {
     <button class="btn" data-action="name-colors-role-clear" data-color-index="${i}"${disabled}>Reset to default</button></td></tr>`;
   }).join('')}</tbody></table></div>
   <h3>Imported name colors</h3><p class="address-note">${esc(data?.notice || 'Loading saved names...')}</p>
+  ${nameColorImportPanel(caseId, busy || state.pending)}
   <label class="field"><span>Search names (case-insensitive)</span><input id="name-colors-query" maxlength="256" value="${esc(state.query)}"${disabled}/></label>
   <div class="form-actions"><button class="btn" data-action="name-colors-load"${disabled}>Search / refresh</button></div>
   <div class="table-wrap"><table><thead><tr><th>Name</th><th>Addresses</th><th>Color</th><th>Actions</th></tr></thead><tbody>${(data?.rows || []).map((row, i) => {
@@ -47,7 +51,8 @@ export function nameColorsPanel(caseId: string, busy: boolean): string {
   <p role="status">${esc(state.message)}</p></div></section>`;
 }
 
-export function nameColorsInput(element: HTMLInputElement): boolean {
+export function nameColorsInput(element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement): boolean {
+  if (nameColorImportInput(element)) return true;
   if (!element?.id?.startsWith('name-colors-')) return false;
   if (element.id === 'name-colors-query') {state.query = element.value; return true;}
   const match = /^name-colors-(role-)?(picker|hex)-(\d+)$/.exec(element.id);
@@ -62,9 +67,23 @@ export function nameColorsInput(element: HTMLInputElement): boolean {
   return true;
 }
 
+export async function nameColorsFile(element: HTMLInputElement, render: () => void, busy = false): Promise<void> {
+  if (busy || state.pending) return;
+  await nameColorImportFile(element, render);
+}
+
 export async function nameColorsAction(action: string, context: Context, element?: HTMLElement): Promise<boolean> {
+  if (action.startsWith('name-color-import-')) {
+    const owner = state;
+    return nameColorImportAction(action, {...context, busy: context.busy || owner.pending,
+      refresh: async () => {
+        const catalog = await context.post<Catalog>(`/api/cases/${encodeURIComponent(context.caseId)}/name-colors`,
+          {query: owner.query, offset: owner.offset, limit: 100});
+        if (owner === state) {owner.data = catalog; owner.drafts.clear();}
+      }});
+  }
   if (!action.startsWith('name-colors-')) return false;
-  if (context.busy || state.pending) return true;
+  if (context.busy || state.pending || nameColorImportPending()) return true;
   if (state.caseId !== context.caseId) resetNameColors(context.caseId);
   if (action === 'name-colors-close') {state.open = false; context.render(); return true;}
   const owner = state;
@@ -82,6 +101,7 @@ export async function nameColorsAction(action: string, context: Context, element
       const color = action.endsWith('-clear') ? null : (drafts.get(key) ?? fallback).trim();
       if (color && !safeColor(color)) throw new Error('Enter #RRGGBB or clear the assignment.');
       const update = roleMode ? {role: roleRow!.role, color} : {name: nameRow!.name, color};
+      invalidateNameColorImport();
       const result = await context.post<{changed: number}>(path, {updates: [update], expected_revision: owner.data.revision});
       owner.message = `Saved ${result.changed} color assignment(s). Regenerate previews or sync Miro to refresh the graph.`;
       drafts.delete(key);

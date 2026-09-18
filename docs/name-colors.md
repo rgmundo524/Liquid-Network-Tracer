@@ -58,6 +58,63 @@ The attribution format includes an optional hop limit:
 Address,Name,confidence,stop_tracing,hop_limit,source,notes
 ```
 
+## Import name-group colors
+
+After importing or saving the address attributions, open **Assign name colors**
+and choose **Import name colors**. Select a UTF-8 CSV or JSON file, or paste its
+contents. This assigns a color to each name group, including all capitalization
+variants, without editing the address attributions themselves.
+
+```csv
+Name,Color
+Perp,#f0abfc
+Example Exchange,#93c5fd
+Client wallet,#bbf7d0
+```
+
+The [CSV template](../examples/name-colors-template.csv) and
+[JSON template](../examples/name-colors-template.json) are examples; replace the
+names with those in your investigation. JSON uses an array of objects with
+`name` and `color` fields. Column/field names and attribution-name matching are
+case-insensitive. Colors must be six-digit hex values including `#`; short hex,
+color names, and CSS expressions are rejected.
+
+1. Choose **Preview import** to review each name's current color, requested color,
+   and proposed action.
+2. Existing assignments are kept by default. Select **Replace existing colors**
+   and preview again to overwrite them. A blank CSV color or JSON `null` clears
+   an existing assignment only with this replacement policy.
+3. Review the preview, check the review checkbox, and apply the import.
+4. Regenerate a preview or choose **Sync to Miro** to update the graph.
+
+Names must already exist in the attribution list or saved color assignments.
+Unknown names are reported as errors so a typo cannot silently create an unused
+group. Import the attribution first if the name is new. Identical duplicate
+rows are combined; different colors for the same case-insensitive name are an
+error. Any invalid row blocks the entire import. There is no partial save.
+
+Only `Name,Color` fields belong in this file. Graph-role colors, selected-seed
+priority, confidence, stop flags, and saved trace evidence remain unchanged.
+Imported name colors also apply to future addresses using the same name.
+
+The CLI uses the same preview and apply flow:
+
+```bash
+liquid-trace name-color-import --case cases/my-case --file colors.csv --dry-run
+
+# Use the approval_sha256 returned by the preview you reviewed.
+liquid-trace name-color-import --case cases/my-case --file colors.csv \
+  --approve-plan REVIEWED_APPROVAL_SHA256
+```
+
+To replace or clear existing assignments, add `--on-conflict replace` to both
+commands. `--format auto|csv|json` selects the parser, defaulting to auto.
+Files are limited to 512 KiB and 5,000 rows. Changing the file, import options,
+or investigation settings invalidates the prior review. Apply rechecks the
+whole batch under the existing case/trace locks and makes one atomic settings
+write with an audit-history entry. Preview does not write, and apply never
+starts a trace, reads credentials, or publishes to Miro.
+
 ## Persistence and existing diagrams
 
 Role overrides are saved as `role_colors` beside `name_colors` in the case's

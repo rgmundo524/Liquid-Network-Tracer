@@ -22,6 +22,7 @@ def name_color_screen(base, button, case):
             with VerticalScroll(classes="form-panel"):
                 yield Label("Assign colors", classes="title")
                 yield Static(NOTICE, markup=False)
+                yield button("Import name colors", id="name-color-import")
                 yield Input(placeholder="Search attribution names", id="name-color-search")
                 with Horizontal(classes="buttons"):
                     yield button("Search / refresh", id="name-color-find")
@@ -76,6 +77,15 @@ def name_color_screen(base, button, case):
             self.query_one("#name-color-next", button).disabled = self.page_offset + 100 >= self.report["total"]
             self.query_one("#name-color-selected", Static).update("Select a name with Enter.")
 
+        def on_screen_resume(self):
+            # Imports change the palette revision; reload before another edit.
+            if self.report is not None:
+                try:
+                    self.load()
+                    self.query_one("#name-color-error", Static).update("")
+                except (TraceError, OSError, ValueError, TypeError) as exc:
+                    self.query_one("#name-color-error", Static).update(str(exc))
+
         def on_data_table_row_selected(self, event: DataTable.RowSelected):
             if event.data_table.id != "name-color-rows" or not self.report:
                 return
@@ -118,6 +128,9 @@ def name_color_screen(base, button, case):
                 action = event.button.id
                 if action == "name-color-back":
                     self.action_back()
+                elif action == "name-color-import":
+                    from .name_color_import_menu import name_color_import_screen
+                    self.app.push_screen(name_color_import_screen(base, button, case))
                 elif action in ("name-color-find", "name-color-prev", "name-color-next"):
                     self.page_offset = (max(0, self.page_offset - 100) if action == "name-color-prev" else
                                    self.page_offset + 100 if action == "name-color-next" else 0)

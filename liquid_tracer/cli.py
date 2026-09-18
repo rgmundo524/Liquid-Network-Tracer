@@ -71,6 +71,14 @@ def parser():
     approval = bulk.add_mutually_exclusive_group()
     approval.add_argument("--dry-run", action="store_true", help="Preview only (the default)")
     approval.add_argument("--approve-plan", help="Apply the exact approval_sha256 from a reviewed preview")
+    colors = commands.add_parser("name-color-import", help="Preview/apply name-group colors from CSV or JSON; offline")
+    colors.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    colors.add_argument("--file", type=Path, required=True, help="UTF-8 CSV with Name,Color columns or JSON array")
+    colors.add_argument("--format", choices=("auto", "csv", "json"), default="auto")
+    colors.add_argument("--on-conflict", choices=("keep", "replace"), default="keep")
+    color_approval = colors.add_mutually_exclusive_group()
+    color_approval.add_argument("--dry-run", action="store_true", help="Preview only (the default)")
+    color_approval.add_argument("--approve-plan", help="Apply the exact approval_sha256 from a reviewed preview")
     activity = commands.add_parser("address-inspect", help="Save a bounded address activity lookup using the investigation's API source")
     activity.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     activity.add_argument("--address", required=True)
@@ -769,6 +777,14 @@ def main(argv=None, *, progress=None):
             return check_credentials(args.service)
         if args.command == "address-import":
             from .address_import import apply_import, preview_import, read_import
+            text = read_import(args.file)
+            options = {"format": args.format, "policy": args.on_conflict}
+            result = (apply_import(args.case, text, approval_sha256=args.approve_plan, **options)
+                      if args.approve_plan else preview_import(args.case, text, **options))
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0 if result.get("valid", True) else 1
+        if args.command == "name-color-import":
+            from .name_color_import import apply_import, preview_import, read_import
             text = read_import(args.file)
             options = {"format": args.format, "policy": args.on_conflict}
             result = (apply_import(args.case, text, approval_sha256=args.approve_plan, **options)
