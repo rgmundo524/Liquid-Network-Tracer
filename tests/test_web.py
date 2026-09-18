@@ -15,7 +15,27 @@ from unittest.mock import patch
 
 from liquid_tracer.cli import verify_export
 from liquid_tracer.common import read_json, save_json
+from liquid_tracer.investigations import create_investigation
 from liquid_tracer.web import LocalServer, worker_command
+
+
+SYNTHETIC_API = Path(__file__).parent / "data" / "synthetic-api.json"
+SYNTHETIC_SEEDS = Path(__file__).parent / "data" / "synthetic-seeds.txt"
+
+
+def synthetic_txid():
+    return next(line.split(":")[0] for line in SYNTHETIC_SEEDS.read_text().splitlines()
+                if line.strip() and not line.startswith("#"))
+
+
+def fixture_lookup_worker(request, result, live=False):
+    """Replace a live lookup's network boundary, keeping the real worker/job flow."""
+    payload = read_json(request)
+    if not live or payload["arguments"][0] != "inspect-txs":
+        raise AssertionError("Expected a live transaction lookup")
+    payload["arguments"].extend(["--fixture", str(SYNTHETIC_API.resolve())])
+    request.write_text(json.dumps(payload), encoding="utf-8")
+    return worker_command(request, result, live=False)
 
 
 class LocalWebTests(unittest.TestCase):
@@ -69,9 +89,13 @@ class LocalWebTests(unittest.TestCase):
         self.fail("Synthetic local action did not finish")
 
     def create(self):
-        txid = self.success("/api/demo")["txids"][0]
-        case = self.success("/api/cases", {"name": "Synthetic local investigation", "source": "demo",
-                            "seeds": [txid + ":0"], "board": "", "settings": {"hops": 1}}, 201)
+        txid = synthetic_txid()
+        # Fixtures are supplied only by this test seam, never by a browser request.
+        # Retain real saved-fixture workflows for tests that share this helper.
+        with patch("liquid_tracer.web.create_investigation", side_effect=lambda *args, **kwargs:
+                   create_investigation(*args, **kwargs, fixture=SYNTHETIC_API)):
+            case = self.success("/api/cases", {"name": "Synthetic local investigation",
+                                "seeds": [txid + ":0"], "board": "", "settings": {"hops": 1}}, 201)
         return txid, case
 
     def test_session_security_origin_csrf_and_size(self):
@@ -92,13 +116,48 @@ class LocalWebTests(unittest.TestCase):
         self.assertFalse(self.server.root.exists())
         self.assertIn(b"Synthetic UI", self.success("/"))
 
-    def test_demo_lookup_trace_continue_csv_and_reopen_share_saved_cases(self):
-        txid = self.success("/api/demo")["txids"][0]
-        lookup_job = self.success("/api/lookup", {"source": "demo", "txids": txid + ", " + txid}, 202)
-        self.assertIsNone(lookup_job["case_id"])
-        self.assertFalse(lookup_job["live"])
-        self.assertEqual(lookup_job["action"], "lookup")
-        lookup = self.wait(lookup_job)
+    def test_new_lookups_and_cases_default_to_live_without_fixture_paths(self):
+        txid = synthetic_txid()
+        with patch.object(self.server, "start_job", return_value={"id": "synthetic"}) as start:
+            for source in ({}, {"source": "live"}):
+                with self.subTest(source=source):
+                    self.success("/api/lookup", {"txids": txid, **source}, 202)
+                    self.assertEqual(start.call_args.args[0], ["inspect-txs", "--txids", txid])
+                    self.assertTrue(start.call_args.kwargs["live"])
+                    info = self.success("/api/cases", {
+                        "name": "Live investigation", "seeds": [txid + ":0"], **source}, 201)
+                    self.assertFalse(info["fixture"])
+                    _, metadata = self.server.case(info["id"])
+                    self.assertIsNone(metadata["fixture"])
+        self.assertIsNone(self.server.active_job)
+
+    def test_demo_route_and_nonlive_creation_are_rejected_without_side_effects(self):
+        self.assertEqual(self.request("/api/demo")[0], 404)
+        txid = synthetic_txid()
+        lookup = {"txids": txid}
+        new_case = {"name": "Rejected source", "seeds": [txid + ":0"]}
+        invalid = [{"source": value} for value in ("demo", "fixture", "", None, False, {})]
+        invalid += [{"fixture": str(SYNTHETIC_API)}, {"arguments": ["--fixture", str(SYNTHETIC_API)]}]
+        with patch.object(self.server, "start_job") as start, \
+                patch("liquid_tracer.web.create_investigation") as create:
+            for extra in invalid:
+                for route, body in (("/api/lookup", lookup), ("/api/cases", new_case)):
+                    with self.subTest(route=route, extra=extra):
+                        self.assertEqual(self.request(route, {**body, **extra})[0], 400)
+            start.assert_not_called()
+            create.assert_not_called()
+        self.assertFalse(self.server.root.exists())
+        self.assertEqual(self.server.jobs, {})
+        self.assertIsNone(self.server.active_job)
+
+    def test_live_lookup_and_saved_fixture_trace_continue_csv_and_reopen(self):
+        txid = synthetic_txid()
+        with patch("liquid_tracer.web.worker_command", side_effect=fixture_lookup_worker):
+            lookup_job = self.success("/api/lookup", {"txids": txid + ", " + txid}, 202)
+            self.assertIsNone(lookup_job["case_id"])
+            self.assertTrue(lookup_job["live"])
+            self.assertEqual(lookup_job["action"], "lookup")
+            lookup = self.wait(lookup_job)
         self.assertEqual(lookup["transactions"][0]["txid"], txid)
         outputs = lookup["transactions"][0]["outputs"]
         self.assertTrue(any(output["selectable"] for output in outputs))
@@ -228,7 +287,7 @@ class LocalWebTests(unittest.TestCase):
         self.assertNotIn(self.server.root / "outside-case", self.server.case_paths())
 
     def test_live_jobs_construct_secret_provider_command_without_browser_credentials(self):
-        txid = self.success("/api/demo")["txids"][0]
+        txid = synthetic_txid()
         with patch.object(self.server, "start_job", return_value={"id": "synthetic", "status": "running"}) as start, \
                 patch.dict(os.environ, {"BLOCKSTREAM_CLIENT_SECRET": "SYNTHETIC-NEVER-EXPOSE"}):
             self.success("/api/lookup", {"source": "live", "txids": txid}, 202)
@@ -281,13 +340,14 @@ class LocalWebTests(unittest.TestCase):
                          {"conflicts_count": 2})
 
     def test_failed_lookup_is_sanitized_and_incomplete_run_is_not_listed(self):
-        job = self.success("/api/lookup", {"source": "demo", "txids": "a" * 64}, 202)
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            status = self.success("/api/jobs/" + job["id"])
-            if status["status"] != "running":
-                break
-            time.sleep(.03)
+        with patch("liquid_tracer.web.worker_command", side_effect=fixture_lookup_worker):
+            job = self.success("/api/lookup", {"txids": "a" * 64}, 202)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                status = self.success("/api/jobs/" + job["id"])
+                if status["status"] != "running":
+                    break
+                time.sleep(.03)
         self.assertEqual(status["status"], "failed")
         self.assertNotIn("result", status)
         self.assertIn("launching terminal", status["message"])

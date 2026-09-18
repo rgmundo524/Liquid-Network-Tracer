@@ -392,7 +392,7 @@ def svg_graph(graph):
         '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/></marker></defs>',
         f'<rect x="{min_x}" y="{min_y}" width="{width}" height="{height}" fill="#fff"/>',
         '<g font-family="Arial, sans-serif">',
-        f'<text x="40" y="{header_top}" font-size="24" font-weight="bold">Liquid UTXO trace' + (' · SYNTHETIC DEMO' if graph["simulated"] else '') + '</text>']
+        f'<text x="40" y="{header_top}" font-size="24" font-weight="bold">Liquid UTXO trace' + (' · SYNTHETIC DATA' if graph["simulated"] else '') + '</text>']
     chunks.extend(f'<text x="40" y="{header_top + 24 + index * 18}" font-size="13">{html.escape(line)}</text>'
                   for index, line in enumerate(legend))
     for edge, (path, (label_x, label_y), _) in routes:
@@ -446,7 +446,7 @@ def html_graph(graph, svg):
 <main><div id="canvas">''' + svg + '''</div><aside><p id="notice"></p><p>Click a node to inspect full identifiers and evidence. Hover an edge for its outpoint and public quantity.</p><a id="link" target="_blank" rel="noopener noreferrer" hidden>Open explorer</a><pre id="details"></pre></aside></main>
 <script type="application/json" id="graph-data">''' + encoded + '''</script><script>
 const graph=JSON.parse(document.getElementById('graph-data').textContent),svg=document.querySelector('svg'),canvas=document.getElementById('canvas');
-document.getElementById('notice').textContent=(graph.simulated?'SYNTHETIC DEMO. ':'')+graph.notice;
+document.getElementById('notice').textContent=(graph.simulated?'SYNTHETIC DATA. ':'')+graph.notice;
 const original=svg.viewBox.baseVal.width;let scale=1;function zoom(f){scale=Math.max(.1,Math.min(4,f));svg.style.width=(original*scale)+'px';svg.style.height='auto'}
 document.getElementById('plus').onclick=()=>zoom(scale*1.25);document.getElementById('minus').onclick=()=>zoom(scale/1.25);document.getElementById('fit').onclick=()=>zoom(canvas.clientWidth/original);
 function select(node){document.querySelectorAll('.selected').forEach(x=>x.classList.remove('selected'));const el=[...document.querySelectorAll('.node')].find(x=>x.dataset.key===node.id);el.classList.add('selected');document.getElementById('details').textContent=JSON.stringify(node.details,null,2);const link=document.getElementById('link');link.hidden=!node.url;if(node.url)link.href=node.url;return el}

@@ -28,7 +28,7 @@ class CliIntegrationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.case = Path(self.temp.name) / "case"
         self.project = Path(__file__).resolve().parents[1]
-        self.base = ["trace", "--case", str(self.case), "--fixture", str(self.project / "examples/demo-api.json")]
+        self.base = ["trace", "--case", str(self.case), "--fixture", str(self.project / "tests/data/synthetic-api.json")]
 
     def invoke(self, arguments):
         output, errors = io.StringIO(), io.StringIO()
@@ -37,7 +37,7 @@ class CliIntegrationTests(unittest.TestCase):
         return status, output.getvalue(), errors.getvalue()
 
     def start(self, *arguments):
-        status, output, errors = self.invoke(self.base + ["--seeds-file", str(self.project / "examples/demo-seeds.txt"), *arguments])
+        status, output, errors = self.invoke(self.base + ["--seeds-file", str(self.project / "tests/data/synthetic-seeds.txt"), *arguments])
         self.assertEqual(status, 0, errors or output)
         return json.loads(output)
 
@@ -146,7 +146,7 @@ class CliIntegrationTests(unittest.TestCase):
             raise TraceError("simulated unavailable")
 
         with patch.dict(os.environ, {"MIRO_ACCESS_TOKEN": "synthetic-test-token"}), patch("liquid_tracer.cli.sync", side_effect=unavailable):
-            status, output, errors = self.invoke(self.base + ["--seeds-file", str(self.project / "examples/demo-seeds.txt"), "--hops", "1", "--miro-board", "DEMO="])
+            status, output, errors = self.invoke(self.base + ["--seeds-file", str(self.project / "tests/data/synthetic-seeds.txt"), "--hops", "1", "--miro-board", "DEMO="])
         self.assertEqual(status, 1, errors)
         saved = json.loads(output)
         self.assertEqual(saved["miro_error"], "simulated unavailable")
@@ -189,7 +189,7 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("checksum mismatch", errors)
 
-    def test_saved_demo_runs_incrementally_sync_to_same_board(self):
+    def test_saved_fixture_runs_incrementally_sync_to_same_board(self):
         first = self.start("--hops", "1")
         remote = FakeMiro()
         adapter = functools.partial(real_sync, token="synthetic-test-token", transport=remote, interval=0)
@@ -232,8 +232,8 @@ class CliIntegrationTests(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 parser().parse_args(["export", "--out", "new-export"])
             with patch("liquid_tracer.cli.sync", side_effect=AssertionError("A board default must not cause automatic publishing")):
-                status, output, errors = self.invoke(["trace", "--fixture", str(self.project / "examples/demo-api.json"),
-                    "--seeds-file", str(self.project / "examples/demo-seeds.txt"), "--hops", "0"])
+                status, output, errors = self.invoke(["trace", "--fixture", str(self.project / "tests/data/synthetic-api.json"),
+                    "--seeds-file", str(self.project / "tests/data/synthetic-seeds.txt"), "--hops", "0"])
             self.assertEqual(status, 0, errors or output)
         for environment in ({}, {"LIQUID_CASE_DIR": "", "LIQUID_MIRO_BOARD": ""}):
             with patch.dict(os.environ, {**NODE_ENV, **environment}, clear=True):

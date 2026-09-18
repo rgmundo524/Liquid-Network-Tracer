@@ -119,7 +119,7 @@ def _preview_html(graph, svg):
     run_id = html.escape(str(graph.get("run_id", "")))
     notice = html.escape(str(graph.get("notice", "")))
     fees = "included" if graph.get("include_fees") else "hidden"
-    simulated = " · Synthetic demonstration data" if graph.get("simulated") else ""
+    simulated = " · Synthetic data" if graph.get("simulated") else ""
     fallback = graph.get("preview", {}).get("renderer") == "direct_svg"
     title = "Direct SVG fallback" if fallback else "Mermaid preview"
     if fallback:

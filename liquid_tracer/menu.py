@@ -318,9 +318,7 @@ def create_app(root=None):
                     yield Label("Investigation name")
                     yield Input(str(self.metadata.get("name", "")), id="case-name")
                 if self.mode == "new":
-                    yield Label("Data source")
-                    yield Select([("Synthetic demo (offline)", "demo"), ("Live Liquid", "live")],
-                                 value="demo", allow_blank=False, id="source")
+                    yield Static("Data source: Live Liquid", markup=False)
                     yield Label("Transaction hashes separated by commas")
                     yield Input(placeholder="64-character hash, another hash, ...", id="lookup-txid")
                     yield Button("Load outputs", id="lookup")
@@ -339,7 +337,7 @@ def create_app(root=None):
                     yield Static("Credential provider: " + (os.environ.get("LIQUID_SECRET_PROVIDER") or "protonpass")
                                  + " / profile: " + (os.environ.get("LIQUID_SECRET_PROFILE") or "development"), markup=False)
                 if self.mode == "run":
-                    source = "Synthetic demo: no Blockstream requests." if self.metadata.get("fixture") else "Live Liquid: running this trace may consume Blockstream credits."
+                    source = "Synthetic data: no Blockstream requests." if self.metadata.get("fixture") else "Live Liquid: running this trace may consume Blockstream credits."
                     yield Static(source, markup=False)
                     if self.metadata.get("latest_run"):
                         yield Static("Adds hops to the saved run's existing ceiling. Use 0 to retry the current frontier.", markup=False)
@@ -440,17 +438,8 @@ def create_app(root=None):
                     if not name:
                         raise TraceError("Enter an investigation name.")
                 if self.mode == "new":
-                    fixture = None
-                    if self.query_one("#source", Select).value == "demo":
-                        fixture = _project() / "examples" / "demo-api.json"
-                        lines = (_project() / "examples" / "demo-seeds.txt").read_text().splitlines()
-                        entered = self.query_one("#seeds", TextArea).text.strip()
-                        seeds = _seed_values(entered or " ".join(line.split("#", 1)[0] for line in lines))
-                        if not fixture.is_file():
-                            raise TraceError("The synthetic demo fixture is unavailable.")
-                    else:
-                        seeds = _seed_values(self.query_one("#seeds", TextArea).text)
-                    case = create_investigation(investigation_root, name, board=board, fixture=fixture,
+                    seeds = _seed_values(self.query_one("#seeds", TextArea).text)
+                    case = create_investigation(investigation_root, name, board=board,
                                                 seeds=seeds, run_defaults=settings)
                     self.dismiss(case)
                 elif self.mode == "global":
@@ -489,7 +478,6 @@ def create_app(root=None):
             except ACTION_ERRORS as error:
                 error_field.update(str(error))
                 return
-            live = self.query_one("#source", Select).value == "live"
             try:
                 # Keep provider prompts on the real terminal. Only the transaction
                 # report passes through this temporary file, never credentials.
@@ -499,15 +487,11 @@ def create_app(root=None):
                     arguments = (["inspect-tx", "--txid", txids[0]] if len(txids) == 1
                                  else ["inspect-txs", "--txids", ",".join(txids)])
                     arguments.extend(["--output", str(report_path)])
-                    if not live:
-                        arguments.extend(["--fixture", str(_project() / "examples" / "demo-api.json")])
-                    with self.app.suspend() if live else contextlib.nullcontext():
-                        options = {} if live else {"capture_output": True, "text": True}
-                        result = subprocess.run(_command(arguments, live=live), cwd=_project(),
-                                                env=_environment(), check=False, **options)
+                    with self.app.suspend():
+                        result = subprocess.run(_command(arguments, live=True), cwd=_project(),
+                                                env=_environment(), check=False)
                     if result.returncode:
-                        raise TraceError("Output lookup failed. Check the terminal for credential or API errors, then retry."
-                                         if live else "Transaction not available in the synthetic demo, or lookup failed.")
+                        raise TraceError("Output lookup failed. Check the terminal for credential or API errors, then retry.")
                     reports = _lookup_reports(read_json(report_path), txids)
                 self.app.push_screen(OutputScreen(reports), self.use_outputs)
             except KeyboardInterrupt:
@@ -1028,7 +1012,7 @@ def create_app(root=None):
         def update_summary(self):
             try:
                 metadata = read_case(self.case)
-                source = "Synthetic demo" if metadata.get("fixture") else "Live Liquid"
+                source = "Synthetic data" if metadata.get("fixture") else "Live Liquid"
                 board = metadata.get("miro_board")
                 settings = validate_settings(metadata.get("run_defaults", {}))
                 self.query_one("#case-summary", Static).update(

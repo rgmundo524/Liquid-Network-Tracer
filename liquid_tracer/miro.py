@@ -33,7 +33,7 @@ from .miro_creation_parents import (normalize_created_shapes, validate_creation_
 def make_plan(graph):
     shapes, connectors = [], []
     incremental = "namespace" in graph
-    title = ("SYNTHETIC DEMO · " if graph["simulated"] else "") + "Liquid UTXO trace"
+    title = ("SYNTHETIC DATA · " if graph["simulated"] else "") + "Liquid UTXO trace"
     if not incremental:
         title += " · " + graph["run_id"]
     shapes.append({"key": "legend", "body": {"data": {"shape": "rectangle", "content":

@@ -12,7 +12,7 @@ from liquid_tracer.miro import _retry_delay, make_plan, publish, resolve, sync
 from liquid_tracer.miro_state import _write_snapshot
 
 
-NAMESPACE = {"case_id": "case-123", "source": "fixture:liquid-demo", "address_mode": "merged"}
+NAMESPACE = {"case_id": "case-123", "source": "fixture:synthetic-test", "address_mode": "merged"}
 
 
 def graph(run="one", extended=False):

@@ -181,7 +181,7 @@ class TraceTests(unittest.TestCase):
             self.assertEqual(state["stats"]["frontier_count"], 1)
 
     def test_address_label_stop_with_provenance(self):
-        labels = [{"kind": "address", "value": "SYNTHETIC-branch-A", "entity": "Demo service",
+        labels = [{"kind": "address", "value": "SYNTHETIC-branch-A", "entity": "Test service",
             "source": "case-record:synthetic", "confidence": "candidate", "observed_at": "2026-09-09", "stop": True}]
         state = self.run_trace(labels=labels)
         self.assertEqual(state["outputs"][B + ":0"]["status"], "suspected_service_stop")

@@ -27,7 +27,7 @@ class ConnectionWebTests(unittest.TestCase):
         _, info = self.create()
         case, _ = self.server.case(info["id"])
         state, _ = saved_case(case)
-        # This synthetic graph differs from the demo used to create the case.
+        # This synthetic graph differs from the test fixture used to create the case.
         # Attach a matching statistics fixture now that previews fetch counts.
         from liquid_tracer.address_counts import addresses
         data = {"/address/" + address: {"address": address,

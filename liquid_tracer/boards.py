@@ -18,7 +18,7 @@ UNCERTAIN = ("Miro board creation outcome is uncertain. Inspect your Miro boards
 
 def default_board_name(metadata):
     name = metadata.get("name") or "Liquid investigation"
-    prefix = "SYNTHETIC DEMO · " if metadata.get("fixture") else ""
+    prefix = "SYNTHETIC DATA · " if metadata.get("fixture") else ""
     return (prefix + str(name))[:60]
 
 
