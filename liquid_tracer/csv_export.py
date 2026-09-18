@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from .common import HEX64, TraceError, digest, save_json
-from .transaction_csv import TRANSACTION_CSV_FIELDS, VALUE_NOTICE, transaction_csv_rows, write_transaction_csv
+from .transaction_csv import TRANSACTION_CSV_FIELDS, VALUE_NOTICE, VALUE_UNITS, transaction_csv_rows, write_transaction_csv
 
 _DETAIL_FILES = ("inputs.csv", "outputs.csv", "spends.csv", "events.csv", "frontier.csv")
 
@@ -69,11 +69,13 @@ def export_csv(graph, archive, directory):
         raise TraceError("CSV export directory already exists; choose a new directory") from error
     row_count = write_transaction_csv(directory / "transactions.csv", graph, state)
     save_json(directory / "export.json", {
-        "schema_version": 2,
+        "schema_version": 3,
         "format": "transaction_io",
         "columns": list(TRANSACTION_CSV_FIELDS),
         "row_count": row_count,
-        "value_units": "base_units",
+        "value_units": "asset_dependent",
+        "value_units_by_asset": VALUE_UNITS,
+        "bitcoin_decimal_places": 8,
         "time_zone": "UTC",
         "io_index_base": 0,
         "run_id": graph["run_id"],

@@ -188,6 +188,9 @@ class ConnectionPreviewTests(unittest.TestCase):
         with self.assertRaises(TraceError): _namespace(plan)
         self.assertEqual(before, {p.name: p.read_bytes() for p in self.archive.iterdir()})
         self.assertEqual(len(graph["edges"]), 4)
+        self.assertEqual(graph["connections"]["value_units"], "asset_dependent")
+        self.assertEqual(graph["connections"]["value_units_by_asset"]["L-BTC"], "L-BTC")
+        self.assertEqual(graph["connections"]["bitcoin_decimal_places"], 8)
         self.assertIn("does not fetch", result["notice"])
         directory = Path(result["directory"])
         self.assertIn("flowchart LR", (directory/"graph.mmd").read_text())
@@ -215,6 +218,23 @@ class ConnectionPreviewTests(unittest.TestCase):
         update_case(self.case, {"miro_board": "full-board"})
         with patch("liquid_tracer.miro.publish", side_effect=AssertionError("no writes")):
             with self.assertRaisesRegex(TraceError, "separate"): publish_connections(self.case, result["preview_id"], "full-board")
+
+    def test_older_display_snapshot_stays_readable_but_requires_regeneration_to_publish(self):
+        from liquid_tracer.connections import FILES, connection_plan
+        from liquid_tracer.export import PRESENTATION_VERSION
+        result = preview_connections(self.case, max_hops=2)
+        directory = Path(result["directory"])
+        graph = read_json(directory / "graph.json")
+        graph["presentation_version"] = PRESENTATION_VERSION - 1
+        save_json(directory / "graph.json", graph)
+        save_json(directory / "miro-plan.json", connection_plan(graph))
+        (directory / "SHA256SUMS").write_text("".join(
+            digest((directory / name).read_bytes()) + "  " + name + "\n"
+            for name in sorted(FILES - {"SHA256SUMS"})))
+        reviewed_connections(self.case, result["preview_id"])
+        with patch("liquid_tracer.miro.publish", side_effect=AssertionError("no writes")):
+            with self.assertRaisesRegex(TraceError, "regenerate the preview before publishing"):
+                publish_connections(self.case, result["preview_id"], "snapshot-board")
 
     def test_wrong_preview_paths_and_case_rejected(self):
         for identity in (None, "../../private", "a"*16+"-elk-12345678"):

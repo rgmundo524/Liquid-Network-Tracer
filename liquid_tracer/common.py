@@ -74,14 +74,37 @@ def public_fields(output):
         "valuecommitment", "asset", "assetcommitment", "pegout")}
 
 
+def is_lbtc(asset):
+    """Recognize only the explicit L-BTC asset ID, never an inferred identity."""
+    return isinstance(asset, str) and asset.lower() == LBTC
+
+
+def bitcoin_units(value):
+    """Format satoshis as exact whole BTC/L-BTC units without floating point."""
+    if type(value) is not int or value < 0:
+        raise TraceError("Bitcoin amounts require nonnegative integer base units")
+    whole, fractional = divmod(value, 100_000_000)
+    return f"{whole}.{fractional:08d}"
+
+
+def display_amount(output):
+    """Display known L-BTC in whole units; other assets keep their raw units."""
+    value = output.get("value")
+    if value is None:
+        return "??"
+    if is_lbtc(output.get("asset")):
+        return bitcoin_units(value)
+    return str(value) + " base units"
+
+
 def quantity(output):
     value = output.get("value")
     if value is None:
         amount = "amount confidential" if output.get("valuecommitment") else "amount unavailable"
     else:
-        amount = str(value) + " base units"
+        amount = display_amount(output)
     asset = output.get("asset")
-    name = "L-BTC" if asset == LBTC else ((asset[:10] + "…") if asset else "asset unknown")
+    name = "L-BTC" if is_lbtc(asset) else ((asset[:10] + "…") if asset else "asset unknown")
     return amount + "; " + name
 
 

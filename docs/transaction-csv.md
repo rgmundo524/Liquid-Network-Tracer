@@ -16,9 +16,9 @@ The separate `export.json` and `SHA256SUMS` describe provenance and completion.
 | Address Label | Applicable saved/imported attribution names, with the existing `Suspected ` prefix when appropriate. |
 | Address Flags | Applicable facts and controls: selected seed, context, STOP TRACING, unspent at observation, confidential amount/asset, peg-in, peg-out request, fee, unspendable or coinbase. Not a risk score or ownership finding. |
 | Address Hash | Full input prevout/output address. For a peg-out, the explicit Bitcoin destination. Blank where there is no recorded address. |
-| Asset Value | Explicit integer amount in **base units**, exactly as recorded. For L-BTC these are satoshis. Confidential or missing amounts are blank, never zero. |
+| Asset Value | Recognized L-BTC amounts in **L-BTC**, or Bitcoin peg-in amounts in **BTC**, with exactly eight decimal places. Other or unidentified assets retain their explicit integer **base units**. Confidential or missing amounts are blank, never zero. |
 | Asset | `L-BTC` for its recognized explicit asset ID; `BTC` for a Bitcoin peg-in input; otherwise the full explicit Liquid asset ID. Blank when confidential or unavailable. No asset registry lookup or guessed ticker. |
-| PegOut Value | Explicit amount of the peg-out request output, in the same base units. Blank for non-peg-outs or unavailable amounts. This is not independent confirmation of a Bitcoin payout. |
+| PegOut Value | Explicit amount of the peg-out request output, using the same asset-dependent units as Asset Value. Blank for non-peg-outs or unavailable amounts. This is not independent confirmation of a Bitcoin payout. |
 | Direction | `IN` for transaction inputs, `OUT` for transaction outputs. Amounts remain nonnegative; direction is separate. |
 | Number of I/O | **Zero-based index**, not a count. `IN` uses the input's `vin` position in this transaction; `OUT` uses its `vout` position. |
 
@@ -27,12 +27,19 @@ The separate `export.json` and `SHA256SUMS` describe provenance and completion.
 `Address Label`; the underlying saved/imported assessments are unchanged.
 
 `PegOut Value` follows `Asset` and repeats a subset of `Asset Value`; do not add
-the two value columns together. Values remain in exact base units, not decimal
-token amounts. Do not sum amounts across different assets or treat a blank
+the two value columns together. L-BTC and BTC values convert exactly from
+100,000,000 base units per coin, using integer arithmetic: `1` becomes
+`0.00000001`, `1000000` becomes `0.01000000`, and `100000000` becomes `1.00000000`.
+Explicit zero is `0.00000000`; unknown values stay blank. Other or unidentified
+assets remain in integer base units because their decimal precision is unknown.
+Do not sum amounts across different assets or treat a blank
 asset as L-BTC. Asset identity is independent of whether the amount is public.
 A peg-out row identifies its Liquid request-output asset, not a guessed Bitcoin
-payout asset. Historical exports and connection snapshots keep their original
-headers; create a fresh export or connection preview to use the new columns.
+payout asset. New CSV bundles use metadata schema version 3, with
+`value_units: "asset_dependent"`, `value_units_by_asset`, and
+`bitcoin_decimal_places: 8` in `export.json`. Historical exports and connection
+snapshots keep their original headers and amount units; create a fresh export
+or connection preview to use L-BTC/BTC units.
 
 ```csv
 Block,Time,Transaction Label,Transaction Hash,Address Label,Address Flags,Address Hash,Asset Value,Asset,PegOut Value,Direction,Number of I/O
@@ -48,6 +55,8 @@ Rows sort by UTC transaction time, block height, full transaction hash, IN befor
 OUT, and numeric index. Unknown timestamps sort last. The output contains full
 hashes, normal CSV quoting and Unicode, and spreadsheet-formula protection.
 Import hash/address columns as text in spreadsheet applications to preserve IDs.
+For lossless handling of unusually large amounts, import amount columns as text
+too; a spreadsheet's numeric precision can be lower than the exact CSV text.
 The file never parses abbreviated captions or uses visual styling as evidence.
 
 ## Full graph versus starter connections
@@ -61,11 +70,13 @@ export selection. No API calls, ELK recalculation or retracing are needed.
 For a connection-only graph, regenerate **Starter connections** and select its
 **Transaction CSV** download. Only its connecting arrows are exported. No-match
 results have the header and zero data rows. Existing connection snapshots remain
-readable/publishable; regenerate a preview to obtain its new transaction CSV.
+readable. Regenerate a preview to obtain its new transaction CSV and update its
+amount display before publishing to Miro.
 
-New trace archives also include `transactions.csv`. Internal legacy graph and
-raw evidence tables stay in those archives for reproducibility and compatibility;
-they are no longer copied into the user-facing CSV export. Historical run
+New trace archives also include `transactions.csv`. Internal legacy graph tables
+and raw evidence tables stay in those archives for reproducibility and
+compatibility. Raw evidence amounts always remain integer base units. These
+tables are no longer copied into the user-facing CSV export. Historical run
 archives and prior exports are never rewritten or deleted by this change.
 
 ```sh

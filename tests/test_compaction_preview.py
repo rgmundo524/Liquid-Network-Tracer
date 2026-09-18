@@ -13,7 +13,7 @@ from unittest.mock import patch
 from liquid_tracer.cli import (latest_compaction_preview, main, saved_graph, sync_run,
                                verified_compaction_preview, verify_export)
 from liquid_tracer.common import TraceError, digest, read_json, save_json
-from liquid_tracer.compaction_preview import export_compaction, service_fingerprint
+from liquid_tracer.compaction_preview import compaction_preview_metadata, export_compaction, service_fingerprint
 from liquid_tracer.investigations import create_investigation, read_case, update_case
 from liquid_tracer.services import set_service
 from tests.fixtures import A, fixture
@@ -48,8 +48,10 @@ class CompactionPreviewTests(unittest.TestCase):
         self.archive = self.case / "runs" / self.run
         self.snapshot = {p.name: p.read_bytes() for p in self.archive.iterdir() if p.is_file()}
 
-    def preview(self, suffix="12345678"):
+    def preview(self, suffix="12345678", presentation_version=None):
         _, _, graph = saved_graph(self.case, self.run)
+        if presentation_version is not None:
+            graph["presentation_version"] = presentation_version
         # These tests exercise storage/identity, not ELK geometry. Real ELK and
         # compaction are exercised by engine and HTTP workflow tests.
         graph["layout"]["algorithm"] = "elk_layered_v1"
@@ -90,6 +92,18 @@ class CompactionPreviewTests(unittest.TestCase):
         self.assertTrue(sync.call_args.kwargs["reorganize"])
         self.assertEqual(result["plan_sha256"], expected["sha256"])
         self.assertEqual(result["compact_preview"], identity)
+
+    def test_old_units_preview_remains_readable_but_requires_regeneration_for_sync(self):
+        from liquid_tracer.export import PRESENTATION_VERSION
+
+        identity, directory = self.preview(presentation_version=PRESENTATION_VERSION - 1)
+        self.assertEqual(compaction_preview_metadata(self.case, self.run, identity)["preview_id"], identity)
+        self.assertTrue((directory / "graph.html").is_file())
+        with patch("liquid_tracer.cli.sync") as sync:
+            with self.assertRaisesRegex(TraceError, "older amount presentation"):
+                sync_run(self.case, self.run, dry_run=True, reorganize=True, compact_preview=identity)
+            sync.assert_not_called()
+        self.assertEqual(self.snapshot, {p.name: p.read_bytes() for p in self.archive.iterdir() if p.is_file()})
 
     def test_apply_requires_reorganization_and_rejects_presentation_overrides(self):
         identity, _ = self.preview()

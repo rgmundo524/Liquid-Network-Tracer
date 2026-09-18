@@ -376,10 +376,15 @@ class LocalServer(ThreadingHTTPServer):
                         continue
                     product = self.artifact_links(case, [folder, directory.name], selected_names)
                     product["include_fees"] = fees
+                    if kind == "csv":
+                        product["value_units"] = ("asset_dependent" if info.get("value_units") == "asset_dependent"
+                                                  else "base_units")
                     if kind == "connections":
                         report = info["connections"]
                         product.update(preview_id=directory.name, max_hops=report["max_hops"],
-                                       connection_count=report["connection_count"], connection_status=report["status"])
+                                       connection_count=report["connection_count"], connection_status=report["status"],
+                                       value_units="asset_dependent" if report.get("value_units") == "asset_dependent"
+                                       else "base_units")
                     if kind in ("elk", "compact"):
                         style = options.get("connector_style")
                         layout = info.get("layout")
@@ -622,13 +627,19 @@ class LocalServer(ThreadingHTTPServer):
             relative = directory.relative_to(case)
             names = {"mermaid": PREVIEW_NAMES, "csv": EXPORT_NAMES, "layout": LAYOUT_NAMES,
                      "compact": COMPACTION_NAMES, "connections": CONNECTION_NAMES}[action]
+            if action == "csv":
+                info = read_json(self.artifact(case, [*relative.parts, "export.json"]))
+                value["value_units"] = ("asset_dependent" if info.get("value_units") == "asset_dependent"
+                                         else "base_units")
             if action == "connections":
                 names = preview_files(directory)
                 from .connections import reviewed_connections
                 graph, _ = reviewed_connections(case, directory.name)
                 report = graph["connections"]
                 value.update(preview_id=directory.name, max_hops=report["max_hops"],
-                             connection_count=report["connection_count"], connection_status=report["status"])
+                             connection_count=report["connection_count"], connection_status=report["status"],
+                             value_units="asset_dependent" if report.get("value_units") == "asset_dependent"
+                             else "base_units")
             if action == "compact":
                 from .cli import compaction_preview_metadata
 

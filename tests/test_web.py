@@ -124,6 +124,7 @@ class LocalWebTests(unittest.TestCase):
         self.assertGreaterEqual(detail["latest"]["transaction_count"], 2)
         csv = self.wait(self.success(route + "/actions", {"action": "csv", "run_id": initial["run_id"]}, 202))
         self.assertEqual(csv["run_id"], initial["run_id"])
+        self.assertEqual(csv["value_units"], "asset_dependent")
         self.assertEqual({item["name"] for item in csv["downloads"]}, {"transactions.csv", "export.json", "SHA256SUMS"})
         self.assertNotIn("directory", csv)
         for file in csv["downloads"]:
@@ -139,10 +140,32 @@ class LocalWebTests(unittest.TestCase):
         self.assertIsNone(reopened.active_job)
         saved = reopened.case_summary(path, read_json(path / "case.json"), detail=True)["artifacts"]
         self.assertEqual(saved[initial["run_id"]]["csv"]["downloads"], csv["downloads"])
+        self.assertEqual(saved[initial["run_id"]]["csv"]["value_units"], "asset_dependent")
         self.assertFalse(saved[initial["run_id"]]["csv"]["include_fees"])
         self.assertNotIn(second["run_id"], saved)
         self.assertNotIn(str(path), json.dumps(saved))
         self.assertEqual(read_json(path / "case.json")["run_defaults"]["hops"], 1)
+
+    def test_historical_csv_units_are_taken_from_saved_metadata(self):
+        _, case = self.create()
+        path, metadata = self.server.case(case["id"])
+        run_id = "a" * 16
+        directory = path / "exports" / (run_id + "-csv-" + "b" * 8)
+        directory.mkdir(parents=True)
+        (directory / "transactions.csv").write_text("Asset Value,Asset\n1000000,L-BTC\n")
+        (directory / "SHA256SUMS").write_text("SYNTHETIC COMPLETION MARKER")
+        for units in (None, "base_units", "asset_dependent"):
+            with self.subTest(units=units):
+                info = {"schema_version": 2, "run_id": run_id, "case_id": metadata["case_id"]}
+                if units is not None:
+                    info["value_units"] = units
+                save_json(directory / "export.json", info)
+                expected = units or "base_units"
+                saved = self.server.saved_artifacts(path, metadata, {run_id})
+                self.assertEqual(saved[run_id]["csv"]["value_units"], expected)
+                result = self.server.public_result({"directory": str(directory), "run_id": run_id,
+                                                   "value_units": "ignored_worker_value"}, "csv", path, [])
+                self.assertEqual(result["value_units"], expected)
 
     def test_saved_downloads_skip_incomplete_wrong_case_and_linked_products(self):
         _, case = self.create()

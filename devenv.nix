@@ -193,6 +193,7 @@
     "$LIQUID_MERMAID_BIN" --version
     liquid-web-build
     ${pkgs.nodejs_24}/bin/npm --prefix "$LIQUID_TRACER_ROOT/web" run check
+    ${pkgs.nodejs_24}/bin/npm --prefix "$LIQUID_TRACER_ROOT/web" test
     liquid-test
   '';
 

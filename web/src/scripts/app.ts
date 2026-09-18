@@ -1,5 +1,6 @@
 import {nameColorsPanel, nameColorsInput, nameColorsAction, resetNameColors} from "./name-colors";
 import { addressImportPanel, addressImportInput, addressImportFile, addressImportAction, resetAddressImport } from "./address-import";
+import { csvAmountNotice, isLiquidBitcoin, outputValue } from "./amounts";
 export {};
 
 type ConnectorStyle = "straight" | "curved" | "elbowed";
@@ -38,6 +39,7 @@ type Run = {
 };
 type Download = { name: string; url: string };
 type Artifact = RenderingMetadata & {
+  value_units?: string;
   max_hops?: number; connection_count?: number; connection_status?: string;
   downloads: Download[];
   preview_url?: string;
@@ -85,6 +87,7 @@ type Output = {
 type Report = { txid: string; outputs: Output[] };
 type CountReport = { known: number; total: number; remaining: number; failed: number; stop_reason?: string | null };
 type Result = RenderingMetadata & {
+  value_units?: string;
   address_counts?: CountReport;
   max_hops?: number; connection_count?: number; connection_status?: string;
   connector_style?: ConnectorStyle;
@@ -216,16 +219,8 @@ const human = (value: unknown): string =>
   String(value ?? "—").replaceAll("_", " ");
 const isBusy = (): boolean => !!state.job || submitting;
 const disabled = (condition: boolean): string => (condition ? " disabled" : "");
-const outputValue = (output: Output): string =>
-  typeof output.value_text === "string"
-    ? output.value_text
-    : typeof output.value === "number" && Number.isSafeInteger(output.value)
-      ? String(output.value)
-      : "??";
-const liquidBitcoinAsset =
-  "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d";
 const outputAsset = (asset?: string): string =>
-  asset === liquidBitcoinAsset ? "L-BTC" : asset ? short(asset, 10) : "??";
+  isLiquidBitcoin(asset) ? "L-BTC" : asset ? short(asset, 10) : "??";
 const formatDate = (value?: string): string => {
   if (!value) return "Saved locally";
   const parsed = new Date(value);
@@ -453,7 +448,7 @@ function dashboard(): string {
 
 function newCase(): string {
   const draft = state.draft;
-  return `<div class="page-heading"><div><div class="eyebrow">Build a starting point</div><h1 id="page-title" tabindex="-1">New investigation</h1><p>Choose the transactions and exact outputs you want to follow.</p></div>${button("Back to investigations", "dashboard", "", "ghost")}</div><form id="new-case-form"><div class="form-grid"><div class="form-stack"><section class="panel"><div class="panel-head"><h2><span class="section-number">1</span> Investigation details</h2></div><div class="panel-body"><label class="field"><span>Investigation name</span><input name="name" maxlength="120" placeholder="e.g. Service withdrawal review" value="${esc(draft.name)}" required autocomplete="off"/></label><span class="field-label">Data source</span><div class="source-options"><label class="source-option"><input type="radio" name="source" value="demo"${disabled(isBusy())}${draft.source === "demo" ? " checked" : ""}/><span><strong>Synthetic demo</strong><small>Local fixture · No credentials</small></span></label><label class="source-option"><input type="radio" name="source" value="live"${disabled(isBusy())}${draft.source === "live" ? " checked" : ""}/><span><strong>Live Liquid</strong><small>Blockstream API · Proton Pass</small></span></label></div><label class="field"><span>Miro board URL or ID <span class="muted">(optional)</span></span><input name="board" placeholder="You can link or create a board later" value="${esc(draft.board)}" autocomplete="off"/></label></div></section><section class="panel"><div class="panel-head"><div><h2><span class="section-number">2</span> Starting outputs</h2><p>Multiple transactions can share one investigation.</p></div></div><div class="panel-body"><label class="field"><span>Transaction hashes</span><textarea name="txids" class="mono" rows="3" spellcheck="false" placeholder="Paste transaction hashes separated by commas">${esc(draft.txids)}</textarea><small>Paste up to 100 transaction hashes, separated by commas, spaces, or newlines.</small></label><div class="heading-actions">${button("Load outputs", "lookup", "search", "", isBusy())}${draft.source === "demo" ? button("Use demo transaction", "demo-tx", "", "ghost small", isBusy()) : ""}</div>${draft.source === "live" ? '<p class="small muted" style="margin-top:12px">This lookup uses your Blockstream credits. Watch the terminal for Proton Pass prompts.</p>' : ""}<div id="lookup-outputs">${draft.reports.length ? '<p class="small muted" style="margin-top:17px">Amounts are base units; ?? means unavailable.</p>' : ""}${draft.reports
+  return `<div class="page-heading"><div><div class="eyebrow">Build a starting point</div><h1 id="page-title" tabindex="-1">New investigation</h1><p>Choose the transactions and exact outputs you want to follow.</p></div>${button("Back to investigations", "dashboard", "", "ghost")}</div><form id="new-case-form"><div class="form-grid"><div class="form-stack"><section class="panel"><div class="panel-head"><h2><span class="section-number">1</span> Investigation details</h2></div><div class="panel-body"><label class="field"><span>Investigation name</span><input name="name" maxlength="120" placeholder="e.g. Service withdrawal review" value="${esc(draft.name)}" required autocomplete="off"/></label><span class="field-label">Data source</span><div class="source-options"><label class="source-option"><input type="radio" name="source" value="demo"${disabled(isBusy())}${draft.source === "demo" ? " checked" : ""}/><span><strong>Synthetic demo</strong><small>Local fixture · No credentials</small></span></label><label class="source-option"><input type="radio" name="source" value="live"${disabled(isBusy())}${draft.source === "live" ? " checked" : ""}/><span><strong>Live Liquid</strong><small>Blockstream API · Proton Pass</small></span></label></div><label class="field"><span>Miro board URL or ID <span class="muted">(optional)</span></span><input name="board" placeholder="You can link or create a board later" value="${esc(draft.board)}" autocomplete="off"/></label></div></section><section class="panel"><div class="panel-head"><div><h2><span class="section-number">2</span> Starting outputs</h2><p>Multiple transactions can share one investigation.</p></div></div><div class="panel-body"><label class="field"><span>Transaction hashes</span><textarea name="txids" class="mono" rows="3" spellcheck="false" placeholder="Paste transaction hashes separated by commas">${esc(draft.txids)}</textarea><small>Paste up to 100 transaction hashes, separated by commas, spaces, or newlines.</small></label><div class="heading-actions">${button("Load outputs", "lookup", "search", "", isBusy())}${draft.source === "demo" ? button("Use demo transaction", "demo-tx", "", "ghost small", isBusy()) : ""}</div>${draft.source === "live" ? '<p class="small muted" style="margin-top:12px">This lookup uses your Blockstream credits. Watch the terminal for Proton Pass prompts.</p>' : ""}<div id="lookup-outputs">${draft.reports.length ? '<p class="small muted" style="margin-top:17px">L-BTC amounts use 8 decimal places; other or unidentified assets use base units. ?? means unavailable.</p>' : ""}${draft.reports
     .map(
       (report, index) =>
         `<section class="output-group"><header><span>Transaction ${index + 1}</span><span class="mono" title="${esc(report.txid)}">${esc(short(report.txid, 15))}</span></header>${report.outputs
@@ -522,6 +517,7 @@ function connectionsGraph(artifact: Artifact | undefined, saved: boolean): strin
   ${button("Plot starter connections", "connections", "graph", "", !saved || isBusy())}
   ${artifact ? `<p>${count === 0 ? "No connection found in the saved searched data. Nothing is plotted." : `${count} ordered starter pair(s) connected within ${artifact.max_hops} hops.`}</p>` : ""}
   ${downloadLink(svg, "SVG", "small")}${downloadLink(source, "Mermaid source", "small")}${downloadLink(evidence, "Connection report", "small")}${downloadLink(transactions, "Transaction CSV", "small")}
+  ${transactions ? `<p class="small muted">CSV amounts: ${esc(csvAmountNotice(artifact?.value_units, "plot starter connections again"))} · Unknown CSV values stay blank.</p>` : ""}
   ${preview ? `<a class="btn small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">Open full view</a>` : ""}
   ${artifact?.preview_id && count ? `<details><summary>Publish this reviewed snapshot to Miro</summary><p>Use a separate board. The full trace board is protected. One immutable snapshot per board; repeating this publication reuses acknowledged items.</p>
   <label class="field"><span>Separate Miro board URL or ID</span><input id="connection-board" maxlength="512"/></label>
@@ -593,7 +589,7 @@ function csvDownloads(artifact: Artifact | undefined, saved: boolean, includeFee
   const tables = downloads.filter((item) => item.name === "transactions.csv");
   const provenance = downloads.filter((item) => !item.name.endsWith(".csv"));
   const mismatch = artifact && !matches;
-  return `<section class="panel"><div class="panel-head"><div><h2>CSV downloads</h2><p>${tables.length ? "One row per displayed transaction input or output." : "Export transaction I/O, not graph objects."}</p></div>${tables.length ? '<span class="badge">Saved locally</span>' : ""}</div>${tables.length ? `<div class="downloads">${tables.map((item) => downloadLink(item, `Download ${item.name}`, "download-link")).join("")}</div><div class="export-footer"><span class="small muted">${includeFees ? "Fee flows included" : "Fee flows hidden"} · Indexes start at 0 · Amounts are exact base units · Unknown values stay blank.</span>${provenance.length ? `<details class="provenance-downloads"><summary>Export provenance</summary><div class="artifact-actions">${provenance.map((item) => downloadLink(item, item.name, "ghost")).join("")}</div></details>` : ""}</div>` : `<div class="panel-body"><p class="artifact-note">${mismatch ? "The saved export uses a different fee setting. Create a new export to match the current settings." : "Create transactions.csv for this full-trace snapshot. Use the Starter connections panel for its filtered transaction CSV."}</p>${button("Create CSV export", "csv", "table", "", !saved || isBusy())}</div>`}</section>`;
+  return `<section class="panel"><div class="panel-head"><div><h2>CSV downloads</h2><p>${tables.length ? "One row per displayed transaction input or output." : "Export transaction I/O, not graph objects."}</p></div>${tables.length ? '<span class="badge">Saved locally</span>' : ""}</div>${tables.length ? `<div class="downloads">${tables.map((item) => downloadLink(item, `Download ${item.name}`, "download-link")).join("")}</div><div class="export-footer"><span class="small muted">${includeFees ? "Fee flows included" : "Fee flows hidden"} · Indexes start at 0 · ${esc(csvAmountNotice(artifact?.value_units))} · Unknown values stay blank.</span>${artifact?.value_units !== "asset_dependent" ? button("Create export in L-BTC units", "csv", "table", "small", !saved || isBusy()) : ""}${provenance.length ? `<details class="provenance-downloads"><summary>Export provenance</summary><div class="artifact-actions">${provenance.map((item) => downloadLink(item, item.name, "ghost")).join("")}</div></details>` : ""}</div>` : `<div class="panel-body"><p class="artifact-note">${mismatch ? "The saved export uses a different fee setting. Create a new export to match the current settings." : "Create transactions.csv for this full-trace snapshot. Use the Starter connections panel for its filtered transaction CSV."}</p>${button("Create CSV export", "csv", "table", "", !saved || isBusy())}</div>`}</section>`;
 }
 
 function workspace(): string {
@@ -1006,6 +1002,7 @@ async function pollJob(): Promise<void> {
             ...state.artifacts.get(key),
             [active.action === "layout" ? "elk" : active.action]: {
               downloads: result.downloads || [],
+              value_units: result.value_units,
               preview_url: safeLocalUrl(result.preview_url) || undefined,
               include_fees: result.include_fees ?? detail.run_defaults.include_fees,
               connector_style: result.connector_style,

@@ -70,7 +70,7 @@ class ReuseTests(unittest.TestCase):
         before = copy.deepcopy(shuffled)
         self.assertEqual(self.reuse(shuffled), self.saved)
         self.assertEqual(shuffled, before)
-        for change in ('run', 'namespace', 'color', 'label', 'edge', 'view', 'width', 'stop'):
+        for change in ('run', 'namespace', 'color', 'label', 'edge', 'view', 'width', 'stop', 'presentation'):
             graph = copy.deepcopy(self.original)
             if change == 'run': graph['run_id'] = '0' * 16
             elif change == 'namespace': graph['namespace']['case_id'] = '0' * 32
@@ -80,6 +80,7 @@ class ReuseTests(unittest.TestCase):
             elif change == 'view': graph['graph_options']['view'] = 'starter_connections'
             elif change == 'width': graph['nodes'][0]['width'] += 1
             elif change == 'stop': graph['service_controls']['revision'] += 1
+            elif change == 'presentation': graph['presentation_version'] -= 1
             with self.subTest(change=change): self.assertIsNone(self.reuse(graph))
         self.assertIsNone(self.reuse(style='curved'))
 

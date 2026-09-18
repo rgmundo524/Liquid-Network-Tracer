@@ -191,7 +191,7 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
     from .layout_preview import export_layout
     from .mermaid import mermaid_source
     from .miro import make_plan, validate_plan
-    from .transaction_csv import write_transaction_csv
+    from .transaction_csv import VALUE_UNITS, write_transaction_csv
 
     validate_hops(max_hops)
     case = Path(case)
@@ -212,6 +212,8 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
     if graph["nodes"]:
         graph = optimize_graph(graph, connector_style=connector_appearance(metadata), progress=progress)
     report = graph["connections"]
+    report.update(value_units="asset_dependent", value_units_by_asset=VALUE_UNITS,
+                  bitcoin_decimal_places=8)
     report["service_sha256"] = digest(canonical({k: v for k, v in settings.items() if k != "history"}))
     report["archive_sha256"] = digest((archive / "SHA256SUMS").read_bytes())
     destination = case / "previews" / (run_id + "-connections-" + uuid.uuid4().hex[:8])
@@ -308,9 +310,12 @@ def publish_connections(case, preview_id, board, *, max_items=750, **kwargs):
 def _publish_connections(case, preview_id, board, *, max_items=750, **kwargs):
     """Publish a reviewed immutable snapshot, never replace the full trace board."""
     from .cli import board_id
+    from .export import PRESENTATION_VERSION
     from .investigations import read_case
     from .miro import publish
     graph, plan = reviewed_connections(case, preview_id)
+    if graph.get("presentation_version", 1) != PRESENTATION_VERSION:
+        raise TraceError("The connection preview uses an older display format; regenerate the preview before publishing")
     if not graph["nodes"]:
         return {"status": "no_connection_found", "items": 0, "run_id": graph["run_id"]}
     target = board_id(board)

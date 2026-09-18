@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from liquid_tracer.common import TraceError, read_json, save_json
+from liquid_tracer.common import LBTC, TraceError, read_json, save_json
 from liquid_tracer.investigations import (DEFAULTS, create_investigation, list_investigations,
                                          load_settings, read_case, save_settings, update_case)
 from liquid_tracer.menu import _OfflineCalculation, _command, _lookup_reports, _seed_values, create_app, run_menu
@@ -260,6 +260,34 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(commands), 2)
         for command in commands:
             self.assertFalse(Path(command[command.index("--output") + 1]).exists())
+
+    async def test_output_picker_formats_only_identified_lbtc_without_rounding(self):
+        from textual.widgets import DataTable, Input
+        txid = "c" * 64
+        values = [(1, LBTC), (0, LBTC.upper()), (2 ** 53 + 1, LBTC),
+                  (123, "ab" * 32), (123, None), (None, LBTC)]
+        report = {"txid": txid, "outputs": [
+            {"outpoint": f"{txid}:{index}", "vout": index, "selectable": True,
+             "value": value, "asset": asset}
+            for index, (value, asset) in enumerate(values)
+        ]}
+
+        def local_report(command, **kwargs):
+            Path(command[command.index("--output") + 1]).write_text(json.dumps(report))
+            return subprocess.CompletedProcess(command, 0)
+
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run", side_effect=local_report):
+            async with app.run_test(size=(110, 55)) as pilot:
+                await self.click(app, pilot, "#new")
+                app.screen.query_one("#lookup-txid", Input).value = txid
+                await self.click(app, pilot, "#lookup")
+                table = app.screen.query_one("#outputs", DataTable)
+                self.assertEqual([table.get_row_at(index)[4] for index in range(len(values))],
+                                 ["0.00000001", "0.00000000", "90071992.54740993",
+                                  "123 base units", "123 base units", "??"])
+                self.assertEqual([str(table.get_row_at(index)[5]) for index in range(len(values))],
+                                 ["L-BTC", "L-BTC", "L-BTC", "ab" * 32, "??", "L-BTC"])
 
     async def test_live_output_lookup_uses_pinned_tools_and_saves_only_explicit_selection(self):
         from textual.widgets import DataTable, Input, Select, TextArea

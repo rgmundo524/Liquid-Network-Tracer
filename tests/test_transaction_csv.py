@@ -84,8 +84,8 @@ class TransactionCSVTests(unittest.TestCase):
 
     def test_pegout_value_is_actual_request_output_and_destination_not_payout_claim(self):
         row = find(transaction_csv_rows(self.graph, self.state), D, "OUT", 0)
-        self.assertEqual(row["PegOut Value"], 1234)
-        self.assertEqual(row["Asset Value"], 1234)
+        self.assertEqual(row["PegOut Value"], "0.00001234")
+        self.assertEqual(row["Asset Value"], "0.00001234")
         self.assertEqual(row["Address Hash"], "SYNTHETIC-bitcoin-payout-request")
         self.assertIn("PEG-OUT REQUEST", row["Address Flags"])
         self.assertNotIn("USD Value", row)
@@ -95,7 +95,7 @@ class TransactionCSVTests(unittest.TestCase):
         rows = transaction_csv_rows(self.graph, self.state)
         self.assertEqual(find(rows, B, "OUT", 0)["Asset Value"], "")
         self.assertIn("CONFIDENTIAL VALUE", find(rows, B, "OUT", 0)["Address Flags"])
-        self.assertEqual(find(rows, C, "OUT", 1)["Asset Value"], 0)
+        self.assertEqual(find(rows, C, "OUT", 1)["Asset Value"], "0.00000000")
         self.assertTrue(all("USD Value" not in row for row in rows))
         self.state["transactions"][D]["data"]["vout"][0].pop("value")
         row = find(transaction_csv_rows(build_graph(self.state), self.state), D, "OUT", 0)

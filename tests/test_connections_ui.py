@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from liquid_tracer.cli import main
 from liquid_tracer.common import canonical, digest, read_json, save_json
-from liquid_tracer.connections import preview_connections, reviewed_connections
+from liquid_tracer.connections import FILES, connection_plan, preview_connections, reviewed_connections
 from liquid_tracer.investigations import read_case
 from liquid_tracer.menu import create_app
 from tests import test_web, test_menu_addresses
@@ -46,6 +46,7 @@ class ConnectionWebTests(unittest.TestCase):
         job = self.success(route+"/actions", {"action": "connections", "run_id": state["run_id"], "connection_hops": 2}, status=202)
         result = self.wait(job)
         self.assertEqual(result["connection_count"], 1)
+        self.assertEqual(result["value_units"], "asset_dependent")
         self.assertEqual(result["max_hops"], 2)
         self.assertEqual(result["address_counts"]["remaining"], 0)
         self.assertGreater(result["address_counts"]["known"], 0)
@@ -58,6 +59,7 @@ class ConnectionWebTests(unittest.TestCase):
         self.assertIn(b"Starter-to-starter", page)
         detail = self.success(route)
         self.assertEqual(detail["artifacts"][state["run_id"]]["connections"]["connection_count"], 1)
+        self.assertEqual(detail["artifacts"][state["run_id"]]["connections"]["value_units"], "asset_dependent")
         self.assertEqual((case/"case.json").read_bytes(), before)
 
     def test_invalid_hops_and_unconfirmed_publish_do_not_start_worker(self):
@@ -68,6 +70,30 @@ class ConnectionWebTests(unittest.TestCase):
             self.assertEqual(self.request(route+"/actions", {"action": "miro-connections"})[0], 400)
             worker.assert_not_called()
         self.assertEqual(self.request(route+"/actions", {"action": "connections"}, headers={"X-Liquid-CSRF":"wrong"})[0], 403)
+
+    def test_old_connection_downloads_keep_their_original_unit_description(self):
+        from pathlib import Path
+        from liquid_tracer.export import PRESENTATION_VERSION
+
+        case, route, state = self.setup_case()
+        result = preview_connections(case, max_hops=1)
+        directory = Path(result["directory"])
+        graph = read_json(directory / "graph.json")
+        graph["presentation_version"] = PRESENTATION_VERSION - 1
+        for key in ("value_units", "value_units_by_asset", "bitcoin_decimal_places"):
+            graph["connections"].pop(key, None)
+        save_json(directory / "graph.json", graph)
+        save_json(directory / "connections.json", graph["connections"])
+        save_json(directory / "miro-plan.json", connection_plan(graph))
+        (directory / "SHA256SUMS").write_text("".join(
+            digest((directory / name).read_bytes()) + "  " + name + "\n"
+            for name in sorted(FILES - {"SHA256SUMS"})))
+        before = {name: (directory / name).read_bytes() for name in FILES}
+        direct = self.server.public_result(result, "connections", case, [])
+        self.assertEqual(direct["value_units"], "base_units")
+        saved = self.success(route)["artifacts"][state["run_id"]]["connections"]
+        self.assertEqual(saved["value_units"], "base_units")
+        self.assertEqual(before, {name: (directory / name).read_bytes() for name in FILES})
 
     def test_publish_uses_fixed_command_and_separate_board(self):
         case, route, state = self.setup_case()

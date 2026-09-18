@@ -145,11 +145,15 @@ def compaction_preview_metadata(case, run_id, preview_id):
 
 
 def verified_compaction_preview(case, run_id, preview_id):
+    from .export import PRESENTATION_VERSION
+
     meta = compaction_preview_metadata(case, run_id, preview_id)
     plan = read_json(_directory(case, preview_id) / "miro-plan.json")
     validate_plan(plan)
     if plan.get("sha256") != meta["plan_sha256"]:
         raise TraceError("Compact preview changed during verification; create it again")
+    if plan.get("presentation_version") != PRESENTATION_VERSION:
+        raise TraceError("The compact preview uses an older amount presentation; create a new compact preview before applying it")
     return plan, meta
 
 

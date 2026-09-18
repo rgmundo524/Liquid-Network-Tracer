@@ -14,7 +14,7 @@ import threading
 import time
 from pathlib import Path
 
-from .common import LBTC, TraceError, parse_outpoint, read_json
+from .common import TraceError, display_amount, is_lbtc, parse_outpoint, read_json
 from .investigations import (create_investigation, default_root, list_investigations,
                              load_settings, read_case, save_settings, update_case, validate_settings)
 
@@ -540,6 +540,8 @@ def create_app(root=None):
                 yield Static(f"{len(self.reports)} transaction(s). Rows are grouped in the order entered.", markup=False)
                 yield Static("Enter toggles the highlighted output. Nothing is selected initially. "
                              "Using a selection replaces the starting-output field.", markup=False)
+                yield Static("L-BTC amounts use whole units with 8 decimals. Other or unidentified assets use "
+                             "base units; ?? means unavailable.", markup=False)
                 yield DataTable(id="outputs", cursor_type="row")
                 yield Static("", id="output-detail", markup=False)
                 yield Static("", id="output-error", markup=False)
@@ -557,8 +559,8 @@ def create_app(root=None):
                 table.add_row("No" if output["selectable"] else "Unavailable", f"{number}: {txid[:8]}…{txid[-6:]}",
                               str(output["vout"]),
                               Text(output.get("address") or "No address"),
-                              str(output["value"]) + " base units" if output.get("value") is not None else "??",
-                              Text("L-BTC" if asset == LBTC else asset or "??"),
+                              display_amount(output),
+                              Text("L-BTC" if is_lbtc(asset) else asset or "??"),
                               Text(output.get("reason") or output.get("script_type") or "??"), key=outpoint)
             table.focus()
 
