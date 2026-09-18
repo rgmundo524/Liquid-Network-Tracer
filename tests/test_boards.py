@@ -192,9 +192,9 @@ class BoardCreationTests(unittest.TestCase):
 
     def test_default_name_limits_and_synthetic_marker(self):
         self.assertEqual(len(default_board_name({"name": "n" * 120})), 60)
-        demo = default_board_name({"name": "n" * 120, "fixture": "synthetic.json"})
-        self.assertEqual(len(demo), 60)
-        self.assertTrue(demo.startswith("SYNTHETIC DEMO · "))
+        synthetic = default_board_name({"name": "n" * 120, "fixture": "synthetic.json"})
+        self.assertEqual(len(synthetic), 60)
+        self.assertTrue(synthetic.startswith("SYNTHETIC DATA · "))
         self.assertEqual(board_options(" Name ")["name"], "Name")
 
     def test_cli_dispatches_board_creation_without_graph_sync(self):

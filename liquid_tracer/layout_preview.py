@@ -352,7 +352,7 @@ def _preview_html(graph, svg, metrics):
     from .attribution_presentation import register_html
     inline_svg = svg.decode("utf-8")
     legend = "".join("<li>" + _escape(line) + "</li>" for line in legend_lines(graph))
-    simulated = " · Synthetic demonstration data" if graph.get("simulated") else ""
+    simulated = " · Synthetic data" if graph.get("simulated") else ""
     fees = "included" if graph.get("include_fees") else "hidden"
     return f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">

@@ -899,10 +899,6 @@ class Handler(BaseHTTPRequestHandler):
     def get(self, parts):
         if parts == ["api", "session"]:
             self.send(200, self.server.session())
-        elif parts == ["api", "demo"]:
-            lines = (_project() / "examples" / "demo-seeds.txt").read_text().splitlines()
-            seeds = _seed_values(" ".join(line.split("#", 1)[0] for line in lines))
-            self.send(200, {"txids": list(dict.fromkeys(seed.split(":")[0] for seed in seeds))})
         elif len(parts) == 3 and parts[:2] == ["api", "cases"]:
             case, metadata = self.server.case(parts[2])
             self.send(200, self.server.case_summary(case, metadata, detail=True))
@@ -931,26 +927,25 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["api", "settings"]:
             return {"settings": save_settings(self.server.root, body.get("settings"))}, 200
         if parts == ["api", "lookup"]:
+            if set(body) - {"txids", "source"}:
+                raise RequestError("Transaction lookup accepts transaction IDs only; not fixture files or custom arguments.")
+            if body.get("source", "live") != "live":
+                raise RequestError("New transaction lookups use live Liquid data.")
             txids = parse_transaction_hashes(body.get("txids"))
-            source = body.get("source")
-            if source not in ("live", "demo"):
-                raise RequestError("Select a live or synthetic demo source.")
             arguments = ["inspect-txs", "--txids", ",".join(txids)]
-            if source == "demo":
-                arguments.extend(["--fixture", str(_project() / "examples" / "demo-api.json")])
-            return self.server.start_job(arguments, action="lookup", live=source == "live", txids=txids), 202
+            return self.server.start_job(arguments, action="lookup", live=True, txids=txids), 202
         if parts == ["api", "cases"]:
-            source = body.get("source")
-            if source not in ("demo", "live"):
-                raise RequestError("Select a live or synthetic demo source.")
+            if set(body) - {"name", "seeds", "board", "settings", "source"}:
+                raise RequestError("New investigations accept a name, starting outputs, board and settings only; not fixture files.")
+            if body.get("source", "live") != "live":
+                raise RequestError("New investigations use live Liquid data.")
             seeds = body.get("seeds")
             if not isinstance(seeds, list) or not seeds or any(not isinstance(seed, str) for seed in seeds):
                 raise RequestError("Select at least one starting output.")
             normalized = _seed_values(" ".join(seeds))
             settings = validate_settings(body.get("settings", load_settings(self.server.root)))
             case = create_investigation(self.server.root, body.get("name"), seeds=normalized,
-                board=body.get("board") or None, run_defaults=settings,
-                fixture=_project() / "examples" / "demo-api.json" if source == "demo" else None)
+                board=body.get("board") or None, run_defaults=settings)
             return self.server.case_summary(case, read_case(case), detail=True), 201
         if len(parts) == 4 and parts[:2] == ["api", "cases"]:
             case, metadata = self.server.case(parts[2])

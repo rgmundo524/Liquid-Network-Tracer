@@ -20,7 +20,6 @@
     ASTRO_TELEMETRY_DISABLED = "1";
     LIQUID_INVESTIGATIONS_DIR = "${config.devenv.root}/cases";
     LIQUID_CASE_DIR = "${config.devenv.root}/cases/current";
-    LIQUID_DEMO_CASE_DIR = "${config.devenv.root}/demo-case";
     LIQUID_SECRET_PROVIDER = "protonpass";
     LIQUID_SECRET_PROFILE = "development";
     # Chosen operating rate for the paid endpoint, shared across fetch workers.
@@ -149,34 +148,6 @@
       "$LIQUID_SECRETSPEC_BIN" --version
       "$SECRETSPEC_PROTONPASS_CLI_PATH" --version
       "$SECRETSPEC_PROTONPASS_CLI_PATH" info --help > /dev/null
-    '';
-  };
-
-  scripts.liquid-demo = {
-    description = "Run a synthetic one-hop trace without loading credentials";
-    exec = ''
-      exec liquid-trace trace \
-        --case "$LIQUID_DEMO_CASE_DIR" \
-        --fixture "$LIQUID_TRACER_ROOT/examples/demo-api.json" \
-        --seeds-file "$LIQUID_TRACER_ROOT/examples/demo-seeds.txt" \
-        --hops 1 "$@"
-    '';
-  };
-
-  scripts.liquid-demo-preview = {
-    description = "Preview the latest saved demo run for the configured test board";
-    exec = ''
-      exec liquid-trace miro-sync \
-        --case "$LIQUID_DEMO_CASE_DIR" --run latest \
-        --dry-run "$@"
-    '';
-  };
-
-  scripts.liquid-demo-sync = {
-    description = "Sync the latest saved demo run to the configured test board";
-    exec = ''
-      exec liquid-live miro-sync \
-        --case "$LIQUID_DEMO_CASE_DIR" --run latest "$@"
     '';
   };
 

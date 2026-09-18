@@ -101,9 +101,9 @@ class InvestigationTests(unittest.TestCase):
 
     def test_run_snapshots_preserve_board_history_when_case_settings_change(self):
         case = create_investigation(self.root, "Original name", board="FIRST=")
-        base = ["trace", "--case", str(case), "--fixture", str(self.project / "examples/demo-api.json")]
+        base = ["trace", "--case", str(case), "--fixture", str(self.project / "tests/data/synthetic-api.json")]
         with contextlib.redirect_stdout(io.StringIO()):
-            status = main(base + ["--seeds-file", str(self.project / "examples/demo-seeds.txt"), "--hops", "1"])
+            status = main(base + ["--seeds-file", str(self.project / "tests/data/synthetic-seeds.txt"), "--hops", "1"])
         self.assertEqual(status, 0)
         first_dir = case / "runs" / read_case(case)["latest_run"]
         original = (first_dir / "investigation.json").read_bytes()

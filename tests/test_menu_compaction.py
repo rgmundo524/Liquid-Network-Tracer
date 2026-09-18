@@ -29,12 +29,12 @@ class CompactionMenuTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name) / "cases"
-        fixture = PROJECT / "examples" / "demo-api.json"
+        fixture = PROJECT / "tests" / "data" / "synthetic-api.json"
         self.case = create_investigation(self.root, "Compaction fixture", board="SYNTHETIC-BOARD=",
                                          fixture=str(fixture), run_defaults={"max_new_items": 321})
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(main(["trace", "--case", str(self.case), "--fixture", str(fixture),
-                                   "--seeds-file", str(PROJECT / "examples" / "demo-seeds.txt"),
+                                   "--seeds-file", str(PROJECT / "tests" / "data" / "synthetic-seeds.txt"),
                                    "--hops", "1"]), 0)
         self.run_id = read_case(self.case)["latest_run"]
         self.preview_id = self.run_id + "-compact-abcd1234"

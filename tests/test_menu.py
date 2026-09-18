@@ -17,7 +17,8 @@ from unittest.mock import patch
 from liquid_tracer.common import TraceError, read_json, save_json
 from liquid_tracer.investigations import (DEFAULTS, create_investigation, list_investigations,
                                          load_settings, read_case, save_settings, update_case)
-from liquid_tracer.menu import _OfflineCalculation, _command, _lookup_reports, _seed_values, create_app, run_menu
+from liquid_tracer.menu import (_OfflineCalculation, _command, _lookup_reports, _seed_values,
+                                _trace_arguments, create_app, run_menu)
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -105,6 +106,19 @@ finally:
             _seed_values(txid + r"\:0,")
         self.assertEqual(_seed_values(txid + ":12,"), [txid + ":12"])
 
+    def test_missing_saved_fixture_never_becomes_a_live_trace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case = Path(directory)
+            metadata = {"fixture": str(case / "missing-fixture.json"), "seeds": ["a" * 64 + ":0"]}
+            with self.assertRaisesRegex(TraceError, "Saved synthetic fixture is unavailable"):
+                _trace_arguments(case, metadata, DEFAULTS)
+
+    def test_saved_synthetic_run_requires_its_original_fixture(self):
+        metadata = {"latest_run": "saved-run", "seeds": ["a" * 64 + ":0"]}
+        with patch("liquid_tracer.menu._latest", return_value=(Path("saved-run"), {"source": "fixture://saved"})), \
+                self.assertRaisesRegex(TraceError, "fixture path is not configured"):
+            _trace_arguments(Path("saved-case"), metadata, DEFAULTS)
+
     def test_nonterminal_menu_does_not_load_the_ui_or_credentials(self):
         with patch("sys.stdin.isatty", return_value=False), patch("liquid_tracer.menu.create_app") as make_app, \
                 contextlib.redirect_stderr(io.StringIO()) as error:
@@ -158,11 +172,12 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         await pilot.click(selector)
         await pilot.pause()
 
-    async def new_demo(self, app, pilot, name="Synthetic case", board="DEMO="):
-        from textual.widgets import Input
+    async def new_case(self, app, pilot, name="New case", board="DEMO="):
+        from textual.widgets import Input, TextArea
         await self.click(app, pilot, "#new")
         app.screen.query_one("#case-name", Input).value = name
         app.screen.query_one("#board", Input).value = board
+        app.screen.query_one("#seeds", TextArea).text = "a" * 64 + ":0"
         await self.click(app, pilot, "#submit")
         entries = list_investigations(self.root)
         return next(case for case, metadata in entries if metadata["name"] == name)
@@ -182,12 +197,11 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         await pilot.pause()
 
     async def test_malformed_output_lookup_never_starts_a_process_or_creates_case(self):
-        from textual.widgets import Input, Select, Static
+        from textual.widgets import Input, Static
         app = create_app(self.root)
         with patch("liquid_tracer.menu.subprocess.run") as process:
             async with app.run_test(size=(110, 55)) as pilot:
                 await self.click(app, pilot, "#new")
-                app.screen.query_one("#source", Select).value = "live"
                 for value in ("bad", "a" * 64 + ":vout", "a" * 64 + r"\:0", "a" * 64 + ",bad"):
                     with self.subTest(value=value):
                         app.screen.query_one("#lookup-txid", Input).value = value
@@ -198,27 +212,30 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(self.root.exists())
                 process.assert_not_called()
 
-    async def test_fixture_output_picker_requires_selection_and_preserves_seeds_on_cancel(self):
+    async def test_output_picker_requires_selection_and_preserves_seeds_on_cancel(self):
         from textual.widgets import DataTable, Input, Static, TextArea
-        fixture = read_json(PROJECT / "examples" / "demo-api.json")
+        fixture = read_json(PROJECT / "tests" / "data" / "synthetic-api.json")
         transaction = next(value for key, value in fixture.items()
                            if not key.endswith("outspends") and
                            any(output.get("scriptpubkey_type") == "op_return" and not output.get("pegout")
                                for output in value["vout"]))
         txid = transaction["txid"]
         original_seed = "b" * 64 + ":7"
-        real_run = subprocess.run
+        from liquid_tracer.inspection import inspect_transaction
+        report = inspect_transaction(txid, fixture=PROJECT / "tests" / "data" / "synthetic-api.json")
         commands = []
 
-        def offline_inspection(command, **kwargs):
-            self.assertEqual(command[:4], [sys.executable, "-m", "liquid_tracer", "inspect-tx"])
+        def local_report(command, **kwargs):
+            self.assertEqual(command[0], "/nix/store/test-secretspec/bin/secretspec")
             self.assertEqual(command[command.index("--txid") + 1], txid)
-            self.assertEqual(command[command.index("--fixture") + 1], str(PROJECT / "examples" / "demo-api.json"))
+            self.assertNotIn("--fixture", command)
             commands.append(command)
-            return real_run(command, **kwargs)
+            Path(command[command.index("--output") + 1]).write_text(json.dumps(report))
+            return subprocess.CompletedProcess(command, 0)
 
         app = create_app(self.root)
-        with patch("liquid_tracer.menu.subprocess.run", side_effect=offline_inspection):
+        with patch("liquid_tracer.menu.subprocess.run", side_effect=local_report), \
+                patch.object(app, "suspend", side_effect=contextlib.nullcontext):
             async with app.run_test(size=(110, 55)) as pilot:
                 await self.click(app, pilot, "#new")
                 form = app.screen
@@ -251,18 +268,18 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(app.screen, form)
                 self.assertEqual(form.query_one("#seeds", TextArea).text, txid + ":0")
                 self.assertFalse(self.root.exists())
-                form.query_one("#case-name", Input).value = "Chosen demo output"
+                form.query_one("#case-name", Input).value = "Chosen output"
                 await self.click(app, pilot, "#submit")
                 case = app.screen.case
                 self.assertEqual(read_case(case)["seeds"], [txid + ":0"])
-                self.assertEqual(read_case(case)["fixture"], str(PROJECT / "examples" / "demo-api.json"))
+                self.assertFalse(read_case(case).get("fixture"))
                 self.assertFalse((case / "runs").exists())
         self.assertEqual(len(commands), 2)
         for command in commands:
             self.assertFalse(Path(command[command.index("--output") + 1]).exists())
 
     async def test_live_output_lookup_uses_pinned_tools_and_saves_only_explicit_selection(self):
-        from textual.widgets import DataTable, Input, Select, TextArea
+        from textual.widgets import DataTable, Input, TextArea
         txid = "c" * 64
         report = {"txid": txid, "outputs": [
             {"outpoint": txid + ":0", "vout": 0, "address": "SYNTHETIC-unselected", "value": None,
@@ -292,7 +309,6 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 await self.click(app, pilot, "#new")
                 form = app.screen
                 form.query_one("#case-name", Input).value = "Chosen live output"
-                form.query_one("#source", Select).value = "live"
                 form.query_one("#seeds", TextArea).text = "d" * 64 + ":9"
                 form.query_one("#lookup-txid", Input).value = txid
                 process.assert_not_called()
@@ -318,7 +334,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 process.assert_called_once()
 
     async def test_ten_transaction_lookup_groups_outputs_and_saves_exact_selections(self):
-        from textual.widgets import DataTable, Input, Select, Static, TextArea
+        from textual.widgets import DataTable, Input, Static, TextArea
         txids = [f"{number:064x}" for number in range(10, 20)]
         report = {"transactions": [{"txid": txid, "outputs": [
             {"outpoint": txid + ":0", "vout": 0, "address": "SYNTHETIC-output-" + str(number),
@@ -350,7 +366,6 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 await self.click(app, pilot, "#new")
                 form = app.screen
                 form.query_one("#case-name", Input).value = "Ten starting transactions"
-                form.query_one("#source", Select).value = "live"
                 form.query_one("#seeds", TextArea).text = original
                 form.query_one("#lookup-txid", Input).value = ", ".join(txids + [txids[0].upper()])
                 await self.click(app, pilot, "#lookup")
@@ -391,7 +406,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(not path.exists() for path in report_paths))
 
     async def test_failed_or_incomplete_batch_lookup_keeps_existing_selection(self):
-        from textual.widgets import Input, Select, Static, TextArea
+        from textual.widgets import Input, Static, TextArea
         txids = ["a" * 64, "b" * 64]
         report = {"transactions": [{"txid": txids[0], "outputs": [
             {"outpoint": txids[0] + ":0", "vout": 0, "selectable": True}]}]}
@@ -407,7 +422,6 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(110, 55)) as pilot:
                 await self.click(app, pilot, "#new")
                 form = app.screen
-                form.query_one("#source", Select).value = "live"
                 form.query_one("#lookup-txid", Input).value = ", ".join(txids)
                 form.query_one("#seeds", TextArea).text = original
                 for effect, message in ((incomplete_report, "invalid transaction report"),
@@ -426,7 +440,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         app = create_app(self.root)
         with patch("liquid_tracer.menu.subprocess.run", side_effect=AssertionError("Navigation must not run a process")):
             async with app.run_test(size=(110, 55)) as pilot:
-                case = await self.new_demo(app, pilot)
+                case = await self.new_case(app, pilot)
                 await self.click(app, pilot, "#run")
                 await pilot.press("enter")
                 await pilot.pause()
@@ -478,10 +492,10 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(seeds.cursor_location, (1, 2))
                 self.assertIs(app.focused, seeds)
 
-                source = app.screen.query_one("#source", Select)
-                source.focus()
+                connector = app.screen.query_one("#connector-style", Select)
+                connector.focus()
                 await pilot.press("enter", "down", "enter")
-                self.assertEqual(source.value, "live")
+                self.assertEqual(connector.value, "curved")
                 checkbox = app.screen.query_one("#include-fees", Checkbox)
                 checkbox.focus()
                 await pilot.press("space")
@@ -502,7 +516,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         app = create_app(self.root)
         with patch("liquid_tracer.menu.subprocess.run") as process:
             async with app.run_test(size=(80, 24)) as pilot:
-                case = await self.new_demo(app, pilot, board="")
+                case = await self.new_case(app, pilot, board="")
                 for selector in ("#mermaid", "#csv", "#elk-preview", "#layout"):
                     self.assertTrue(app.screen.query_one(selector, Button).disabled)
                 run = app.screen.query_one("#run", Button)
@@ -550,7 +564,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 process.assert_not_called()
 
     async def test_fixture_run_restart_continue_and_readonly_preview(self):
-        from textual.widgets import Input
+        from textual.widgets import Input, Static
         real_run = subprocess.run
         commands = []
 
@@ -560,10 +574,19 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
             commands.append(command)
             return real_run(command, **kwargs)
 
+        fixture = PROJECT / "tests" / "data" / "synthetic-api.json"
+        seed_lines = (PROJECT / "tests" / "data" / "synthetic-seeds.txt").read_text().splitlines()
+        seeds = _seed_values(" ".join(line.split("#", 1)[0] for line in seed_lines))
+        case = create_investigation(self.root, "Saved synthetic case", board="DEMO=", fixture=str(fixture),
+                                    seeds=seeds, run_defaults=DEFAULTS)
         app = create_app(self.root)
         with patch("liquid_tracer.menu.subprocess.run", side_effect=offline_only):
             async with app.run_test(size=(110, 55)) as pilot:
-                case = await self.new_demo(app, pilot)
+                await self.click(app, pilot, "#continue")
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertEqual(app.screen.case, case)
+                self.assertIn("Synthetic data", str(app.screen.query_one("#case-summary", Static).render()))
                 await self.click(app, pilot, "#run")
                 await self.click(app, pilot, "#submit")
                 await self.finish_action(app, pilot)
@@ -605,7 +628,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         app = create_app(self.root)
         with patch("liquid_tracer.menu.subprocess.run") as process:
             async with app.run_test(size=(110, 55)) as pilot:
-                case = await self.new_demo(app, pilot, board="")
+                case = await self.new_case(app, pilot, board="")
                 self.assertFalse(read_case(case).get("miro_board"))
                 self.assertTrue(app.screen.query_one("#mermaid", Button).disabled)
                 self.assertTrue(app.screen.query_one("#csv", Button).disabled)
@@ -623,11 +646,11 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_csv_button_uses_offline_worker_and_reports_saved_paths_at_small_size(self):
         from textual.widgets import Button, Static
         from liquid_tracer.cli import main
-        fixture = PROJECT / "examples" / "demo-api.json"
+        fixture = PROJECT / "tests" / "data" / "synthetic-api.json"
         case = create_investigation(self.root, "Synthetic CSV case", fixture=str(fixture))
         with contextlib.redirect_stdout(io.StringIO()):
             status = main(["trace", "--case", str(case), "--fixture", str(fixture),
-                           "--seeds-file", str(PROJECT / "examples" / "demo-seeds.txt"), "--hops", "1"])
+                           "--seeds-file", str(PROJECT / "tests" / "data" / "synthetic-seeds.txt"), "--hops", "1"])
         self.assertEqual(status, 0)
         self.assertFalse(read_case(case).get("miro_board"))
         snapshot = {p.relative_to(case): p.read_bytes() for p in case.rglob("*") if p.is_file()}
@@ -688,11 +711,11 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_mermaid_button_uses_offline_worker_and_preserves_saved_investigation(self):
         from textual.widgets import Button, Static
         from liquid_tracer.cli import main
-        fixture = PROJECT / "examples" / "demo-api.json"
+        fixture = PROJECT / "tests" / "data" / "synthetic-api.json"
         case = create_investigation(self.root, "Synthetic Mermaid case", fixture=str(fixture))
         with contextlib.redirect_stdout(io.StringIO()):
             status = main(["trace", "--case", str(case), "--fixture", str(fixture),
-                           "--seeds-file", str(PROJECT / "examples" / "demo-seeds.txt"), "--hops", "1"])
+                           "--seeds-file", str(PROJECT / "tests" / "data" / "synthetic-seeds.txt"), "--hops", "1"])
         self.assertEqual(status, 0)
         self.assertFalse(read_case(case).get("miro_board"))
         settings = dict(read_case(case)["run_defaults"], include_fees=True)
@@ -750,11 +773,11 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_elk_preview_uses_offline_worker_without_a_miro_board(self):
         from textual.widgets import Button, Static
         from liquid_tracer.cli import main
-        fixture = PROJECT / "examples" / "demo-api.json"
+        fixture = PROJECT / "tests" / "data" / "synthetic-api.json"
         case = create_investigation(self.root, "Synthetic ELK case", fixture=str(fixture))
         with contextlib.redirect_stdout(io.StringIO()):
             status = main(["trace", "--case", str(case), "--fixture", str(fixture),
-                           "--seeds-file", str(PROJECT / "examples" / "demo-seeds.txt"), "--hops", "1"])
+                           "--seeds-file", str(PROJECT / "tests" / "data" / "synthetic-seeds.txt"), "--hops", "1"])
         self.assertEqual(status, 0)
         snapshot = {p.relative_to(case): p.read_bytes() for p in case.rglob("*") if p.is_file()}
         preview = case / "previews" / "synthetic-elk" / "graph.html"
@@ -809,7 +832,7 @@ finally:
         with patch("liquid_tracer.menu._command", return_value=command), \
                 patch("liquid_tracer.address_counts.count_credentials_required", return_value=False):
             async with app.run_test(size=(80, 24)) as pilot:
-                case = await self.new_demo(app, pilot)
+                case = await self.new_case(app, pilot)
                 snapshot = {p.relative_to(case): p.read_bytes() for p in case.rglob("*") if p.is_file()}
                 for action, key in (("layout-preview", "enter"), ("mermaid", "ctrl+x"), ("layout-preview", None)):
                     ready.unlink(missing_ok=True)
@@ -850,7 +873,7 @@ finally:
     async def test_cancel_calculation_does_not_cancel_live_actions(self):
         app = create_app(self.root)
         async with app.run_test(size=(80, 24)) as pilot:
-            await self.new_demo(app, pilot)
+            await self.new_case(app, pilot)
             app.busy = True
             app.screen.current_action = "miro-sync"
             with patch("liquid_tracer.menu.os.killpg") as kill:
@@ -876,7 +899,7 @@ finally:
                 self.assertEqual(load_settings(self.root)["connector_style"], "curved")
                 self.assertEqual(load_settings(self.root)["hops"], 3)
                 self.assertIs(load_settings(self.root)["include_fees"], True)
-                case = await self.new_demo(app, pilot)
+                case = await self.new_case(app, pilot)
                 self.assertEqual(read_case(case)["run_defaults"]["max_requests"], 12)
                 self.assertEqual(read_case(case)["run_defaults"]["connector_style"], "curved")
                 self.assertIs(read_case(case)["run_defaults"]["include_fees"], True)
@@ -956,11 +979,11 @@ finally:
     async def test_organize_confirmation_uses_saved_case_and_preserves_trace_evidence(self):
         from textual.widgets import Button, Checkbox, Input, Static
         from liquid_tracer.cli import main
-        fixture = PROJECT / "examples" / "demo-api.json"
+        fixture = PROJECT / "tests" / "data" / "synthetic-api.json"
         case = create_investigation(self.root, "Synthetic layout", board="DEMO=", fixture=str(fixture))
         with contextlib.redirect_stdout(io.StringIO()):
             status = main(["trace", "--case", str(case), "--fixture", str(fixture),
-                           "--seeds-file", str(PROJECT / "examples" / "demo-seeds.txt"), "--hops", "1"])
+                           "--seeds-file", str(PROJECT / "tests" / "data" / "synthetic-seeds.txt"), "--hops", "1"])
         self.assertEqual(status, 0)
         before = read_case(case)
         run_files = {p.relative_to(case): p.read_bytes() for p in (case / "runs").rglob("*") if p.is_file()}
@@ -1077,11 +1100,11 @@ finally:
     async def test_create_board_after_run_saves_selection_and_preserves_evidence_across_restart(self):
         from textual.widgets import Button, Input, Select, Static
         from liquid_tracer.cli import main
-        fixture = PROJECT / "examples" / "demo-api.json"
+        fixture = PROJECT / "tests" / "data" / "synthetic-api.json"
         case = create_investigation(self.root, "Synthetic board case", fixture=str(fixture))
         with contextlib.redirect_stdout(io.StringIO()):
             status = main(["trace", "--case", str(case), "--fixture", str(fixture),
-                           "--seeds-file", str(PROJECT / "examples" / "demo-seeds.txt"), "--hops", "1"])
+                           "--seeds-file", str(PROJECT / "tests" / "data" / "synthetic-seeds.txt"), "--hops", "1"])
         self.assertEqual(status, 0)
         before = read_case(case)
         run_files = {p.relative_to(case): p.read_bytes() for p in (case / "runs").rglob("*") if p.is_file()}
@@ -1111,7 +1134,7 @@ finally:
                 self.assertFalse(app.screen.query_one("#create-board", Button).disabled)
                 await self.click(app, pilot, "#create-board")
                 self.assertEqual(app.screen.query_one("#board-name", Input).value,
-                                 "SYNTHETIC DEMO · Synthetic board case")
+                                 "SYNTHETIC DATA · Synthetic board case")
                 app.screen.query_one("#board-name", Input).value = selected_name
                 app.screen.query_one("#board-visibility", Select).value = "team"
                 app.screen.query_one("#board-team", Input).value = "SYNTHETIC-TEAM"
@@ -1178,13 +1201,17 @@ finally:
                 process.assert_called_once()
 
     async def test_invalid_live_seeds_and_board_are_rejected_without_creating_case(self):
-        from textual.widgets import Input, Select, Static, TextArea
+        from textual.widgets import Input, Static, TextArea
         app = create_app(self.root)
         with patch("liquid_tracer.menu.subprocess.run", side_effect=AssertionError("Invalid form cannot run")):
             async with app.run_test(size=(110, 55)) as pilot:
                 await self.click(app, pilot, "#new")
                 app.screen.query_one("#case-name", Input).value = "Invalid input"
-                app.screen.query_one("#source", Select).value = "live"
+                self.assertEqual(len(app.screen.query("#source")), 0)
+                self.assertEqual(app.screen.query_one("#seeds", TextArea).text, "")
+                await self.click(app, pilot, "#submit")
+                self.assertIn("starting output", str(app.screen.query_one("#form-error", Static).render()))
+                self.assertEqual(list_investigations(self.root), [])
                 app.screen.query_one("#seeds", TextArea).text = "not an outpoint"
                 await self.click(app, pilot, "#submit")
                 self.assertIn("Seed", str(app.screen.query_one("#form-error", Static).render()))

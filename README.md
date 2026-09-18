@@ -68,16 +68,16 @@ In an interactive terminal, `liquid-trace` opens a Textual interface with **New 
 When a button is highlighted, use **↑ ↓ ← →** to move between buttons and **Enter** to activate it. **Tab** and **Shift+Tab** move between all controls. Text fields, dropdowns, and tables keep their normal arrow-key behavior. **Space** toggles a checkbox; **Esc** returns to the previous screen. Disabled buttons are skipped, and navigation scrolls the focused button into view.
 
 1. Choose **New investigation** and give it a name. The program creates a unique subdirectory under `cases/`.
-2. Select **Live Liquid** or the offline synthetic demo. Paste one or more bare Liquid transaction hashes, separated by commas, into **Transaction hashes** and choose **Load outputs**. Review the outputs grouped by transaction, use Enter to toggle the relevant rows across transactions, then choose **Use selected outputs**. This fills the starting-output field; it replaces any existing entries. Alternatively enter known outputs directly as `HASH:NUMBER`, separated by whitespace or commas. Optionally provide an existing Miro board URL or ID; you can add it later.
-3. Start the first bounded run from the investigation menu. Review the hop and request limits before running it. A live trace retrieves credentials through SecretSpec; a demo trace needs none.
+2. Paste one or more bare Liquid transaction hashes, separated by commas, into **Transaction hashes** and choose **Load outputs**. New investigations use Live Liquid. Review the outputs grouped by transaction, use Enter to toggle the relevant rows across transactions, then choose **Use selected outputs**. This fills the starting-output field; it replaces any existing entries. Alternatively enter known outputs directly as `HASH:NUMBER`, separated by whitespace or commas. Optionally provide an existing Miro board URL or ID; you can add it later.
+3. Start the first bounded run from the investigation menu. Review the hop and request limits before running it. The trace retrieves credentials through SecretSpec when the configured API requires them.
 4. Review the saved run summary and exported file locations. If the case has no board, choose **Create Miro board**, review its name and visibility, and create it. Then choose **Preview Miro** and **Sync to Miro** to publish the saved run.
 5. Next time, launch `liquid-trace`, choose **Continue investigation**, and select the saved case. Continue its latest run with another bounded hop allowance, or review and sync what is already saved.
 
 The investigation settings let you change its name, board, run limits, fee visibility, and connector appearance. Top-level **Settings** changes defaults for new investigations. Existing investigations keep their own saved defaults. Creating a board saves its ID with the case and shows its URL in the investigation menu. It creates an empty board; publishing the traced graph is a separate **Sync to Miro** action. A completed run can be synced after creating or linking a board without tracing again.
 
-Choose **ELK layout preview** after saving a run to inspect the proposed positions and routes locally, compare estimated crossings and overlaps, and download its SVG. It needs no credentials or board. The preview uses the same ELK calculation as the default Miro plan, while actual Miro routes and existing manual arrangements can differ.
+Choose **ELK layout preview** after saving a run to inspect the proposed positions and routes locally, compare estimated crossings and overlaps, and download its SVG. It needs no Miro board. Missing address transaction counts are fetched first, using credentials when the configured API requires them; layout calculation remains local. The preview uses the same ELK calculation as the default Miro plan, while actual Miro routes and existing manual arrangements can differ.
 
-For an independent local view, choose **Mermaid chart** in the investigation menu after saving a run. The button creates a Mermaid source file, renders an SVG, and opens an HTML preview in your browser. It uses the latest saved run and current fee setting, needs no API credentials or Miro board, and saves each preview in a new directory under the investigation's `previews/`. The menu shows the file path if a browser cannot be opened. Miro remains the editable investigation board.
+For an independent local view, choose **Mermaid chart** in the investigation menu after saving a run. The button creates a Mermaid source file, renders an SVG, and opens an HTML preview in your browser. It uses the latest saved run and current fee setting, needs no Miro board, and saves each preview in a new directory under the investigation's `previews/`. Like the ELK preview, chart preparation can require credentials to fetch missing address counts. The menu shows the file path if a browser cannot be opened. Miro remains the editable investigation board.
 
 Choose **Export CSV** beside **Mermaid chart** to save tables from the latest run. Each click creates a new directory under the investigation's `exports/` and displays its file paths. This offline action requires a saved run, with no Miro board or secret-provider session. Completed runs already contain CSVs; the menu action makes a separate export for review or use in another application.
 
@@ -86,8 +86,6 @@ Choose **Export CSV** beside **Mermaid chart** to save tables from the latest ru
 **Load outputs** accepts up to 100 distinct transaction hashes. Commas, spaces, or newlines separate hashes; duplicates are removed and the full list is validated before lookup. One credential session and API client serve the batch. The shared lookup budget defaults to five API attempts and 30 seconds per distinct transaction, including authentication and retries. For 10 transactions that means at most 50 attempts and 300 seconds across the batch. A failed lookup preserves the existing starting-output field; a partial result is not applied.
 
 Lookup creates no investigation or trace and follows no subsequent spends. The selected output references are saved when you create the investigation; the later trace fetches and archives its own evidence. Selected UTXOs from all starting transactions share one investigation, board, and set of run limits. Shared descendants are represented once. Continuing a bounded run resumes its saved branches; adding different starting transactions currently requires a new investigation.
-
-For your first trial, select the **offline demo** and use a separate empty Miro test board. Demo hashes and addresses are synthetic. Its full path ends in a synthetic peg-out request, not an actual Bitcoin payout or Avalanche transaction. You can navigate, trace the demo, and preview a Miro plan without credentials. Creating a Miro board and live sync require your access token, even for a demo investigation.
 
 ## Local browser interface
 
@@ -102,12 +100,12 @@ This builds the interface and opens [http://127.0.0.1:4321](http://127.0.0.1:432
 
 The browser and terminal interfaces share the same `cases/`, defaults, run history, and Miro mappings. An investigation created in either interface can be reopened in the other without importing or migrating it.
 
-1. Open a saved investigation, or create a new live or synthetic-demo investigation. For live cases, paste comma-separated transaction hashes, load their outputs, and select the relevant UTXOs grouped by transaction.
+1. Open a saved investigation, or create a new Live Liquid investigation. Paste comma-separated transaction hashes, load their outputs, and select the relevant UTXOs grouped by transaction.
 2. Review the bounded run limits and start tracing. A later run continues the investigation's latest saved snapshot.
 3. Select a saved run to review it, create an **ELK layout preview** or Mermaid chart, or export CSV tables. Use **Download SVG** beside either chart or the individual CSV download buttons. Layout reports, Mermaid source, and supporting files are also available. Downloads remain available after reopening the investigation; selecting a different run shows that run's products. Changed display settings are identified so you can regenerate the affected product.
 4. Create a private Miro board or link an existing board in the investigation settings. Preview the saved run, then sync it to Miro. **Sync and reorganize graph** is a separate action because it can move existing managed objects and change their connector appearance and attachment points.
 
-The investigation settings include run limits, the fee-flow checkbox, and connector appearance; global settings provide defaults for new investigations. The synthetic demo, saved-run review, ELK and Mermaid previews, CSV export, and Miro plan preview need no API credentials. Miro board creation, sync, and organization still contact Miro, including for demo cases.
+The investigation settings include run limits, the fee-flow checkbox, and connector appearance; global settings provide defaults for new investigations. Saved-run review, CSV export, and Miro plan preview need no API credentials. ELK and Mermaid charts can require credentials to fetch missing address counts before local rendering. Miro board creation, sync, and organization contact Miro and require its access token.
 
 The usual cycle is **Trace → Create or link a board once → Preview Miro → Sync to Miro → Continue run → Sync to Miro**. Keep the same investigation and board. Normal sync preserves your arrangement and adds the continuation. If the existing positions leave no room, or you want a fresh arrangement, choose **Sync and reorganize graph**. This action both adds the selected saved run and rearranges the managed graph; no separate sync or new trace is required afterward. It cannot reserve space for a future run that has not been traced. You may also tidy the native shapes in Miro by hand.
 
@@ -143,32 +141,23 @@ New run exports include an `investigation.json` snapshot of the investigation na
 
 The default `cases/` directory is ignored by Git. Preserve the whole investigation directory when backing up or moving a case, including its `case.json` and `miro/` mapping. A custom investigation directory has its own storage and Git rules.
 
-## Explicit commands and demo helpers
+## Explicit commands
 
 Either interface can be the normal starting point. All existing subcommands remain available for scripts and advanced tracing. `liquid-live` loads credentials before running a direct command; the interfaces handle that step when you select a live action. `liquid-test` runs the offline Python suite.
 
-For a quick fixture run without the menu:
+To continue an existing live investigation, preview its saved graph, and update its linked board, replace `cases/theft-liquid` with your case directory:
 
 ```bash
-liquid-demo
-liquid-demo-preview --board 'https://miro.com/app/board/YOUR_TEST_BOARD_ID/'
-liquid-demo-sync --board 'https://miro.com/app/board/YOUR_TEST_BOARD_ID/'
+liquid-live trace --case cases/theft-liquid \
+  --resume latest --additional-hops 1 \
+  --max-transactions 20 --max-outpoints 100 --max-requests 30 --max-seconds 60
+liquid-trace miro-sync --case cases/theft-liquid --dry-run
+liquid-live miro-sync --case cases/theft-liquid
 ```
 
-The preview makes no network calls, needs no token, and writes no state. It cannot detect remote manual edits or deleted items; live sync performs that preflight. Live sync saves the selected board after local validation so subsequent `liquid-demo-preview` and `liquid-demo-sync` commands can reuse it. In a terminal, a missing board can be entered at the first-use prompt. For scripts, supply `--board` or use a case that already has one saved.
+The dry run makes no network calls, needs no token, and writes no state. It cannot detect remote manual edits or deleted items; live sync performs that preflight. Supply `--board URL_OR_ID` to select a board that is not already saved with the case. Live sync saves the selected board after local validation so later commands can reuse it. See [explicit tracing commands](#trace-a-case-with-explicit-commands) to start a new case.
 
-`liquid-demo` starts a fresh independent run each time. To extend a published demo graph, resume its lineage instead of creating another independent root:
-
-```bash
-liquid-trace trace \
-  --case "$LIQUID_DEMO_CASE_DIR" \
-  --fixture "$LIQUID_TRACER_ROOT/examples/demo-api.json" \
-  --resume latest --additional-hops 1
-liquid-demo-preview
-liquid-demo-sync
-```
-
-A new independent root cannot overwrite an already published graph's lineage. The interactive menu avoids this manual selection by offering continuation within the saved investigation.
+A new independent root cannot overwrite an already published graph's lineage. Continue with `--resume latest` to extend it; the interactive menu offers continuation within the saved investigation.
 
 If needed, add `--offline-preview` to `trace` or `export` to also save an HTML inspector and SVG. These are optional inspection files; normal runs use Miro for visual review.
 
@@ -253,7 +242,7 @@ liquid-trace layout-preview --case cases/theft-liquid --run latest --open
 
 This action fetches missing address transaction counts, computes placement locally, and saves `graph.html`, `graph.svg`, `graph.json`, and `layout-report.json` in a new `previews/<run-id>-elk-<id>/` directory. Optional `--connector-style straight|curved|elbowed`, `--include-fees`/`--exclude-fees`, `--run RUN_ID`, and `--out NEW_DIRECTORY` override the selected preview without changing its archive or case settings.
 
-In the ELK preview, click a transaction or address node, or focus it with Tab and press Enter, to open its **Explorer** link in a new tab. These links also work when the downloaded SVG is opened directly in a browser. They are limited to Blockstream's Liquid and Liquid testnet explorers; synthetic demonstrations and special event nodes have no live links. Preview generation can contact the statistics API for missing address counts. Once saved, previews remain self-contained and render offline; opening an Explorer link is a separate browser request. See [automatic address counts](docs/automatic-address-counts.md). Choose **Refresh layout preview** to add links and current presentation colors to an older saved run.
+In the ELK preview, click a transaction or address node, or focus it with Tab and press Enter, to open its **Explorer** link in a new tab. These links also work when the downloaded SVG is opened directly in a browser. They are limited to Blockstream's Liquid and Liquid testnet explorers; saved synthetic evidence and special event nodes have no live links. Preview generation can contact the statistics API for missing address counts. Once saved, previews remain self-contained and render offline; opening an Explorer link is a separate browser request. See [automatic address counts](docs/automatic-address-counts.md). Choose **Refresh layout preview** to add links and current presentation colors to an older saved run.
 
 The report compares the saved graph's baseline arrangement with the proposed ELK arrangement, **not the current live Miro board**. It estimates line crossings, object overlaps, and lines through unrelated objects. Counts marked `≥` are lower bounds when the comparison limit is reached. Labels and Miro's automatic curves are not measured; zero estimated crossings does not guarantee a collision-free board. For smaller graphs ELK tries three deterministic alternatives; larger graphs use one. The comparison budget limits quality measurement work, never the accepted graph size or number of rendered objects. Optimization makes no external layout requests and uses no secrets.
 
@@ -458,7 +447,7 @@ Obtain an access token with **`boards:read` and `boards:write`** scopes and acce
 liquid-secrets-setup miro
 ```
 
-In the investigation menu, choose **Create Miro board**. The name defaults to the investigation name, limited to 60 characters; demo names start with `SYNTHETIC DEMO`. Visibility defaults to **Private**. **Team members can edit** enables team access; public-link and organization access remain private. An optional Miro team ID selects a destination team. Availability depends on your Miro plan and team permissions; a rejected private request does not automatically become team-visible. Creation uses [Miro's board endpoint](https://developers.miro.com/reference/create-board-1) and its `boards:write` scope.
+In the investigation menu, choose **Create Miro board**. The name defaults to the investigation name, limited to 60 characters. Visibility defaults to **Private**. **Team members can edit** enables team access; public-link and organization access remain private. An optional Miro team ID selects a destination team. Availability depends on your Miro plan and team permissions; a rejected private request does not automatically become team-visible. Creation uses [Miro's board endpoint](https://developers.miro.com/reference/create-board-1) and its `boards:write` scope.
 
 Confirming creation retrieves the token through SecretSpec, creates an empty board, and saves its ID in `case.json`. The board's name, URL, and creation receipt are saved under `miro/board-creation.json`. The menu then reuses that board for previews and syncing. Opening or cancelling the form does not load credentials. For the same action from the CLI:
 
@@ -682,6 +671,6 @@ Evidence is retrieved explorer JSON, not independently verified raw transaction 
 python3 -m unittest discover -v
 ```
 
-Tests cover seed precision, hop boundaries, split/merge paths, continuation, budgets, spend-status freshness, confidential fields, event stops, reference validation, labeling, graph identity, evidence checksums, OAuth refresh, board creation and persistence, incremental Miro updates, manual-edit preservation, local ELK placement and route estimates, offline SVG export, retries, and uncertain creation recovery. Automated API checks use synthetic fixtures and mock transports. Live authentication and publication are verified locally with the operator's credentials.
+Tests cover seed precision, hop boundaries, split/merge paths, continuation, budgets, spend-status freshness, confidential fields, event stops, reference validation, labeling, graph identity, evidence checksums, OAuth refresh, board creation and persistence, incremental Miro updates, manual-edit preservation, local ELK placement and route estimates, offline SVG export, retries, and uncertain creation recovery. Automated API checks use synthetic fixtures under `tests/data/` and mock transports. The fixture adapter supports regression tests and previously saved synthetic evidence; new investigations in the interfaces use Live Liquid. Live authentication and publication are verified locally with the operator's credentials.
 
 Source separates the API client, evidence store, tracing engine, export, Miro publication, command parsing, and interactive investigation workflow. The CLI is separate from tracing, so a notebook or case-management interface can call the same engine later.

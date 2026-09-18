@@ -2,7 +2,7 @@
 
 The project uses **one main `devenv.nix`** to define Python, the Textual terminal interface, Node.js 24 for the Astro interface and local ELK layout engine, Mermaid CLI, commands, and nonsecret environment defaults. `secretspec.toml` declares credential names. Proton Pass stores their values. Investigation names, board IDs, run limits, and the latest-run reference belong in the saved investigation files.
 
-Entering the environment and opening the interface do not access a secret provider. Selecting a live output lookup, trace, Miro board creation, or Miro sync retrieves credentials through SecretSpec for that action. The offline demo trace and navigation need no credentials. Previews fetch missing address counts automatically and use SecretSpec when those lookups require Enterprise credentials; cached/public-API counts need no provider session.
+Entering the environment and opening the interface do not access a secret provider. Selecting a live output lookup, trace, Miro board creation, or Miro sync retrieves credentials through SecretSpec for that action. Navigation and reading saved runs need no credentials. Previews fetch missing address counts automatically and use SecretSpec when those lookups require Enterprise credentials; cached/public-API counts need no provider session.
 
 Explorer fetching uses up to eight concurrent requests with one shared rate limiter. The existing `devenv.nix` sets `env.LIQUID_BLOCKSTREAM_ENTERPRISE_RPS = "49"` for the paid endpoint. All interfaces inherit this actual operating target on their next launch, with at least 20.408 ms between request starts across workers. It is public configuration, so no new Proton Pass entry is needed. This selected target is not a published Blockstream quota. Public and other endpoints retain the 4 requests/second fallback. A verified allowance in `env.LIQUID_BLOCKSTREAM_API_RPS` takes precedence and uses 95% of that allowance instead. Credit balance and hourly/monthly request volume are not RPS limits. Separate processes do not share this limiter, so divide the desired total rate if running live investigations simultaneously. See [fetching controls and run limits](../README.md#trace-a-case-with-explicit-commands).
 
@@ -23,7 +23,7 @@ liquid-trace menu
 
 On a focused button, **↑ ↓ ← →** moves to another enabled button and **Enter** activates it. Left/right prefers the same row; up/down prefers buttons aligned above/below. When that direction has no candidate, navigation falls back to the previous/next button and stops at the ends. Focused buttons scroll into view. **Tab** and **Shift+Tab** still move between all controls; use them to enter or leave a text field or table. Arrows inside inputs, multiline text, dropdowns, and tables retain their native editing/selection behavior. **Space** toggles checkboxes and **Esc** returns to the prior screen. Footer hints appear when a button is focused.
 
-Creating an investigation asks for a name, live or synthetic-demo source, starting outputs, an optional existing Miro board URL or ID, and numeric run limits. Enter known outputs as `HASH:NUMBER` in the multiline field, separated by whitespace or commas. `vout` is the numeric output index, not a word to enter: `:0` selects the first output and `:1` the second. To look up outputs, paste transaction hashes separated by commas into **Transaction hashes**, choose **Load outputs**, toggle the relevant rows across transactions with Enter, and choose **Use selected outputs**. The picker identifies each transaction and output separately, including outputs with the same index from different transactions. Nothing is preselected; applying a selection replaces the starting-output field. The offline demo uses its original sample seeds when this field is empty.
+Creating an investigation asks for a name, starting outputs, an optional existing Miro board URL or ID, and numeric run limits. New investigations use Live Liquid without a source selector. Enter known outputs as `HASH:NUMBER` in the multiline field, separated by whitespace or commas. `vout` is the numeric output index, not a word to enter: `:0` selects the first output and `:1` the second. To look up outputs, paste transaction hashes separated by commas into **Transaction hashes**, choose **Load outputs**, toggle the relevant rows across transactions with Enter, and choose **Use selected outputs**. The picker identifies each transaction and output separately, including outputs with the same index from different transactions. Nothing is preselected; applying a selection replaces the starting-output field.
 
 Lookup accepts up to 100 distinct hashes, validates the full list, and deduplicates it before requesting data. One shared client uses a batch budget of five API attempts and 30 seconds per distinct hash by default, including authentication and retries. Ten hashes therefore share a 50-attempt, 300-second maximum. Explicit CLI limits apply to the whole batch. The single-hash command retains its five-attempt, 30-second defaults.
 
@@ -60,7 +60,7 @@ Use a current devenv release. The project supplies its own pinned SecretSpec and
 | `liquid-web` | Builds and opens the local Astro interface at `http://127.0.0.1:4321`, using the same investigations and secrets workflow. |
 | `liquid-web-build` | Installs locked ELK/frontend dependencies when needed and builds the local interface without starting its server. |
 | `liquid-layout-setup` | Installs the locked local ELK dependency when absent or its manifest/lockfile changes. |
-| `liquid-trace layout-preview --case CASE --run latest --open` | Creates and opens an offline SVG/HTML preview of the proposed ELK arrangement. |
+| `liquid-live layout-preview --case CASE --run latest --open` | Fetches missing address counts when needed, then calculates and opens a local SVG/HTML preview of the proposed ELK arrangement. |
 | `liquid-trace SUBCOMMAND ...` | Runs an explicit command using the existing process environment. |
 | `liquid-live SUBCOMMAND ...` | Resolves project credentials through SecretSpec, then runs an explicit command. |
 | `liquid-live inspect-tx --txid HASH` | Looks up one live transaction and prints its output numbers, addresses, and available public quantities as JSON. Does not trace spends or create a case. |
@@ -70,9 +70,6 @@ Use a current devenv release. The project supplies its own pinned SecretSpec and
 | `liquid-secrets-setup [all\|blockstream\|miro]` | Prompts for selected credentials and stores them in the configured provider; defaults to all three. |
 | `liquid-toolchain-check` | Reports the pinned SecretSpec/Proton CLI versions and checks support for `info`, without accessing a vault. |
 | `liquid-secrets-check [--service blockstream\|miro\|all]` | Loads project secrets and reports presence only; defaults to Blockstream. No Blockstream or Miro calls. |
-| `liquid-demo` | Creates a fresh synthetic one-hop run under `LIQUID_DEMO_CASE_DIR`; no paid requests or credentials. |
-| `liquid-demo-preview [--board URL_OR_ID]` | Locally previews the latest demo run for the selected or saved board. |
-| `liquid-demo-sync [--board URL_OR_ID]` | Loads credentials through SecretSpec and syncs the latest demo run to the selected or saved board. |
 | `liquid-test` | Runs the offline Python test suite, including terminal and browser-backend tests. |
 
 The launchers locate the source and secret declaration using `LIQUID_TRACER_ROOT`, preserving your working directory for relative case paths. The ordinary command-line tracing engine uses Python's standard library. The terminal interface uses Textual, provided by devenv; outside devenv, install it with `python3 -m pip install -e '.[tui]'`.
@@ -98,11 +95,11 @@ liquid-web --help
 
 `--no-open` leaves browser launch to you; `--help` returns without installing packages or building. The root defaults to the same `LIQUID_INVESTIGATIONS_DIR` used by the terminal interface. Cases, global defaults, run limits, seeds, latest-run pointers, immutable archives, exports, and Miro mappings use the existing Python formats. Switching interfaces requires no migration.
 
-The browser supports new live or synthetic-demo investigations, comma-separated transaction lookup and grouped UTXO selection, bounded tracing and continuation, saved-run review, ELK and Mermaid previews, CSV downloads, and Miro board creation, plan preview, sync, and reorganization. Case settings retain the board, fee-flow checkbox, and connector appearance; global settings apply to future cases. A historical run selection controls review and exports. Continuation follows the case's latest saved run so it extends the current lineage.
+The browser supports new Live Liquid investigations, comma-separated transaction lookup and grouped UTXO selection, bounded tracing and continuation, saved-run review, ELK and Mermaid previews, CSV downloads, and Miro board creation, plan preview, sync, and reorganization. Case settings retain the board, fee-flow checkbox, and connector appearance; global settings apply to future cases. A historical run selection controls review and exports. Continuation follows the case's latest saved run so it extends the current lineage.
 
 ELK and Mermaid **Download SVG** buttons, layout reports, and Mermaid source links live outside the sandboxed preview iframe. CSV tables each have a download button. The case-detail endpoint rediscovers the newest complete product of each kind for each saved run, checking the case/run identity and allowed nonsymlink files. Partial rendering attempts cannot hide a completed product. Downloads survive browser or server restarts; changed display settings are shown as a mismatch with a regenerate action. Artifacts remain in their original `previews/` and `exports/` directories, and immutable run archives are untouched.
 
-Opening the browser, reading saved evidence and exporting transaction CSVs do not resolve secrets. Generating a chart can require credentials for automatic missing-address-count lookups. Live jobs invoke the same SecretSpec command, project manifest, provider, and profile as the terminal workflow. Proton Pass login or unlock prompts appear in the launching terminal. API credentials are never form fields or frontend build variables. A demo trace is offline; publishing its results to Miro still requires a Miro token and network access.
+Opening the browser, reading saved evidence and exporting transaction CSVs do not resolve secrets. Generating a chart can require credentials for automatic missing-address-count lookups. Live jobs invoke the same SecretSpec command, project manifest, provider, and profile as the terminal workflow. Proton Pass login or unlock prompts appear in the launching terminal. API credentials are never form fields or frontend build variables. Publishing to Miro requires a Miro token and network access.
 
 One job is active per server at a time. The browser polls its status while work continues in the background. Closing the tab does not interrupt that job; reopening the local address reconnects to the running server. Pressing Ctrl+C shuts down the server and any active offline worker. While a live action owns the terminal for provider prompts, the first Ctrl+C cancels that action and returns control to the server; press Ctrl+C again to stop the server. Saved case files remain the source for later sessions. Incomplete live Miro operations use the same recovery and mapping rules as CLI operations; review the next preview before retrying an interrupted sync.
 
@@ -121,7 +118,7 @@ liquid-web-build
 devenv test
 ```
 
-`devenv test` includes the Astro check/build, Python backend and terminal tests, pinned toolchain checks, real synthetic ELK layout calculations, and a genuine synthetic Mermaid render. The suite uses no real API credentials or investigation data. `liquid-test` runs just the Python suite when frontend files have not changed.
+`devenv test` includes the Astro check/build, Python backend and terminal tests, pinned toolchain checks, real synthetic ELK layout calculations, and a genuine synthetic Mermaid render. The suite uses no real API credentials or investigation data. Regression fixtures live under `tests/data/`. The generic fixture adapter remains available for tests and previously saved synthetic evidence; it is not a source option when creating an investigation in either interface. `liquid-test` runs just the Python suite when frontend files have not changed.
 
 ## Reproduce the Miro sync benchmark
 
@@ -268,11 +265,9 @@ For direct sync commands, board selection follows **explicit `--board` → saved
 
 `--run` defaults to `latest` for sync. Use `--run RUN_ID` for sync or export, or `--resume RUN_ID` for tracing, to select a particular historical snapshot. `export --case cases/theft-liquid --run latest --out NEW_DIRECTORY` also accepts the pointer. Existing cases without a latest pointer need an explicit run ID; the program does not guess.
 
-The demo helpers remain useful for scripts. `liquid-demo` starts an independent root each time. After syncing it, resume with `--case "$LIQUID_DEMO_CASE_DIR" --fixture "$LIQUID_TRACER_ROOT/examples/demo-api.json" --resume latest --additional-hops 1` to extend its lineage. An independent new root cannot replace an already published lineage. The interactive interface offers continuation for a selected demo investigation automatically.
-
 ## Optional environment overrides
 
-The normal setup needs no `devenv.local.nix`. The single committed environment supplies the investigation root, demo helper path, and SecretSpec provider/profile. Personal board IDs belong to case settings, and credentials belong to Proton Pass.
+The normal setup needs no `devenv.local.nix`. The single committed environment supplies the investigation root and SecretSpec provider/profile. Personal board IDs belong to case settings, and credentials belong to Proton Pass.
 
 For advanced machine-specific settings, an ignored `devenv.local.nix` can override the main environment; it contributes to the same environment rather than creating another one. For example, to keep investigations outside the source directory:
 

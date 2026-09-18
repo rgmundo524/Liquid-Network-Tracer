@@ -76,39 +76,6 @@ select.input {
 .field-row .field {
   margin: 0;
 }
-.source-options {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-  margin-bottom: 20px;
-}
-.source-option {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  border: 1px solid #dee6e8;
-  border-radius: 9px;
-  padding: 15px;
-  cursor: pointer;
-}
-.source-option:has(input:checked) {
-  background: #f0f8f5;
-  border-color: #84b9ab;
-}
-.source-option strong {
-  font-size: 12px;
-  display: block;
-}
-.source-option small {
-  display: block;
-  color: #81928f;
-  font-size: 10px;
-  margin-top: 3px;
-}
-.source-option input {
-  accent-color: var(--teal);
-  margin: 3px 0 0;
-}
 .check-line {
   display: flex;
   gap: 10px;
@@ -992,19 +959,6 @@ dialog::backdrop {
   }
   .downloads {
     grid-template-columns: 1fr;
-  }
-  .source-options {
-    gap: 9px;
-  }
-  .source-option {
-    padding: 12px;
-    gap: 8px;
-  }
-  .source-option strong {
-    font-size: 11px;
-  }
-  .source-option small {
-    font-size: 9px;
   }
   .form-actions {
     align-items: flex-start;
