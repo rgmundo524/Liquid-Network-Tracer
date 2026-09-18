@@ -877,8 +877,9 @@ class Handler(BaseHTTPRequestHandler):
                 raise RequestError("Route not found", 404)
             parts = unquote(parsed.path).strip("/").split("/")
             if mutation:
-                # Only the attribution upload route accepts a larger, still bounded text body.
-                is_import = len(parts) == 4 and parts[:2] == ["api", "cases"] and parts[3] == "address-import"
+                # Only the two reviewed import routes accept larger, bounded text bodies.
+                is_import = (len(parts) == 4 and parts[:2] == ["api", "cases"]
+                             and parts[3] in ("address-import", "name-color-import"))
                 body = self.body(4 * 1024 * 1024 if is_import else MAX_BODY)
                 with self.server.job_lock:
                     if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "cancel":
@@ -968,6 +969,17 @@ class Handler(BaseHTTPRequestHandler):
                         offset=body.get("offset", 0), limit=body.get("limit", 100)), 200
                 except TraceError as error:
                     raise RequestError(str(error)) from None
+            if parts[3] == "name-color-import":
+                from .name_color_import import apply_import, preview_import
+                if set(body) - {"text", "format", "policy", "approve_plan"}:
+                    raise RequestError("Color import accepts uploaded text, format, policy and approval only; not file paths.")
+                options = {"format": body.get("format", "auto"), "policy": body.get("policy", "keep")}
+                try:
+                    result = (apply_import(case, body.get("text"), approval_sha256=body["approve_plan"], **options)
+                              if "approve_plan" in body else preview_import(case, body.get("text"), **options))
+                except TraceError as error:
+                    raise RequestError(str(error)) from None
+                return result, 200
             if parts[3] == "address-import":
                 from .address_import import apply_import, preview_import
                 if set(body) - {"text", "format", "policy", "approve_plan"}:

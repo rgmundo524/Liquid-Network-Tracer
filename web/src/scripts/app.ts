@@ -1,4 +1,4 @@
-import {nameColorsPanel, nameColorsInput, nameColorsAction, resetNameColors} from "./name-colors";
+import {nameColorsPanel, nameColorsInput, nameColorsAction, nameColorsFile, resetNameColors} from "./name-colors";
 import { addressImportPanel, addressImportInput, addressImportFile, addressImportAction, resetAddressImport } from "./address-import";
 export {};
 
@@ -1330,6 +1330,10 @@ app.addEventListener("click", (event) => {
 
 app.addEventListener("change", (event) => {
   const element = event.target as HTMLInputElement | HTMLSelectElement;
+  if (element.id === "name-color-import-file") {
+    void nameColorsFile(element as HTMLInputElement, render, isBusy()).catch(handleError);
+    return;
+  }
   if (element.id === "attribution-file") {
     void addressImportFile(element as HTMLInputElement, render).catch(handleError);
     return;

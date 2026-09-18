@@ -199,6 +199,8 @@ liquid-trace service-set --case cases/theft-liquid --address ADDRESS --disable
 
 After importing attributions, choose **Assign name colors** in the browser or terminal import screen. Each unique name appears once, case-insensitively. Choose and save a color; later imports with the same name inherit it. Confidence does not choose a color. **Selected seed outputs always take red priority**, including shared-address nodes and named or unspent seeds. Source, notes, stop indicators and unspent labels remain available. Use **Sync to Miro** or regenerate previews to apply the display changes without retracing. See [name colors and seed priority](docs/name-colors.md).
 
+For bulk assignments, choose **Import name colors** inside that editor. Upload or paste a `Name,Color` CSV (or JSON array), preview the proposed changes, and apply the reviewed import. Names and headers match case-insensitively; colors use `#RRGGBB`. Existing colors are kept unless you choose replacement. Import address attributions first so the name groups exist. See the [CSV template](examples/name-colors-template.csv) and [bulk color import instructions](docs/name-colors.md#import-name-group-colors).
+
 ### Bulk address attributions before the first run
 
 Create or open an investigation, then use **Import attributions** in the browser
