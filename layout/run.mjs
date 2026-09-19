@@ -83,6 +83,18 @@ function validateInputOrder(graph, orders) {
   }
 }
 
+function layoutCandidate(result, seed, branchProfile, inputOrderPolicy) {
+  // Snapshot data-only geometry before a second layout can mutate its request.
+  // Sections contain nested points, so copying only their array is insufficient.
+  return {
+    seed, branchProfile, inputOrderPolicy,
+    nodes: result.children.map(({id, x, y, width, height, ports}) =>
+      ({id, x, y, width, height, ports: (ports || []).map(({id, x, y}) => ({id, x, y}))})),
+    edges: result.edges.map(({id, sections, labels}) => ({id, sections: structuredClone(sections),
+      labels: (labels || []).map(({id, x, y, width, height}) => ({id, x, y, width, height}))})),
+  };
+}
+
 try {
   let request;
   {
@@ -102,16 +114,16 @@ try {
   delete request.graph.branchOrganization;
   const elk = new ELK();
   const candidates = [];
-  for (const seed of request.seeds) {
+  for (const [seedIndex, seed] of request.seeds.entries()) {
     // Large graphs use one seed. Reuse that graph instead of retaining a
     // second complete copy throughout ELK's calculation.
     let graph = request.seeds.length === 1 ? request.graph : structuredClone(request.graph);
     if (request.seeds.length === 1) request.graph = null;
     graph.layoutOptions['elk.randomSeed'] = String(seed);
-    // Keep the same bounded candidate count: compare the existing placer with
+    // Keep the same bounded layout calls: compare the existing placer with
     // two flow-weighted alternatives on small graphs. Large graphs use one
     // weighted pass, keeping memory bounded to one ELK graph at a time.
-    const branchProfile = organizeBranches && (request.seeds.length === 1 || candidates.length > 0)
+    const branchProfile = organizeBranches && (request.seeds.length === 1 || seedIndex > 0)
       ? 'flow_weighted' : 'balanced';
     if (organizeBranches) {
       graph.layoutOptions['elk.layered.nodePlacement.strategy'] = branchProfile === 'flow_weighted'
@@ -129,21 +141,22 @@ try {
     }
     let result = await elk.layout(graph);
     graph = null;
+    const firstCandidate = layoutCandidate(result, seed, branchProfile, 'geometry');
     const constraints = constrainInputOrder(result, orders);
     if (constraints) {
+      // Compare ELK's crossing-aware port order with the historical traced-first
+      // order. This retains the already calculated result, without another run.
+      candidates.push(firstCandidate);
       // Reuse the first result as the second request rather than cloning a
       // large graph. Fixed indices override the first pass's port positions.
       result = await elk.layout(result);
       validateInputOrder(result, constraints);
+      candidates.push(layoutCandidate(result, seed, branchProfile, 'traced_first'));
+    } else {
+      // Identical policies need only one candidate; retain the preferred order.
+      firstCandidate.inputOrderPolicy = 'traced_first';
+      candidates.push(firstCandidate);
     }
-    // Only coordinates, ports, routes, and label boxes cross the boundary.
-    candidates.push({
-      seed, branchProfile,
-      nodes: result.children.map(({id, x, y, width, height, ports}) =>
-        ({id, x, y, width, height, ports: (ports || []).map(({id, x, y}) => ({id, x, y}))})),
-      edges: result.edges.map(({id, sections, labels}) => ({id, sections,
-        labels: (labels || []).map(({id, x, y, width, height}) => ({id, x, y, width, height}))})),
-    });
   }
   process.stdout.write(JSON.stringify({version: '0.12.0', candidates}));
 } catch (error) {

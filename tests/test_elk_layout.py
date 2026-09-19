@@ -111,6 +111,33 @@ class LayoutGeometryTests(unittest.TestCase):
         self.assertEqual(metrics["crossings"], 1)
         self.assertEqual(metrics["node_intersections"], 0)
 
+    def test_overlapping_connectors_are_counted_separately_from_crossings(self):
+        graph = crossing_graph()
+        graph["nodes"][1].update(x=100, y=100)
+        graph["nodes"][2].update(x=460, y=100)
+        metrics = layout_metrics(graph)
+        self.assertEqual(metrics["crossings"], 0)
+        self.assertEqual(metrics["connector_overlaps"], 1)
+        graph["edges"][1]["target"] = graph["edges"][1]["source"]
+        # An endpoint-only touch is not a shared line segment.
+        graph["edges"][1]["attachment"] = {
+            "startItem": {"position": {"x": "100%", "y": "50%"}},
+            "endItem": {"position": {"x": "100%", "y": "50%"}}}
+        self.assertEqual(layout_metrics(graph)["connector_overlaps"], 0)
+
+    def test_board_elbow_estimate_detects_line_through_unrelated_transaction(self):
+        graph = crossing_graph()
+        graph["edges"] = [graph["edges"][0]]
+        graph["nodes"][1].update(x=280, y=200, width=50, height=50)
+        graph["nodes"] = graph["nodes"][:3]
+        graph["edges"][0].update(connector_shape="elbowed", route=[
+            point(140, 100), point(180, 100), point(180, 300), point(420, 300)])
+        self.assertEqual(layout_metrics(graph)["node_intersections"], 0)
+        estimated = layout_metrics(graph, midpoint_elbows=True)
+        self.assertEqual(estimated["node_intersections"], 1)
+        self.assertEqual(estimated["method"], "midpoint_elbow_estimate")
+        self.assertTrue(estimated["estimated"])
+
     def test_node_intersections_respect_circle_diamond_and_rectangle_boundaries(self):
         node = {"id": "n", "x": 0, "y": 0, "width": 20, "height": 20}
         for kind in ("address", "event", "transaction"):

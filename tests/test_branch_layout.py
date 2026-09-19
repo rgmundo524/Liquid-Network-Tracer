@@ -152,9 +152,12 @@ class BranchEngineTests(unittest.TestCase):
         graph = build_graph(input_order_state(4, continuing=(3,)))
         request, _, _ = _request_graph(graph)
         candidates = _worker(request, [1, 7, 19])
-        self.assertEqual([candidate["branchProfile"] for candidate in candidates],
-                         ["balanced", "flow_weighted", "flow_weighted"])
-        self.assertEqual(len(candidates), 3)
+        for seed, profile in ((1, "balanced"), (7, "flow_weighted"), (19, "flow_weighted")):
+            alternatives = [candidate for candidate in candidates if candidate["seed"] == seed]
+            self.assertIn(len(alternatives), (1, 2))
+            self.assertTrue(all(candidate["branchProfile"] == profile for candidate in alternatives))
+            policies = [candidate["inputOrderPolicy"] for candidate in alternatives]
+            self.assertIn(policies, (["traced_first"], ["geometry", "traced_first"]))
         self.assertEqual(_worker(request, [1])[0]["branchProfile"], "flow_weighted")
 
     def test_flow_layout_reduces_travel_on_shared_address_cycle(self):
@@ -224,7 +227,14 @@ class BranchEngineTests(unittest.TestCase):
                 self.assertGreaterEqual(float(edge["attachment"]["endItem"]["position"]["x"].rstrip("%")), 50)
         for order in input_orders(optimized).values():
             positions = west_positions(optimized, order)
-            self.assertEqual(positions, sorted(positions))
+            if optimized["layout"]["input_order"]["policy"] == "traced_first":
+                self.assertEqual(positions, sorted(positions))
+            else:
+                edges = {edge["id"]: edge for edge in optimized["edges"]}
+                nodes = {node["id"]: node for node in optimized["nodes"]}
+                physical_order = sorted(order, key=lambda key: attachment_point(
+                    nodes[edges[key]["source"]], edges[key]["attachment"]["startItem"])["y"])
+                self.assertEqual(west_positions(optimized, physical_order), sorted(positions))
             self.assertEqual(len(positions), len(set(positions)))
         self.assertTrue(optimized["layout"]["change_outputs"]["applied"])
 

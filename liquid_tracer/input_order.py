@@ -7,7 +7,7 @@ ownership attribution, or the order of the transaction's evidence records.
 from collections import defaultdict
 
 
-INPUT_ORDER_VERSION = 2
+INPUT_ORDER_VERSION = 3
 
 
 def _vin_index(edge):
@@ -49,8 +49,9 @@ def input_orders(graph):
     return result
 
 
-def input_order_metadata(graph):
-    return {"version": INPUT_ORDER_VERSION, "rule": "displayed_child_outputs_first",
+def input_order_metadata(graph, policy="traced_first"):
+    return {"version": INPUT_ORDER_VERSION, "rule": "displayed_child_outputs_preferred",
+            "policy": policy, "crossing_avoidance_first": True,
             "transaction_count": len(input_orders(graph))}
 
 
@@ -66,21 +67,31 @@ def centered_input_positions(graph, aligned):
     for edge in graph["edges"]:
         if nodes[edge["target"]]["kind"] == "transaction":
             incoming[edge["target"]].append(edge)
-    orders = input_orders(graph)
+    geometry = graph.get("layout", {}).get("input_order", {}).get("policy") == "geometry"
+    semantic = input_orders(graph)
+    input_ranks = {key: {edge: i for i, edge in enumerate(order)} for key, order in semantic.items()}
+    orders = {} if geometry else semantic
     result = {}
     for key, edges in incoming.items():
         if not any(edge["id"] in aligned for edge in edges):
             continue
-        # Mixed continuation/context nodes retain their explicit priority.
-        # Otherwise keep ELK's top-to-bottom order, with a stable fallback for
-        # layouts that have not supplied percentage ports.
+        # Re-evaluate physical source rows after change alignment for the
+        # geometry alternative. The traced-first alternative retains the
+        # semantic order; candidate scoring decides whether it is safe.
         def current_position(edge):
+            if geometry:
+                source = nodes[edge["source"]]
+                position = edge.get("attachment", {}).get("startItem", {}).get("position", {})
+                fraction = float(str(position.get("y", "50%")).removesuffix("%")) / 100
+                y = source["y"] if edge["id"] in aligned else source["y"] + (fraction - .5) * source["height"]
+                preferred = input_ranks.get(key, {}).get(edge["id"], float("inf"))
+                return y, preferred, _vin_index(edge), edge["id"]
             position = edge.get("attachment", {}).get("endItem", {}).get("position", {})
             try:
                 y = float(str(position.get("y", "50%")).removesuffix("%"))
             except ValueError:
                 y = 50.0
-            return y, _vin_index(edge), edge["id"]
+            return y, 0, _vin_index(edge), edge["id"]
 
         order = orders.get(key) or [edge["id"] for edge in sorted(edges, key=current_position)]
         centers = [i for i, key in enumerate(order) if key in aligned]

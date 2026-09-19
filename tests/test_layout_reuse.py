@@ -115,7 +115,7 @@ class ReuseTests(unittest.TestCase):
 
     def test_pre_input_order_layout_previews_are_not_reused(self):
         original_report = read_json(self.path / 'layout-report.json')
-        for value in (None, {'version': 0}):
+        for value in (None, {'version': 0}, {'version': 2}):
             saved = copy.deepcopy(self.saved)
             if value is None:
                 saved['layout'].pop('input_order', None)

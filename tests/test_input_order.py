@@ -119,11 +119,14 @@ class InputOrderSemanticsTests(unittest.TestCase):
             child: [ports[child_input(index)][1] for index in (2, 0, 1)]})
         self.assertEqual(graph, original)
 
-    def test_fallback_preserves_input_priority_and_original_vin_labels(self):
+    def test_fallback_prefers_physical_order_and_preserves_original_vin_labels(self):
         graph = build_graph(input_order_state())
         expected = input_orders(graph)["tx:" + txid("input-order-child")]
         result = fallback_graph(graph)
-        values = west_positions(result, expected)
+        nodes = {node["id"]: node for node in graph["nodes"]}
+        edges = {edge["id"]: edge for edge in graph["edges"]}
+        physical = sorted(expected, key=lambda key: nodes[edges[key]["source"]]["y"])
+        values = west_positions(result, physical)
         self.assertEqual(values, sorted(values))
         self.assertEqual(len(values), len(set(values)))
         self.assertEqual({edge["id"]: edge["label"] for edge in result["edges"]},
@@ -134,7 +137,11 @@ class InputOrderSemanticsTests(unittest.TestCase):
 class RealInputOrderTests(unittest.TestCase):
     def assert_order(self, graph, expected):
         positions = west_positions(graph, expected)
-        self.assertEqual(positions, sorted(positions))
+        if graph["layout"]["input_order"]["policy"] == "traced_first":
+            self.assertEqual(positions, sorted(positions))
+        else:
+            self.assertEqual(graph["layout"]["input_order"]["policy"], "geometry")
+            self.assertTrue(graph["layout"]["input_order"]["crossing_avoidance_first"])
         self.assertEqual(len(positions), len(set(positions)))
         self.assertEqual(graph["layout"]["input_order"]["version"], INPUT_ORDER_VERSION)
         edges = {edge["id"]: edge for edge in graph["edges"]}
