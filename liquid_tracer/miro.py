@@ -368,6 +368,7 @@ def _load_sync_state(path, board_id, namespace, *, allow_pending=False):
         raise TraceError(f"Prior Miro POST outcome is uncertain for {len(unresolved)} item(s): " + examples +
                          "; inspect the board before retrying. For an initial publication on a confirmed empty board, "
                          "use Recover empty-board sync or liquid-live miro-recover --case CASE_DIRECTORY --confirm-empty. "
+                         "For an interrupted frame, use Recover interrupted frame or liquid-live miro-frame-review --case CASE_DIRECTORY. "
                          "If objects exist, keep the state and use miro-resolve --key for each inspected item.")
     return state
 
@@ -1218,6 +1219,8 @@ def _create_items(plan, state, journal, requests, base, headers, positions, mapp
             raise TraceError(creation_error(status, job["endpoint"], len(job["items"]),
                                             response_headers, raw, request_headers=headers) +
                              ("; fix the error and rerun sync" if rejected
+                              else "; use Recover interrupted frame or miro-frame-review before retrying; acknowledged graph items are saved"
+                              if job["endpoint"] == "frames"
                               else "; reconcile the pending items before retrying"))
         batch = job["items"]
         detaches = {}

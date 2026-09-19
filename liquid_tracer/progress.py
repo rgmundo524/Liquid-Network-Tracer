@@ -23,6 +23,7 @@ MESSAGES = {
     "removing": "Removing obsolete generated items",
     "framing": "Updating graph export frames",
     "recovery": "Checking the confirmed-empty Miro board",
+    "frame_recovery": "Checking frames for the interrupted Miro sync",
     "creating": "Adding new Miro items",
     "waiting": "Waiting before retrying a Miro request",
     "complete": "Miro synchronization completed",

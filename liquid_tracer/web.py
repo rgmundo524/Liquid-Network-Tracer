@@ -32,6 +32,8 @@ from .progress import public_progress
 MAX_BODY = 64 * 1024
 CASE_ID = re.compile(r"[0-9a-f]{32}")
 RUN_ID = re.compile(r"[a-zA-Z0-9]{16}")
+FRAME_REVIEW_ID = re.compile(r"[0-9a-f]{64}")
+MIRO_ITEM_ID = re.compile(r"[a-zA-Z0-9_][a-zA-Z0-9_-]{0,199}")
 ARTIFACT_DIR = re.compile(r"[a-zA-Z0-9]{16}-(?:csv|mermaid|elk|compact|connections)-[0-9a-f]{8}")
 COMPACTION_DIR = re.compile(r"[a-zA-Z0-9]{16}-compact-[0-9a-f]{8}")
 LEGACY_EXPORT_NAMES = {"nodes.csv", "edges.csv", "inputs.csv", "outputs.csv", "spends.csv",
@@ -103,6 +105,59 @@ def public_rendering_metadata(result):
     if result.get("fallback_reason") in FALLBACK_REASONS:
         value["fallback_reason"] = result["fallback_reason"]
     return value
+
+
+def public_frame_recovery(result, *, review):
+    """A reviewed frame exposes geometry and candidate IDs, never journal data."""
+    error = "Miro frame recovery returned an invalid report. Review the interrupted frame again."
+    run_id = result.get("run_id")
+    if not isinstance(run_id, str) or not RUN_ID.fullmatch(run_id):
+        raise TraceError(error)
+    if not review:
+        if (result.get("recovery") not in ("adopted_frame", "confirmed_absent_frame")
+                or type(result.get("resolved_count")) is not int or result["resolved_count"] != 1
+                or type(result.get("remaining_pending")) is not int or result["remaining_pending"] != 0):
+            raise TraceError(error)
+        return {"recovery": result["recovery"], "run_id": run_id,
+                "resolved_count": 1, "remaining_pending": 0}
+
+    review_id = result.get("review_id")
+    potential = result.get("potential_match_count")
+    if (type(result.get("schema_version")) is not int or result["schema_version"] != 1
+            or result.get("recovery") != "pending_frame_review"
+            or not isinstance(review_id, str) or not FRAME_REVIEW_ID.fullmatch(review_id)
+            or type(potential) is not int or not 0 <= potential <= 2 ** 53 - 1
+            or type(result.get("can_confirm_absent")) is not bool
+            or not isinstance(result.get("candidates"), list)):
+        raise TraceError(error)
+
+    def frame(value, *, candidate=False):
+        if (not isinstance(value, dict) or not isinstance(value.get("title"), str)
+                or not 1 <= len(value["title"]) <= 6000):
+            raise TraceError(error)
+        clean = {"title": value["title"]}
+        for key in ("x", "y", "width", "height"):
+            number = value.get(key)
+            if (type(number) not in (int, float)
+                    or not -sys.float_info.max <= number <= sys.float_info.max
+                    or (key in ("width", "height") and number <= 0)):
+                raise TraceError(error)
+            clean[key] = number
+        if candidate:
+            identity = value.get("id")
+            if not isinstance(identity, str) or not MIRO_ITEM_ID.fullmatch(identity):
+                raise TraceError(error)
+            clean["id"] = identity
+        return clean
+
+    pending = frame(result.get("pending_frame"))
+    candidates = [frame(item, candidate=True) for item in result["candidates"]]
+    if (len({item["id"] for item in candidates}) != len(candidates)
+            or (result["can_confirm_absent"] and (candidates or potential))):
+        raise TraceError(error)
+    return {"schema_version": 1, "recovery": "pending_frame_review", "review_id": review_id,
+            "run_id": run_id, "pending_frame": pending, "candidates": candidates,
+            "potential_match_count": potential, "can_confirm_absent": result["can_confirm_absent"]}
 
 
 def public_layout_metrics(metrics):
@@ -529,7 +584,9 @@ class LocalServer(ThreadingHTTPServer):
                 value = self.public_result(report["result"], action, case, txids)
             with self.job_lock:
                 self.jobs[identity].update(status="succeeded", cancellable=False,
-                    message=("Recovery complete. Choose Sync to Miro to resume." if action == "miro-recover"
+                    message=("Frame recovery complete. Choose Sync to Miro to resume." if action == "miro-frame-recover"
+                             else "Frame review ready. Inspect the linked board before choosing a recovery." if action == "miro-frame-review"
+                             else "Recovery complete. Choose Sync to Miro to resume." if action == "miro-recover"
                              else "Action completed."), result=value)
         except JobCancelled:
             with self.job_lock:
@@ -564,6 +621,16 @@ class LocalServer(ThreadingHTTPServer):
             pass
 
     def public_result(self, result, action, case, txids):
+        if action in ("miro-frame-review", "miro-frame-recover"):
+            from .cli import board_id
+
+            value = public_frame_recovery(result, review=action == "miro-frame-review")
+            # The linked board belongs to this case; worker output cannot add a
+            # browser navigation target or expose a private API URL.
+            board = read_case(case).get("miro_board")
+            if board:
+                value["board_url"] = "https://miro.com/app/board/" + quote(board_id(board), safe="") + "/"
+            return value
         if action == "change-output-lookup":
             from .change_outputs import MAX_VOUT, NOTICE
 
@@ -685,6 +752,30 @@ class LocalServer(ThreadingHTTPServer):
         from .cli import miro_recovery_status, resolve_latest, run_path, verify_export
 
         action = body.get("action")
+        if action in ("miro-frame-review", "miro-frame-recover"):
+            if action == "miro-frame-review":
+                if set(body) != {"action"}:
+                    raise RequestError("Frame review uses the linked board and interrupted run only.")
+                arguments = ["miro-frame-review", "--case", str(case)]
+            else:
+                review_id = body.get("review_id")
+                if not isinstance(review_id, str) or not FRAME_REVIEW_ID.fullmatch(review_id):
+                    raise RequestError("Review the interrupted frame before choosing a recovery.")
+                arguments = ["miro-frame-recover", "--case", str(case), "--review-id", review_id]
+                if set(body) == {"action", "review_id", "item_id"}:
+                    identity = body["item_id"]
+                    if not isinstance(identity, str) or not MIRO_ITEM_ID.fullmatch(identity):
+                        raise RequestError("Choose an existing frame from the current review.")
+                    arguments.extend(["--item-id", identity])
+                elif set(body) == {"action", "review_id", "confirm_absent"} and body["confirm_absent"] is True:
+                    arguments.append("--confirm-absent")
+                else:
+                    raise RequestError("Choose one reviewed frame or explicitly confirm that it is absent.")
+            if not metadata.get("miro_board"):
+                raise RequestError("Create or link a Miro board in investigation settings first.")
+            if not miro_recovery_status(case).get("can_recover_frame"):
+                raise RequestError("Frame recovery is unavailable. Review the pending Miro items before retrying.")
+            return self.start_job(arguments, action=action, live=True, case=case)
         if action == "change-output-lookup":
             from .change_outputs import lookup_requires_network
 

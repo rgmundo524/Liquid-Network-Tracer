@@ -3,6 +3,7 @@ import {readFileSync} from 'node:fs';
 import {stripTypeScriptTypes} from 'node:module';
 import {test} from 'node:test';
 import vm from 'node:vm';
+import * as frameRecovery from '../src/scripts/frame-recovery.ts';
 
 // Execute the real application handlers with a small DOM and offline HTTP stub.
 // The attribution panels are unrelated to new-investigation and lookup behavior.
@@ -19,15 +20,18 @@ const defaults = {hops: 1, max_transactions: 20, max_outpoints: 100, max_request
   max_seconds: 60, max_new_items: 750, connector_style: 'straight'};
 
 async function harness(respond = () => undefined) {
-  const calls = [], listeners = {}, notifications = [];
+  frameRecovery.resetFrameRecovery();
+  const calls = [], listeners = {}, dialogListeners = {}, notifications = [];
   let currentForm = null;
   const app = {innerHTML: '', addEventListener(name, callback) {listeners[name] = callback;}};
-  const dialog = {innerHTML: '', addEventListener() {}, close() {}, showModal() {}};
+  const dialog = {innerHTML: '', open: false, addEventListener(name, callback) {dialogListeners[name] = callback;},
+    close() {if (this.open) {this.open = false; dialogListeners.close?.();}}, showModal() {this.open = true;}, querySelector() {return null;}};
   const context = vm.createContext({
-    Error, URL, console,
+    Error, URL, console, ...frameRecovery,
     resetNameColors() {}, resetAddressImport() {}, resetChangeOutputs() {},
     changeOutputsPending() {return false;}, changeOutputsPanel() {return "";},
     changeOutputsAction() {return false;}, changeOutputsLookupComplete() {return false;},
+    nameColorsAction() {return false;}, addressImportAction() {return false;},
     document: {
       querySelector(selector) {
         if (selector === '#app') return app;
@@ -60,6 +64,10 @@ async function harness(respond = () => undefined) {
   await context.startup;
   return {
     ...context.appTest, app, dialog, calls, notifications,
+    async submitDialog(values = {}) {
+      dialogListeners.submit({target: {values, reportValidity: () => true}, preventDefault() {}});
+      await new Promise(setImmediate);
+    },
     async submit(values) {
       currentForm = {id: 'new-case-form', values: {...defaults, ...values}, reportValidity: () => true};
       listeners.submit({target: currentForm, preventDefault() {}});
@@ -179,4 +187,80 @@ test('recovered change-output lookup cannot overwrite the new-investigation star
   assert.equal(view.state.draft.seeds, `${txid}:0`);
   assert.equal(view.state.draft.reports.length, 0);
   assert.match(view.notifications.at(-1), /Open Change outputs and load the transaction again/);
+});
+
+const pendingFrame = {title: 'Activity one', x: 10, y: 20, width: 500, height: 400};
+const frameReview = extra => ({schema_version: 1, recovery: 'pending_frame_review', review_id: 'a'.repeat(64),
+  run_id: 'interrupted', pending_frame: pendingFrame, candidates: [{...pendingFrame, id: 'frame-1'}],
+  potential_match_count: 0, can_confirm_absent: false, ...extra});
+
+async function recoveryHarness(review = frameReview(), failure = null) {
+  let recovered = false;
+  const detail = () => ({id: 'case1', name: 'My investigation', miro_board: 'board1', run_defaults: defaults,
+    runs: [{id: 'interrupted'}, {id: 'latest-run'}], latest_run: 'latest-run',
+    miro_recovery: {pending_count: recovered ? 0 : 1, can_confirm_empty: false, can_recover_frame: !recovered}});
+  const view = await harness((path, body) => {
+    if (path === '/api/cases/case1/actions') return {id: body.action === 'miro-frame-review' ? 'review1' : 'recover1', status: 'running', live: true};
+    if (path === '/api/jobs/review1') return {status: 'succeeded', result: review};
+    if (path === '/api/jobs/recover1') {
+      if (failure) return {status: 'failed', message: failure};
+      recovered = true;
+      return {status: 'succeeded', result: {recovery: review.candidates.length ? 'adopted_frame' : 'confirmed_absent_frame',
+        run_id: 'interrupted', resolved_count: 1, remaining_pending: 0}};
+    }
+    if (path === '/api/cases/case1') return detail();
+  });
+  view.state.activeCase = detail();
+  view.state.page = 'case';
+  return view;
+}
+
+test('interrupted frame browser flow reviews first, explicitly adopts, and selects the interrupted run without syncing', async () => {
+  const view = await recoveryHarness();
+  assert.match(view.workspace(), /Recover interrupted frame/);
+  await view.dispatch('miro-frame-review');
+  assert.deepEqual(view.calls.find(call => call.path.endsWith('/actions')).body, {action: 'miro-frame-review'});
+  assert.equal(view.state.job.live, true);
+  await view.pollJob();
+  assert.equal(view.dialog.open, true);
+  assert.doesNotMatch(view.dialog.innerHTML, /<input[^>]* checked/);
+  await view.submitDialog({frame_item_id: 'frame-1'});
+  assert.deepEqual(view.calls.filter(call => call.path.endsWith('/actions')).at(-1).body,
+    {action: 'miro-frame-recover', review_id: 'a'.repeat(64), item_id: 'frame-1'});
+  await view.pollJob();
+  assert.equal(view.state.selectedRun, 'interrupted');
+  assert.equal(view.state.activeCase.miro_recovery.pending_count, 0);
+  assert.match(view.workspace(), /Choose Sync to Miro to resume using the saved graph objects/);
+  assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 2);
+});
+
+test('absence confirmation sends no run/settings and a failed recheck requires a fresh review', async () => {
+  const view = await recoveryHarness(frameReview({candidates: [], can_confirm_absent: true}), 'Board changed. Review the frame again.');
+  await view.dispatch('miro-frame-review');
+  await view.pollJob();
+  assert.match(view.dialog.innerHTML, /expected frame is absent/);
+  await view.submitDialog({confirm_frame_absent: 'on'});
+  assert.deepEqual(view.calls.filter(call => call.path.endsWith('/actions')).at(-1).body,
+    {action: 'miro-frame-recover', review_id: 'a'.repeat(64), confirm_absent: true});
+  await view.pollJob();
+  assert.match(view.state.error, /Board changed/);
+  assert.equal(view.state.activeCase.miro_recovery.pending_count, 1);
+  await view.submitDialog({confirm_frame_absent: 'on'});
+  assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 2);
+  assert.match(view.state.error, /Review the interrupted frame again/);
+});
+
+test('canceling or navigating away invalidates the frame review and ignores its late job', async () => {
+  const view = await recoveryHarness();
+  await view.dispatch('miro-frame-review');
+  await view.pollJob();
+  view.dialog.close();
+  await view.submitDialog({frame_item_id: 'frame-1'});
+  assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 1);
+  await view.dispatch('miro-frame-review');
+  await view.dispatch('dashboard');
+  await view.pollJob();
+  assert.equal(view.dialog.open, false);
+  assert.match(view.notifications.at(-1), /Choose Recover interrupted frame again/);
+  assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 2);
 });

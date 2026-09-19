@@ -591,6 +591,8 @@ The export-frame implementation had two request regressions. It added `parent: {
 
 A POST timeout or server error can leave its outcome uncertain. The publisher preserves the pending request to avoid duplicates. Subsequent sync and preview attempts check this state **before running ELK**. Keep the saved investigation and its Miro mapping; deleting the mapping would discard duplicate-prevention information.
 
+If the error instead occurs during **Updating graph export frames**, use **Recover interrupted frame** in the browser. It reviews existing frames on the populated board, lets you explicitly adopt a matching frame or confirm that this specific frame is absent, and checks the review again before updating the local mapping. The interrupted snapshot is selected for **Sync to Miro** to resume. Recovery itself makes no board changes. See [frame recovery](docs/miro-frame-recovery.md) for details and the `miro-frame-review` / `miro-frame-recover` terminal commands.
+
 For a failed **initial publication**, when no items have been acknowledged and the linked board is empty:
 
 1. Open the linked Miro board after the failed request has finished and inspect it.

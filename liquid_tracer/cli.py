@@ -259,6 +259,15 @@ def parser():
     recover.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     recover.add_argument("--confirm-empty", action="store_true", required=True,
                          help="You inspected the linked board after the failed sync and confirmed it is empty; verify by API before clearing pending items")
+    frame_review = commands.add_parser("miro-frame-review", help="Review existing frames after an uncertain frame POST; reads Miro only")
+    frame_recover = commands.add_parser("miro-frame-recover", help="Reconcile one reviewed frame locally, then resume with miro-sync")
+    for command in (frame_review, frame_recover):
+        command.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+        command.add_argument("--output", type=Path, help="Write JSON to a new file instead of stdout")
+    frame_recover.add_argument("--review-id", required=True, help="Exact review_id returned by miro-frame-review")
+    choice = frame_recover.add_mutually_exclusive_group(required=True)
+    choice.add_argument("--item-id", help="Existing frame ID explicitly selected from the review")
+    choice.add_argument("--confirm-absent", action="store_true", help="You inspected the linked board after the failure and confirmed this frame is absent")
     return root
 
 
@@ -466,7 +475,7 @@ def miro_recovery_status(case):
     from .miro_recovery import initial_pending_batch
     from .miro_state import load_state
 
-    result = {"pending_count": 0, "can_confirm_empty": False}
+    result = {"pending_count": 0, "can_confirm_empty": False, "can_recover_frame": False}
     try:
         case = Path(case)
         metadata = read_case(case)
@@ -488,9 +497,50 @@ def miro_recovery_status(case):
                 result["can_confirm_empty"] = True
             except TraceError:
                 pass
+            try:
+                from .miro_frame_recovery import pending_frame
+                pending_frame(state)
+                result["can_recover_frame"] = True
+            except TraceError:
+                pass
         return result
     except (TraceError, OSError, ValueError, TypeError, KeyError, AttributeError):
-        return {**result, "can_confirm_empty": False, "unavailable": True}
+        return {**result, "can_confirm_empty": False, "can_recover_frame": False, "unavailable": True}
+
+
+def recover_miro_frame(case, review_id=None, item_id=None, confirmed_absent=False, progress=None):
+    """Use the linked board and interrupted archive, even if a newer run exists."""
+    from .miro_frame_recovery import pending_frame, recover_pending_frame, review_pending_frame
+    from .miro_state import load_state
+
+    if review_id is None and (item_id is not None or confirmed_absent is not False):
+        raise TraceError("Review the interrupted frame before choosing a recovery action")
+    case = Path(case)
+    metadata = read_case(case)
+    if not metadata.get("miro_board"):
+        raise TraceError("This investigation has no linked Miro board to recover")
+    target = board_id(metadata["miro_board"])
+    path = case / "miro" / (digest(target.encode())[:24] + ".json")
+    if not path.is_file():
+        raise TraceError("Miro recovery state does not exist for the linked board")
+    namespace = _namespace(load_state(path))
+    if namespace["case_id"] != metadata["case_id"]:
+        raise TraceError("Miro mapping belongs to another investigation")
+    state = _load_sync_state(path, target, namespace, allow_pending=True)
+    _, entry = pending_frame(state)
+    archive = run_path(case, entry["run_id"])
+    verify_export(archive)
+    plan = read_json(archive / "miro-plan.json")
+    validate_plan(plan)
+    expected = {**_namespace(plan), "address_mode": namespace["address_mode"]}
+    if plan["run_id"] != entry["run_id"] or expected != namespace:
+        raise TraceError("Interrupted Miro run does not match its saved investigation archive")
+    if review_id is None:
+        report = review_pending_frame(path, target, namespace, progress=progress)
+    else:
+        report = recover_pending_frame(path, target, namespace, review_id=review_id,
+                                       item_id=item_id, confirmed_absent=confirmed_absent, progress=progress)
+    return {**report, "board_url": "https://miro.com/app/board/" + quote(target, safe="") + "/"}
 
 
 def recover_miro_run(case, confirmed_empty=False, progress=None):
@@ -975,6 +1025,22 @@ def main(argv=None, *, progress=None):
             print("Pending publication reconciled.")
         elif args.command == "miro-recover":
             print(json.dumps(recover_miro_run(args.case, args.confirm_empty, progress=progress), indent=2))
+        elif args.command in ("miro-frame-review", "miro-frame-recover"):
+            if args.output is not None:
+                if args.output.exists() or args.output.is_symlink():
+                    raise TraceError("Output report already exists; choose a new path")
+                if not args.output.parent.is_dir():
+                    raise TraceError("Output report parent must be an existing directory")
+            options = ({"review_id": args.review_id, "item_id": args.item_id,
+                        "confirmed_absent": args.confirm_absent} if args.command == "miro-frame-recover" else {})
+            result = recover_miro_frame(args.case, progress=progress, **options)
+            if args.output is None:
+                print(json.dumps(result, indent=2))
+            else:
+                with args.output.open("x", encoding="utf-8") as report:
+                    json.dump(result, report, indent=2)
+                    report.write("\n")
+                print("Miro frame recovery report saved.")
         return 0
     except KeyboardInterrupt:
         # Renderer and API cleanup unwinds before reaching this boundary.
