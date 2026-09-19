@@ -18,6 +18,7 @@ from .investigations import read_case, update_case, validate_settings
 from .inspection import inspect_transaction, inspect_transactions, parse_transaction_hashes
 from .miro import _load_sync_state, _namespace, make_plan, publish, resolve, sync, validate_plan
 from .progress import ProgressReporter
+from .layout_search import DEFAULT_LAYOUT_ATTEMPTS, MAX_LAYOUT_ATTEMPTS, normalize_layout_attempts
 from .store import Store
 from .trace import new_state, trace
 from .services import apply_service_labels, disable_service, load_services, set_service
@@ -36,6 +37,9 @@ def fee_arguments(command):
 def connector_arguments(command):
     command.add_argument("--connector-style", choices=("straight", "curved", "elbowed"),
                          help="Connector appearance (default: investigation setting, otherwise straight)")
+    command.add_argument("--layout-attempts", type=int,
+                         help=f"ELK seeds to compare, 1–{MAX_LAYOUT_ATTEMPTS} for any graph size "
+                              f"(default: investigation setting, otherwise {DEFAULT_LAYOUT_ATTEMPTS})")
 
 
 def context_arguments(command):
@@ -435,9 +439,18 @@ def branch_hubs(metadata):
     return validate_settings({"hub_addresses": defaults.get("hub_addresses", [])})["hub_addresses"]
 
 
+def layout_search_attempts(metadata, explicit=None):
+    """Resolve the layout search budget without changing tracing or defaults."""
+    defaults = metadata.get("run_defaults", {})
+    if not isinstance(defaults, dict):
+        raise TraceError("Invalid investigation run defaults; restore case.json")
+    value = explicit if explicit is not None else defaults.get("layout_attempts")
+    return normalize_layout_attempts(value)
+
+
 def refresh_presentation(plan, trace_path, include_fees=False, connector_style="straight", progress=None,
                          service_settings=None, preview_directory=None, fetch_address_counts=False, count_report=None,
-                         group_context_inputs=False, hub_addresses=None):
+                         group_context_inputs=False, hub_addresses=None, layout_attempts=None):
     """Verify historical topology, then create a current shared-address view."""
     namespace = _namespace(plan)
     state = read_json(trace_path)
@@ -487,9 +500,11 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
         if count_report is not None:
             count_report.update(report)
     from .layout_reuse import reusable_elk_preview, report_phase
-    laid_out = reusable_elk_preview(graph, preview_directory, connector_style, progress)
+    laid_out = reusable_elk_preview(graph, preview_directory, connector_style, progress,
+                                    layout_attempts=layout_attempts)
     if laid_out is None:
-        laid_out = optimize_graph(graph, connector_style=connector_style, progress=progress)
+        laid_out = optimize_graph(graph, connector_style=connector_style, progress=progress,
+                                 layout_attempts=layout_attempts)
     report_phase(progress, "building_plan")
     refreshed = make_plan(laid_out)
     validate_plan(refreshed)
@@ -599,12 +614,13 @@ def recover_miro_run(case, confirmed_empty=False, progress=None):
 
 def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_path=None,
              include_fees=None, reorganize=False, progress=None, connector_style=None, compact_preview=None,
-             group_context_inputs=None):
+             group_context_inputs=None, layout_attempts=None):
     if compact_preview is not None and (not reorganize or plan_path is not None):
         raise TraceError("--compact-preview requires --reorganize and cannot be combined with --plan")
     if (plan_path is not None or compact_preview is not None) and (include_fees is not None or connector_style is not None
-                                                               or group_context_inputs is not None):
-        raise TraceError("--plan cannot be combined with fee, connector-style or context-grouping overrides; select an explicit plan with the desired presentation")
+                                                               or group_context_inputs is not None or layout_attempts is not None):
+        option = "--plan" if plan_path is not None else "--compact-preview"
+        raise TraceError(f"{option} cannot be combined with fee, connector-style, context-grouping or layout-attempts overrides; select an explicit plan with the desired presentation")
     run_id = resolve_latest(case, run_id)
     default_plan = run_path(case, run_id) / "miro-plan.json"
     compaction_meta = None
@@ -637,7 +653,8 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
                                     service_settings=load_services(case), preview_directory=Path(case) / "previews",
                                     fetch_address_counts=not dry_run, count_report=count_report,
                                     group_context_inputs=context_input_grouping(metadata, group_context_inputs),
-                                    hub_addresses=branch_hubs(metadata))
+                                    hub_addresses=branch_hubs(metadata),
+                                    layout_attempts=layout_search_attempts(metadata, layout_attempts))
     # Validate the mapping, lineage, and item budget locally before saving a selection.
     options = {"reorganize": True} if reorganize else {}
     if progress is not None:
@@ -657,6 +674,8 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
               "hub_addresses": plan.get("graph_options", {}).get("hub_addresses", []),
               "reorganize": bool(reorganize),
               "presentation_refreshed": plan["sha256"] != archived_plan_sha256}
+    if "layout_attempts" in plan.get("graph_options", {}):
+        report["layout_attempts"] = plan["graph_options"]["layout_attempts"]
     if count_report:
         report["address_counts"] = count_report
     if compaction_meta is not None:
@@ -819,24 +838,27 @@ def mermaid_run(case, run_id="latest", out=None, include_fees=None, open_browser
 
 
 def layout_preview_run(case, run_id="latest", out=None, include_fees=None,
-                       connector_style=None, open_browser=False, progress=None, group_context_inputs=None):
+                       connector_style=None, open_browser=False, progress=None, group_context_inputs=None,
+                       layout_attempts=None):
     from .elk_layout import optimize_graph
     from .layout_preview import export_layout
 
     case = Path(case)
     run_id, _, graph = saved_graph(case, run_id, include_fees, group_context_inputs=group_context_inputs)
-    style = connector_appearance(read_case(case), connector_style)
+    metadata = read_case(case)
+    style = connector_appearance(metadata, connector_style)
+    attempts = layout_search_attempts(metadata, layout_attempts)
     destination = Path(out) if out is not None else case / "previews" / (run_id + "-elk-" + uuid.uuid4().hex[:8])
     if destination.resolve().is_relative_to((case / "runs").resolve()):
         raise TraceError("Save ELK previews outside runs/ to preserve archived evidence")
     counts = ensure_graph_counts(case, graph, progress=progress)
-    graph = optimize_graph(graph, connector_style=style, progress=progress)
+    graph = optimize_graph(graph, connector_style=style, progress=progress, layout_attempts=attempts)
     result = export_layout(graph, destination)
     result["address_counts"] = counts
     result.update({"run_id": run_id, "include_fees": graph["include_fees"], "connector_style": style,
                    "group_context_inputs": graph.get("graph_options", {}).get("group_context_inputs", False),
                    "hub_addresses": graph.get("graph_options", {}).get("hub_addresses", []),
-                   "layout_algorithm": graph["layout"]["algorithm"],
+                   "layout_algorithm": graph["layout"]["algorithm"], "layout_attempts": attempts,
                    "browser_opened": open_preview(result["html"]) if open_browser else False})
     if graph["layout"].get("fallback_reason") in ("size_limit", "timeout", "mermaid_size_limit", "mermaid_timeout"):
         result["fallback_reason"] = graph["layout"]["fallback_reason"]
@@ -844,7 +866,7 @@ def layout_preview_run(case, run_id="latest", out=None, include_fees=None,
 
 
 def compact_preview_run(case, run_id="latest", include_fees=None, connector_style=None,
-                        open_browser=False, progress=None, group_context_inputs=None):
+                        open_browser=False, progress=None, group_context_inputs=None, layout_attempts=None):
     from .compaction import compact_graph
     from .compaction_preview import export_compaction, service_fingerprint
     from .elk_layout import optimize_graph
@@ -856,9 +878,11 @@ def compact_preview_run(case, run_id="latest", include_fees=None, connector_styl
     services_before = service_fingerprint(case)
     run_id, archive, graph = saved_graph(case, run_id, include_fees, group_context_inputs=group_context_inputs)
     archive_sha256 = digest((archive / "SHA256SUMS").read_bytes())
-    style = connector_appearance(read_case(case), connector_style)
+    metadata = read_case(case)
+    style = connector_appearance(metadata, connector_style)
+    attempts = layout_search_attempts(metadata, layout_attempts)
     counts = ensure_graph_counts(case, graph, progress=progress)
-    before = optimize_graph(graph, connector_style=style, progress=progress)
+    before = optimize_graph(graph, connector_style=style, progress=progress, layout_attempts=attempts)
     after = compact_graph(before, progress=progress)
     if services_before != service_fingerprint(case):
         raise TraceError("Service assessments changed during compaction; create the preview again")
@@ -868,7 +892,7 @@ def compact_preview_run(case, run_id="latest", include_fees=None, connector_styl
     result.update(address_counts=counts, run_id=run_id, include_fees=after["include_fees"], connector_style=style,
                   group_context_inputs=after.get("graph_options", {}).get("group_context_inputs", False),
                   hub_addresses=after.get("graph_options", {}).get("hub_addresses", []),
-                  layout_algorithm=after["layout"]["algorithm"],
+                  layout_algorithm=after["layout"]["algorithm"], layout_attempts=attempts,
                   browser_opened=open_preview(result["html"]) if open_browser else False)
     return result
 
@@ -1038,7 +1062,8 @@ def main(argv=None, *, progress=None):
         elif args.command == "layout-preview":
             print(json.dumps(layout_preview_run(args.case, args.run, args.out, args.include_fees,
                                                 args.connector_style, args.open_browser, progress,
-                                                group_context_inputs=args.group_context_inputs), indent=2))
+                                                group_context_inputs=args.group_context_inputs,
+                                                layout_attempts=args.layout_attempts), indent=2))
         elif args.command == "connections":
             from .connections import preview_connections
             print(json.dumps(preview_connections(args.case, args.run, args.hops,
@@ -1049,7 +1074,8 @@ def main(argv=None, *, progress=None):
         elif args.command == "compact-preview":
             print(json.dumps(compact_preview_run(args.case, args.run, args.include_fees,
                                                  args.connector_style, args.open_browser, progress,
-                                                 group_context_inputs=args.group_context_inputs), indent=2))
+                                                 group_context_inputs=args.group_context_inputs,
+                                                 layout_attempts=args.layout_attempts), indent=2))
         elif args.command == "csv-export":
             print(json.dumps(csv_run(args.case, args.run, args.out, args.include_fees), indent=2))
         elif args.command == "miro-create-board":
@@ -1063,7 +1089,8 @@ def main(argv=None, *, progress=None):
             print(json.dumps(sync_run(args.case, args.run, args.board, args.max_new_items, args.dry_run, args.plan,
                                       args.include_fees, args.reorganize, progress=progress,
                                       connector_style=args.connector_style, compact_preview=args.compact_preview,
-                                      group_context_inputs=args.group_context_inputs), indent=2))
+                                      group_context_inputs=args.group_context_inputs,
+                                      layout_attempts=args.layout_attempts), indent=2))
         elif args.command == "miro-publish":
             print(json.dumps(publish(read_json(args.plan), board_id(args.board_id), args.state, args.max_items), indent=2))
         elif args.command == "miro-resolve":

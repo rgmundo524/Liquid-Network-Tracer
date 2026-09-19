@@ -893,6 +893,8 @@ finally:
             async with app.run_test(size=(110, 55)) as pilot:
                 await self.click(app, pilot, "#settings")
                 app.screen.query_one("#hops", Input).value = "3"
+                self.assertEqual(app.screen.query_one("#layout_attempts", Input).value, "25")
+                app.screen.query_one("#layout_attempts", Input).value = "75"
                 app.screen.query_one("#max_requests", Input).value = "12"
                 self.assertFalse(app.screen.query_one("#include-fees", Checkbox).value)
                 app.screen.query_one("#include-fees", Checkbox).value = True
@@ -905,11 +907,13 @@ finally:
                 await self.click(app, pilot, "#submit")
                 self.assertEqual(load_settings(self.root)["connector_style"], "curved")
                 self.assertEqual(load_settings(self.root)["hops"], 3)
+                self.assertEqual(load_settings(self.root)["layout_attempts"], 75)
                 self.assertIs(load_settings(self.root)["include_fees"], True)
                 self.assertIs(load_settings(self.root)["group_context_inputs"], True)
                 self.assertEqual(load_settings(self.root)["hub_addresses"], [hub_address])
                 case = await self.new_case(app, pilot)
                 self.assertEqual(read_case(case)["run_defaults"]["max_requests"], 12)
+                self.assertEqual(read_case(case)["run_defaults"]["layout_attempts"], 75)
                 self.assertEqual(read_case(case)["run_defaults"]["connector_style"], "curved")
                 self.assertIs(read_case(case)["run_defaults"]["include_fees"], True)
                 self.assertIs(read_case(case)["run_defaults"]["group_context_inputs"], True)
@@ -918,6 +922,8 @@ finally:
                 self.assertIn("Isolated context inputs: grouped", str(app.screen.query_one("#case-summary", Static).render()))
                 await self.click(app, pilot, "#run")
                 self.assertIs(app.screen.read_limits()["group_context_inputs"], True)
+                self.assertEqual(app.screen.read_limits()["layout_attempts"], 75)
+                self.assertFalse(app.screen.query("#layout_attempts"))
                 self.assertEqual(app.screen.read_limits()["hub_addresses"], [hub_address])
                 self.assertFalse(app.screen.query("#hub-addresses"))
                 await self.click(app, pilot, "#cancel")
@@ -933,11 +939,14 @@ finally:
                 app.screen.query_one("#case-name", Input).value = "Renamed investigation"
                 app.screen.query_one("#board", Input).value = "https://miro.com/app/board/UPDATED%3D/"
                 app.screen.query_one("#max_requests", Input).value = "8"
+                app.screen.query_one("#layout_attempts", Input).value = "100"
                 await self.click(app, pilot, "#submit")
                 saved = read_case(case)
                 self.assertEqual(saved["name"], "Renamed investigation")
                 self.assertEqual(saved["miro_board"], "UPDATED=")
                 self.assertEqual(saved["run_defaults"]["max_requests"], 8)
+                self.assertEqual(saved["run_defaults"]["layout_attempts"], 100)
+                self.assertEqual(load_settings(self.root)["layout_attempts"], 75)
                 self.assertEqual(saved["run_defaults"]["connector_style"], "elbowed")
                 self.assertEqual(load_settings(self.root)["connector_style"], "curved")
                 self.assertIs(saved["run_defaults"]["include_fees"], False)
@@ -959,6 +968,7 @@ finally:
                 self.assertFalse(restarted.screen.query_one("#include-fees", Checkbox).value)
                 self.assertFalse(restarted.screen.query_one("#group-context-inputs", Checkbox).value)
                 self.assertEqual(restarted.screen.query_one("#connector-style", Select).value, "elbowed")
+                self.assertEqual(restarted.screen.query_one("#layout_attempts", Input).value, "100")
                 process.assert_not_called()
 
     async def test_new_case_fee_checkbox_and_legacy_settings_ignore_later_global_defaults(self):

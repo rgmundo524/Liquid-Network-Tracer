@@ -14,10 +14,10 @@ const source = stripTypeScriptTypes(
     .replace('void initialize().catch(', 'globalThis.startup = initialize().catch('),
   {mode: 'transform'},
 );
-const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy};');
+const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, settingsPage, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy};');
 const txid = 'a'.repeat(64);
 const defaults = {hops: 1, max_transactions: 20, max_outpoints: 100, max_requests: 30,
-  max_seconds: 60, max_new_items: 750, connector_style: 'straight'};
+  max_seconds: 60, max_new_items: 750, layout_attempts: 25, connector_style: 'straight'};
 
 async function harness(respond = () => undefined) {
   frameRecovery.resetFrameRecovery();
@@ -66,6 +66,11 @@ async function harness(respond = () => undefined) {
     ...context.appTest, app, dialog, calls, notifications,
     async submitDialog(values = {}) {
       dialogListeners.submit({target: {values, reportValidity: () => true}, preventDefault() {}});
+      await new Promise(setImmediate);
+    },
+    async submitSettings(values) {
+      const form = {id: 'settings-form', values: {...defaults, ...values}, reportValidity: () => true};
+      listeners.submit({target: form, preventDefault() {}});
       await new Promise(setImmediate);
     },
     async submit(values) {
@@ -282,7 +287,7 @@ test('context input grouping defaults off and survives new-case and trace form s
 test('changing grouping invalidates ELK and compact previews and blocks stale compact application', async () => {
   const view = await harness();
   const settings = {...defaults, include_fees: false, group_context_inputs: false};
-  const artifact = {include_fees: false, connector_style: 'straight', preview_id: 'preview1', preview_url: '/files/artifacts/graph.html',
+  const artifact = {include_fees: false, connector_style: 'straight', layout_attempts: 25, preview_id: 'preview1', preview_url: '/files/artifacts/graph.html',
     downloads: [{name: 'details.html', url: '/files/artifacts/details.html'}], compaction: {unchanged: true}};
   const detail = {id: 'case', name: 'Case', run_defaults: settings, miro_board: 'board', runs: [{id: 'run1'}], latest_run: 'run1', artifacts: {run1: {compact: artifact}}};
   view.state.activeCase = detail;
@@ -305,7 +310,7 @@ test('changing grouping invalidates ELK and compact previews and blocks stale co
 test('detail pages are optional and their links accept only local artifact URLs', async () => {
   const view = await harness();
   const settings = {...defaults, include_fees: false, group_context_inputs: false};
-  const artifact = {include_fees: false, connector_style: 'straight', preview_url: '/files/artifacts/graph.html', downloads: []};
+  const artifact = {include_fees: false, connector_style: 'straight', layout_attempts: 25, preview_url: '/files/artifacts/graph.html', downloads: []};
   assert.doesNotMatch(view.elkGraph(artifact, true, settings), /Open detail pages/);
   artifact.downloads = [{name: 'details.html', url: 'javascript:alert(1)'}];
   assert.doesNotMatch(view.elkGraph(artifact, true, settings), /javascript:|Open detail pages/);
@@ -330,7 +335,7 @@ test('hub selection changes invalidate previews while duplicate and reordered li
   const view = await harness();
   const first = 'G' + 'a'.repeat(33), second = 'H' + 'b'.repeat(33);
   const settings = {...defaults, include_fees: false, group_context_inputs: false, hub_addresses: [first, second]};
-  const artifact = {include_fees: false, connector_style: 'straight', preview_id: 'preview1', preview_url: '/files/artifacts/graph.html',
+  const artifact = {include_fees: false, connector_style: 'straight', layout_attempts: 25, preview_id: 'preview1', preview_url: '/files/artifacts/graph.html',
     downloads: [], compaction: {unchanged: true}, hub_addresses: [second, first, second]};
   const detail = {id: 'case', name: 'Case', run_defaults: settings, miro_board: 'board', runs: [{id: 'run1'}], latest_run: 'run1', artifacts: {run1: {compact: artifact}}};
   view.state.activeCase = detail;
@@ -342,4 +347,61 @@ test('hub selection changes invalidate previews while duplicate and reordered li
   assert.equal(view.currentCompaction(), undefined);
   view.openActionDialog('miro-compact');
   assert.equal(view.dialog.open, false);
+});
+
+
+test('layout attempts default to 25 and new-investigation forms send the chosen search size', async () => {
+  const detail = {id: 'layoutcase', name: 'Layout case', run_defaults: {...defaults, layout_attempts: 80}, runs: [], seeds: [`${txid}:0`]};
+  const view = await harness(path => path === '/api/cases' || path === '/api/cases/layoutcase' ? detail : undefined);
+  assert.match(view.newCase(), /Layout attempts/);
+  assert.match(view.newCase(), /name="layout_attempts" type="number" min="1" max="1000" step="1" required value="25"/);
+  assert.match(view.newCase(), /Independent of trace hops/);
+  await view.submit({name: detail.name, txids: txid, seeds: `${txid}:0`, layout_attempts: '80'});
+  assert.equal(view.calls.find(call => call.path === '/api/cases').body.settings.layout_attempts, 80);
+  assert.match(view.workspace(), /<dt>Layout attempts<\/dt><dd>80<\/dd>/);
+});
+
+test('workspace and investigation settings submit layout attempts independently', async () => {
+  const detail = {id: 'layoutcase', name: 'Layout case', run_defaults: {...defaults, layout_attempts: 70}, runs: []};
+  const view = await harness(path => path === '/api/cases/layoutcase' ? detail : undefined);
+  view.state.page = 'settings';
+  assert.match(view.settingsPage(), /name="layout_attempts"[^>]+value="25"/);
+  await view.submitSettings({layout_attempts: '100'});
+  assert.equal(view.calls.find(call => call.path === '/api/settings').body.settings.layout_attempts, 100);
+  view.state.activeCase = detail;
+  view.state.page = 'case-settings';
+  assert.match(view.settingsPage(), /name="layout_attempts"[^>]+value="70"/);
+  await view.submitSettings({name: detail.name, board: '', layout_attempts: '90'});
+  assert.equal(view.calls.find(call => call.path === '/api/cases/layoutcase/settings').body.settings.layout_attempts, 90);
+});
+
+test('a limited form preserves the prior layout-attempt count when the input is absent', async () => {
+  const view = await harness();
+  const {layout_attempts, ...limited} = defaults;
+  assert.equal(view.readSettings({values: limited}).layout_attempts, 25);
+  assert.equal(view.readSettings({values: limited}, {...defaults, hub_addresses: [], layout_attempts: 150}).layout_attempts, 150);
+  assert.equal(view.readSettings({values: {...limited, layout_attempts: '1'}}, {...defaults, hub_addresses: [], layout_attempts: 150}).layout_attempts, 1);
+});
+
+test('legacy or different layout-attempt counts invalidate both previews and compact application', async () => {
+  const view = await harness();
+  const settings = {...defaults, include_fees: false, group_context_inputs: false, hub_addresses: []};
+  const artifact = {include_fees: false, connector_style: 'straight', preview_id: 'preview1', preview_url: '/files/artifacts/graph.html',
+    downloads: [], compaction: {unchanged: true}};
+  const detail = {id: 'case', name: 'Case', run_defaults: settings, miro_board: 'board', runs: [{id: 'run1'}], latest_run: 'run1', artifacts: {run1: {compact: artifact}}};
+  view.state.activeCase = detail;
+  for (const attempts of [undefined, 1, 24, 26]) {
+    if (attempts === undefined) delete artifact.layout_attempts;
+    else artifact.layout_attempts = attempts;
+    for (const html of [view.elkGraph(artifact, true, settings), view.compactGraph(artifact, true, detail)]) {
+      assert.match(html, /different graph settings/);
+      assert.doesNotMatch(html, /<iframe|Apply compact layout to Miro/);
+    }
+    assert.equal(view.currentCompaction(), undefined);
+  }
+  artifact.layout_attempts = 25;
+  assert.match(view.elkGraph(artifact, true, settings), /<iframe/);
+  assert.match(view.compactGraph(artifact, true, detail), /Apply compact layout to Miro/);
+  settings.layout_attempts = 100;
+  assert.equal(view.currentCompaction(), undefined);
 });

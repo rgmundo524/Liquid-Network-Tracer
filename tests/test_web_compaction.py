@@ -74,7 +74,8 @@ class WebCompactionTests(unittest.TestCase):
                 "source": "https://attacker.invalid", "path": "/private/sentinel",
                 "arguments": ["--shell"], "settings": {"include_fees": True, "connector_style": "elbowed"}}, 202)
             self.assertEqual(start.call_args.args[0], ["compact-preview", "--case", str(path),
-                             "--run", run_id, "--include-fees", "--connector-style", "elbowed", "--ungroup-context-inputs"])
+                             "--run", run_id, "--include-fees", "--connector-style", "elbowed",
+                             "--layout-attempts", "25", "--ungroup-context-inputs"])
             self.assertFalse(start.call_args.kwargs["live"])
             self.assertEqual(start.call_args.kwargs["action"], "compact")
             start.reset_mock()

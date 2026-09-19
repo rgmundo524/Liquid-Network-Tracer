@@ -27,8 +27,8 @@ class HorizontalSpacingIntegrationTests(unittest.TestCase):
         graph = build_graph(state_from(chain(5)), merge_addresses=False)
         original = copy.deepcopy(graph)
         with patch("liquid_tracer.elk_layout.compact_candidate"):
-            baseline = optimize_graph(graph, connector_style="elbowed")
-        result = optimize_graph(graph, connector_style="elbowed")
+            baseline = optimize_graph(graph, connector_style="elbowed", layout_attempts=3)
+        result = optimize_graph(graph, connector_style="elbowed", layout_attempts=3)
         before, after = bounds(baseline), bounds(result)
         self.assertLess(after[2] - after[0], .85 * (before[2] - before[0]))
         self.assertEqual((after[1], after[3]), (before[1], before[3]))
@@ -50,8 +50,8 @@ class HorizontalSpacingIntegrationTests(unittest.TestCase):
     def test_reused_address_returns_keep_topology_and_do_not_add_collisions(self):
         graph = build_graph(state_from(chain(5)), merge_addresses=True)
         with patch("liquid_tracer.elk_layout.compact_candidate"):
-            baseline = optimize_graph(graph, connector_style="elbowed")
-        result = optimize_graph(graph, connector_style="elbowed")
+            baseline = optimize_graph(graph, connector_style="elbowed", layout_attempts=3)
+        result = optimize_graph(graph, connector_style="elbowed", layout_attempts=3)
         self.assertEqual(_fingerprint(baseline), _fingerprint(result))
         before, after = bounds(baseline), bounds(result)
         self.assertLessEqual(after[2] - after[0], before[2] - before[0])

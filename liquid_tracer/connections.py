@@ -187,7 +187,7 @@ def connection_plan(graph):
 
 
 def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=False, progress=None):
-    from .cli import resolve_latest, run_path, verify_export, connector_appearance, open_preview
+    from .cli import resolve_latest, run_path, verify_export, connector_appearance, layout_search_attempts, open_preview
     from .investigations import read_case
     from .services import apply_service_labels, load_services
     from .elk_layout import optimize_graph
@@ -213,7 +213,8 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
     graph = connection_graph(state, max_hops)
     counts = ensure_counts(case, state, graph=graph, progress=progress) if graph["nodes"] else None
     if graph["nodes"]:
-        graph = optimize_graph(graph, connector_style=connector_appearance(metadata), progress=progress)
+        graph = optimize_graph(graph, connector_style=connector_appearance(metadata), progress=progress,
+                               layout_attempts=layout_search_attempts(metadata))
     report = graph["connections"]
     report["service_sha256"] = digest(canonical({k: v for k, v in settings.items() if k != "history"}))
     report["archive_sha256"] = digest((archive / "SHA256SUMS").read_bytes())
@@ -242,6 +243,8 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
     except BaseException:
         (destination / "SHA256SUMS").unlink(missing_ok=True)
         raise
+    if "layout_attempts" in graph.get("graph_options", {}):
+        result["layout_attempts"] = graph["graph_options"]["layout_attempts"]
     return {**result, "address_counts": counts, "directory": str(destination.resolve()), "preview_id": destination.name,
             "run_id": run_id, "include_fees": False, "max_hops": max_hops,
             "connection_count": report["connection_count"], "transaction_count": report["transaction_count"],

@@ -343,6 +343,10 @@ def create_app(root=None):
                         yield Static("Adds hops to the saved run's existing ceiling. Use 0 to retry the current frontier.", markup=False)
                     yield Static("Tracing saves a new run. Miro is updated separately.", markup=False)
                 if self.mode in ("new", "global", "case"):
+                    yield Label("Layout attempts")
+                    yield Input(str(self.settings["layout_attempts"]), id="layout_attempts", type="integer")
+                    yield Static("Compare 1 to 1000 graph arrangements. More attempts can improve the layout but take longer. "
+                                 "This is independent of trace hops and has no graph-size cutoff.", markup=False)
                     yield Checkbox("Include transaction fee flows", value=self.settings["include_fees"], id="include-fees")
                     yield Static("Graph display only. Included fees appear in a chronological row above the graph. "
                                  "Trace evidence always retains fee outputs.", markup=False)
@@ -368,6 +372,8 @@ def create_app(root=None):
                     yield Static(text, markup=False)
                     yield Static("Transaction fee flows: " + ("included" if self.settings["include_fees"] else "hidden")
                                  + ". Change this in Investigation settings.", id="fee-status", markup=False)
+                    yield Static(f"Layout attempts: {self.settings['layout_attempts']}. "
+                                 "Change this in Investigation settings.", markup=False)
                     yield Static("Connector appearance: " + self.settings["connector_style"]
                                  + ". Change this in Investigation settings.", markup=False)
                     yield Static("Isolated context inputs: " + ("grouped" if self.settings["group_context_inputs"] else "separate")
@@ -426,12 +432,16 @@ def create_app(root=None):
                     raise TraceError(label + ": enter a " + qualifier) from None
                 settings[key] = value
             if self.mode in ("new", "global", "case"):
+                try:
+                    settings["layout_attempts"] = int(self.query_one("#layout_attempts", Input).value)
+                except ValueError:
+                    raise TraceError("Layout attempts: enter a whole number from 1 to 1000") from None
                 settings["include_fees"] = self.query_one("#include-fees", Checkbox).value
                 settings["group_context_inputs"] = self.query_one("#group-context-inputs", Checkbox).value
                 settings["hub_addresses"] = [line.strip() for line in self.query_one("#hub-addresses", TextArea).text.splitlines()
                                              if line.strip()]
                 settings["connector_style"] = self.query_one("#connector-style", Select).value
-            return settings
+            return validate_settings(settings)
 
         def on_button_pressed(self, event: Button.Pressed):
             if self.app.busy:
@@ -1048,7 +1058,8 @@ def create_app(root=None):
                     f"Miro board: {'https://miro.com/app/board/' + board + '/' if board else 'not set'}\n"
                     f"Transaction fee flows: {'included' if settings['include_fees'] else 'hidden'}\n"
                     f"Isolated context inputs: {'grouped' if settings['group_context_inputs'] else 'separate'}\n"
-                    f"Separate branch hubs: {len(settings['hub_addresses'])} selected\nDirectory: {self.case}")
+                    f"Separate branch hubs: {len(settings['hub_addresses'])} selected\n"
+                    f"Layout attempts: {settings['layout_attempts']}\nDirectory: {self.case}")
                 self.query_one("#run", Button).label = "Continue latest run" if metadata.get("latest_run") else "Start first run"
                 self.query_one("#create-board", Button).disabled = self.app.busy or bool(board)
                 self.query_one("#layout", Button).disabled = self.app.busy or not (board and metadata.get("latest_run"))

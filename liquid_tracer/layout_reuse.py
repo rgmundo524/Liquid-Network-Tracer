@@ -16,6 +16,7 @@ from .edge_labels import LABEL_LAYOUT_VERSION
 from .input_order import INPUT_ORDER_VERSION
 from .horizontal_spacing import HORIZONTAL_SPACING_VERSION
 from .branch_layout import BRANCH_LAYOUT_VERSION
+from .layout_search import LAYOUT_SEARCH_VERSION, layout_seeds, normalize_layout_attempts
 
 _NODE_GEOMETRY = frozenset({"x", "y"})
 _EDGE_GEOMETRY = frozenset({"attachment", "route", "connector_shape", "routing_exception", "label_layout"})
@@ -28,7 +29,7 @@ def _fingerprint(graph):
     metadata = {key: value for key, value in graph.items()
                 if key not in {"nodes", "edges", "layout", "connector_attachment", "graph_options"}}
     metadata["graph_options"] = {key: value for key, value in graph.get("graph_options", {}).items()
-                                 if key != "connector_style"}
+                                 if key not in {"connector_style", "layout_attempts"}}
     result.update(canonical(metadata))
     for field, excluded in (("nodes", _NODE_GEOMETRY), ("edges", _EDGE_GEOMETRY)):
         result.update(b"\0" + field.encode() + b"\0")
@@ -57,7 +58,7 @@ def report_phase(progress, phase):
             pass  # Advisory UI output never changes publication behavior.
 
 
-def reusable_elk_preview(graph, directory, connector_style="straight", progress=None):
+def reusable_elk_preview(graph, directory, connector_style="straight", progress=None, *, layout_attempts=None):
     """Return an exact, validated full-graph layout or None, without any writes.
 
     Old ELK previews have no checksum manifest. Revalidate their entire semantic
@@ -66,6 +67,10 @@ def reusable_elk_preview(graph, directory, connector_style="straight", progress=
     Invalid/incomplete optional previews are ignored, not used as a fallback
     layout. The caller runs the selected ELK engine normally when none matches.
     """
+    attempts = normalize_layout_attempts(
+        graph.get("graph_options", {}).get("layout_attempts") if layout_attempts is None else layout_attempts)
+    expected_search = {"version": LAYOUT_SEARCH_VERSION, "attempt_count": attempts,
+                       "seeds": list(layout_seeds(attempts))}
     run_id = graph.get("run_id")
     if (directory is None or not isinstance(run_id, str)
             or not re.fullmatch(r"[0-9a-f]{16}", run_id)
@@ -91,14 +96,17 @@ def reusable_elk_preview(graph, directory, connector_style="straight", progress=
             before = _signature(path)
             saved = read_json(path / "graph.json")
             layout = saved.get("layout", {})
+            search = layout.get("search", {})
             if (layout.get("algorithm") != ALGORITHM or layout.get("version") != ELK_VERSION
                     or layout.get("edge_labels", {}).get("version") != LABEL_LAYOUT_VERSION
                     or layout.get("input_order", {}).get("version") != INPUT_ORDER_VERSION
                     or layout.get("horizontal_spacing", {}).get("version") != HORIZONTAL_SPACING_VERSION
                     or layout.get("branch_organization", {}).get("version") != BRANCH_LAYOUT_VERSION
+                    or any(search.get(key) != value for key, value in expected_search.items())
                     or "compaction" in layout or "fallback_reason" in layout
                     or saved.get("connector_attachment") != "transaction_ports_v2"
                     or saved.get("graph_options", {}).get("connector_style") != connector_style
+                    or saved.get("graph_options", {}).get("layout_attempts") != attempts
                     or _fingerprint(saved) != expected):
                 continue
             report = read_json(path / "layout-report.json")

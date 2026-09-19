@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 
 from .common import TraceError, now, parse_outpoint, read_json, save_json
+from .layout_search import DEFAULT_LAYOUT_ATTEMPTS, normalize_layout_attempts
 
 
 DEFAULTS = {
@@ -17,6 +18,7 @@ DEFAULTS = {
     "max_requests": 30,
     "max_seconds": 60,
     "max_new_items": 750,
+    "layout_attempts": DEFAULT_LAYOUT_ATTEMPTS,
     "include_fees": False,
     "group_context_inputs": False,
     "hub_addresses": [],
@@ -34,6 +36,11 @@ def validate_settings(settings):
         raise TraceError("Run settings must contain only supported tracing limits and graph options")
     result = {**DEFAULTS, **settings}
     for key, value in result.items():
+        if key == "layout_attempts":
+            if value is None:
+                raise TraceError("layout_attempts must be a whole number from 1 to 1000")
+            result[key] = normalize_layout_attempts(value)
+            continue
         if key == "hub_addresses":
             if (not isinstance(value, list)
                     or any(not isinstance(address, str)

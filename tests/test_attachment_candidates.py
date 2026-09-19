@@ -106,7 +106,7 @@ class AttachmentCandidateTests(unittest.TestCase):
         for style in ("straight", "elbowed"):
             with self.subTest(style=style), \
                     patch("liquid_tracer.elk_layout._worker", side_effect=worker):
-                result = optimize_graph(graph, connector_style=style)
+                result = optimize_graph(graph, connector_style=style, layout_attempts=1)
                 self.assertEqual(result["layout"]["input_order"]["policy"], "geometry")
                 self.assertEqual(result["layout"]["input_order"]["version"], INPUT_ORDER_VERSION)
                 self.assertGreaterEqual(INPUT_ORDER_VERSION, 3)
@@ -130,7 +130,7 @@ class AttachmentCandidateTests(unittest.TestCase):
         graph = build_graph(state)
         with patch("liquid_tracer.elk_layout._worker",
                    side_effect=lambda request, seeds, **kwargs: fan_in_candidates(graph, request)):
-            result = optimize_graph(graph, connector_style="elbowed")
+            result = optimize_graph(graph, connector_style="elbowed", layout_attempts=1)
         plan = make_plan(result)
         validate_plan(plan)
         connectors = {connector["key"]: connector for connector in plan["connectors"]}
@@ -160,7 +160,7 @@ class AttachmentCandidateTests(unittest.TestCase):
                 side_effect=lambda request, seeds, **kwargs: fan_in_candidates(
                     graph, request, context_above=False),
             ):
-                result = optimize_graph(graph, connector_style=style)
+                result = optimize_graph(graph, connector_style=style, layout_attempts=1)
                 self.assertEqual(result["layout"]["input_order"]["policy"], "traced_first")
                 positions = west_positions(result, [child_input(1), child_input(0)])
                 self.assertLess(positions[0], positions[1])
@@ -189,7 +189,7 @@ class AttachmentCandidateTests(unittest.TestCase):
                    side_effect=lambda request, seeds, **kwargs: fan_in_candidates(graph, request)), \
                 patch("liquid_tracer.elk_layout.compact_context_inputs",
                       side_effect=unsafe_compaction) as compact:
-            result = optimize_graph(graph, connector_style="elbowed")
+            result = optimize_graph(graph, connector_style="elbowed", layout_attempts=1)
         compact.assert_called_once()
         self.assertEqual(result["layout"]["input_order"]["policy"], "geometry")
         self.assertEqual(result["nodes"], winning_geometry[0]["nodes"])

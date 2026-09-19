@@ -133,7 +133,7 @@ class ChangeElkTests(unittest.TestCase):
         state = change_state(3)
         graph = build_graph(state)
         original = copy.deepcopy(graph)
-        result = optimize_graph(graph, "elbowed")
+        result = optimize_graph(graph, "elbowed", layout_attempts=3)
         self.assertEqual(graph, original)
         self.assertEqual(len(result["layout"]["change_outputs"]["applied"]), 3)
         self.assertEqual(result["layout"]["change_outputs"]["skipped"], [])
@@ -151,7 +151,7 @@ class ChangeElkTests(unittest.TestCase):
 
     def test_compaction_preserves_rows_and_sibling_direction(self):
         state = change_state(3)
-        graph = optimize_graph(build_graph(state), "elbowed")
+        graph = optimize_graph(build_graph(state), "elbowed", layout_attempts=3)
         result = compact_graph(graph)
         assert_rows(self, result, state)
         self.assertEqual(layout_metrics(result)["node_overlaps"], 0)
@@ -160,7 +160,7 @@ class ChangeElkTests(unittest.TestCase):
         state = change_state(1)
         key = next(iter(state["transactions"]))
         state["transactions"][key]["data"]["vout"][0] = copy.deepcopy(state["transactions"][key]["data"]["vout"][1])
-        result = optimize_graph(build_graph(state), "elbowed")
+        result = optimize_graph(build_graph(state), "elbowed", layout_attempts=3)
         report = result["layout"]["change_outputs"]
         self.assertEqual(report["applied"], [])
         self.assertIn("shared", report["skipped"][0]["reason"])
@@ -171,24 +171,24 @@ class ChangeElkTests(unittest.TestCase):
         # Keep the visible Change caption: its measured width legitimately
         # affects ordinary ELK placement even when a row cannot be enforced.
         unconstrained.pop("change_outputs")
-        expected = optimize_graph(unconstrained, "elbowed")
+        expected = optimize_graph(unconstrained, "elbowed", layout_attempts=3)
         self.assertEqual([(node["id"], node["x"], node["y"]) for node in result["nodes"]],
                          [(node["id"], node["x"], node["y"]) for node in expected["nodes"]])
 
     def test_fingerprint_preserves_reuse_but_invalidates_changed_selection(self):
         state = change_state(2)
         graph = build_graph(state)
-        result = optimize_graph(graph)
+        result = optimize_graph(graph, layout_attempts=3)
         self.assertEqual(_fingerprint(graph), _fingerprint(result))
         state["service_controls"]["change_outputs"][next(iter(state["transactions"]))]["vout"] = 0
         self.assertNotEqual(_fingerprint(graph), _fingerprint(build_graph(state)))
 
     def test_reordered_input_has_deterministic_rows(self):
         state = change_state(3)
-        original = optimize_graph(build_graph(state), "elbowed")
+        original = optimize_graph(build_graph(state), "elbowed", layout_attempts=3)
         state["transactions"] = dict(reversed(list(state["transactions"].items())))
         state["service_controls"]["change_outputs"] = dict(reversed(list(state["service_controls"]["change_outputs"].items())))
-        result = optimize_graph(build_graph(state), "elbowed")
+        result = optimize_graph(build_graph(state), "elbowed", layout_attempts=3)
         self.assertEqual(original, result)
 
     def test_incompatible_change_inputs_to_one_spender_are_reported(self):
@@ -204,7 +204,7 @@ class ChangeElkTests(unittest.TestCase):
             "txid": joined, "vin": [{"txid": key, "vout": 1, "prevout": state["transactions"][key]["data"]["vout"][1]}
                                        for key in (first, second)], "vout": [output("SYNTHETIC-join")], "status": {}}}
         state["service_controls"]["change_outputs"][second] = {"vout": 1}
-        result = optimize_graph(build_graph(state), "elbowed")
+        result = optimize_graph(build_graph(state), "elbowed", layout_attempts=3)
         report = result["layout"]["change_outputs"]
         self.assertEqual(report["applied"], [])
         self.assertEqual(len(report["skipped"]), 2)

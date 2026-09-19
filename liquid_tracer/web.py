@@ -28,6 +28,7 @@ from .investigations import (create_investigation, default_root, load_settings,
                              read_case, save_settings, update_case, validate_settings)
 from .menu import _command, _environment, _lookup_reports, _project, _seed_values, _trace_arguments
 from .progress import public_progress
+from .layout_search import MAX_LAYOUT_ATTEMPTS, normalize_layout_attempts
 
 MAX_BODY = 64 * 1024
 CASE_ID = re.compile(r"[0-9a-f]{32}")
@@ -57,7 +58,17 @@ def public_graph_options(options):
         settings = validate_settings({key: options[key] for key in ("group_context_inputs", "hub_addresses") if key in options})
     except TraceError:
         return None
-    return {key: settings[key] for key in ("group_context_inputs", "hub_addresses")}
+    result = {key: settings[key] for key in ("group_context_inputs", "hub_addresses")}
+    # Old artifacts did not record a search budget. Do not claim the current
+    # default was used to calculate those saved coordinates.
+    if "layout_attempts" in options:
+        try:
+            if options["layout_attempts"] is None:
+                return None
+            result["layout_attempts"] = normalize_layout_attempts(options["layout_attempts"])
+        except TraceError:
+            return None
+    return result
 
 
 def public_service(rule):
@@ -176,6 +187,9 @@ def public_layout_metrics(metrics):
     if not isinstance(metrics, dict):
         return None
     result = {"estimated": True}
+    attempts = metrics.get("attempt_count")
+    if type(attempts) is int and 1 <= attempts <= MAX_LAYOUT_ATTEMPTS:
+        result["attempt_count"] = attempts
     for phase in ("before", "after"):
         values = metrics.get(phase)
         if not isinstance(values, dict):
@@ -710,7 +724,7 @@ class LocalServer(ThreadingHTTPServer):
             value["connector_style"] = result["connector_style"]
         options = result.get("graph_options", {})
         if isinstance(options, dict):
-            options = {**options, **{key: result[key] for key in ("group_context_inputs", "hub_addresses") if key in result}}
+            options = {**options, **{key: result[key] for key in ("group_context_inputs", "hub_addresses", "layout_attempts") if key in result}}
             display_options = public_graph_options(options)
             if display_options is not None:
                 value.update({key: item for key, item in display_options.items() if key in options})
@@ -933,6 +947,7 @@ class LocalServer(ThreadingHTTPServer):
                 arguments.append("--include-fees" if settings["include_fees"] else "--exclude-fees")
             if action not in ("mermaid", "csv", "miro-compact"):
                 arguments.extend(["--connector-style", settings["connector_style"]])
+                arguments.extend(["--layout-attempts", str(settings["layout_attempts"])])
                 arguments.append("--group-context-inputs" if settings["group_context_inputs"] else "--ungroup-context-inputs")
         else:
             raise RequestError("Choose a supported investigation action.")

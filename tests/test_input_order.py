@@ -158,7 +158,7 @@ class RealInputOrderTests(unittest.TestCase):
         graph = build_graph(state)
         before = copy.deepcopy(graph)
         expected = input_orders(graph)["tx:" + txid("input-order-child")]
-        result = optimize_graph(graph, connector_style="elbowed")
+        result = optimize_graph(graph, connector_style="elbowed", layout_attempts=3)
         self.assert_order(result, expected)
         self.assertEqual(graph, before)
         self.assertEqual(state, original)
@@ -176,7 +176,7 @@ class RealInputOrderTests(unittest.TestCase):
     def test_change_alignment_and_compaction_keep_continuing_inputs_first(self):
         graph = build_graph(input_order_state(4, continuing=(1, 2), change=2))
         expected = input_orders(graph)["tx:" + txid("input-order-child")]
-        result = optimize_graph(graph, connector_style="elbowed")
+        result = optimize_graph(graph, connector_style="elbowed", layout_attempts=3)
         self.assert_order(result, expected)
         self.assertTrue(result["layout"]["change_outputs"]["applied"])
         self.assert_order(compact_graph(result), expected)
@@ -186,7 +186,7 @@ class RealInputOrderTests(unittest.TestCase):
         shuffled = copy.deepcopy(graph)
         random.Random(7).shuffle(shuffled["nodes"])
         random.Random(11).shuffle(shuffled["edges"])
-        first, second = optimize_graph(graph), optimize_graph(shuffled)
+        first, second = optimize_graph(graph, layout_attempts=3), optimize_graph(shuffled, layout_attempts=3)
         expected = input_orders(graph)["tx:" + txid("input-order-child")]
         self.assert_order(first, expected)
         self.assert_order(second, expected)

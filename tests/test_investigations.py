@@ -97,6 +97,38 @@ class InvestigationTests(unittest.TestCase):
         update_case(case, {"run_defaults": {"group_context_inputs": True}})
         self.assertIs(read_case(case)["run_defaults"]["group_context_inputs"], True)
 
+    def test_layout_attempts_default_persist_and_legacy_cases_keep_builtin_default(self):
+        self.assertEqual(DEFAULTS["layout_attempts"], 25)
+        self.assertEqual(validate_settings({})["layout_attempts"], 25)
+        case = create_investigation(self.root, "Legacy layout")
+        metadata = read_case(case)
+        metadata["run_defaults"].pop("layout_attempts")
+        save_json(case / "case.json", metadata)
+        original = (case / "case.json").read_bytes()
+        save_settings(self.root, {"layout_attempts": 75})
+        self.assertEqual(load_settings(self.root)["layout_attempts"], 75)
+        self.assertEqual(validate_settings(read_case(case)["run_defaults"])["layout_attempts"], 25)
+        self.assertEqual((case / "case.json").read_bytes(), original)
+        created = create_investigation(self.root, "Expanded search", run_defaults=load_settings(self.root))
+        self.assertEqual(read_case(created)["run_defaults"]["layout_attempts"], 75)
+        for attempts in (1, 1000):
+            update_case(case, {"run_defaults": {"layout_attempts": attempts}})
+            self.assertEqual(read_case(case)["run_defaults"]["layout_attempts"], attempts)
+
+    def test_invalid_layout_attempts_do_not_change_saved_settings(self):
+        case = create_investigation(self.root, "Strict layout")
+        save_settings(self.root, {})
+        original_case = (case / "case.json").read_bytes()
+        original_global = (self.root / "settings.json").read_bytes()
+        for value in (None, True, False, 0, -1, 1001, 25.0, 1.5, "25", [], {}, float("nan"), float("inf")):
+            with self.subTest(value=value):
+                with self.assertRaises(TraceError):
+                    save_settings(self.root, {"layout_attempts": value})
+                with self.assertRaises(TraceError):
+                    update_case(case, {"run_defaults": {"layout_attempts": value}})
+        self.assertEqual((case / "case.json").read_bytes(), original_case)
+        self.assertEqual((self.root / "settings.json").read_bytes(), original_global)
+
     def test_invalid_fee_booleans_and_boolean_limits_do_not_write(self):
         case = create_investigation(self.root, "Strict settings")
         save_settings(self.root, {})

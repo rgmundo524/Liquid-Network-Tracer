@@ -106,25 +106,30 @@ try {
     // The parsed graph is sufficient; do not retain its encoded input too.
     chunks.length = 0;
   }
-  if (!request.graph || !Array.isArray(request.seeds) || request.seeds.length > 3) {
+  if (!request.graph || !Array.isArray(request.seeds) || request.seeds.length === 0 || request.seeds.length > 3
+      || request.seeds.some(seed => !Number.isInteger(seed) || seed <= 0 || seed > 2147483647)) {
     throw new Error('Invalid layout request');
   }
+  const requestedProfile = request.graph.branchProfile;
+  if (requestedProfile !== undefined && !['balanced', 'flow_weighted'].includes(requestedProfile)) {
+    throw new Error('Invalid branch placement profile');
+  }
+  delete request.graph.branchProfile;
   const orders = inputPortOrders(request.graph);
   const organizeBranches = request.graph.branchOrganization === 1;
   delete request.graph.branchOrganization;
   const elk = new ELK();
   const candidates = [];
   for (const [seedIndex, seed] of request.seeds.entries()) {
-    // Large graphs use one seed. Reuse that graph instead of retaining a
+    // The Python search sends one seed at a time. Reuse that graph instead of retaining a
     // second complete copy throughout ELK's calculation.
     let graph = request.seeds.length === 1 ? request.graph : structuredClone(request.graph);
     if (request.seeds.length === 1) request.graph = null;
     graph.layoutOptions['elk.randomSeed'] = String(seed);
-    // Keep the same bounded layout calls: compare the existing placer with
-    // two flow-weighted alternatives on small graphs. Large graphs use one
-    // weighted pass, keeping memory bounded to one ELK graph at a time.
-    const branchProfile = organizeBranches && (request.seeds.length === 1 || seedIndex > 0)
-      ? 'flow_weighted' : 'balanced';
+    // Explicit metadata preserves the placement profile when seeds are sent
+    // separately. Keep the historical defaults for direct batched callers.
+    const branchProfile = requestedProfile ?? (organizeBranches && (request.seeds.length === 1 || seedIndex > 0)
+      ? 'flow_weighted' : 'balanced');
     if (organizeBranches) {
       graph.layoutOptions['elk.layered.nodePlacement.strategy'] = branchProfile === 'flow_weighted'
         ? 'NETWORK_SIMPLEX' : 'BRANDES_KOEPF';

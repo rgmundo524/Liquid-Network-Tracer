@@ -187,7 +187,7 @@ class LayoutGeometryTests(unittest.TestCase):
             mutate(graph)
             with patch("liquid_tracer.elk_layout._worker") as worker:
                 with self.assertRaises(TraceError):
-                    optimize_graph(graph)
+                    optimize_graph(graph, layout_attempts=3)
                 worker.assert_not_called()
 
     def test_invalid_worker_response_cannot_change_input_graph(self):
@@ -195,7 +195,7 @@ class LayoutGeometryTests(unittest.TestCase):
         before = copy.deepcopy(graph)
         with patch("liquid_tracer.elk_layout._worker", return_value=[{"seed": 1, "nodes": [], "edges": []}]):
             with self.assertRaisesRegex(TraceError, "objects"):
-                optimize_graph(graph)
+                optimize_graph(graph, layout_attempts=3)
         self.assertEqual(graph, before)
 
     def test_worker_strips_credentials_and_runtime_injection_environment(self):
@@ -320,7 +320,7 @@ class UncappedElkTests(unittest.TestCase):
                              "outpoint": f"synthetic:{index}", "quantity": None} for index in range(count - 1)]}
         with patch("liquid_tracer.elk_layout._worker", side_effect=synthetic_candidate) as worker, \
                 patch("liquid_tracer.elk_layout.fallback_graph", side_effect=AssertionError("Unexpected fallback")):
-            result = optimize_graph(graph)
+            result = optimize_graph(graph, layout_attempts=1)
         worker.assert_called_once()
         request = worker.call_args.args[0]
         self.assertEqual(len(request["children"]), count)
@@ -346,7 +346,7 @@ class UncappedElkTests(unittest.TestCase):
         with patch("liquid_tracer.elk_layout._worker", side_effect=TraceError("Local ELK engine failure")), \
                 patch("liquid_tracer.elk_layout.fallback_graph") as fallback:
             with self.assertRaisesRegex(TraceError, "Local ELK engine failure"):
-                optimize_graph(graph, progress=progress.append)
+                optimize_graph(graph, progress=progress.append, layout_attempts=3)
         fallback.assert_not_called()
         self.assertEqual(progress[-1]["completed"], 0)
         self.assertEqual(graph, before)
@@ -415,10 +415,10 @@ class RealElkTests(unittest.TestCase):
         graph = crossing_graph()
         for edge in graph["edges"]:
             edge.update(label="vout 0", quantity="?? ??")
-        small = optimize_graph(graph, connector_style="elbowed")
+        small = optimize_graph(graph, connector_style="elbowed", layout_attempts=3)
         for edge in graph["edges"]:
             edge.update(label="vout 123 · Change", quantity="12345678901234567890 SYNTHETIC-ASSET")
-        large = optimize_graph(graph, connector_style="elbowed")
+        large = optimize_graph(graph, connector_style="elbowed", layout_attempts=3)
         def gaps(result):
             nodes = {node["id"]: node for node in result["nodes"]}
             return [nodes[edge["target"]]["x"] - nodes[edge["target"]]["width"] / 2
@@ -447,11 +447,13 @@ class RealElkTests(unittest.TestCase):
         self.assertEqual({edge["id"] for edge in result["edges"]}, {edge["id"] for edge in graph["edges"]})
 
     def assert_topology_and_evidence_unchanged(self, before, after):
+        self.assertEqual(after["graph_options"]["layout_attempts"], 3)
         before_copy, after_copy = copy.deepcopy(before), copy.deepcopy(after)
         for graph in (before_copy, after_copy):
             for key in ("layout", "connector_attachment", "presentation_version"):
                 graph.pop(key, None)
             graph.get("graph_options", {}).pop("connector_style", None)
+            graph.get("graph_options", {}).pop("layout_attempts", None)
             for node in graph["nodes"]:
                 for key in ("x", "y", "width", "height"):
                     node.pop(key, None)
@@ -463,7 +465,7 @@ class RealElkTests(unittest.TestCase):
     def test_real_elk_removes_crossing_without_mutating_graph(self):
         graph = crossing_graph()
         original = copy.deepcopy(graph)
-        result = optimize_graph(graph)
+        result = optimize_graph(graph, layout_attempts=3)
         self.assertEqual(graph, original)
         self.assert_topology_and_evidence_unchanged(graph, result)
         self.assertEqual(result["layout"]["algorithm"], "elk_layered_v1")
@@ -476,7 +478,7 @@ class RealElkTests(unittest.TestCase):
         state = state_from(chain(10))
         state["seeds"] = [key + ":0" for key in state["transactions"]]
         graph = build_graph(state)
-        result = optimize_graph(graph)
+        result = optimize_graph(graph, layout_attempts=3)
         self.assert_topology_and_evidence_unchanged(graph, result)
         nodes = {node["id"]: node for node in result["nodes"]}
         positions = [nodes["tx:" + txid(index)]["x"] for index in range(10)]
@@ -486,9 +488,9 @@ class RealElkTests(unittest.TestCase):
 
     def test_split_join_ports_are_spread_and_fees_do_not_change_main_layout(self):
         state = state_from({data["txid"]: data for key, data in fixture().items() if not key.endswith("outspends")})
-        hidden = optimize_graph(build_graph(state))
+        hidden = optimize_graph(build_graph(state), layout_attempts=3)
         shown_original = build_graph(state, include_fees=True)
-        shown = optimize_graph(shown_original)
+        shown = optimize_graph(shown_original, layout_attempts=3)
         self.assert_topology_and_evidence_unchanged(shown_original, shown)
         fee_ids = {key for key, value in shown["fee_items"].items() if value["endpoint"] == "shapes"}
         self.assertEqual({node["id"]: (node["x"], node["y"]) for node in hidden["nodes"]},
@@ -514,7 +516,7 @@ class RealElkTests(unittest.TestCase):
 
     def test_merged_address_cycle_uses_elk_routes_while_transaction_order_stays_forward(self):
         graph = build_graph(state_from(chain(10)), merge_addresses=True)
-        result = optimize_graph(graph)
+        result = optimize_graph(graph, layout_attempts=3)
         self.assert_topology_and_evidence_unchanged(graph, result)
         nodes = {node["id"]: node for node in result["nodes"]}
         positions = [nodes["tx:" + txid(index)]["x"] for index in range(10)]
@@ -530,17 +532,17 @@ class RealElkTests(unittest.TestCase):
         shuffled = copy.deepcopy(graph)
         random.Random(19).shuffle(shuffled["nodes"])
         random.Random(3).shuffle(shuffled["edges"])
-        first, second = optimize_graph(graph), optimize_graph(shuffled)
+        first, second = optimize_graph(graph, layout_attempts=3), optimize_graph(shuffled, layout_attempts=3)
         self.assertEqual({node["id"]: (node["x"], node["y"]) for node in first["nodes"]},
                          {node["id"]: (node["x"], node["y"]) for node in second["nodes"]})
         self.assertEqual({edge["id"]: edge["route"] for edge in first["edges"]},
                          {edge["id"]: edge["route"] for edge in second["edges"]})
 
     def test_curved_is_optional_while_returns_remain_routed(self):
-        result = optimize_graph(build_graph(state_from(chain(3)), merge_addresses=False), connector_style="curved")
+        result = optimize_graph(build_graph(state_from(chain(3)), merge_addresses=False), connector_style="curved", layout_attempts=3)
         self.assertEqual(result["graph_options"]["connector_style"], "curved")
         self.assertTrue(all(edge["connector_shape"] == "curved" for edge in result["edges"]))
-        shared = optimize_graph(build_graph(state_from(chain(3))), connector_style="curved")
+        shared = optimize_graph(build_graph(state_from(chain(3))), connector_style="curved", layout_attempts=3)
         self.assertTrue(any(edge.get("routing_exception") == "return" for edge in shared["edges"]))
         self.assertTrue(all(edge["connector_shape"] == ("elbowed" if edge.get("routing_exception") else "curved")
                             for edge in shared["edges"]))

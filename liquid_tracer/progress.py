@@ -58,6 +58,13 @@ def public_progress(event):
         stage = event.get("stage")
         if isinstance(stage, str) and stage in ELK_STAGES:
             value.update(stage=stage, message=ELK_STAGES[stage])
+        attempt, attempts, seed = (event.get(key) for key in ("attempt_index", "attempt_total", "seed"))
+        if (type(attempt) is int and type(attempts) is int
+                and 1 <= attempt <= attempts <= 1000):
+            value.update(attempt_index=attempt, attempt_total=attempts)
+            value["message"] += f"; layout attempt {attempt} of {attempts}"
+            if type(seed) is int and 1 <= seed <= 2 ** 31 - 1:
+                value["seed"] = seed
         for field in ("node_count", "edge_count", "heap_mb"):
             number = event.get(field)
             if type(number) is int and 0 <= number <= 2 ** 53 - 1:
@@ -93,6 +100,7 @@ class ProgressReporter:
         self.path = Path(path) if path is not None else None
         self.previous_phase = None
         self.previous_stage = None
+        self.previous_attempt = None
         self.file_time = self.terminal_time = float("-inf")
 
     def __call__(self, event):
@@ -101,10 +109,12 @@ class ProgressReporter:
             return
         now = time.monotonic()
         urgent = (value["phase"] != self.previous_phase or value.get("stage") != self.previous_stage
+                  or value.get("attempt_index") != self.previous_attempt
                   or value["phase"] == "waiting"
                   or (value["total"] > 0 and value["completed"] == value["total"]))
         self.previous_phase = value["phase"]
         self.previous_stage = value.get("stage")
+        self.previous_attempt = value.get("attempt_index")
         if self.path is not None and (urgent or now - self.file_time >= .1):
             temporary = self.path.with_name(self.path.name + ".tmp")
             try:

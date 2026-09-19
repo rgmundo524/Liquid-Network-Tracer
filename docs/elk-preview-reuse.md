@@ -4,14 +4,14 @@ Ordinary **Sync to Miro** now checks completed full-graph ELK previews under the
 investigation's `previews/` directory before launching another layout calculation.
 A matching preview reports **Reusing the completed ELK layout; no recalculation**.
 Previews made before connector-label spacing, input ordering or horizontal-spacing
-correction are no longer reused.
+correction, or the configurable seed search, are no longer reused.
 Choose **Refresh layout preview** to save a compatible replacement.
 Keep the entire preview directory, not just its SVG: graph.json,
 layout-report.json, graph.svg and the completed graph.html are required.
 
 The saved run, case/network namespace, node/edge identities, labels, dimensions,
 colors, service settings, fee visibility, connector style, label-layout and
-input-order and horizontal-spacing revisions must match. The current graph is rebuilt from verified archived
+input-order and horizontal-spacing revisions, search version, attempt count and deterministic seed sequence must match. The current graph is rebuilt from verified archived
 evidence before comparison.
 Incomplete, stale, malformed or symlinked previews are ignored. An unmatched
 request still uses ELK, without imposing new time/size limits or a fallback engine.
@@ -30,6 +30,6 @@ always targets the full trace, not a filtered connection-only chart.
 Progress now distinguishes preparing ELK input, measuring the input layout,
 running the ELK worker, validating its returned coordinates, measuring the output,
 and building the Miro publication plan. During the worker calculation it reports
-object/connection counts, Node heap budget, and elapsed time. These are activity
+object/connection counts, Node heap budget, elapsed time, and the current layout attempt out of the configured total. These are activity
 indicators, not an estimated completion percentage. No credentials or arbitrary
 worker/API text are copied into progress messages.

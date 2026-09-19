@@ -169,7 +169,7 @@ class BranchEngineTests(unittest.TestCase):
         baseline = organization_metrics(results[0])["weighted_vertical_travel"]
         self.assertLess(min(organization_metrics(result)["weighted_vertical_travel"] for result in results[1:]), baseline)
         original = copy.deepcopy(graph)
-        optimized = optimize_graph(graph, "elbowed")
+        optimized = optimize_graph(graph, "elbowed", layout_attempts=3)
         self.assertEqual(graph, original)
         self.assertEqual({node["id"] for node in optimized["nodes"]}, {node["id"] for node in graph["nodes"]})
         self.assertEqual({edge["id"] for edge in optimized["edges"]}, {edge["id"] for edge in graph["edges"]})
@@ -182,7 +182,7 @@ class BranchEngineTests(unittest.TestCase):
         request, ports, fees = _request_graph(graph)
         candidates = _worker(request, [1, 7, 19])
         baseline = _apply_candidate(graph, compact_candidate(candidates[0]), ports, fees, "elbowed")
-        optimized = optimize_graph(graph, "elbowed")
+        optimized = optimize_graph(graph, "elbowed", layout_attempts=3)
         def safety(value):
             metrics = layout_metrics(value)
             return tuple(metrics[key] for key in ("node_overlaps", "node_intersections", "crossings"))
@@ -199,7 +199,7 @@ class BranchEngineTests(unittest.TestCase):
         hub = next(node for node in graph["nodes"] if node["kind"] == "address")
         hub["layout_hub"] = True
         original = copy.deepcopy(graph)
-        optimized = optimize_graph(graph, "elbowed")
+        optimized = optimize_graph(graph, "elbowed", layout_attempts=3)
         nodes = {node["id"]: node for node in optimized["nodes"]}
         self.assertEqual(len(nodes), len(graph["nodes"]))
         self.assertEqual(graph, original)
@@ -219,7 +219,7 @@ class BranchEngineTests(unittest.TestCase):
         hub_edge = next(edge for edge in graph["edges"] if edge["id"] == child_input(3))
         hub = next(node for node in graph["nodes"] if node["id"] == hub_edge["source"])
         hub["layout_hub"] = True
-        optimized = optimize_graph(graph, "elbowed")
+        optimized = optimize_graph(graph, "elbowed", layout_attempts=3)
         for edge in optimized["edges"]:
             if edge["source"] == hub["id"]:
                 self.assertGreaterEqual(float(edge["attachment"]["startItem"]["position"]["x"].rstrip("%")), 50)

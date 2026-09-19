@@ -13,6 +13,7 @@ from .investigations import read_case, validate_settings
 from .layout_preview import _preview_html, export_layout, render_svg
 from .miro import make_plan, validate_plan
 from .services import load_services
+from .layout_search import normalize_layout_attempts
 
 PREVIEW_ID = re.compile(r"[0-9a-f]{16}-compact-[0-9a-f]{8}\Z")
 FILES = frozenset({"graph.html", "graph.svg", "graph.json", "before.html", "before.svg", "before.json",
@@ -25,6 +26,17 @@ def _selection(options):
         raise TraceError("Invalid compact-preview graph options; create the preview again")
     settings = validate_settings({key: options[key] for key in ("group_context_inputs", "hub_addresses") if key in options})
     return {key: settings[key] for key in ("group_context_inputs", "hub_addresses")}
+
+
+def _saved_attempts(options):
+    """Keep older reviewed previews valid without inventing a search count."""
+    if not isinstance(options, dict):
+        raise TraceError("Invalid compact-preview graph options; create the preview again")
+    if "layout_attempts" not in options:
+        return None
+    if options["layout_attempts"] is None:
+        raise TraceError("Invalid compact-preview layout attempts; create the preview again")
+    return normalize_layout_attempts(options["layout_attempts"])
 
 
 def _check_selection(case, meta):
@@ -119,7 +131,8 @@ def _verified_files(directory_text, signature):
     if (plan.get("sha256") != meta.get("plan_sha256") or plan.get("namespace") != meta.get("namespace")
             or plan.get("run_id") != meta.get("run_id")
             or plan.get("layout", {}).get("compaction") != meta["compaction"]
-            or _selection(plan.get("graph_options", {})) != _selection(meta.get("graph_options", {}))):
+            or _selection(plan.get("graph_options", {})) != _selection(meta.get("graph_options", {}))
+            or _saved_attempts(plan.get("graph_options", {})) != _saved_attempts(meta.get("graph_options", {}))):
         raise TraceError("Compact preview and Miro plan disagree; create the preview again")
     return meta
 
