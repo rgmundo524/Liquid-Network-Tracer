@@ -135,6 +135,21 @@ class ReuseTests(unittest.TestCase):
             sync_run(self.case, 'latest', 'SYNTHETIC=', dry_run=True)
         worker.assert_called_once()
 
+    def test_pre_horizontal_spacing_previews_are_not_reused(self):
+        original_report = read_json(self.path / 'layout-report.json')
+        for value in (None, {'version': 0}):
+            saved = copy.deepcopy(self.saved)
+            if value is None:
+                saved['layout'].pop('horizontal_spacing', None)
+            else:
+                saved['layout']['horizontal_spacing'] = value
+            report = copy.deepcopy(original_report)
+            report['layout'] = saved['layout']
+            save_json(self.path / 'graph.json', saved)
+            save_json(self.path / 'layout-report.json', report)
+            with self.subTest(metadata=value):
+                self.assertIsNone(self.reuse())
+
 
 class StageProgressTests(unittest.TestCase):
     def test_elk_stages_and_counts_survive_without_exposing_raw_messages(self):

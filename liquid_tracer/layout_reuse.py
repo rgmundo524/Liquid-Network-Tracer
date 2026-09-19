@@ -14,6 +14,7 @@ from .elk_layout import ALGORITHM, ELK_VERSION, _validate_graph
 from .layout_preview import _geometry
 from .edge_labels import LABEL_LAYOUT_VERSION
 from .input_order import INPUT_ORDER_VERSION
+from .horizontal_spacing import HORIZONTAL_SPACING_VERSION
 
 _NODE_GEOMETRY = frozenset({"x", "y"})
 _EDGE_GEOMETRY = frozenset({"attachment", "route", "connector_shape", "routing_exception", "label_layout"})
@@ -92,6 +93,7 @@ def reusable_elk_preview(graph, directory, connector_style="straight", progress=
             if (layout.get("algorithm") != ALGORITHM or layout.get("version") != ELK_VERSION
                     or layout.get("edge_labels", {}).get("version") != LABEL_LAYOUT_VERSION
                     or layout.get("input_order", {}).get("version") != INPUT_ORDER_VERSION
+                    or layout.get("horizontal_spacing", {}).get("version") != HORIZONTAL_SPACING_VERSION
                     or "compaction" in layout or "fallback_reason" in layout
                     or saved.get("connector_attachment") != "transaction_ports_v2"
                     or saved.get("graph_options", {}).get("connector_style") != connector_style

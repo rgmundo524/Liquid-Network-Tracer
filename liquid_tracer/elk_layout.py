@@ -22,6 +22,7 @@ from .processes import defer_cancellation_during_spawn
 from .render_runtime import renderer_failure, renderer_heap_mb
 from .edge_labels import FONT_SIZE, LABEL_LAYOUT_VERSION, caption_size, caption_text, route_signature
 from .input_order import input_orders, input_order_metadata
+from .horizontal_spacing import compact_candidate
 
 
 ALGORITHM = "elk_layered_v1"
@@ -471,6 +472,7 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
                         "annotations": {"legend": {"x": 700, "y": -160 + shift}, "run": {"x": 700, "y": -480 + shift}},
                         "routing_exceptions": exceptions, "routing_checks_truncated": routing_checks_truncated,
                         "input_order": input_order_metadata(graph),
+                        "horizontal_spacing": copy.deepcopy(candidate.get("horizontal_spacing", {})),
                         "edge_labels": {"version": LABEL_LAYOUT_VERSION, "estimated": True,
                                         "font_size": FONT_SIZE, "placement": "center_above",
                                         "reserved_count": len(label_map), "miro_positions_exact": False}}
@@ -617,6 +619,7 @@ def optimize_graph(graph, connector_style="straight", progress=None):
     for candidate in candidates:
         _report_progress(progress, "Validating ELK coordinates and routes", stage="applying")
         try:
+            compact_candidate(candidate)
             result = _apply_candidate(graph, candidate, ports, fee_ids, connector_style)
             from .change_layout import apply_change_layout
             apply_change_layout(result)

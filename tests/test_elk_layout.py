@@ -308,7 +308,10 @@ class UncappedElkTests(unittest.TestCase):
         self.assertIsNone(result["layout"]["metrics"]["time_limit_seconds"])
         self.assertNotIn("fallback_reason", result["layout"])
         self.assertTrue(all("attachment" not in edge for edge in graph["edges"]))
-        self.assertGreater(max(node["x"] for node in result["nodes"]), 1e8)
+        # Very large input coordinates remain accepted; redundant horizontal
+        # gaps can now shrink without collapsing the complete output graph.
+        self.assertGreater(max(node["x"] for node in graph["nodes"]), 1e8)
+        self.assertGreater(max(node["x"] for node in result["nodes"]), count * 200)
 
     def test_worker_failures_do_not_silently_change_layout_engine(self):
         graph = crossing_graph()
