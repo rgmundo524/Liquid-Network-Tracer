@@ -286,6 +286,8 @@ Set **Settings → Layout attempts** in the browser or terminal to choose 1–1,
 
 For a one-time override, use `liquid-trace layout-preview --case cases/theft-liquid --layout-attempts 50`. The same option works with `compact-preview` and fresh `miro-sync` layouts. A matching completed ELK preview is reused during sync; changing the attempt count or using an older preview requires a new calculation. Refresh the preview and use **Sync and reorganize** to apply the selected arrangement to an existing Miro board.
 
+After aligning an explicitly designated change output, the other outputs attach below the change line in destination order. Original `vout` numbers stay unchanged. Small connector steps can also be removed by sliding an isolated attachment along its address circle to match the transaction port's height. Transaction input spacing and object positions stay fixed. This adjustment applies only when complete geometric checks show no increase in measured crossings, overlaps or object intersections; normal bends between different rows remain. Refresh older previews to use these attachment corrections. Miro still chooses its own intermediate bends, so several elbowed connectors can share or cross a routing lane.
+
 To remove unnecessary space after ELK, choose **Compact graph** in either interface:
 
 1. Select the saved run and calculate the local compact preview. This uses the existing ELK engine, followed by address and disconnected-component compaction. It makes no Blockstream or Miro requests.

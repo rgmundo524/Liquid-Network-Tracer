@@ -23,6 +23,7 @@ from .render_runtime import renderer_failure, renderer_heap_mb
 from .edge_labels import FONT_SIZE, LABEL_LAYOUT_VERSION, caption_size, caption_text, route_signature
 from .input_order import input_orders, input_order_metadata
 from .attachment_order import attachment_order_metrics
+from .endpoint_alignment import align_near_horizontal_endpoints
 from .horizontal_spacing import compact_candidate
 from .layout_search import LAYOUT_SEARCH_VERSION, layout_seeds, normalize_layout_attempts
 from .branch_layout import (BRANCH_LAYOUT_VERSION, edge_priorities, organization_metrics,
@@ -682,6 +683,7 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
                 result = _apply_candidate(graph, candidate, ports, fee_ids, connector_style)
                 from .change_layout import apply_change_layout
                 apply_change_layout(result)
+                align_near_horizontal_endpoints(result)
             except (KeyError, TypeError, ValueError, OverflowError) as exc:
                 raise TraceError("ELK returned an invalid layout; no Miro changes were made") from exc
             _report_progress(report, "Measuring completed ELK layout", stage="measuring_output")
@@ -717,6 +719,10 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
     compacted = copy.deepcopy(result)
     compact_context_inputs(compacted)
     if compacted["layout"]["branch_organization"].get("context_inputs_moved", 0):
+        alignment = compacted["layout"].get("endpoint_alignment", {})
+        align_near_horizontal_endpoints(compacted)
+        compacted["layout"]["endpoint_alignment"] = {
+            **alignment, "after_context_compaction": compacted["layout"]["endpoint_alignment"]}
         original_estimate = layout_metrics(result, midpoint_elbows=True)
         compacted_estimate = layout_metrics(compacted, midpoint_elbows=True)
         original_ports, compacted_ports = attachment_order_metrics(result), attachment_order_metrics(compacted)

@@ -4,7 +4,7 @@ Ordinary **Sync to Miro** now checks completed full-graph ELK previews under the
 investigation's `previews/` directory before launching another layout calculation.
 A matching preview reports **Reusing the completed ELK layout; no recalculation**.
 Previews made before connector-label spacing, input ordering or horizontal-spacing
-correction, or the configurable seed search, are no longer reused.
+correction, the configurable seed search, or the current change-output and small-jog attachment corrections are no longer reused.
 Choose **Refresh layout preview** to save a compatible replacement.
 Keep the entire preview directory, not just its SVG: graph.json,
 layout-report.json, graph.svg and the completed graph.html are required.
