@@ -115,6 +115,37 @@ class ChangeOutputMenuTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("changed", str(screen.query_one("#change-output-error", Static).render()))
                 self.assertNotIn(A, load_services(self.case)["change_outputs"])
 
+    async def test_saved_selection_and_lookup_ignore_queued_input_events(self):
+        from textual.widgets import Button, DataTable, Input, Select
+        set_change_output(self.case, A, 1)
+        app = create_app(self.root)
+        with patch("liquid_tracer.change_outputs.lookup_requires_network", return_value=False), \
+                patch("liquid_tracer.menu.subprocess.run", side_effect=self.lookup_process):
+            async with app.run_test(size=(115, 65)) as pilot:
+                screen = await self.open_editor(app, pilot)
+                saved = screen.query_one("#change-output-saved", DataTable)
+                screen.on_data_table_row_selected(DataTable.RowSelected(saved, 0, next(iter(saved.rows))))
+                # Selection must finish the lookup before returning, without a
+                # render callback, and its queued Input.Changed must not clear it.
+                self.assertIsNotNone(screen.lookup)
+                self.assertEqual(screen.lookup["txid"], A)
+                self.assertEqual(screen.query_one("#change-output-vout", Select).value, 1)
+                await pilot.pause()
+                self.assertEqual(screen.lookup["txid"], A)
+                self.assertEqual(screen.query_one("#change-output-vout", Select).value, 1)
+
+                txid = screen.query_one("#change-output-txid", Input)
+                txid.value = B
+                screen.lookup_outputs()
+                await pilot.pause()
+                self.assertEqual(screen.lookup["txid"], B)
+                self.assertFalse(screen.query_one("#change-output-save", Button).disabled)
+
+                txid.value = A
+                await pilot.pause()
+                self.assertIsNone(screen.lookup)
+                self.assertTrue(screen.query_one("#change-output-save", Button).disabled)
+
     async def test_reviewed_paste_refreshes_parent_and_input_changes_invalidate(self):
         from textual.widgets import Button, Checkbox, DataTable, Select, TextArea
         app = create_app(self.root)

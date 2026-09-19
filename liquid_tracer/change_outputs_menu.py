@@ -21,6 +21,7 @@ def change_output_screen(base, button, case):
             super().__init__()
             self.report = None
             self.lookup = None
+            self.lookup_input = None
             self.page_offset = 0
 
         def compose(self):
@@ -67,6 +68,7 @@ def change_output_screen(base, button, case):
 
         def invalidate_lookup(self):
             self.lookup = None
+            self.lookup_input = None
             self.query_one("#change-output-rows", DataTable).clear()
             selector = self.query_one("#change-output-vout", Select)
             selector.set_options([("No change designation (original ELK rules)", "")])
@@ -101,7 +103,10 @@ def change_output_screen(base, button, case):
 
         def on_input_changed(self, event: Input.Changed):
             if event.input.id == "change-output-txid" and self.is_mounted:
-                self.invalidate_lookup()
+                # Input.Changed may arrive after a synchronous lookup. Compare
+                # the current field, so a queued event cannot clear its result.
+                if self.lookup is not None and event.input.value != self.lookup_input:
+                    self.invalidate_lookup()
 
         def on_input_submitted(self, event: Input.Submitted):
             if self.app.busy:
@@ -118,8 +123,7 @@ def change_output_screen(base, button, case):
             if event.data_table.id == "change-output-saved" and self.report:
                 row = self.report["rows"][int(event.row_key.value)]
                 self.query_one("#change-output-txid", Input).value = row["txid"]
-                # Process the Input.Changed event before installing the lookup.
-                self.call_after_refresh(self.lookup_outputs)
+                self.lookup_outputs()
             elif event.data_table.id == "change-output-rows" and self.lookup:
                 output = self.lookup["outputs"][int(event.row_key.value)]
                 if output["selectable"]:
@@ -135,7 +139,8 @@ def change_output_screen(base, button, case):
             self.invalidate_lookup()
             error.update("")
             try:
-                txids = parse_transaction_hashes(self.query_one("#change-output-txid", Input).value)
+                lookup_input = self.query_one("#change-output-txid", Input).value
+                txids = parse_transaction_hashes(lookup_input)
                 if len(txids) != 1:
                     raise TraceError("Look up one transaction at a time")
                 txid = txids[0]
@@ -160,6 +165,7 @@ def change_output_screen(base, button, case):
                             (type(report["current_vout"]) is not int or report["current_vout"] < 0)):
                         raise TraceError("Transaction lookup returned invalid change metadata. Look up the transaction again.")
                 self.lookup = report
+                self.lookup_input = lookup_input
                 table = self.query_one("#change-output-rows", DataTable)
                 options = [("No change designation (original ELK rules)", "")]
                 for index, output in enumerate(report["outputs"]):
@@ -216,7 +222,8 @@ def change_output_screen(base, button, case):
                 elif action == "change-output-lookup":
                     self.lookup_outputs()
                 elif action in ("change-output-save", "change-output-clear"):
-                    if not self.lookup:
+                    if not self.lookup or self.query_one("#change-output-txid", Input).value != self.lookup_input:
+                        self.invalidate_lookup()
                         raise TraceError("Look up a transaction before saving")
                     selected = self.query_one("#change-output-vout", Select).value
                     vout = None if action == "change-output-clear" or selected == "" else selected
