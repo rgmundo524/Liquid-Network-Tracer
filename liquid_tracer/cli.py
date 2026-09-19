@@ -79,6 +79,31 @@ def parser():
     color_approval = colors.add_mutually_exclusive_group()
     color_approval.add_argument("--dry-run", action="store_true", help="Preview only (the default)")
     color_approval.add_argument("--approve-plan", help="Apply the exact approval_sha256 from a reviewed preview")
+    change_list = commands.add_parser("change-output-list", help="List saved investigator-designated change outputs; offline")
+    change_list.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    change_list.add_argument("--query", default="")
+    change_list.add_argument("--offset", type=int, default=0)
+    change_list.add_argument("--limit", type=int, default=100)
+    change_set = commands.add_parser("change-output-set", help="Designate or clear one transaction's change output; offline")
+    change_set.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    change_set.add_argument("--txid", required=True)
+    selection = change_set.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--vout", type=int)
+    selection.add_argument("--clear", action="store_true")
+    change_set.add_argument("--notes", default="")
+    change_set.add_argument("--expected-revision", type=int)
+    change_lookup = commands.add_parser("change-output-lookup", help="Inspect transaction outputs from saved evidence or a bounded case-source lookup")
+    change_lookup.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    change_lookup.add_argument("--txid", required=True)
+    change_lookup.add_argument("--output", type=Path, help="Write outputs to a new JSON file, keeping the terminal available for credentials")
+    change_import = commands.add_parser("change-output-import", help="Preview/apply change outputs from CSV or JSON; offline")
+    change_import.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    change_import.add_argument("--file", type=Path, required=True, help="UTF-8 CSV with Txid,ChangeVout and optional Notes, or JSON array")
+    change_import.add_argument("--format", choices=("auto", "csv", "json"), default="auto")
+    change_import.add_argument("--on-conflict", choices=("keep", "replace"), default="keep")
+    change_approval = change_import.add_mutually_exclusive_group()
+    change_approval.add_argument("--dry-run", action="store_true", help="Preview only (the default)")
+    change_approval.add_argument("--approve-plan", help="Apply the exact approval_sha256 from a reviewed preview")
     activity = commands.add_parser("address-inspect", help="Save a bounded address activity lookup using the investigation's API source")
     activity.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     activity.add_argument("--address", required=True)
@@ -785,6 +810,43 @@ def main(argv=None, *, progress=None):
             return 0 if result.get("valid", True) else 1
         if args.command == "name-color-import":
             from .name_color_import import apply_import, preview_import, read_import
+            text = read_import(args.file)
+            options = {"format": args.format, "policy": args.on_conflict}
+            result = (apply_import(args.case, text, approval_sha256=args.approve_plan, **options)
+                      if args.approve_plan else preview_import(args.case, text, **options))
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0 if result.get("valid", True) else 1
+        if args.command == "change-output-list":
+            from .change_outputs import catalog
+            print(json.dumps(catalog(args.case, args.query, args.offset, args.limit), indent=2))
+            return 0
+        if args.command == "change-output-set":
+            from .change_outputs import set_change_output
+            print(json.dumps(set_change_output(args.case, args.txid, None if args.clear else args.vout,
+                args.notes, args.expected_revision), indent=2))
+            return 0
+        if args.command == "change-output-lookup":
+            from .change_outputs import transaction_lookup, validate_txid
+            txid = validate_txid(args.txid)
+            if args.output is not None:
+                if args.output.exists() or args.output.is_symlink():
+                    raise TraceError("Output report already exists; choose a new path")
+                if not args.output.parent.is_dir():
+                    raise TraceError("Output report parent must be an existing directory")
+            result = transaction_lookup(args.case, txid)
+            if args.output is None:
+                print(json.dumps(result, indent=2))
+            else:
+                try:
+                    with args.output.open("x", encoding="utf-8") as report:
+                        json.dump(result, report, indent=2)
+                        report.write("\n")
+                except FileExistsError:
+                    raise TraceError("Output report already exists; choose a new path") from None
+                print("Transaction outputs saved.")
+            return 0
+        if args.command == "change-output-import":
+            from .change_output_import import apply_import, preview_import, read_import
             text = read_import(args.file)
             options = {"format": args.format, "policy": args.on_conflict}
             result = (apply_import(args.case, text, approval_sha256=args.approve_plan, **options)

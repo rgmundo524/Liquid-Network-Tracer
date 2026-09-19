@@ -16,7 +16,7 @@ from .services import confidence_value
 from .attribution_presentation import display_name, attribution_reference
 from .name_colors import apply_name_colors, color_text
 
-PRESENTATION_VERSION = 18
+PRESENTATION_VERSION = 19
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -282,6 +282,8 @@ def build_graph(state, merge_addresses=True, include_fees=False):
     annotate_branch_interactions(graph, state)
     from .address_counts import annotate
     annotate(graph, state)
+    from .change_layout import annotate_changes
+    annotate_changes(graph, state)
     return graph
 
 

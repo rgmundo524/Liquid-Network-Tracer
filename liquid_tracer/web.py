@@ -564,6 +564,22 @@ class LocalServer(ThreadingHTTPServer):
             pass
 
     def public_result(self, result, action, case, txids):
+        if action == "change-output-lookup":
+            from .change_outputs import MAX_VOUT, NOTICE
+
+            transaction = _lookup_reports(result, txids)[0]
+            revision, current = result.get("revision"), result.get("current_vout")
+            if (type(revision) is not int or not 0 <= revision <= 2 ** 53 - 1
+                    or (current is not None and (type(current) is not int
+                        or not 0 <= current <= MAX_VOUT))
+                    or not isinstance(result.get("current_notes"), str)):
+                raise TraceError("Change-output lookup returned an invalid selection report.")
+            fields = ("vout", "outpoint", "address", "value", "asset", "script_type", "selectable", "reason")
+            return {"txid": transaction["txid"], "outputs": [
+                {**{key: output.get(key) for key in fields},
+                 "value_text": str(output["value"]) if type(output.get("value")) is int else None}
+                for output in transaction["outputs"]], "revision": revision,
+                "current_vout": current, "current_notes": result["current_notes"], "notice": NOTICE}
         if action == "address-counts":
             return {key:result[key] for key in ("run_id", "fetched", "known", "total", "remaining", "requests_this_lookup", "stop_reason") if key in result}
         if action == "address-inspect":
@@ -669,6 +685,21 @@ class LocalServer(ThreadingHTTPServer):
         from .cli import miro_recovery_status, resolve_latest, run_path, verify_export
 
         action = body.get("action")
+        if action == "change-output-lookup":
+            from .change_outputs import lookup_requires_network
+
+            if set(body) != {"action", "txid"}:
+                raise RequestError("Change-output lookup accepts one transaction ID only; not file paths or custom arguments.")
+            txid = body.get("txid")
+            if not isinstance(txid, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", txid):
+                raise RequestError("Enter one transaction hash containing 64 hexadecimal characters, without :vout.")
+            txid = txid.lower()
+            try:
+                live = lookup_requires_network(case, txid)
+            except TraceError as error:
+                raise RequestError(str(error)) from None
+            arguments = ["change-output-lookup", "--case", str(case), "--txid", txid]
+            return self.start_job(arguments, action=action, live=live, case=case, txids=[txid])
         settings = validate_settings(body.get("settings", metadata.get("run_defaults", {})))
         selected = body.get("run_id", "latest")
         live = False
@@ -877,9 +908,9 @@ class Handler(BaseHTTPRequestHandler):
                 raise RequestError("Route not found", 404)
             parts = unquote(parsed.path).strip("/").split("/")
             if mutation:
-                # Only the two reviewed import routes accept larger, bounded text bodies.
+                # Only reviewed import routes accept larger, bounded text bodies.
                 is_import = (len(parts) == 4 and parts[:2] == ["api", "cases"]
-                             and parts[3] in ("address-import", "name-color-import"))
+                             and parts[3] in ("address-import", "name-color-import", "change-output-import"))
                 body = self.body(4 * 1024 * 1024 if is_import else MAX_BODY)
                 with self.server.job_lock:
                     if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "cancel":
@@ -949,6 +980,38 @@ class Handler(BaseHTTPRequestHandler):
             return self.server.case_summary(case, read_case(case), detail=True), 201
         if len(parts) == 4 and parts[:2] == ["api", "cases"]:
             case, metadata = self.server.case(parts[2])
+            if parts[3] == "change-outputs":
+                from .change_outputs import catalog, set_change_output
+
+                if set(body) <= {"query", "offset", "limit"}:
+                    try:
+                        return catalog(case, query=body.get("query", ""),
+                            offset=body.get("offset", 0), limit=body.get("limit", 100)), 200
+                    except TraceError as error:
+                        raise RequestError(str(error)) from None
+                if (set(body) - {"txid", "vout", "notes", "expected_revision"}
+                        or not {"txid", "vout", "expected_revision"} <= set(body)):
+                    raise RequestError("Change outputs accept a transaction search or one output selection with the current revision.")
+                revision = body["expected_revision"]
+                if type(revision) is not int or not 0 <= revision <= 2 ** 53 - 1:
+                    raise RequestError("Saving a change output requires the current revision.")
+                try:
+                    return set_change_output(case, body["txid"], body["vout"],
+                        notes=body.get("notes", ""), expected_revision=revision), 200
+                except TraceError as error:
+                    raise RequestError(str(error)) from None
+            if parts[3] == "change-output-import":
+                from .change_output_import import apply_import, preview_import
+
+                if set(body) - {"text", "format", "policy", "approve_plan"}:
+                    raise RequestError("Change-output import accepts uploaded text, format, policy and approval only; not file paths.")
+                options = {"format": body.get("format", "auto"), "policy": body.get("policy", "keep")}
+                try:
+                    result = (apply_import(case, body.get("text"), approval_sha256=body["approve_plan"], **options)
+                              if "approve_plan" in body else preview_import(case, body.get("text"), **options))
+                except TraceError as error:
+                    raise RequestError(str(error)) from None
+                return result, 200
             if parts[3] == "name-colors":
                 from .name_colors import name_color_catalog, set_name_colors
                 if set(body) - {"query", "offset", "limit", "updates", "expected_revision"}:

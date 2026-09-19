@@ -475,7 +475,7 @@ def _sibling_order(nodes, adjacent):
     return limits
 
 
-def _compact_addresses(nodes, edges, points, adjacent, fee_ids, bounds, budget, notify):
+def _compact_addresses(nodes, edges, points, adjacent, fee_ids, bounds, budget, notify, locked_nodes=()):
     geometry = _Geometry(nodes, edges, points, budget)
     siblings = _sibling_order(nodes, adjacent)
     moved, skipped = 0, 0
@@ -483,6 +483,9 @@ def _compact_addresses(nodes, edges, points, adjacent, fee_ids, bounds, budget, 
     for index, node in enumerate(candidates):
         notify(index, len(candidates), "Compacting local address positions")
         key = node["id"]
+        if key in locked_nodes:
+            skipped += 1
+            continue
         eligible = _eligible(node, adjacent[key], nodes, fee_ids)
         if not eligible or budget.remaining < 0:
             skipped += 1
@@ -719,7 +722,8 @@ def compact_graph(graph, progress=None):
                 pass
             last[0] = now
     notify(0, len(nodes), "Compacting the saved ELK layout", True)
-    moved_addresses, skipped_addresses = _compact_addresses(nodes, edges, points, adjacent, fee_ids, bounds, budget, notify)
+    locked_nodes = set(result["layout"].get("change_outputs", {}).get("locked_nodes", []))
+    moved_addresses, skipped_addresses = _compact_addresses(nodes, edges, points, adjacent, fee_ids, bounds, budget, notify, locked_nodes)
     _, current_bounds = _measure(nodes, edges, points, fee_ids, adjacent, annotations, frame_groups)
     moved_components, skipped_components, fee_components = _pack_components(nodes, edges, points, fee_ids, current_bounds, budget, notify, frame_groups)
     after, _ = _measure(nodes, edges, points, fee_ids, adjacent, annotations, frame_groups)
