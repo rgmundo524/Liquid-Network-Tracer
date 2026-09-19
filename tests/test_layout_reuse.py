@@ -113,6 +113,21 @@ class ReuseTests(unittest.TestCase):
         save_json(self.path / 'layout-report.json', report)
         self.assertIsNone(self.reuse())
 
+    def test_pre_input_order_layout_previews_are_not_reused(self):
+        original_report = read_json(self.path / 'layout-report.json')
+        for value in (None, {'version': 0}):
+            saved = copy.deepcopy(self.saved)
+            if value is None:
+                saved['layout'].pop('input_order', None)
+            else:
+                saved['layout']['input_order'] = value
+            report = copy.deepcopy(original_report)
+            report['layout'] = saved['layout']
+            save_json(self.path / 'graph.json', saved)
+            save_json(self.path / 'layout-report.json', report)
+            with self.subTest(metadata=value):
+                self.assertIsNone(self.reuse())
+
     def test_missing_preview_still_uses_selected_elk_engine(self):
         (self.path / 'graph.html').unlink()
         from liquid_tracer.elk_layout import optimize_graph

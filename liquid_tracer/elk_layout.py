@@ -21,6 +21,7 @@ from .common import TraceError
 from .processes import defer_cancellation_during_spawn
 from .render_runtime import renderer_failure, renderer_heap_mb
 from .edge_labels import FONT_SIZE, LABEL_LAYOUT_VERSION, caption_size, caption_text, route_signature
+from .input_order import input_orders, input_order_metadata
 
 
 ALGORITHM = "elk_layered_v1"
@@ -344,7 +345,9 @@ def _request_graph(graph):
         "elk.layered.nodePlacement.favorStraightEdges": "true",
         "elk.layered.edgeLabels.sideSelection": "ALWAYS_UP", "elk.spacing.edgeLabel": "7",
         "elk.padding": "[top=0,left=0,bottom=0,right=0]"},
-        "children": list(children.values()), "edges": edge_values}, port_map, fee_ids
+        "children": list(children.values()), "edges": edge_values,
+        "inputPortOrders": {key: [port_map[edge_id][1] for edge_id in order]
+                            for key, order in input_orders(graph).items()}}, port_map, fee_ids
 
 
 def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
@@ -467,6 +470,7 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
                         "cycle_groups": copy.deepcopy(graph.get("layout", {}).get("cycle_groups", [])),
                         "annotations": {"legend": {"x": 700, "y": -160 + shift}, "run": {"x": 700, "y": -480 + shift}},
                         "routing_exceptions": exceptions, "routing_checks_truncated": routing_checks_truncated,
+                        "input_order": input_order_metadata(graph),
                         "edge_labels": {"version": LABEL_LAYOUT_VERSION, "estimated": True,
                                         "font_size": FONT_SIZE, "placement": "center_above",
                                         "reserved_count": len(label_map), "miro_positions_exact": False}}
@@ -523,6 +527,8 @@ def fallback_graph(graph, connector_style="straight", reason="size_limit"):
     fee_ids = {key for key, item in result.get("fee_items", {}).items()
                if item["endpoint"] == "shapes" and key in nodes}
     ports = defaultdict(list)
+    ordered_inputs = {key: {edge_id: index for index, edge_id in enumerate(order)}
+                      for key, order in input_orders(result).items()}
     for edge in result["edges"]:
         edge["attachment"] = {}
         for field, key, other, outgoing in (
@@ -535,7 +541,9 @@ def fallback_graph(graph, connector_style="straight", reason="size_limit"):
             ports[key, side].append((neighbor["y"], other, edge["id"], field, edge))
     for (key, side), values in ports.items():
         node = nodes[key]
-        for index, (_, _, _, field, edge) in enumerate(sorted(values, key=lambda item: item[:4])):
+        ranks = ordered_inputs.get(key) if side == "west" else None
+        ordered = sorted(values, key=lambda item: ranks[item[2]] if ranks is not None else item[:4])
+        for index, (_, _, _, field, edge) in enumerate(ordered):
             fraction = (index + 1) / (len(values) + 1)
             x = fraction * node["width"] if side == "bottom" else node["width"] if side == "east" else 0
             y = node["height"] if side == "bottom" else fraction * node["height"]
@@ -578,7 +586,7 @@ def fallback_graph(graph, connector_style="straight", reason="size_limit"):
                         "fallback_reason": reason, "fallback_notice": notice,
                         "placement": "complete_graph_v1",
                         "routing_exceptions": exceptions, "routing_checks_truncated": False,
-                        "crossing_optimization": False}
+                        "crossing_optimization": False, "input_order": input_order_metadata(result)}
     result["layout"]["metrics"] = {"before": layout_metrics(graph), "after": layout_metrics(result),
                                     "estimated": True, "candidate_count": 0,
                                     "routing_exceptions": exceptions, "miro_routes_exact": False}

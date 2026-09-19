@@ -13,6 +13,7 @@ from collections import defaultdict
 
 from .common import output_kind
 from .edge_labels import translate_label
+from .input_order import centered_input_positions
 
 
 SPACING = 80.0
@@ -221,13 +222,14 @@ def _separate_components(main, components, original, rows):
 
 def _routes(graph, nodes, original, aligned):
     from .elk_layout import attachment_point, _default_attachments
+    input_positions = centered_input_positions(graph, aligned)
     fee_ids = {key for key, value in graph.get("fee_items", {}).items() if value["endpoint"] == "shapes"}
     for edge in graph["edges"]:
         source, target = nodes[edge["source"]], nodes[edge["target"]]
         deltas = [(node["x"] - original[node["id"]][0], node["y"] - original[node["id"]][1])
                   for node in (source, target)]
         centered = edge["id"] in aligned
-        if not centered and deltas[0] == deltas[1]:
+        if not centered and edge["id"] not in input_positions and deltas[0] == deltas[1]:
             if deltas[0] != (0, 0):
                 edge["route"] = [{"x": point["x"] + deltas[0][0], "y": point["y"] + deltas[0][1]}
                                  for point in edge.get("route", [])]
@@ -237,6 +239,8 @@ def _routes(graph, nodes, original, aligned):
         if centered:
             attachment = {"startItem": {"position": {"x": "100%", "y": "50%"}},
                           "endItem": {"position": {"x": "0%", "y": "50%"}}}
+        elif edge["id"] in input_positions:
+            attachment["endItem"] = {"position": {"x": "0%", "y": f'{input_positions[edge["id"]]:.6f}%'}}
         a, b = attachment_point(source, attachment["startItem"]), attachment_point(target, attachment["endItem"])
         if centered:
             route, reason = [a, b], None
