@@ -991,6 +991,7 @@ def create_app(root=None):
                 with Horizontal(classes="buttons"):
                     yield Button("Import address attributions", id="addresses-import")
                     yield Button("Assign name colors", id="name-colors")
+                yield Button("Change outputs", id="change-outputs")
                 yield Button("Fetch address transaction counts", id="address-counts")
                 yield Static("Counts use one statistics request per uncached address, within this investigation's API/time budget. Then regenerate a preview or sync Miro.", markup=False)
                 yield Button("Merge duplicate addresses", id="address-merge")
@@ -1113,6 +1114,9 @@ def create_app(root=None):
                 elif action == "name-colors":
                     from .name_colors_menu import name_color_screen
                     self.app.push_screen(name_color_screen(BaseScreen, Button, self.case))
+                elif action == "change-outputs":
+                    from .change_outputs_menu import change_output_screen
+                    self.app.push_screen(change_output_screen(BaseScreen, Button, self.case))
                 elif action == "addresses-import":
                     from .address_import_menu import import_screen
                     self.app.push_screen(import_screen(BaseScreen, Button, self.case))

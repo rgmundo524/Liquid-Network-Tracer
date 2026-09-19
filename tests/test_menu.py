@@ -528,6 +528,8 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("down")
                 self.assertEqual(app.focused.id, "addresses-import")
                 await pilot.press("down")
+                self.assertEqual(app.focused.id, "change-outputs")
+                await pilot.press("down")
                 self.assertEqual(app.focused.id, "create-board")
                 await pilot.press("down")
                 self.assertEqual(app.focused.id, "case-settings")

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from liquid_tracer.common import TraceError, read_json, save_json
 from liquid_tracer.cli import refresh_presentation
-from liquid_tracer.export import build_graph, node_csv_rows, svg_graph, COLORS
+from liquid_tracer.export import build_graph, node_csv_rows, svg_graph, COLORS, PRESENTATION_VERSION
 from liquid_tracer.graph_markers import node_border
 from liquid_tracer.layout_preview import render_svg
 from liquid_tracer.mermaid import mermaid_source
@@ -128,7 +128,7 @@ class GraphCleanupTests(unittest.TestCase):
         before = trace_path.read_bytes()
         with patch("liquid_tracer.cli.Esplora", side_effect=AssertionError("Must not retrace")):
             plan = refresh_presentation(old, trace_path)
-        self.assertEqual(plan["presentation_version"], 18)
+        self.assertEqual(plan["presentation_version"], PRESENTATION_VERSION)
         self.assertEqual(plan["presentation_items"], {})
         self.sync(plan, max_items=len(plan["presentation_items"]))
         self.assertEqual(self.item(self.host)["style"]["borderWidth"], "12")

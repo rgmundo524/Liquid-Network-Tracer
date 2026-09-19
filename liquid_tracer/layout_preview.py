@@ -49,7 +49,11 @@ def layout_notice(graph):
     if layout.get("algorithm") == "dependency_layers_v1":
         return (str(layout.get("fallback_notice") or "Dependency layout; ELK optimization was not applied.")
                 + " Miro routes may differ. Crossing counts are estimates.")
-    return LAYOUT_NOTICE
+    notice = LAYOUT_NOTICE
+    changes = layout.get("change_outputs")
+    if changes:
+        notice += f" Change rows: {len(changes.get('applied', []))} aligned; {len(changes.get('skipped', []))} skipped."
+    return notice
 
 
 def _number(value, *, positive=False):
@@ -354,6 +358,11 @@ def _preview_html(graph, svg, metrics):
     legend = "".join("<li>" + _escape(line) + "</li>" for line in legend_lines(graph))
     simulated = " · Synthetic data" if graph.get("simulated") else ""
     fees = "included" if graph.get("include_fees") else "hidden"
+    change_report = graph.get("layout", {}).get("change_outputs", {})
+    skipped_changes = change_report.get("skipped", [])
+    change_details = ("<details><summary>Skipped change rows</summary><ul>"
+                      + "".join("<li>" + _escape(item.get("outpoint", "")) + ": " + _escape(item.get("reason", "")) + "</li>"
+                                for item in skipped_changes) + "</ul></details>") if skipped_changes else ""
     return f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
@@ -375,6 +384,7 @@ body:has(#chart:target) header {{ display:none; }}
 <p><a href="graph.svg" download>Download SVG</a> · <a href="graph.json" download>Graph details</a> ·
 <a href="layout-report.json" download>Layout report</a></p></div>{_metrics_table(metrics, layout_title(graph))}</div>
 {register_html(graph)}
+{change_details}
 <details><summary>Legend and evidence notes</summary><p>{_escape(graph.get('notice', ''))}</p>
 <p>Before uses the saved graph's baseline layout, not live Miro positions. Labels and Miro's automatic curves are not measured.
 Counts prefixed with ≥ are lower bounds because the comparison limit was reached.</p><ul>{legend}</ul></details></header>

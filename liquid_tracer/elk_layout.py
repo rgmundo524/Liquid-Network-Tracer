@@ -577,6 +577,8 @@ def optimize_graph(graph, connector_style="straight", progress=None):
         _report_progress(progress, "Validating ELK coordinates and routes", stage="applying")
         try:
             result = _apply_candidate(graph, candidate, ports, fee_ids, connector_style)
+            from .change_layout import apply_change_layout
+            apply_change_layout(result)
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
             raise TraceError("ELK returned an invalid layout; no Miro changes were made") from exc
         _report_progress(progress, "Measuring completed ELK layout", stage="measuring_output")

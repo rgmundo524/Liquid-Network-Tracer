@@ -25,7 +25,9 @@ async function harness(respond = () => undefined) {
   const dialog = {innerHTML: '', addEventListener() {}, close() {}, showModal() {}};
   const context = vm.createContext({
     Error, URL, console,
-    resetNameColors() {}, resetAddressImport() {},
+    resetNameColors() {}, resetAddressImport() {}, resetChangeOutputs() {},
+    changeOutputsPending() {return false;}, changeOutputsPanel() {return "";},
+    changeOutputsAction() {return false;}, changeOutputsLookupComplete() {return false;},
     document: {
       querySelector(selector) {
         if (selector === '#app') return app;
@@ -137,4 +139,21 @@ test('saved fixture investigations retain synthetic provenance and offline trace
   view.openActionDialog('miro-create');
   assert.match(view.dialog.innerHTML, /SYNTHETIC DATA · Archived investigation/);
   assert.match(view.dialog.innerHTML, /Changes your Miro workspace/);
+});
+
+test('recovered change-output lookup cannot overwrite the new-investigation starting outputs', async () => {
+  let jobReads = 0;
+  const view = await harness(path => {
+    if (path === '/api/session') return {csrf: 'test', settings: defaults, cases: [], active_job: jobReads ? null : 'change1'};
+    if (path === '/api/jobs/change1') return {id: 'change1', action: 'change-output-lookup', case_id: 'case A', live: true,
+      status: jobReads++ ? 'succeeded' : 'running', result: {txid, outputs: [{vout: 1, selectable: true}], current_vout: 1}};
+  });
+  view.state.draft.txids = 'Investigator draft';
+  view.state.draft.seeds = `${txid}:0`;
+  await view.pollJob();
+  assert.equal(view.state.job, null);
+  assert.equal(view.state.draft.txids, 'Investigator draft');
+  assert.equal(view.state.draft.seeds, `${txid}:0`);
+  assert.equal(view.state.draft.reports.length, 0);
+  assert.match(view.notifications.at(-1), /Open Change outputs and load the transaction again/);
 });

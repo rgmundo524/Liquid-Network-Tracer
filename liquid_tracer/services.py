@@ -85,6 +85,8 @@ def _validate(data, identity):
     validate_name_colors(data.get("name_colors", {}))
     from .role_colors import validate_role_colors
     validate_role_colors(data.get("role_colors", {}))
+    from .change_outputs import validate_change_outputs
+    validate_change_outputs(data.get("change_outputs", {}))
     return data
 
 

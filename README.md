@@ -30,6 +30,14 @@ The status refers to the saved observation, not a real-time balance or a minimum
 
 Miro presentations now use **ELK Layered**, a layout engine running locally through the pinned `elkjs` library. It places transactions and nearby inputs/outputs from left to right, orders connection points to reduce crossings, and separates disconnected components. Each full address has one circle per network, shared across starting transactions and hops. Address reuse can introduce return edges that cannot all point right; transaction dependency order remains preserved. The evidence archive retains its original baseline layout; ELK calculates a separate presentation without changing the recorded relationships.
 
+Optionally open **Change outputs** to select a transaction's change `vout` using
+transaction lookup or a reviewed `Txid,ChangeVout,Notes` CSV import. ELK aligns
+that change output with its transaction and places the other outputs below.
+Transactions without a designation keep normal ELK rules. Shared-address
+conflicts are reported in the preview. Regenerate a preview or use **Sync and
+reorganize Miro graph** to apply the arrangement. See [change-output selections
+and CSV import](docs/change-outputs.md).
+
 Transaction connectors attach to fixed sides: inputs enter the left and outputs leave the right, with separate attachment points ordered by ELK. **Connector appearance** in settings defaults to **Straight**; **Curved** and **Elbowed** are also available. Straight connections that return backward or would pass through objects use elbowed routes where needed. Miro controls the final connector paths, so the local preview estimates its appearance. New connectors use the selected setting; choose **Sync and reorganize graph** to apply the calculated positions and connector appearance to an existing graph. Normal sync preserves manual positions and connector choices.
 
 **Include transaction fee flows** is a checkbox in investigation settings and the defaults for new investigations. It starts unchecked. When included, fees appear in a horizontal row above the main flow, ordered by available chain chronology with deterministic tie handling. Excluding fees changes the graph only: fee amounts, events, and API observations remain in the evidence exports.
