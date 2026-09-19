@@ -198,6 +198,12 @@ After importing attributions, choose **Assign name colors** in the browser or te
 
 For bulk assignments, choose **Import name colors** inside that editor. Upload or paste a `Name,Color` CSV (or JSON array), preview the proposed changes, and apply the reviewed import. Names and headers match case-insensitively; colors use `#RRGGBB`. Existing colors are kept unless you choose replacement. Import address attributions first so the name groups exist. See the [CSV template](examples/name-colors-template.csv) and [bulk color import instructions](docs/name-colors.md#import-name-group-colors).
 
+Choose **Export saved CSV** in the attribution, name-color, or change-output
+screen to edit current saved entries in their import format. **Export input CSVs**
+in the investigation exports all three together as a ZIP, even before a trace.
+Exports include every saved row, with large tables split into importable CSV
+parts. See [exporting and reimporting CSV inputs](docs/input-csv-exports.md).
+
 ### Bulk address attributions before the first run
 
 Create or open an investigation, then use **Import attributions** in the browser

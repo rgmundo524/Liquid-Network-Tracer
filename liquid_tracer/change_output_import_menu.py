@@ -22,6 +22,8 @@ def change_output_import_screen(base, button, case):
             with VerticalScroll(classes="form-panel"):
                 yield Label("Import change outputs", classes="title")
                 yield Static(NOTICE, markup=False)
+                yield button("Export saved CSV", id="change-import-export")
+                yield Static("", id="change-import-export-status", markup=False)
                 yield Label("CSV / JSON file path (optional; takes precedence over pasted text)")
                 yield Input(id="change-import-file")
                 yield Label("Or paste Txid,ChangeVout,Notes CSV / JSON (Notes is optional)")
@@ -92,6 +94,10 @@ def change_output_import_screen(base, button, case):
         def on_button_pressed(self, event):
             event.stop()
             if self.app.busy:
+                return
+            if event.button.id == "change-import-export":
+                from .input_export_menu import export_saved_inputs
+                self.query_one("#change-import-export-status", Static).update(export_saved_inputs(case, "change-outputs"))
                 return
             error = self.query_one("#change-import-error", Static)
             try:

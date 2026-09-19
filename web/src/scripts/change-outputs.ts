@@ -122,7 +122,8 @@ export function changeOutputsPanel(caseId: string, busy: boolean): string {
   if (state.caseId !== caseId) resetChangeOutputs(caseId);
   if (!state.open) return '';
   const locked = busy || state.pending, lookup = state.lookup, catalog = state.catalog;
-  return `<section class="panel" id="change-outputs-panel"><div class="panel-head"><h2 tabindex="-1" id="change-outputs-title">Change outputs</h2><button class="btn" data-action="change-outputs-close"${off(locked)}>Close</button></div><div class="panel-body">
+  return `<section class="panel" id="change-outputs-panel"><div class="panel-head"><h2 tabindex="-1" id="change-outputs-title">Change outputs</h2><div class="form-actions"><a class="btn" href="/api/cases/${esc(encodeURIComponent(caseId))}/input-exports/change-outputs" download>Export saved CSV</a><button class="btn" data-action="change-outputs-close"${off(locked)}>Close</button></div></div><div class="panel-body">
+  <p class="address-note">Export includes all saved change outputs across every page. Unsaved edits are excluded. Empty exports contain column headers; large exports download as a ZIP of CSV parts.</p>
   <p class="address-note">${esc(NOTICE)}</p><h3>Find a transaction</h3>
   <label class="field"><span>Transaction hash</span><input id="change-outputs-txid" class="mono" maxlength="64" spellcheck="false" value="${esc(state.txid)}" placeholder="64-character transaction hash"${off(locked)}/></label>
   <div class="form-actions"><button class="btn" data-action="change-outputs-lookup"${off(locked)}>Load outputs</button></div>

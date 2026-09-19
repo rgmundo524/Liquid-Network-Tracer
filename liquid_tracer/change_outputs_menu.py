@@ -29,6 +29,8 @@ def change_output_screen(base, button, case):
                 yield Label("Change outputs", classes="title")
                 yield Static(NOTICE, markup=False)
                 yield button("Import change outputs", id="change-output-import")
+                yield button("Export saved CSV", id="change-output-export")
+                yield Static("", id="change-output-export-status", markup=False)
                 yield Input(placeholder="Search saved transaction IDs", id="change-output-search")
                 with Horizontal(classes="buttons"):
                     yield button("Search / refresh", id="change-output-find")
@@ -194,6 +196,10 @@ def change_output_screen(base, button, case):
         def on_button_pressed(self, event):
             event.stop()
             if self.app.busy:
+                return
+            if event.button.id == "change-output-export":
+                from .input_export_menu import export_saved_inputs
+                self.query_one("#change-output-export-status", Static).update(export_saved_inputs(case, "change-outputs"))
                 return
             error = self.query_one("#change-output-error", Static)
             try:

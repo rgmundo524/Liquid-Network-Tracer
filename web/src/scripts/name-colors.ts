@@ -32,7 +32,8 @@ export function nameColorsPanel(caseId: string, busy: boolean): string {
     <button class="btn" data-action="name-colors-role-save" data-color-index="${i}"${disabled}>Save color</button>
     <button class="btn" data-action="name-colors-role-clear" data-color-index="${i}"${disabled}>Reset to default</button></td></tr>`;
   }).join('')}</tbody></table></div>
-  <h3>Imported name colors</h3><p class="address-note">${esc(data?.notice || 'Loading saved names...')}</p>
+  <div class="panel-head"><h3>Imported name colors</h3><a class="btn" href="/api/cases/${esc(encodeURIComponent(caseId))}/input-exports/name-colors" download>Export saved CSV</a></div><p class="address-note">${esc(data?.notice || 'Loading saved names...')}</p>
+  <p class="address-note">Export includes all saved name color assignments across every page. Unsaved edits and graph-role colors are excluded. Empty exports contain column headers; large exports download as a ZIP of CSV parts.</p>
   ${nameColorImportPanel(caseId, busy || state.pending)}
   <label class="field"><span>Search names (case-insensitive)</span><input id="name-colors-query" maxlength="256" value="${esc(state.query)}"${disabled}/></label>
   <div class="form-actions"><button class="btn" data-action="name-colors-load"${disabled}>Search / refresh</button></div>

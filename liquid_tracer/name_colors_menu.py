@@ -23,6 +23,8 @@ def name_color_screen(base, button, case):
                 yield Label("Assign colors", classes="title")
                 yield Static(NOTICE, markup=False)
                 yield button("Import name colors", id="name-color-import")
+                yield button("Export saved CSV", id="name-color-export")
+                yield Static("", id="name-color-export-status", markup=False)
                 yield Input(placeholder="Search attribution names", id="name-color-search")
                 with Horizontal(classes="buttons"):
                     yield button("Search / refresh", id="name-color-find")
@@ -122,6 +124,10 @@ def name_color_screen(base, button, case):
         def on_button_pressed(self, event):
             event.stop()
             if self.app.busy:
+                return
+            if event.button.id == "name-color-export":
+                from .input_export_menu import export_saved_inputs
+                self.query_one("#name-color-export-status", Static).update(export_saved_inputs(case, "name-colors"))
                 return
             error = self.query_one("#name-color-error", Static)
             try:

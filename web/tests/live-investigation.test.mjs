@@ -13,7 +13,7 @@ const source = stripTypeScriptTypes(
     .replace('void initialize().catch(', 'globalThis.startup = initialize().catch('),
   {mode: 'transform'},
 );
-const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, openActionDialog, isBusy};');
+const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, openActionDialog, isBusy};');
 const txid = 'a'.repeat(64);
 const defaults = {hops: 1, max_transactions: 20, max_outpoints: 100, max_requests: 30,
   max_seconds: 60, max_new_items: 750, connector_style: 'straight'};
@@ -139,6 +139,29 @@ test('saved fixture investigations retain synthetic provenance and offline trace
   view.openActionDialog('miro-create');
   assert.match(view.dialog.innerHTML, /SYNTHETIC DATA · Archived investigation/);
   assert.match(view.dialog.innerHTML, /Changes your Miro workspace/);
+});
+
+test('input CSV download is available before and after tracing, including while busy', async () => {
+  const view = await harness();
+  const caseId = 'case \'"><script>name</script>';
+  const detail = {id: caseId, name: 'My investigation', run_defaults: defaults, runs: []};
+  view.state.activeCase = detail;
+  const expected = `/api/cases/${encodeURIComponent(caseId).replace(/'/g, '&#39;')}/input-exports/all`;
+  for (const traced of [false, true]) {
+    detail.runs = traced ? [{id: 'savedrun', transaction_count: 1, frontier_count: 0}] : [];
+    detail.latest_run = traced ? 'savedrun' : undefined;
+    view.state.job = {id: 'busy', status: 'running', action: 'trace'};
+    const html = view.workspace();
+    assert.ok(html.includes(`href="${expected}" download>`));
+    assert.match(html, /Export input CSVs/);
+    assert.match(html, /all saved attributions, name colors, and change outputs across every page/);
+    assert.match(html, /Unsaved edits are excluded/);
+    assert.doesNotMatch(html, /<script>/);
+    assert.equal((html.match(/\/input-exports\/all/g) || []).length, 1);
+    const link = html.match(/<a[^>]*\/input-exports\/all[^>]*>/)[0];
+    assert.doesNotMatch(link, /disabled|data-action/);
+  }
+  assert.equal(view.calls.length, 1, 'rendering download links does not start requests or jobs');
 });
 
 test('recovered change-output lookup cannot overwrite the new-investigation starting outputs', async () => {

@@ -47,6 +47,11 @@ limited to 512 KiB and 5,000 rows per batch.
 Changing the text, options, or investigation settings invalidates the review.
 Applying a valid batch makes one atomic settings update with revision history.
 
+Choose **Export saved CSV** to download current change selections as
+`Txid,ChangeVout,Notes`. This includes all saved selections, independent of the
+current search or page. Larger exports contain numbered CSV parts in a ZIP.
+See [CSV input exports](input-csv-exports.md).
+
 ## Layout behavior
 
 | Selection | ELK presentation |
