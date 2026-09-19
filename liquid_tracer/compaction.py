@@ -713,6 +713,10 @@ def compact_graph(graph, progress=None):
             last[0] = now
     notify(0, len(nodes), "Compacting the saved ELK layout", True)
     locked_nodes = set(result["layout"].get("change_outputs", {}).get("locked_nodes", []))
+    # A manual hub owns its separate entry lane. Whole connected components
+    # may still translate, but a local address move must not pull the hub back
+    # into the branch it was explicitly separated from.
+    locked_nodes.update(key for key, node in nodes.items() if node.get("layout_hub") is True)
     moved_addresses, skipped_addresses = _compact_addresses(nodes, edges, points, adjacent, fee_ids, bounds, budget, notify, locked_nodes)
     _, current_bounds = _measure(nodes, edges, points, fee_ids, adjacent, annotations, frame_groups)
     moved_components, skipped_components, fee_components = _pack_components(nodes, edges, points, fee_ids, current_bounds, budget, notify, frame_groups)

@@ -9,7 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from .common import TraceError, canonical, digest, read_json, save_json
-from .investigations import read_case
+from .investigations import read_case, validate_settings
 from .layout_preview import _preview_html, export_layout, render_svg
 from .miro import make_plan, validate_plan
 from .services import load_services
@@ -17,6 +17,21 @@ from .services import load_services
 PREVIEW_ID = re.compile(r"[0-9a-f]{16}-compact-[0-9a-f]{8}\Z")
 FILES = frozenset({"graph.html", "graph.svg", "graph.json", "before.html", "before.svg", "before.json",
                    "layout-report.json", "miro-plan.json", "compaction.json"})
+OPTIONAL_FILES = frozenset({"details.html", "details.json"})
+
+
+def _selection(options):
+    if not isinstance(options, dict):
+        raise TraceError("Invalid compact-preview graph options; create the preview again")
+    settings = validate_settings({key: options[key] for key in ("group_context_inputs", "hub_addresses") if key in options})
+    return {key: settings[key] for key in ("group_context_inputs", "hub_addresses")}
+
+
+def _check_selection(case, meta):
+    saved = _selection(meta.get("graph_options", {}))
+    current = _selection(read_case(case).get("run_defaults", {}))
+    if saved != current:
+        raise TraceError("Context grouping or branch hubs changed since this preview; create a new compact preview before applying it")
 
 
 def _hash_file(path):
@@ -52,6 +67,7 @@ def compaction_apply_lock(case, meta):
             raise TraceError("This investigation has an active trace or address review; apply the compact layout after it finishes") from None
         if meta.get("service_sha256") != service_fingerprint(case):
             raise TraceError("Service assessments changed since this preview; create a new compact preview before applying it")
+        _check_selection(case, meta)
         yield
 
 
@@ -82,13 +98,13 @@ def _verified_files(directory_text, signature):
     for line in (directory / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
         parts = line.split("  ", 1)
         if (len(parts) != 2 or not re.fullmatch(r"[0-9a-f]{64}", parts[0])
-                or parts[1] not in FILES or parts[1] in seen):
+                or parts[1] not in FILES | OPTIONAL_FILES or parts[1] in seen):
             raise TraceError("Invalid compact-preview checksum manifest; create the preview again")
         checksum, name = parts
         if _hash_file(directory / name) != checksum:
             raise TraceError("Compact-preview checksum mismatch; create the preview again")
         seen.add(name)
-    if seen != FILES:
+    if not FILES <= seen:
         raise TraceError("Compact preview has missing files; create the preview again")
     meta = read_json(directory / "compaction.json")
     if (not isinstance(meta, dict) or meta.get("schema_version") != 1
@@ -102,7 +118,8 @@ def _verified_files(directory_text, signature):
     validate_plan(plan)
     if (plan.get("sha256") != meta.get("plan_sha256") or plan.get("namespace") != meta.get("namespace")
             or plan.get("run_id") != meta.get("run_id")
-            or plan.get("layout", {}).get("compaction") != meta["compaction"]):
+            or plan.get("layout", {}).get("compaction") != meta["compaction"]
+            or _selection(plan.get("graph_options", {})) != _selection(meta.get("graph_options", {}))):
         raise TraceError("Compact preview and Miro plan disagree; create the preview again")
     return meta
 
@@ -124,7 +141,8 @@ def compaction_preview_metadata(case, run_id, preview_id):
     directory = _directory(case, preview_id)
     if not preview_id.startswith(selected + "-compact-"):
         raise TraceError("Compact preview belongs to another saved run")
-    paths = [directory / name for name in sorted(FILES | {"SHA256SUMS"})]
+    optional = {name for name in OPTIONAL_FILES if (directory / name).exists() or (directory / name).is_symlink()}
+    paths = [directory / name for name in sorted(FILES | optional | {"SHA256SUMS"})]
     meta = _verified_files(str(directory.absolute()), _stat_signature(paths))
     metadata = read_case(case)
     if meta.get("case_id") != metadata["case_id"] or meta.get("run_id") != selected:
@@ -139,6 +157,7 @@ def compaction_preview_metadata(case, run_id, preview_id):
         raise TraceError("The compact preview no longer matches its saved evidence; create it again")
     if meta.get("service_sha256") != service_fingerprint(case):
         raise TraceError("Service assessments changed since this preview; create a new compact preview before applying it")
+    _check_selection(case, meta)
     # Do not let callers mutate cached verification metadata.
     import copy
     return copy.deepcopy(meta)
@@ -204,7 +223,8 @@ def export_compaction(before, after, directory, *, archive_sha256, service_sha25
                 "case_id": after["namespace"]["case_id"], "namespace": after["namespace"],
                 "archive_sha256": archive_sha256, "service_sha256": service_sha256,
                 "plan_sha256": plan["sha256"], "include_fees": after["include_fees"],
-                "connector_style": after["graph_options"]["connector_style"], "compaction": report}
+                "connector_style": after["graph_options"]["connector_style"], "compaction": report,
+                "graph_options": {**after["graph_options"], **_selection(after["graph_options"])}}
         save_json(directory / "compaction.json", meta)
         rows = []
         for group, key, title in (("main", "width", "Main graph width"), ("main", "height", "Main graph height"),
@@ -232,6 +252,8 @@ summary{cursor:pointer;font-size:18px;font-weight:600;margin:8px}.chart{overflow
         document += "<p>Before is a fresh ELK layout of the selected saved run, not your current Miro arrangement. Node sizes and default clearances are retained. Label bounds and curved paths are estimates; Miro routes may differ.</p>"
         document += '<div class="metrics"><table><thead><tr><th>Measure</th><th>Before</th><th>After</th></tr></thead><tbody>' + "".join(rows) + '</tbody></table></div>'
         document += '<p><a href="before.html" target="_blank" rel="noopener noreferrer">Open before separately</a> · <a href="graph.svg" download>Download compact SVG</a> · <a href="before.svg" download>Download before SVG</a> · <a href="layout-report.json" download>Layout report</a></p>'
+        if (directory / "details.html").is_file():
+            document += '<p><a href="details.html" target="_blank" rel="noopener noreferrer">Open detail pages</a></p>'
         from .attribution_presentation import register_html
         document += register_html(after)
         document += '<p>Review both drawings, then return to the investigation and choose Apply compact layout to Miro. Applying replaces positions of managed graph objects. Calculating this preview makes no board changes.</p></header>'
@@ -244,7 +266,8 @@ summary{cursor:pointer;font-size:18px;font-weight:600;margin:8px}.chart{overflow
         temporary.replace(directory / "graph.html")
         # The manifest is the completion marker. Partial products cannot be
         # rediscovered or applied after cancellation or an interrupted write.
-        manifest = "".join(_hash_file(directory / name) + "  " + name + "\n" for name in sorted(FILES))
+        exported = FILES | {name for name in OPTIONAL_FILES if (directory / name).is_file()}
+        manifest = "".join(_hash_file(directory / name) + "  " + name + "\n" for name in sorted(exported))
         temporary = directory / "SHA256SUMS.tmp"
         temporary.write_text(manifest, encoding="utf-8")
         temporary.replace(directory / "SHA256SUMS")

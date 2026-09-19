@@ -14,7 +14,7 @@ const source = stripTypeScriptTypes(
     .replace('void initialize().catch(', 'globalThis.startup = initialize().catch('),
   {mode: 'transform'},
 );
-const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, openActionDialog, isBusy};');
+const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy};');
 const txid = 'a'.repeat(64);
 const defaults = {hops: 1, max_transactions: 20, max_outpoints: 100, max_requests: 30,
   max_seconds: 60, max_new_items: 750, connector_style: 'straight'};
@@ -263,4 +263,83 @@ test('canceling or navigating away invalidates the frame review and ignores its 
   assert.equal(view.dialog.open, false);
   assert.match(view.notifications.at(-1), /Choose Recover interrupted frame again/);
   assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 2);
+});
+
+
+test('context input grouping defaults off and survives new-case and trace form submission', async () => {
+  const detail = {id: 'groupcase', name: 'Grouped case', run_defaults: {...defaults, include_fees: false, group_context_inputs: true}, runs: [], seeds: [`${txid}:0`]};
+  const view = await harness(path => path === '/api/cases' || path === '/api/cases/groupcase' ? detail : undefined);
+  assert.match(view.newCase(), /name="group_context_inputs" type="checkbox"\//);
+  await view.submit({name: detail.name, txids: txid, seeds: `${txid}:0`, group_context_inputs: 'on'});
+  assert.equal(view.calls.find(call => call.path === '/api/cases').body.settings.group_context_inputs, true);
+  view.openActionDialog('trace');
+  assert.match(view.dialog.innerHTML, /name="group_context_inputs" type="checkbox" checked/);
+  const settings = view.readSettings({values: {...defaults, group_context_inputs: 'on'}});
+  assert.equal(settings.group_context_inputs, true);
+  assert.equal(view.readSettings({values: defaults}).group_context_inputs, false);
+});
+
+test('changing grouping invalidates ELK and compact previews and blocks stale compact application', async () => {
+  const view = await harness();
+  const settings = {...defaults, include_fees: false, group_context_inputs: false};
+  const artifact = {include_fees: false, connector_style: 'straight', preview_id: 'preview1', preview_url: '/files/artifacts/graph.html',
+    downloads: [{name: 'details.html', url: '/files/artifacts/details.html'}], compaction: {unchanged: true}};
+  const detail = {id: 'case', name: 'Case', run_defaults: settings, miro_board: 'board', runs: [{id: 'run1'}], latest_run: 'run1', artifacts: {run1: {compact: artifact}}};
+  view.state.activeCase = detail;
+  assert.match(view.elkGraph(artifact, true, settings), /Open detail pages/);
+  assert.match(view.compactGraph(artifact, true, detail), /Open detail pages/);
+  assert.ok(view.currentCompaction());
+  settings.group_context_inputs = true;
+  for (const html of [view.elkGraph(artifact, true, settings), view.compactGraph(artifact, true, detail)]) {
+    assert.match(html, /different graph settings/);
+    assert.doesNotMatch(html, /<iframe|Open detail pages|Apply compact layout to Miro/);
+  }
+  assert.equal(view.currentCompaction(), undefined);
+  view.openActionDialog('miro-compact');
+  assert.equal(view.dialog.open, false);
+  artifact.group_context_inputs = true;
+  assert.match(view.elkGraph(artifact, true, settings), /<iframe/);
+  assert.match(view.compactGraph(artifact, true, detail), /Apply compact layout to Miro/);
+});
+
+test('detail pages are optional and their links accept only local artifact URLs', async () => {
+  const view = await harness();
+  const settings = {...defaults, include_fees: false, group_context_inputs: false};
+  const artifact = {include_fees: false, connector_style: 'straight', preview_url: '/files/artifacts/graph.html', downloads: []};
+  assert.doesNotMatch(view.elkGraph(artifact, true, settings), /Open detail pages/);
+  artifact.downloads = [{name: 'details.html', url: 'javascript:alert(1)'}];
+  assert.doesNotMatch(view.elkGraph(artifact, true, settings), /javascript:|Open detail pages/);
+});
+
+test('separate branch hubs are normalized at creation and preserved by the trace-only form', async () => {
+  const first = 'G' + 'a'.repeat(33), second = 'H' + 'b'.repeat(33);
+  const detail = {id: 'hubcase', name: 'Hub case', run_defaults: {...defaults, include_fees: false, group_context_inputs: false, hub_addresses: [first, second]}, runs: [], seeds: [`${txid}:0`]};
+  const view = await harness(path => path === '/api/cases' || path === '/api/cases/hubcase' ? detail
+    : path === '/api/cases/hubcase/actions' ? {id: 'trace1', status: 'running'} : undefined);
+  assert.match(view.newCase(), /Separate branch hubs/);
+  await view.submit({name: detail.name, txids: txid, seeds: `${txid}:0`, hub_addresses: ` ${second}\n${first}\n\n${second} `});
+  assert.deepEqual(view.calls.find(call => call.path === '/api/cases').body.settings.hub_addresses, [first, second]);
+  view.openActionDialog('trace');
+  assert.doesNotMatch(view.dialog.innerHTML, /name="hub_addresses"/);
+  await view.submitDialog(defaults);
+  const trace = view.calls.find(call => call.path === '/api/cases/hubcase/actions');
+  assert.deepEqual(trace.body.settings.hub_addresses, [first, second]);
+});
+
+test('hub selection changes invalidate previews while duplicate and reordered lists remain equivalent', async () => {
+  const view = await harness();
+  const first = 'G' + 'a'.repeat(33), second = 'H' + 'b'.repeat(33);
+  const settings = {...defaults, include_fees: false, group_context_inputs: false, hub_addresses: [first, second]};
+  const artifact = {include_fees: false, connector_style: 'straight', preview_id: 'preview1', preview_url: '/files/artifacts/graph.html',
+    downloads: [], compaction: {unchanged: true}, hub_addresses: [second, first, second]};
+  const detail = {id: 'case', name: 'Case', run_defaults: settings, miro_board: 'board', runs: [{id: 'run1'}], latest_run: 'run1', artifacts: {run1: {compact: artifact}}};
+  view.state.activeCase = detail;
+  assert.match(view.elkGraph(artifact, true, settings), /<iframe/);
+  assert.match(view.compactGraph(artifact, true, detail), /<iframe/);
+  settings.hub_addresses = [first];
+  assert.match(view.elkGraph(artifact, true, settings), /different graph settings/);
+  assert.match(view.compactGraph(artifact, true, detail), /different graph settings/);
+  assert.equal(view.currentCompaction(), undefined);
+  view.openActionDialog('miro-compact');
+  assert.equal(view.dialog.open, false);
 });

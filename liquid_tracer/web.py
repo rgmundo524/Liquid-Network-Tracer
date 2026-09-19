@@ -42,11 +42,22 @@ EXPORT_NAMES = {"transactions.csv", "export.json", "SHA256SUMS"}
 PREVIEW_NAMES = {"graph.html", "graph.svg", "graph.mmd", "graph.json",
                  "mermaid-node-map.json", "mermaid-config.json"}
 LAYOUT_NAMES = {"graph.html", "graph.svg", "graph.json", "layout-report.json"}
+LAYOUT_DETAIL_NAMES = {"details.html", "details.json"}
 COMPACTION_NAMES = LAYOUT_NAMES | {"before.html", "before.svg", "before.json", "compaction.json", "SHA256SUMS"}
 LAYOUT_ALGORITHMS = ("elk_layered_v1", "dependency_layers_v1")
 FALLBACK_REASONS = ("size_limit", "timeout", "mermaid_size_limit", "mermaid_timeout")
 from .connections import FILES as CONNECTION_NAMES, LEGACY_FILES as LEGACY_CONNECTION_NAMES, preview_files
 CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact", "connections"}
+
+
+def public_graph_options(options):
+    if not isinstance(options, dict):
+        return None
+    try:
+        settings = validate_settings({key: options[key] for key in ("group_context_inputs", "hub_addresses") if key in options})
+    except TraceError:
+        return None
+    return {key: settings[key] for key in ("group_context_inputs", "hub_addresses")}
 
 
 def public_service(rule):
@@ -408,7 +419,7 @@ class LocalServer(ThreadingHTTPServer):
                         if not isinstance(layout_report, dict):
                             continue
                         info = {**compact_meta, "graph_options": {
-                            "connector_style": compact_meta["connector_style"]},
+                            **compact_meta.get("graph_options", {}), "connector_style": compact_meta["connector_style"]},
                             "layout": layout_report.get("layout")}
                     else:
                         info = read_json(files[metadata_file])
@@ -429,7 +440,8 @@ class LocalServer(ThreadingHTTPServer):
                     order = (finished, directory.name)
                     if order <= newest.get((run_id, kind), (-1, "")):
                         continue
-                    product = self.artifact_links(case, [folder, directory.name], selected_names)
+                    exposed_names = selected_names | LAYOUT_DETAIL_NAMES if kind in ("elk", "compact") else selected_names
+                    product = self.artifact_links(case, [folder, directory.name], exposed_names)
                     product["include_fees"] = fees
                     if kind == "connections":
                         report = info["connections"]
@@ -442,6 +454,10 @@ class LocalServer(ThreadingHTTPServer):
                                 or not isinstance(layout, dict) or layout.get("algorithm") not in LAYOUT_ALGORITHMS):
                             continue
                         product["connector_style"] = style
+                        display_options = public_graph_options(options)
+                        if display_options is None:
+                            continue
+                        product.update(display_options)
                         product.update(public_rendering_metadata({
                             "layout_algorithm": layout.get("algorithm"),
                             "fallback_reason": layout.get("fallback_reason")}))
@@ -692,6 +708,12 @@ class LocalServer(ThreadingHTTPServer):
                               if isinstance(item, (int, float)) and not isinstance(item, bool)}
         if result.get("connector_style") in ("straight", "curved", "elbowed"):
             value["connector_style"] = result["connector_style"]
+        options = result.get("graph_options", {})
+        if isinstance(options, dict):
+            options = {**options, **{key: result[key] for key in ("group_context_inputs", "hub_addresses") if key in result}}
+            display_options = public_graph_options(options)
+            if display_options is not None:
+                value.update({key: item for key, item in display_options.items() if key in options})
         from .address_counts import public_count_report
         counts = public_count_report(result.get("address_counts"))
         if counts is not None:
@@ -705,6 +727,8 @@ class LocalServer(ThreadingHTTPServer):
             relative = directory.relative_to(case)
             names = {"mermaid": PREVIEW_NAMES, "csv": EXPORT_NAMES, "layout": LAYOUT_NAMES,
                      "compact": COMPACTION_NAMES, "connections": CONNECTION_NAMES}[action]
+            if action in ("layout", "compact"):
+                names = names | LAYOUT_DETAIL_NAMES
             if action == "connections":
                 names = preview_files(directory)
                 from .connections import reviewed_connections
@@ -719,6 +743,7 @@ class LocalServer(ThreadingHTTPServer):
                     raise RequestError("Invalid compact preview identifier.")
                 meta = compaction_preview_metadata(case, result["run_id"], directory.name)
                 value["preview_id"] = directory.name
+                value.update(public_graph_options(meta.get("graph_options", {})) or {})
                 report = public_compaction_report(meta.get("compaction"))
                 if report is not None:
                     value["compaction"] = report
@@ -734,6 +759,8 @@ class LocalServer(ThreadingHTTPServer):
             raise RequestError("File not found", 404)
         expected = {"mermaid": PREVIEW_NAMES, "csv": EXPORT_NAMES | LEGACY_EXPORT_NAMES, "elk": LAYOUT_NAMES,
                     "compact": COMPACTION_NAMES, "connections": CONNECTION_NAMES | LEGACY_CONNECTION_NAMES}[kind]
+        if kind in ("elk", "compact", "connections"):
+            expected = expected | LAYOUT_DETAIL_NAMES
         if parts[2] not in expected:
             raise RequestError("File not found", 404)
         return safe_path(case, parts)
@@ -906,6 +933,7 @@ class LocalServer(ThreadingHTTPServer):
                 arguments.append("--include-fees" if settings["include_fees"] else "--exclude-fees")
             if action not in ("mermaid", "csv", "miro-compact"):
                 arguments.extend(["--connector-style", settings["connector_style"]])
+                arguments.append("--group-context-inputs" if settings["group_context_inputs"] else "--ungroup-context-inputs")
         else:
             raise RequestError("Choose a supported investigation action.")
         if action in CANCELLABLE_ACTIONS:

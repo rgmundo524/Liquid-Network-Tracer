@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .name_colors import color_text
 from .graph_markers import node_border
+from .connector_styles import stroke_width
 from .common import TraceError, save_json
 from .export import COLORS, edge_color, legend_lines
 from .edge_labels import (FONT_SIZE, LINE_HEIGHT, PADDING_Y, caption_box, caption_text,
@@ -116,7 +117,7 @@ def _attachment(edge, key, node, other, source):
                 node["y"] + (py - .5) * node["height"])
     # A valid legacy graph can still be previewed. Transactions use fixed sides;
     # address/event fallback points intersect the actual ellipse/diamond.
-    if node["kind"] == "transaction":
+    if node["kind"] in ("transaction", "context_group"):
         return (node["x"] + node["width"] / 2 * (1 if source else -1), node["y"])
     dx, dy = _number(other["x"] - node["x"]), _number(other["y"] - node["y"])
     if dx == dy == 0:
@@ -138,12 +139,12 @@ def _geometry(graph):
     for item in graph["nodes"]:
         if (not isinstance(item, dict) or not isinstance(item.get("id"), str)
                 or not item["id"] or item["id"] in nodes
-                or item.get("kind") not in ("transaction", "address", "event")):
+                or item.get("kind") not in ("transaction", "address", "event", "context_group")):
             raise TraceError("ELK preview contains an invalid or duplicate node")
         node = dict(item)
         for key in ("x", "y", "width", "height"):
             node[key] = _number(node.get(key), positive=key in ("width", "height"))
-        node["color"] = node.get("color", COLORS[node["kind"]])
+        node["color"] = node.get("color", COLORS.get(node["kind"], COLORS["address"]))
         if not isinstance(node["color"], str) or not _COLOR.fullmatch(node["color"]):
             raise TraceError("ELK preview contains an invalid node color")
         nodes[node["id"]] = node
@@ -233,21 +234,32 @@ def _short_lines(value, width, height, kind, reserved_lines=0):
     return lines
 
 
-def _svg(graph, nodes, edges):
-    banner = ("Dependency layout fallback · Full graph retained; crossing optimization skipped."
+def drawing_bounds(nodes, edges):
+    """Bounds of everything drawn, including markers, borders and caption halos."""
+    boxes = []
+    for node in nodes:
+        padding = node_border(node)[1] / 2
+        boxes.append((node["x"] - node["width"] / 2 - padding,
+                      node["y"] - node["height"] / 2 - padding,
+                      node["x"] + node["width"] / 2 + padding,
+                      node["y"] + node["height"] / 2 + padding))
+    for edge in edges:
+        # The SVG arrow is nine units long, independent of line thickness.
+        padding = max(9, stroke_width(edge.get("role", "")) / 2)
+        for x, y in edge["points"]:
+            boxes.append((x - padding, y - padding, x + padding, y + padding))
+        if caption_text(edge):
+            left, top, right, bottom = caption_box(edge, edge["points"])
+            boxes.append((left - 3, top - 3, right + 3, bottom + 3))
+    return tuple(_number(value) for value in (
+        min(box[0] for box in boxes), min(box[1] for box in boxes),
+        max(box[2] for box in boxes), max(box[3] for box in boxes)))
+
+
+def _svg(graph, nodes, edges, *, banner=True):
+    notice = ("Dependency layout fallback · Full graph retained; crossing optimization skipped."
               if graph.get("layout", {}).get("fallback_reason") else layout_notice(graph))
-    left = min(node["x"] - node["width"] / 2 for node in nodes)
-    right = max(node["x"] + node["width"] / 2 for node in nodes)
-    top = min(node["y"] - node["height"] / 2 for node in nodes)
-    bottom = max(node["y"] + node["height"] / 2 for node in nodes)
-    points = [point for edge in edges for point in edge["points"]]
-    if points:
-        left, right = min(left, min(p[0] for p in points)), max(right, max(p[0] for p in points))
-        top, bottom = min(top, min(p[1] for p in points)), max(bottom, max(p[1] for p in points))
-    captions = [caption_box(edge, edge["points"]) for edge in edges if caption_text(edge)]
-    if captions:
-        left, right = min(left, min(box[0] for box in captions)), max(right, max(box[2] for box in captions))
-        top, bottom = min(top, min(box[1] for box in captions)), max(bottom, max(box[3] for box in captions))
+    left, top, right, bottom = drawing_bounds(nodes, edges)
     margin = 180
     x, y = left - margin, top - margin
     width, height = max(800, right - left + margin * 2), bottom - top + margin * 2
@@ -263,15 +275,15 @@ def _svg(graph, nodes, edges):
         lines.append(f'<marker id="arrow-{key}" markerWidth="9" markerHeight="7" refX="8" refY="3.5" '
                      f'orient="auto" markerUnits="userSpaceOnUse"><path d="M 0 0 L 9 3.5 L 0 7 Z" fill="{color}"/></marker>')
     lines.extend(['</defs>', f'<rect x="{_fmt(x)}" y="{_fmt(y)}" width="{_fmt(width)}" height="{_fmt(height)}" fill="white"/>',
-                  f'<text x="{_fmt(left)}" y="{_fmt(top - 100)}" font-family="sans-serif" font-size="15" fill="#475569">'
-                  + _escape(banner) + '</text>', '<g id="edges" fill="none" stroke-width="2">'])
+                  *([f'<text x="{_fmt(left)}" y="{_fmt(top - 100)}" font-family="sans-serif" font-size="15" fill="#475569">'
+                     + _escape(notice) + '</text>'] if banner else []), '<g id="edges" fill="none">'])
     for index, edge in enumerate(edges):
         marker = "context" if edge.get("role", "").startswith("context") else "traced"
         caption = _text(caption_text(edge))
         lines.append(f'<path id="edge-{index}" data-edge-id="{_escape(edge["id"])}" '
                      f'data-source="{_escape(edge["source"])}" data-target="{_escape(edge["target"])}" '
                      f'data-appearance="{edge["connector_shape"]}" d="{_path(edge["points"], edge["connector_shape"] == "curved")}" '
-                     f'stroke="{edge_color(edge.get("role", ""))}" marker-end="url(#arrow-{marker})">'
+                     f'stroke="{edge_color(edge.get("role", ""))}" stroke-width="{stroke_width(edge.get("role", ""))}" marker-end="url(#arrow-{marker})">'
                      f'<title>{_escape(caption)}</title></path>')
     lines.append('</g><g id="nodes" font-family="sans-serif" text-anchor="middle" fill="#172033">')
     for index, node in enumerate(nodes):
@@ -286,7 +298,7 @@ def _svg(graph, nodes, edges):
                          f'rel="noopener noreferrer" referrerpolicy="no-referrer" tabindex="0" '
                          f'aria-label="{_escape(title)}">')
         lines.append(f'<g id="node-{index}" data-node-id="{_escape(node["id"])}"><title>{_escape(title)}</title>')
-        if node["kind"] == "transaction":
+        if node["kind"] in ("transaction", "context_group"):
             shape = f'<rect x="{_fmt(cx - width / 2)}" y="{_fmt(cy - height / 2)}" width="{_fmt(width)}" height="{_fmt(height)}" {style}/>'
         elif node["kind"] == "address":
             shape = f'<ellipse cx="{_fmt(cx)}" cy="{_fmt(cy)}" rx="{_fmt(width / 2)}" ry="{_fmt(height / 2)}" {style}/>'
@@ -297,7 +309,7 @@ def _svg(graph, nodes, edges):
         inset_x, inset_y = width * .22, height * .22
         if node["kind"] == "address":
             inset_x = width * .10  # Match the label width; keep the Suspected prefix visible.
-        if node["kind"] == "transaction":
+        if node["kind"] in ("transaction", "context_group"):
             inset_x, inset_y = width * .06, height * .06
         lines.append(f'<clipPath id="label-clip-{index}"><rect x="{_fmt(cx - width / 2 + inset_x)}" '
                      f'y="{_fmt(cy - height / 2 + inset_y)}" width="{_fmt(width - inset_x * 2)}" '
@@ -360,11 +372,12 @@ def _metrics_table(metrics, title="ELK layout"):
     return '<table><caption>Estimated layout quality</caption><thead><tr><th>Measure</th><th>Baseline layout</th><th>' + _escape(title) + '</th></tr></thead><tbody>' + ''.join(rows) + '</tbody></table>'
 
 
-def _preview_html(graph, svg, metrics):
+def _preview_html(graph, svg, metrics, *, detail_pages=False):
     # SVG anchors are disabled inside an <img>. Inline only our escaped,
     # allowlisted renderer output so links work offline and in the local UI.
     from .attribution_presentation import register_html
     inline_svg = svg.decode("utf-8")
+    detail_link = ' · <a href="details.html">Open printable overview and detail pages</a>' if detail_pages else ""
     legend = "".join("<li>" + _escape(line) + "</li>" for line in legend_lines(graph))
     simulated = " · Synthetic data" if graph.get("simulated") else ""
     fees = "included" if graph.get("include_fees") else "hidden"
@@ -392,7 +405,7 @@ body:has(#chart:target) header {{ display:none; }}
 <p>Run {_escape(graph.get('run_id', ''))} · {len(graph['nodes'])} nodes · {len(graph['edges'])} links · Fees {fees}{simulated}</p>
 <p>{_escape(layout_notice(graph))}</p><p>Scroll to explore; use your browser zoom to adjust the scale. Select Explorer on a transaction or address to open Blockstream in a new tab.</p>
 <p><a href="graph.svg" download>Download SVG</a> · <a href="graph.json" download>Graph details</a> ·
-<a href="layout-report.json" download>Layout report</a></p></div>{_metrics_table(metrics, layout_title(graph))}</div>
+<a href="layout-report.json" download>Layout report</a>{detail_link}</p></div>{_metrics_table(metrics, layout_title(graph))}</div>
 {register_html(graph)}
 {change_details}
 <details><summary>Legend and evidence notes</summary><p>{_escape(graph.get('notice', ''))}</p>
@@ -410,7 +423,9 @@ def export_layout(graph, directory):
     if not isinstance(layout, dict) or not isinstance(layout.get("metrics", {}), dict):
         raise TraceError("ELK preview contains invalid layout metadata")
     metrics = layout.get("metrics", {})
-    document = _preview_html(graph, svg, metrics)
+    from .layout_details import render_details
+    details_document, details_index = render_details(graph, nodes, edges, svg)
+    document = _preview_html(graph, svg, metrics, detail_pages=True)
     directory = Path(os.path.abspath(directory))
     # A preview must never silently replace an archived run or follow a link
     # into another investigation. The caller normally supplies a unique path.
@@ -423,7 +438,8 @@ def export_layout(graph, directory):
     except OSError as error:
         raise TraceError("Cannot create the ELK preview output directory") from error
     paths = {"directory": directory, "svg": directory / "graph.svg", "html": directory / "graph.html",
-             "graph": directory / "graph.json", "report": directory / "layout-report.json"}
+             "graph": directory / "graph.json", "report": directory / "layout-report.json",
+             "details": directory / "details.html", "details_index": directory / "details.json"}
     temporary = paths["html"].with_name("graph.html.tmp")
     try:
         save_json(paths["graph"], graph)
@@ -431,6 +447,8 @@ def export_layout(graph, directory):
                                   "metrics": metrics, "notice": layout_notice(graph),
                                   "node_count": len(nodes), "edge_count": len(edges)})
         paths["svg"].write_bytes(svg)
+        save_json(paths["details_index"], details_index)
+        paths["details"].write_text(details_document, encoding="utf-8")
         temporary.write_text(document, encoding="utf-8")
         temporary.replace(paths["html"])
     except (OSError, TypeError, ValueError) as error:

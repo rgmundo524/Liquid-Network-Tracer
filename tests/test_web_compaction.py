@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from liquid_tracer.common import TraceError
 from liquid_tracer.investigations import read_case, update_case
-from liquid_tracer.web import LocalServer, public_compaction_report
+from liquid_tracer.web import LocalServer, public_compaction_report, public_graph_options
 from tests import test_web
 
 
@@ -44,7 +44,10 @@ class WebCompactionTests(unittest.TestCase):
         self.assertNotIn(str(path), json.dumps(result))
         names = {item["name"] for item in result["downloads"]}
         self.assertEqual(names, {"graph.html", "graph.svg", "graph.json", "layout-report.json",
-                                 "before.html", "before.svg", "before.json", "compaction.json", "SHA256SUMS"})
+                                 "before.html", "before.svg", "before.json", "compaction.json", "SHA256SUMS",
+                                 "details.html", "details.json"})
+        self.assertFalse(result["group_context_inputs"])
+        self.assertEqual(result["hub_addresses"], [])
         for item in result["downloads"]:
             status, data, response = self.request(item["url"])
             self.assertEqual(status, 200)
@@ -71,13 +74,34 @@ class WebCompactionTests(unittest.TestCase):
                 "source": "https://attacker.invalid", "path": "/private/sentinel",
                 "arguments": ["--shell"], "settings": {"include_fees": True, "connector_style": "elbowed"}}, 202)
             self.assertEqual(start.call_args.args[0], ["compact-preview", "--case", str(path),
-                             "--run", run_id, "--include-fees", "--connector-style", "elbowed"])
+                             "--run", run_id, "--include-fees", "--connector-style", "elbowed", "--ungroup-context-inputs"])
             self.assertFalse(start.call_args.kwargs["live"])
             self.assertEqual(start.call_args.kwargs["action"], "compact")
             start.reset_mock()
             for run in ("../outside", "--run", {}, True):
                 self.assertEqual(self.request(route + "/actions", {"action": "compact", "run_id": run})[0], 400)
             start.assert_not_called()
+
+    def test_changed_group_or_hub_selection_blocks_apply_before_live_job(self):
+        route, path, run_id = self.traced()
+        result = self.compact(route, run_id)
+        for settings in ({"group_context_inputs": True}, {"hub_addresses": ["G" + "a" * 33]}):
+            with self.subTest(settings=settings):
+                update_case(path, {"miro_board": "SYNTHETIC=", "run_defaults": settings})
+                with patch.object(self.server, "start_job") as start:
+                    status, error, _ = self.request(route + "/actions", {"action": "miro-compact", "run_id": run_id,
+                        "preview_id": result["preview_id"]})
+                    self.assertEqual(status, 400)
+                    self.assertNotIn(str(path), error["error"])
+                    start.assert_not_called()
+
+    def test_public_group_and_hub_options_are_validated_and_canonical(self):
+        address = "G" + "a" * 33
+        self.assertEqual(public_graph_options({}), {"group_context_inputs": False, "hub_addresses": []})
+        self.assertEqual(public_graph_options({"group_context_inputs": True, "hub_addresses": [address, " " + address], "private": "hidden"}),
+                         {"group_context_inputs": True, "hub_addresses": [address]})
+        for options in ({"group_context_inputs": "true"}, {"hub_addresses": ["/private"]}, None):
+            self.assertIsNone(public_graph_options(options))
 
     def test_apply_uses_exact_preview_and_live_handoff_without_default_overrides(self):
         route, path, run_id = self.traced()

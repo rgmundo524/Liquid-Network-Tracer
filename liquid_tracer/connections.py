@@ -17,11 +17,14 @@ PREVIEW_ID = re.compile(r"[0-9a-f]{16}-connections-[0-9a-f]{8}\Z")
 FILES = frozenset({"graph.html", "graph.svg", "graph.json", "layout-report.json", "graph.mmd",
                    "transactions.csv", "connections.json", "miro-plan.json", "SHA256SUMS"})
 LEGACY_FILES = (FILES - {"transactions.csv"}) | {"nodes.csv", "edges.csv"}
+OPTIONAL_FILES = frozenset({"details.html", "details.json"})
 
 
 def preview_files(directory):
     """Historical connection snapshots remain readable without being rewritten."""
-    return FILES if (Path(directory) / "transactions.csv").exists() else LEGACY_FILES
+    directory = Path(directory)
+    required = FILES if (directory / "transactions.csv").exists() else LEGACY_FILES
+    return required | {name for name in OPTIONAL_FILES if (directory / name).exists() or (directory / name).is_symlink()}
 SCOPE = ("Search scope: verified spends in the selected saved run, from the selected starting outputs. "
          "This view does not fetch additional transactions. Unsearched, paused, stopped or hop-limited "
          "branches may contain undiscovered connections; no result is not proof of no connection.")
@@ -233,7 +236,8 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
         save_json(destination / "connections.json", report)
         (destination / "graph.mmd").write_text(mermaid_source(graph) if graph["nodes"] else "flowchart LR\n  %% No connection found in saved searched data.\n", encoding="utf-8")
         write_transaction_csv(destination / "transactions.csv", graph, state)
-        manifest = "".join(digest((destination / name).read_bytes()) + "  " + name + "\n" for name in sorted(FILES - {"SHA256SUMS"}))
+        manifest = "".join(digest((destination / name).read_bytes()) + "  " + name + "\n"
+                           for name in sorted(preview_files(destination) - {"SHA256SUMS"}))
         (destination / "SHA256SUMS").write_text(manifest, encoding="utf-8")
     except BaseException:
         (destination / "SHA256SUMS").unlink(missing_ok=True)

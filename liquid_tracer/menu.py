@@ -346,6 +346,17 @@ def create_app(root=None):
                     yield Checkbox("Include transaction fee flows", value=self.settings["include_fees"], id="include-fees")
                     yield Static("Graph display only. Included fees appear in a chronological row above the graph. "
                                  "Trace evidence always retains fee outputs.", markup=False)
+                    yield Checkbox("Group isolated context inputs", value=self.settings["group_context_inputs"],
+                                   id="group-context-inputs")
+                    yield Static("Optional summary for inputs used only by one transaction. Every input number and "
+                                 "output reference is retained in the details. Shared or traced addresses stay separate.", markup=False)
+                    yield Static("Use Sync and reorganize to change grouping on an existing board. "
+                                 "This replaces generated context objects; preserve their Miro comments first.", markup=False)
+                    yield Label("Separate branch hubs")
+                    yield TextArea("\n".join(self.settings["hub_addresses"]), id="hub-addresses")
+                    yield Static("Enter one full Liquid address per line. Choose high-activity or shared addresses "
+                                 "to arrange apart from their branches. Each address keeps one identity and all "
+                                 "connections. This does not classify an address as a service.", markup=False)
                     yield Label("Miro connector appearance")
                     yield Select([("Straight", "straight"), ("Curved", "curved"), ("Elbowed", "elbowed")],
                                  value=self.settings["connector_style"], allow_blank=False, id="connector-style")
@@ -359,6 +370,10 @@ def create_app(root=None):
                                  + ". Change this in Investigation settings.", id="fee-status", markup=False)
                     yield Static("Connector appearance: " + self.settings["connector_style"]
                                  + ". Change this in Investigation settings.", markup=False)
+                    yield Static("Isolated context inputs: " + ("grouped" if self.settings["group_context_inputs"] else "separate")
+                                 + ". Change this in Investigation settings.", markup=False)
+                    yield Static(f"Separate branch hubs: {len(self.settings['hub_addresses'])} selected. "
+                                 "Change this in Investigation settings.", markup=False)
                     if not self.settings["include_fees"]:
                         yield Static("Sync checks previously generated fee items for manual edits before removing them. "
                                      "Saved trace evidence is unchanged.", markup=False)
@@ -412,6 +427,9 @@ def create_app(root=None):
                 settings[key] = value
             if self.mode in ("new", "global", "case"):
                 settings["include_fees"] = self.query_one("#include-fees", Checkbox).value
+                settings["group_context_inputs"] = self.query_one("#group-context-inputs", Checkbox).value
+                settings["hub_addresses"] = [line.strip() for line in self.query_one("#hub-addresses", TextArea).text.splitlines()
+                                             if line.strip()]
                 settings["connector_style"] = self.query_one("#connector-style", Select).value
             return settings
 
@@ -868,7 +886,7 @@ def create_app(root=None):
                 yield Button("Open saved comparison", id="compact-open")
                 yield Checkbox("I reviewed this comparison and approve replacing managed positions.",
                                value=False, id="compact-reviewed")
-                yield Static("Uses the comparison's saved fee and connector settings. "
+                yield Static("Uses the comparison's saved graph settings. "
                              "The investigation's saved maximum new-item budget still applies.", markup=False)
                 yield Static("", id="form-error", markup=False)
             with Horizontal(classes="buttons form-actions"):
@@ -1028,7 +1046,9 @@ def create_app(root=None):
                     f"{metadata.get('name') or self.case.name}\n{source}\n"
                     f"Latest run: {_status(self.case, metadata)}\n"
                     f"Miro board: {'https://miro.com/app/board/' + board + '/' if board else 'not set'}\n"
-                    f"Transaction fee flows: {'included' if settings['include_fees'] else 'hidden'}\nDirectory: {self.case}")
+                    f"Transaction fee flows: {'included' if settings['include_fees'] else 'hidden'}\n"
+                    f"Isolated context inputs: {'grouped' if settings['group_context_inputs'] else 'separate'}\n"
+                    f"Separate branch hubs: {len(settings['hub_addresses'])} selected\nDirectory: {self.case}")
                 self.query_one("#run", Button).label = "Continue latest run" if metadata.get("latest_run") else "Start first run"
                 self.query_one("#create-board", Button).disabled = self.app.busy or bool(board)
                 self.query_one("#layout", Button).disabled = self.app.busy or not (board and metadata.get("latest_run"))

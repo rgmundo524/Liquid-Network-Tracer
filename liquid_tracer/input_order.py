@@ -7,7 +7,7 @@ ownership attribution, or the order of the transaction's evidence records.
 from collections import defaultdict
 
 
-INPUT_ORDER_VERSION = 1
+INPUT_ORDER_VERSION = 2
 
 
 def _vin_index(edge):
@@ -57,22 +57,39 @@ def input_order_metadata(graph):
 def centered_input_positions(graph, aligned):
     """Preserve ordered WEST inputs around an explicitly centered change path.
 
-    Change continuations keep their 50% attachment. Inputs before/after that
-    continuation occupy the corresponding half of the transaction's left side.
-    Several aligned continuations may share the same center attachment, as
-    required by the existing change-row constraints.
+    One continuation keeps its 50% attachment. Other inputs occupy distinct
+    positions above or below it, including any additional change continuations.
+    Their address objects still keep their explicitly aligned change rows.
     """
+    incoming = defaultdict(list)
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    for edge in graph["edges"]:
+        if nodes[edge["target"]]["kind"] == "transaction":
+            incoming[edge["target"]].append(edge)
+    orders = input_orders(graph)
     result = {}
-    for order in input_orders(graph).values():
-        centers = [i for i, key in enumerate(order) if key in aligned]
-        if not centers:
+    for key, edges in incoming.items():
+        if not any(edge["id"] in aligned for edge in edges):
             continue
-        first, last = centers[0], centers[-1]
+        # Mixed continuation/context nodes retain their explicit priority.
+        # Otherwise keep ELK's top-to-bottom order, with a stable fallback for
+        # layouts that have not supplied percentage ports.
+        def current_position(edge):
+            position = edge.get("attachment", {}).get("endItem", {}).get("position", {})
+            try:
+                y = float(str(position.get("y", "50%")).removesuffix("%"))
+            except ValueError:
+                y = 50.0
+            return y, _vin_index(edge), edge["id"]
+
+        order = orders.get(key) or [edge["id"] for edge in sorted(edges, key=current_position)]
+        centers = [i for i, key in enumerate(order) if key in aligned]
+        center = centers[0]
         for index, key in enumerate(order):
-            if index < first:
-                y = 50 * (index + 1) / (first + 1)
-            elif index > last:
-                y = 50 + 50 * (index - last) / (len(order) - last)
+            if index < center:
+                y = 50 * (index + 1) / (center + 1)
+            elif index > center:
+                y = 50 + 50 * (index - center) / (len(order) - center)
             else:
                 y = 50
             result[key] = y

@@ -239,10 +239,10 @@ def _routes(graph, nodes, original, aligned):
         if centered:
             attachment = {"startItem": {"position": {"x": "100%", "y": "50%"}},
                           "endItem": {"position": {"x": "0%", "y": "50%"}}}
-        elif edge["id"] in input_positions:
+        if edge["id"] in input_positions:
             attachment["endItem"] = {"position": {"x": "0%", "y": f'{input_positions[edge["id"]]:.6f}%'}}
         a, b = attachment_point(source, attachment["startItem"]), attachment_point(target, attachment["endItem"])
-        if centered:
+        if centered and input_positions.get(edge["id"], 50) == 50:
             route, reason = [a, b], None
         elif edge["target"] in fee_ids:
             lane = target["y"] + target["height"] / 2 + 70

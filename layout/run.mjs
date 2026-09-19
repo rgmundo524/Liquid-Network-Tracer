@@ -98,6 +98,8 @@ try {
     throw new Error('Invalid layout request');
   }
   const orders = inputPortOrders(request.graph);
+  const organizeBranches = request.graph.branchOrganization === 1;
+  delete request.graph.branchOrganization;
   const elk = new ELK();
   const candidates = [];
   for (const seed of request.seeds) {
@@ -106,6 +108,25 @@ try {
     let graph = request.seeds.length === 1 ? request.graph : structuredClone(request.graph);
     if (request.seeds.length === 1) request.graph = null;
     graph.layoutOptions['elk.randomSeed'] = String(seed);
+    // Keep the same bounded candidate count: compare the existing placer with
+    // two flow-weighted alternatives on small graphs. Large graphs use one
+    // weighted pass, keeping memory bounded to one ELK graph at a time.
+    const branchProfile = organizeBranches && (request.seeds.length === 1 || candidates.length > 0)
+      ? 'flow_weighted' : 'balanced';
+    if (organizeBranches) {
+      graph.layoutOptions['elk.layered.nodePlacement.strategy'] = branchProfile === 'flow_weighted'
+        ? 'NETWORK_SIMPLEX' : 'BRANDES_KOEPF';
+      if (branchProfile === 'balanced') {
+        for (const edge of graph.edges) delete edge.layoutOptions?.['elk.layered.priority.straightness'];
+      } else {
+        // Network simplex can place a routing dummy between two real nodes.
+        // Keep their combined edge clearances at least the node clearance;
+        // otherwise 35 + dummy + 35 can violate our 80-unit compaction rule.
+        const nodeSpacing = Number(graph.layoutOptions['elk.spacing.nodeNode'] ?? 80);
+        const edgeSpacing = Number(graph.layoutOptions['elk.spacing.edgeNode'] ?? 35);
+        graph.layoutOptions['elk.spacing.edgeNode'] = String(Math.max(edgeSpacing, nodeSpacing / 2));
+      }
+    }
     let result = await elk.layout(graph);
     graph = null;
     const constraints = constrainInputOrder(result, orders);
@@ -117,7 +138,7 @@ try {
     }
     // Only coordinates, ports, routes, and label boxes cross the boundary.
     candidates.push({
-      seed,
+      seed, branchProfile,
       nodes: result.children.map(({id, x, y, width, height, ports}) =>
         ({id, x, y, width, height, ports: (ports || []).map(({id, x, y}) => ({id, x, y}))})),
       edges: result.edges.map(({id, sections, labels}) => ({id, sections,

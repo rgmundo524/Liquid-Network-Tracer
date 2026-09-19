@@ -16,8 +16,9 @@ from .api import http
 from .common import TraceError, canonical, digest, now
 from .export import COLORS, edge_color, legend_lines
 from .edge_labels import FONT_SIZE as CAPTION_FONT_SIZE, caption_text
+from .connector_styles import stroke_width
 from .name_colors import color_text
-from . import presentation_items
+from . import presentation_items, context_group_miro
 from .address_counts import caption as count_caption
 from .graph_markers import node_border
 from .miro_http import MiroHTTP
@@ -73,7 +74,8 @@ def make_plan(graph):
         if count is not None:
             content += "<p>" + html.escape(count) + "</p>"
         shapes.append({"key": node["id"], "body": {
-            "data": {"shape": {"address": "circle", "transaction": "rectangle", "event": "rhombus"}[node["kind"]], "content": content},
+            "data": {"shape": {"address": "circle", "transaction": "rectangle", "event": "rhombus",
+                               "context_group": "rectangle"}[node["kind"]], "content": content},
             "position": {"x": node["x"], "y": node["y"], "origin": "center"},
             "geometry": {"width": node["width"], "height": node["height"]},
             "style": {"fillColor": node["color"], "fillOpacity": "1", "borderColor": border, "borderWidth": str(thickness),
@@ -85,7 +87,7 @@ def make_plan(graph):
             "shape": edge.get("connector_shape", "curved"), "captions": [{"content": html.escape(caption_text(edge)), "position": "50%"}],
             "style": {"startStrokeCap": "none", "endStrokeCap": "stealth", "strokeStyle": "normal",
                       "strokeColor": edge_color(edge["role"]),
-                      "strokeWidth": "2", "fontSize": str(CAPTION_FONT_SIZE)}}}
+                      "strokeWidth": str(stroke_width(edge["role"])), "fontSize": str(CAPTION_FONT_SIZE)}}}
         if graph.get("connector_attachment") == "transaction_sides_v1":
             connector["attachment"] = {}
             for field, logical, side in (("startItem", "source", "right"), ("endItem", "target", "left")):
@@ -97,6 +99,7 @@ def make_plan(graph):
             # Preserve ELK's return-link exceptions for compact-plan geometry
             # checks. This metadata is never sent to the Miro connector API.
             connector["routing_exception"] = edge.get("routing_exception")
+        connector["context_evidence"] = context_group_miro.evidence(edge)
         connectors.append(connector)
     if graph.get("layout"):
         # The graph supplies its actual top bound, including the optional fee row.
@@ -124,6 +127,7 @@ def make_plan(graph):
         [_bounds(item["body"], item["key"]) for item in shapes if item["key"] == "legend" or item["key"].startswith("run:")])
     shapes.extend(annotations)
     plan["presentation_items"] = annotation_catalog
+    plan["context_group_items"] = context_group_miro.catalog(graph)
     if "activity_frames" in graph:
         plan["activity_frames"] = copy.deepcopy(graph["activity_frames"])
         plan["frames"] = frame_bodies(plan["activity_frames"], {
@@ -176,6 +180,7 @@ def validate_plan(plan):
             raise TraceError("Invalid Miro connector endpoints")
     _validate_attachments(plan)
     _fee_catalog(plan)
+    context_group_miro.validate(plan)
     if "activity_frames" in plan:
         seeds = plan.get("run", {}).get("seeds")
         starts = ({"tx:" + seed.rpartition(":")[0] for seed in seeds
@@ -245,6 +250,9 @@ def _validate_ports(item, shapes, transactions):
                 raise ValueError
             x, y = (_percentage(position[axis]) for axis in ("x", "y"))
             if item[logical] in transactions:
+                if x != side:
+                    raise ValueError
+            elif item[logical].startswith(context_group_miro.PREFIX) and shapes[item[logical]] == "rectangle":
                 if x != side:
                     raise ValueError
             elif shapes[item[logical]] == "circle":
@@ -625,6 +633,7 @@ def _fee_removals(plan, state):
                 raise TraceError("Mapped event was not generated as a fee; refusing to remove a non-fee item")
             removals[key] = proof
     removals.update(presentation_items.removals(plan, state))
+    removals.update(context_group_miro.removals(plan, state))
     pending = state.get("pending_deletions", {})
     if not isinstance(pending, dict):
         raise TraceError("Malformed pending Miro deletions; restore the sync state")
@@ -1169,6 +1178,8 @@ def _create_items(plan, state, journal, requests, base, headers, positions, mapp
             pending["presentation_proof"] = copy.deepcopy(plan["presentation_items"][key])
         if key in plan.get("fee_items", {}):
             pending["fee_proof"] = copy.deepcopy(plan["fee_items"][key])
+        if key in plan.get("context_group_items", {}):
+            pending["context_group_proof"] = copy.deepcopy(plan["context_group_items"][key])
         if endpoint == "connectors":
             pending.update({"source": item["source"], "target": item["target"]})
             if item.get("attachment"):
@@ -1341,11 +1352,15 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
         _check_lineage(plan, current)
         removals = _fee_removals(plan, current)
         frame_removals = _frame_removals(plan, current)
+        if not reorganize and any(proof.get("kind") == "context_group_replacement" for proof in removals.values()):
+            raise TraceError("Changing context grouping on an existing board replaces generated objects; "
+                             "choose Sync and reorganize to apply this layout change. Ordinary sync preserves manual positions and ports.")
         report = {"dry_run": dry_run, "board_url": "https://miro.com/app/board/" + urllib.parse.quote(board_id, safe="") + "/",
                   "run_id": plan["run_id"], "namespace": namespace, "state_path": str(state_path), "max_items": max_items,
-                  "reorganize": reorganize, "fee_items_to_remove": sum(not key.startswith(presentation_items.PREFIX) for key in removals),
+                  "reorganize": reorganize, "fee_items_to_remove": sum(not key.startswith(presentation_items.PREFIX) and proof.get("kind") != "context_group_replacement" for key, proof in removals.items()),
                   "annotations_to_remove": sum(key.startswith(presentation_items.PREFIX) for key in removals),
-                  "frames_to_remove": len(frame_removals)}
+                  "frames_to_remove": len(frame_removals),
+                  "context_items_to_replace": sum(proof.get("kind") == "context_group_replacement" for proof in removals.values())}
         layout = plan.get("layout", {})
         if layout.get("algorithm"):
             report["layout_algorithm"] = layout["algorithm"]
@@ -1361,9 +1376,9 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
                 record = current["items"].get(item["key"])
                 if record and record["endpoint"] != endpoint:
                     raise TraceError("Miro logical key changed item type: " + item["key"])
-                if record and endpoint == "connectors" and (record.get("source") != item["source"] or record.get("target") != item["target"]):
+                if record and item["key"] not in removals and endpoint == "connectors" and (record.get("source") != item["source"] or record.get("target") != item["target"]):
                     raise TraceError("Miro connector logical key changed endpoints: " + item["key"])
-            report["new_" + endpoint] = sum(item["key"] not in current["items"] for item in collection)
+            report["new_" + endpoint] = sum(item["key"] not in current["items"] or item["key"] in removals for item in collection)
             report["mapped_" + endpoint] = len(collection) - report["new_" + endpoint]
         report["new_items"] = report["new_shapes"] + report["new_connectors"] + report["new_frames"]
         report["existing_items"] = len(current["items"])
@@ -1409,7 +1424,14 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
         live_frame_ids = {record["id"] for record in live_frame_records.values()}
 
         status_progress.emit("layout", 0, 1, "Checking connections and preparing the layout")
-        _check_fee_removals(state, remote, removals)
+        context_removals = {key: proof for key, proof in removals.items()
+                            if proof.get("kind") == "context_group_replacement"}
+        _check_fee_removals(state, remote, {key: proof for key, proof in removals.items()
+                                         if key not in context_removals})
+        if context_removals:
+            from .address_migration import _inventory
+            context_group_miro.check_remote(state, remote, context_removals,
+                                           _inventory(requests, base, headers))
         annotation_removals = {state["items"][key]["id"] for key in removals if key.startswith(presentation_items.PREFIX)}
         if annotation_removals:
             from .address_migration import _inventory
@@ -1429,7 +1451,7 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
         for endpoint, collection in live_collections:
             for item in collection:
                 key = item["key"]
-                if key not in state["items"]:
+                if key not in state["items"] or key in removals:
                     continue
                 record = state["items"][key]
                 if endpoint == "connectors":
@@ -1537,7 +1559,7 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
         initial_sets.extend((("items", key), record) for key, record in recovered_records.items())
         journal.commit(sets=initial_sets)
         mapped_ids = {record["id"] for record in state["items"].values()}
-        status_progress.emit("removing", 0, len(removals), "Removing obsolete generated fee/annotation items")
+        status_progress.emit("removing", 0, len(removals), "Removing obsolete generated items")
         for key in sorted(removals, key=lambda key: (0 if state["items"][key]["endpoint"] == "connectors" else 1, key)):
             record = state["items"][key]
             # Save intent before DELETE so a lost response can be reconciled by
@@ -1552,7 +1574,7 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
             del pending_deletions[key]
             journal.commit(deletes=[("items", key), ("pending_deletions", key)])
             report["deleted"] += 1
-            status_progress.emit("removing", report["deleted"], len(removals), "Removing obsolete generated fee/annotation items")
+            status_progress.emit("removing", report["deleted"], len(removals), "Removing obsolete generated items")
         status_progress.emit("updating", 0, len(updates), "Applying changes while preserving manual edits")
         checked = 0
 
@@ -1659,6 +1681,8 @@ def _record_pending(pending, item_id, response=None):
         record["fee_proof"] = copy.deepcopy(pending["fee_proof"])
     if "frame_proof" in pending:
         record["frame_proof"] = copy.deepcopy(pending["frame_proof"])
+    if "context_group_proof" in pending:
+        record["context_group_proof"] = copy.deepcopy(pending["context_group_proof"])
     return record
 
 

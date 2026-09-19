@@ -23,6 +23,8 @@ from .render_runtime import renderer_failure, renderer_heap_mb
 from .edge_labels import FONT_SIZE, LABEL_LAYOUT_VERSION, caption_size, caption_text, route_signature
 from .input_order import input_orders, input_order_metadata
 from .horizontal_spacing import compact_candidate
+from .branch_layout import (BRANCH_LAYOUT_VERSION, edge_priorities, organization_metrics,
+                            compact_context_inputs, hub_nodes)
 
 
 ALGORITHM = "elk_layered_v1"
@@ -302,12 +304,19 @@ def _request_graph(graph):
     nodes = {node["id"]: node for node in graph["nodes"]}
     fee_ids = {key for key, item in graph.get("fee_items", {}).items() if item["endpoint"] == "shapes"}
     main = {key: node for key, node in nodes.items() if key not in fee_ids}
+    hubs = hub_nodes(graph) & main.keys()
+    # A selected busy address gets its own entry lane, preserving a single
+    # identity. Its incoming funds remain explicit return connections. Other
+    # nodes keep their recorded transaction-dependency partitions unchanged.
+    hub_column = min((node["column"] for node in main.values()), default=0) - 1
+    columns = {key: hub_column if key in hubs else node["column"] for key, node in main.items()}
     children, port_map = {}, {}
     for key, node in sorted(main.items()):
         children[key] = {"id": key, "width": node["width"], "height": node["height"], "ports": [],
-                         "layoutOptions": {"elk.partitioning.partition": str(node["column"]),
+                         "layoutOptions": {"elk.partitioning.partition": str(columns[key]),
                                            "elk.portConstraints": "FIXED_SIDE"}}
     edge_values = []
+    priorities = edge_priorities(graph)
     main_edges = sorted((edge for edge in graph["edges"] if edge["source"] in main and edge["target"] in main),
                         key=lambda edge: edge["id"])
     for index, edge in enumerate(main_edges):
@@ -317,15 +326,16 @@ def _request_graph(graph):
             if node["kind"] == "transaction":
                 east = outgoing
             else:
-                east = main[other]["column"] > node["column"]
-                if main[other]["column"] == node["column"]:
+                east = columns[other] > columns[key]
+                if columns[other] == columns[key]:
                     east = not outgoing
             port_id = "p" + str(index) + ("s" if outgoing else "t")
             children[key]["ports"].append({"id": port_id, "width": 0, "height": 0,
                                            "layoutOptions": {"elk.port.side": "EAST" if east else "WEST"}})
             ports.append(port_id)
         port_map[edge["id"]] = ports
-        item = {"id": edge["id"], "sources": [ports[0]], "targets": [ports[1]]}
+        item = {"id": edge["id"], "sources": [ports[0]], "targets": [ports[1]],
+                "layoutOptions": {"elk.layered.priority.straightness": str(priorities[edge["id"]])}}
         if caption_text(edge):
             # ELK needs dimensions, not confidential caption text, to reserve
             # room. Keep the full public-facing text in the Python graph only.
@@ -347,6 +357,7 @@ def _request_graph(graph):
         "elk.layered.edgeLabels.sideSelection": "ALWAYS_UP", "elk.spacing.edgeLabel": "7",
         "elk.padding": "[top=0,left=0,bottom=0,right=0]"},
         "children": list(children.values()), "edges": edge_values,
+        "branchOrganization": BRANCH_LAYOUT_VERSION,
         "inputPortOrders": {key: [port_map[edge_id][1] for edge_id in order]
                             for key, order in input_orders(graph).items()}}, port_map, fee_ids
 
@@ -472,6 +483,10 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
                         "annotations": {"legend": {"x": 700, "y": -160 + shift}, "run": {"x": 700, "y": -480 + shift}},
                         "routing_exceptions": exceptions, "routing_checks_truncated": routing_checks_truncated,
                         "input_order": input_order_metadata(graph),
+                        "branch_organization": {"version": BRANCH_LAYOUT_VERSION,
+                                                 "profile": candidate.get("branchProfile", "balanced"),
+                                                 "hubs": sorted(hub_nodes(graph)),
+                                                 "hub_rule": "separate_entry_lane_with_return_connections"},
                         "horizontal_spacing": copy.deepcopy(candidate.get("horizontal_spacing", {})),
                         "edge_labels": {"version": LABEL_LAYOUT_VERSION, "estimated": True,
                                         "font_size": FONT_SIZE, "placement": "center_above",
@@ -490,7 +505,7 @@ def _validate_graph(graph, connector_style):
     nodes = {}
     for node in graph["nodes"]:
         if (not isinstance(node, dict) or not isinstance(node.get("id"), str) or node["id"] in nodes
-                or node.get("kind") not in ("transaction", "address", "event")
+                or node.get("kind") not in ("transaction", "address", "event", "context_group")
                 or not isinstance(node.get("column"), int)
                 or any(not _finite(node.get(name)) for name in ("x", "y", "width", "height"))
                 or min(node["width"], node["height"]) <= 0):
@@ -630,9 +645,18 @@ def optimize_graph(graph, connector_style="straight", progress=None):
         main = {"nodes": [node for node in result["nodes"] if node["id"] not in fee_ids],
                 "edges": [edge for edge in result["edges"] if edge["source"] not in fee_ids and edge["target"] not in fee_ids]}
         score_metrics = layout_metrics(main) if fee_ids & nodes.keys() else metrics
-        score = (score_metrics["node_overlaps"], score_metrics["node_intersections"], score_metrics["crossings"], score_metrics["edge_length"])
+        organization = organization_metrics(main)
+        result["layout"]["branch_organization"]["travel"] = organization
+        # Collision quality remains first. For equally safe candidates, favor
+        # shorter vertical travel along actual displayed flows rather than
+        # allowing numerous external inputs to dominate a branch's placement.
+        score = (score_metrics["node_overlaps"], score_metrics["node_intersections"], score_metrics["crossings"],
+                 organization["weighted_vertical_travel"] + score_metrics["edge_length"], score_metrics["edge_length"])
         scored.append((score, result, metrics, candidate["seed"]))
     _, result, after, seed = min(scored, key=lambda item: item[0])
+    _report_progress(progress, "Packing nearby transaction context", stage="applying")
+    compact_context_inputs(result)
+    after = layout_metrics(result)
     result["layout"]["metrics"] = {"before": before, "after": after, "estimated": True,
                                     "candidate_count": len(candidates), "selected_seed": seed,
                                     "routing_exceptions": result["layout"]["routing_exceptions"],
