@@ -10,6 +10,7 @@ from unittest.mock import patch
 from liquid_tracer.common import TraceError
 from liquid_tracer.export import COLORS
 from liquid_tracer.layout_preview import LAYOUT_NOTICE, export_layout, render_svg
+from liquid_tracer.edge_labels import FONT_SIZE, PADDING_Y, caption_size, caption_text, route_signature
 
 
 NS = {"s": "http://www.w3.org/2000/svg"}
@@ -50,6 +51,36 @@ class LayoutPreviewTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         self.destination = self.root / "nested" / "preview"
+
+    def test_full_caption_uses_elk_reserved_position_and_expands_svg_bounds(self):
+        graph = graph_fixture()
+        edge = graph["edges"][0]
+        edge.update(label="vout 0 · Change", quantity="SYNTHETIC " * 20, connector_shape="elbowed")
+        edge["label_layout"] = {"x": -2000, "y": -400, **caption_size(edge),
+                                 "route_signature": route_signature([(p["x"], p["y"]) for p in edge["route"]])}
+        svg = ET.fromstring(render_svg(graph))
+        captions = svg.findall(".//s:g[@id='captions']/s:text", NS)
+        caption = next(item for item in captions if item.text == caption_text(edge))
+        self.assertAlmostEqual(float(caption.get("x")), -2000 + caption_size(edge)["width"] / 2)
+        self.assertEqual(float(caption.get("y")), -400 + PADDING_Y + FONT_SIZE)
+        self.assertLess(float(svg.get("viewBox").split()[0]), -2000)
+        for invalid in (float("nan"), 10 ** 400):
+            edge["label_layout"]["x"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaises(TraceError):
+                render_svg(graph)
+
+    def test_rerouted_caption_does_not_keep_stale_elk_position(self):
+        graph = graph_fixture()
+        edge = graph["edges"][0]
+        edge["label_layout"] = {"x": -2000, "y": -400, **caption_size(edge),
+                                 "route_signature": route_signature([(p["x"], p["y"]) for p in edge["route"]])}
+        # Straight style discards the original bends, so its label must follow
+        # the displayed straight connector instead of the ELK bend route.
+        svg = ET.fromstring(render_svg(graph))
+        caption = next(item for item in svg.findall(".//s:g[@id='captions']/s:text", NS)
+                       if item.text == caption_text(edge))
+        self.assertEqual(float(caption.get("x")), 380)
+        self.assertEqual(float(caption.get("y")), 193)
 
     def test_render_preserves_all_physical_edges_roles_dates_and_input_graph(self):
         graph = graph_fixture()

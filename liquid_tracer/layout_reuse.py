@@ -12,9 +12,10 @@ from pathlib import Path
 from .common import TraceError, canonical, read_json
 from .elk_layout import ALGORITHM, ELK_VERSION, _validate_graph
 from .layout_preview import _geometry
+from .edge_labels import LABEL_LAYOUT_VERSION
 
 _NODE_GEOMETRY = frozenset({"x", "y"})
-_EDGE_GEOMETRY = frozenset({"attachment", "route", "connector_shape", "routing_exception"})
+_EDGE_GEOMETRY = frozenset({"attachment", "route", "connector_shape", "routing_exception", "label_layout"})
 _FILES = ("graph.json", "layout-report.json", "graph.svg", "graph.html")
 
 
@@ -88,6 +89,7 @@ def reusable_elk_preview(graph, directory, connector_style="straight", progress=
             saved = read_json(path / "graph.json")
             layout = saved.get("layout", {})
             if (layout.get("algorithm") != ALGORITHM or layout.get("version") != ELK_VERSION
+                    or layout.get("edge_labels", {}).get("version") != LABEL_LAYOUT_VERSION
                     or "compaction" in layout or "fallback_reason" in layout
                     or saved.get("connector_attachment") != "transaction_ports_v2"
                     or saved.get("graph_options", {}).get("connector_style") != connector_style

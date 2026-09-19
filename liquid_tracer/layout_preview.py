@@ -14,6 +14,8 @@ from .name_colors import color_text
 from .graph_markers import node_border
 from .common import TraceError, save_json
 from .export import COLORS, edge_color, legend_lines
+from .edge_labels import (FONT_SIZE, LINE_HEIGHT, PADDING_Y, caption_box, caption_text,
+                          validate_label_layout)
 
 
 LAYOUT_NOTICE = "ELK layout; Miro routes may differ. Crossing counts are estimates."
@@ -155,6 +157,7 @@ def _geometry(graph):
             raise TraceError("ELK preview contains an invalid edge or missing endpoint")
         seen.add(item["id"])
         edge = dict(item)
+        validate_label_layout(edge)
         edge["connector_shape"] = edge.get("connector_shape", "straight")
         if edge["connector_shape"] not in ("straight", "curved", "elbowed"):
             raise TraceError("ELK preview contains an unsupported connector appearance")
@@ -241,7 +244,11 @@ def _svg(graph, nodes, edges):
     if points:
         left, right = min(left, min(p[0] for p in points)), max(right, max(p[0] for p in points))
         top, bottom = min(top, min(p[1] for p in points)), max(bottom, max(p[1] for p in points))
-    margin = 180  # Includes abbreviated line captions at the outermost edges.
+    captions = [caption_box(edge, edge["points"]) for edge in edges if caption_text(edge)]
+    if captions:
+        left, right = min(left, min(box[0] for box in captions)), max(right, max(box[2] for box in captions))
+        top, bottom = min(top, min(box[1] for box in captions)), max(bottom, max(box[3] for box in captions))
+    margin = 180
     x, y = left - margin, top - margin
     width, height = max(800, right - left + margin * 2), bottom - top + margin * 2
     lines = [f'<svg xmlns="http://www.w3.org/2000/svg" role="group" aria-labelledby="title desc" '
@@ -260,7 +267,7 @@ def _svg(graph, nodes, edges):
                   + _escape(banner) + '</text>', '<g id="edges" fill="none" stroke-width="2">'])
     for index, edge in enumerate(edges):
         marker = "context" if edge.get("role", "").startswith("context") else "traced"
-        caption = _text(edge.get("label", "")) + (" · " + _text(edge["quantity"]) if edge.get("quantity") else "")
+        caption = _text(caption_text(edge))
         lines.append(f'<path id="edge-{index}" data-edge-id="{_escape(edge["id"])}" '
                      f'data-source="{_escape(edge["source"])}" data-target="{_escape(edge["target"])}" '
                      f'data-appearance="{edge["connector_shape"]}" d="{_path(edge["points"], edge["connector_shape"] == "curved")}" '
@@ -317,14 +324,17 @@ def _svg(graph, nodes, edges):
         lines.append('</g></g>')
         if url:
             lines.append('</a>')
-    lines.append('</g><g id="captions" font-family="sans-serif" font-size="11" text-anchor="middle" fill="#334155">')
+    lines.append(f'</g><g id="captions" font-family="sans-serif" font-size="{FONT_SIZE}" text-anchor="middle" fill="#334155">')
     for edge in edges:
-        caption = _text(edge.get("label", "")) + (" · " + _text(edge["quantity"]) if edge.get("quantity") else "")
-        if len(caption) > 48:
-            caption = caption[:47] + "…"
-        cx, cy = _midpoint(edge["points"])
-        lines.append(f'<text x="{_fmt(cx)}" y="{_fmt(cy - 7)}" stroke="white" stroke-width="5" '
-                     f'stroke-linejoin="round" paint-order="stroke">{_escape(caption)}</text>')
+        caption = _text(caption_text(edge)).replace("\t", "    ")
+        if not caption:
+            continue
+        left, top, right, _ = caption_box(edge, edge["points"])
+        cx = (left + right) / 2
+        for row, text in enumerate(caption.splitlines()):
+            baseline = top + PADDING_Y + FONT_SIZE + row * LINE_HEIGHT
+            lines.append(f'<text x="{_fmt(cx)}" y="{_fmt(baseline)}" stroke="white" stroke-width="5" '
+                         f'stroke-linejoin="round" paint-order="stroke">{_escape(text)}</text>')
     lines.append('</g></svg>\n')
     return "\n".join(lines).encode("utf-8")
 
@@ -386,7 +396,7 @@ body:has(#chart:target) header {{ display:none; }}
 {register_html(graph)}
 {change_details}
 <details><summary>Legend and evidence notes</summary><p>{_escape(graph.get('notice', ''))}</p>
-<p>Before uses the saved graph's baseline layout, not live Miro positions. Labels and Miro's automatic curves are not measured.
+<p>Before uses the saved graph's baseline layout, not live Miro positions. Collision counts exclude label boxes and Miro's automatic curves.
 Counts prefixed with ≥ are lower bounds because the comparison limit was reached.</p><ul>{legend}</ul></details></header>
 <main id="chart" class="chart">{inline_svg}</main>
 </body></html>\n'''

@@ -167,9 +167,11 @@ class ChangeElkTests(unittest.TestCase):
         self.assertIn("1 skipped", layout_notice(result))
         self.assertIn("Skipped change rows", _preview_html(result, b"<svg></svg>", {}))
         self.assertEqual(sum(node["kind"] == "address" and node["details"]["address"] == "SYNTHETIC-change-0" for node in result["nodes"]), 1)
-        unmarked = copy.deepcopy(state)
-        unmarked["service_controls"]["change_outputs"] = {}
-        expected = optimize_graph(build_graph(unmarked), "elbowed")
+        unconstrained = build_graph(state)
+        # Keep the visible Change caption: its measured width legitimately
+        # affects ordinary ELK placement even when a row cannot be enforced.
+        unconstrained.pop("change_outputs")
+        expected = optimize_graph(unconstrained, "elbowed")
         self.assertEqual([(node["id"], node["x"], node["y"]) for node in result["nodes"]],
                          [(node["id"], node["x"], node["y"]) for node in expected["nodes"]])
 

@@ -20,6 +20,7 @@ from pathlib import Path
 from .common import TraceError
 from .processes import defer_cancellation_during_spawn
 from .render_runtime import renderer_failure, renderer_heap_mb
+from .edge_labels import FONT_SIZE, LABEL_LAYOUT_VERSION, caption_size, caption_text, route_signature
 
 
 ALGORITHM = "elk_layered_v1"
@@ -322,7 +323,15 @@ def _request_graph(graph):
                                            "layoutOptions": {"elk.port.side": "EAST" if east else "WEST"}})
             ports.append(port_id)
         port_map[edge["id"]] = ports
-        edge_values.append({"id": edge["id"], "sources": [ports[0]], "targets": [ports[1]]})
+        item = {"id": edge["id"], "sources": [ports[0]], "targets": [ports[1]]}
+        if caption_text(edge):
+            # ELK needs dimensions, not confidential caption text, to reserve
+            # room. Keep the full public-facing text in the Python graph only.
+            # ELK ignores labels with no text, even if dimensions are supplied.
+            # This constant activates placement without sharing caption text.
+            item["labels"] = [{"id": "label:" + edge["id"], "text": "caption", **caption_size(edge),
+                               "layoutOptions": {"elk.edgeLabels.placement": "CENTER"}}]
+        edge_values.append(item)
     return {"id": "liquid-layout", "layoutOptions": {
         "elk.algorithm": "layered", "elk.direction": "RIGHT", "elk.edgeRouting": "ORTHOGONAL",
         "elk.partitioning.activate": "true", "elk.spacing.nodeNode": "80", "elk.spacing.componentComponent": "120",
@@ -333,6 +342,7 @@ def _request_graph(graph):
         "elk.layered.crossingMinimization.greedySwitch.type": "TWO_SIDED",
         "elk.layered.nodePlacement.strategy": "BRANDES_KOEPF",
         "elk.layered.nodePlacement.favorStraightEdges": "true",
+        "elk.layered.edgeLabels.sideSelection": "ALWAYS_UP", "elk.spacing.edgeLabel": "7",
         "elk.padding": "[top=0,left=0,bottom=0,right=0]"},
         "children": list(children.values()), "edges": edge_values}, port_map, fee_ids
 
@@ -361,7 +371,7 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
                             "y": point["y"] + node["height"] / 2 + offset_y}))
         for port in raw.get("ports", []):
             ports[port["id"]] = _port(node, **_point(port))
-    route_map = {}
+    route_map, label_map = {}, {}
     for raw in raw_edges:
         sections = raw.get("sections")
         if not isinstance(sections, list) or len(sections) != 1:
@@ -370,11 +380,25 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
         points = [section.get("startPoint"), *section.get("bendPoints", []), section.get("endPoint")]
         route_map[raw["id"]] = [_point({"x": point["x"] + offset_x, "y": point["y"] + offset_y})
                                 for point in map(_point, points)]
+        labels = raw.get("labels", [])
+        if not isinstance(labels, list) or len(labels) > 1:
+            raise TraceError("ELK returned invalid connector labels")
+        if labels:
+            label = labels[0]
+            if (not isinstance(label, dict) or label.get("id") != "label:" + raw["id"]
+                    or any(not _finite(label.get(key)) or label[key] <= 0 for key in ("width", "height"))):
+                raise TraceError("ELK returned invalid connector label dimensions")
+            position = _point(label)
+            label_map[raw["id"]] = {**_point({"x": position["x"] + offset_x, "y": position["y"] + offset_y}),
+                                    "width": label["width"], "height": label["height"]}
     # Existing fee row x positions already encode confirmed height/time order.
     fees = sorted((nodes[key] for key in fee_ids & nodes.keys()), key=lambda node: (node["x"], node["id"]))
     for index, node in enumerate(fees):
         node.update(x=130 + index * 230, y=-100)
     for edge in result["edges"]:
+        edge.pop("label_layout", None)
+        if edge["id"] in port_map and bool(caption_text(edge)) != (edge["id"] in label_map):
+            raise TraceError("ELK omitted or changed connector labels")
         source, target = nodes[edge["source"]], nodes[edge["target"]]
         if edge["id"] in port_map:
             try:
@@ -390,6 +414,12 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
                      {"x": start["x"] + 100, "y": 50}, {"x": end["x"], "y": 50}, end]
         a, b = attachment_point(source, attachment["startItem"]), attachment_point(target, attachment["endItem"])
         route[0], route[-1] = a, b
+        if edge["id"] in label_map:
+            label = label_map[edge["id"]]
+            size = caption_size(edge)
+            if any(label[key] != size[key] for key in ("width", "height")):
+                raise TraceError("ELK changed connector label dimensions")
+            edge["label_layout"] = {**label, "route_signature": route_signature([(p["x"], p["y"]) for p in route])}
         returns = b["x"] <= a["x"] or segment_hits_node(a, b, source) or segment_hits_node(a, b, target)
         reason = "return" if returns else ("fee" if target["id"] in fee_ids else None)
         edge.update(attachment=attachment, route=route, connector_shape="elbowed" if reason else connector_style,
@@ -436,7 +466,10 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
                         "fee_row_y": -100 if fees else None,
                         "cycle_groups": copy.deepcopy(graph.get("layout", {}).get("cycle_groups", [])),
                         "annotations": {"legend": {"x": 700, "y": -160 + shift}, "run": {"x": 700, "y": -480 + shift}},
-                        "routing_exceptions": exceptions, "routing_checks_truncated": routing_checks_truncated}
+                        "routing_exceptions": exceptions, "routing_checks_truncated": routing_checks_truncated,
+                        "edge_labels": {"version": LABEL_LAYOUT_VERSION, "estimated": True,
+                                        "font_size": FONT_SIZE, "placement": "center_above",
+                                        "reserved_count": len(label_map), "miro_positions_exact": False}}
     result.setdefault("graph_options", {})["connector_style"] = connector_style
     result["connector_attachment"] = "transaction_ports_v2"
     result["presentation_version"] = max(6, graph.get("presentation_version", 0))

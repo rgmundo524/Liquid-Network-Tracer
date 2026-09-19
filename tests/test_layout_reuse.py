@@ -102,6 +102,17 @@ class ReuseTests(unittest.TestCase):
         save_json(self.path / 'layout-report.json', report)
         self.assertIsNone(self.reuse())
 
+    def test_pre_label_layout_previews_are_not_reused(self):
+        saved = copy.deepcopy(self.saved)
+        saved['layout'].pop('edge_labels')
+        for edge in saved['edges']:
+            edge.pop('label_layout', None)
+        report = read_json(self.path / 'layout-report.json')
+        report['layout'] = saved['layout']
+        save_json(self.path / 'graph.json', saved)
+        save_json(self.path / 'layout-report.json', report)
+        self.assertIsNone(self.reuse())
+
     def test_missing_preview_still_uses_selected_elk_engine(self):
         (self.path / 'graph.html').unlink()
         from liquid_tracer.elk_layout import optimize_graph

@@ -13,6 +13,8 @@ from liquid_tracer.common import TraceError
 from liquid_tracer.elk_layout import (_apply_candidate, _point, _request_graph, _worker, attachment_point,
                                      fallback_graph, layout_metrics, optimize_graph, segment_hits_node, segments_cross)
 from liquid_tracer.export import build_graph
+from liquid_tracer.edge_labels import (caption_box, caption_size, caption_text, route_signature,
+                                       translate_label)
 from tests.fixtures import fixture
 from tests.test_layout import chain, state_from, txid
 
@@ -50,12 +52,57 @@ def synthetic_candidate(request, seeds, **kwargs):
             ports[port["id"]] = point(x + px, y + py)
         nodes.append(node)
     edges = [{"id": edge["id"], "sections": [{"startPoint": ports[edge["sources"][0]],
-                                              "endPoint": ports[edge["targets"][0]]}]}
+                                              "endPoint": ports[edge["targets"][0]]}],
+              "labels": [{**label, "x": ports[edge["sources"][0]]["x"] + 100,
+                           "y": ports[edge["sources"][0]]["y"] - 50} for label in edge.get("labels", [])]}
              for edge in request["edges"]]
     return [{"seed": seed, "nodes": nodes, "edges": edges} for seed in seeds]
 
 
 class LayoutGeometryTests(unittest.TestCase):
+    def test_request_reserves_full_caption_with_no_private_text_in_worker(self):
+        graph = crossing_graph()
+        edge = graph["edges"][0]
+        edge.update(label="vout 123 · Change", quantity="12345678901234567890 SYNTHETIC-ASSET")
+        request, _, _ = _request_graph(graph)
+        label = request["edges"][0]["labels"][0]
+        self.assertEqual({key: label[key] for key in ("width", "height")}, caption_size(edge))
+        self.assertGreater(label["width"], 200)
+        self.assertTrue(label["text"])
+        self.assertNotIn("SYNTHETIC-ASSET", json.dumps(request))
+        self.assertNotIn("Change", json.dumps(request))
+        self.assertGreater(caption_size({"label": "界" * 20})["width"], caption_size({"label": "a" * 20})["width"])
+        self.assertGreater(caption_size({"label": "one\ntwo"})["height"], caption_size({"label": "one"})["height"])
+
+    def test_invalid_or_missing_worker_label_geometry_fails_closed(self):
+        graph = crossing_graph()
+        graph["edges"][0].update(label="vout 0", quantity="?? ??")
+        request, ports, fees = _request_graph(graph)
+        valid = synthetic_candidate(request, [1])[0]
+        mutations = [lambda edge: edge.pop("labels"),
+                     lambda edge: edge.update(labels=[None]),
+                     lambda edge: edge["labels"][0].update(x=float("nan")),
+                     lambda edge: edge["labels"][0].update(width=1),
+                     lambda edge: edge["labels"][0].update(id="wrong")]
+        for mutate in mutations:
+            candidate = copy.deepcopy(valid)
+            mutate(candidate["edges"][0])
+            with self.subTest(mutate=mutate), self.assertRaises(TraceError):
+                _apply_candidate(graph, candidate, ports, fees, "elbowed")
+
+    def test_label_position_follows_translation_but_not_rerouting(self):
+        edge = {"label": "vout 0", "quantity": "?? ??", "route": [point(0, 0), point(500, 0)]}
+        edge["label_layout"] = {"x": 100, "y": -40, **caption_size(edge),
+                                 "route_signature": route_signature([(0, 0), (500, 0)])}
+        self.assertEqual(caption_box(edge, [(0, 0), (0, 0), (500, 0)])[:2], (100, -40))
+        edge["route"] = [point(10, 20), point(510, 20)]
+        translate_label(edge, 10, 20)
+        self.assertEqual(caption_box(edge, [(10, 20), (510, 20)])[:2], (110, -20))
+        self.assertNotEqual(caption_box(edge, [(10, 20), (900, 20)])[:2], (110, -20))
+        edge["route"][-1]["x"] = 900
+        translate_label(edge, 0, 0)
+        self.assertNotIn("label_layout", edge)
+
     def test_crossings_exclude_shared_ports_and_collinear_lines(self):
         self.assertTrue(segments_cross(point(0, 0), point(10, 10), point(0, 10), point(10, 0)))
         self.assertFalse(segments_cross(point(0, 0), point(10, 10), point(0, 0), point(10, 0)))
@@ -334,6 +381,30 @@ class HistoricalFallbackTests(unittest.TestCase):
 
 @unittest.skipUnless(HAS_ELK, "Run liquid-layout-setup to install the pinned local ELK engine")
 class RealElkTests(unittest.TestCase):
+    def test_real_worker_places_labels_and_reserves_more_space_for_long_captions(self):
+        graph = crossing_graph()
+        for edge in graph["edges"]:
+            edge.update(label="vout 0", quantity="?? ??")
+        small = optimize_graph(graph, connector_style="elbowed")
+        for edge in graph["edges"]:
+            edge.update(label="vout 123 · Change", quantity="12345678901234567890 SYNTHETIC-ASSET")
+        large = optimize_graph(graph, connector_style="elbowed")
+        def gaps(result):
+            nodes = {node["id"]: node for node in result["nodes"]}
+            return [nodes[edge["target"]]["x"] - nodes[edge["target"]]["width"] / 2
+                    - nodes[edge["source"]]["x"] - nodes[edge["source"]]["width"] / 2 for edge in result["edges"]]
+        self.assertTrue(all(a > b for a, b in zip(gaps(large), gaps(small))))
+        nodes = {node["id"]: node for node in large["nodes"]}
+        boxes = []
+        for edge in large["edges"]:
+            box = caption_box(edge, [(p["x"], p["y"]) for p in edge["route"]])
+            self.assertGreater(box[0], nodes[edge["source"]]["x"] + nodes[edge["source"]]["width"] / 2)
+            self.assertLess(box[2], nodes[edge["target"]]["x"] - nodes[edge["target"]]["width"] / 2)
+            boxes.append(box)
+        self.assertNotEqual(boxes[0], boxes[1])
+        self.assertEqual(large["layout"]["edge_labels"]["reserved_count"], len(graph["edges"]))
+        self.assertTrue(large["layout"]["edge_labels"]["estimated"])
+
     def test_real_worker_accepts_input_over_the_old_32_mib_ceiling(self):
         graph = crossing_graph()
         request, ports, fees = _request_graph(graph)
@@ -355,7 +426,7 @@ class RealElkTests(unittest.TestCase):
                 for key in ("x", "y", "width", "height"):
                     node.pop(key, None)
             for edge in graph["edges"]:
-                for key in ("attachment", "route", "connector_shape", "routing_exception"):
+                for key in ("attachment", "route", "connector_shape", "routing_exception", "label_layout"):
                     edge.pop(key, None)
         self.assertEqual(before_copy, after_copy)
 

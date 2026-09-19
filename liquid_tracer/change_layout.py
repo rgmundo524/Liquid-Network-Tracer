@@ -12,6 +12,7 @@ from bisect import bisect_left
 from collections import defaultdict
 
 from .common import output_kind
+from .edge_labels import translate_label
 
 
 SPACING = 80.0
@@ -230,6 +231,7 @@ def _routes(graph, nodes, original, aligned):
             if deltas[0] != (0, 0):
                 edge["route"] = [{"x": point["x"] + deltas[0][0], "y": point["y"] + deltas[0][1]}
                                  for point in edge.get("route", [])]
+                translate_label(edge, *deltas[0])
             continue
         attachment = copy.deepcopy(edge.get("attachment") or _default_attachments(source, target))
         if centered:
@@ -258,6 +260,9 @@ def _routes(graph, nodes, original, aligned):
             reason = "unchecked"
         edge.update(attachment=attachment, route=route, routing_exception=reason,
                     connector_shape="elbowed" if reason else graph.get("graph_options", {}).get("connector_style", "straight"))
+        # ELK's horizontal label clearance remains, but this new route needs a
+        # fresh midpoint caption position instead of its old ELK coordinates.
+        edge.pop("label_layout", None)
 
 
 def apply_change_layout(graph):

@@ -3,13 +3,15 @@
 Ordinary **Sync to Miro** now checks completed full-graph ELK previews under the
 investigation's `previews/` directory before launching another layout calculation.
 A matching preview reports **Reusing the completed ELK layout; no recalculation**.
-This also works for existing previews created before this update. Keep the entire
-preview directory, not just its SVG: graph.json, layout-report.json, graph.svg
-and the completed graph.html are required.
+Previews made before connector-label space was reserved are no longer reused.
+Choose **Refresh layout preview** to save a compatible replacement.
+Keep the entire preview directory, not just its SVG: graph.json,
+layout-report.json, graph.svg and the completed graph.html are required.
 
 The saved run, case/network namespace, node/edge identities, labels, dimensions,
-colors, service settings, fee visibility and connector style must match. The
-current graph is rebuilt from verified archived evidence before comparison.
+colors, service settings, fee visibility, connector style and label-layout
+revision must match. The current graph is rebuilt from verified archived
+evidence before comparison.
 Incomplete, stale, malformed or symlinked previews are ignored. An unmatched
 request still uses ELK, without imposing new time/size limits or a fallback engine.
 Custom external `--out` directories are not searched automatically.

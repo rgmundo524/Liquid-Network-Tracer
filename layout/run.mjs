@@ -24,12 +24,13 @@ try {
     if (request.seeds.length === 1) request.graph = null;
     graph.layoutOptions['elk.randomSeed'] = String(seed);
     const result = await elk.layout(graph);
-    // Only coordinates, ports, and routes cross the worker boundary.
+    // Only coordinates, ports, routes, and label boxes cross the boundary.
     candidates.push({
       seed,
       nodes: result.children.map(({id, x, y, width, height, ports}) =>
         ({id, x, y, width, height, ports: (ports || []).map(({id, x, y}) => ({id, x, y}))})),
-      edges: result.edges.map(({id, sections}) => ({id, sections})),
+      edges: result.edges.map(({id, sections, labels}) => ({id, sections,
+        labels: (labels || []).map(({id, x, y, width, height}) => ({id, x, y, width, height}))})),
     });
   }
   process.stdout.write(JSON.stringify({version: '0.12.0', candidates}));

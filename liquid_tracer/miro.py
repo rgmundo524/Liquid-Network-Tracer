@@ -15,6 +15,7 @@ from pathlib import Path
 from .api import http
 from .common import TraceError, canonical, digest, now
 from .export import COLORS, edge_color, legend_lines
+from .edge_labels import FONT_SIZE as CAPTION_FONT_SIZE, caption_text
 from .name_colors import color_text
 from . import presentation_items
 from .address_counts import caption as count_caption
@@ -81,10 +82,10 @@ def make_plan(graph):
     transaction_keys = {node["id"] for node in graph["nodes"] if node["kind"] == "transaction"}
     for edge in graph["edges"]:
         connector = {"key": edge["id"], "source": edge["source"], "target": edge["target"], "body": {
-            "shape": edge.get("connector_shape", "curved"), "captions": [{"content": html.escape(edge["label"] + " · " + edge["quantity"]), "position": "50%"}],
+            "shape": edge.get("connector_shape", "curved"), "captions": [{"content": html.escape(caption_text(edge)), "position": "50%"}],
             "style": {"startStrokeCap": "none", "endStrokeCap": "stealth", "strokeStyle": "normal",
                       "strokeColor": edge_color(edge["role"]),
-                      "strokeWidth": "2", "fontSize": "11"}}}
+                      "strokeWidth": "2", "fontSize": str(CAPTION_FONT_SIZE)}}}
         if graph.get("connector_attachment") == "transaction_sides_v1":
             connector["attachment"] = {}
             for field, logical, side in (("startItem", "source", "right"), ("endItem", "target", "left")):
