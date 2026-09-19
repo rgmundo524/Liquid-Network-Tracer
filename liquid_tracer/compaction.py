@@ -15,6 +15,7 @@ from itertools import product
 from .common import TraceError
 from .miro_frames import _padded
 from .elk_layout import ALGORITHM, _default_attachments, _validate_graph, attachment_point, segment_hits_node, layout_metrics
+from .edge_labels import caption_box, translate_label
 
 ALGORITHM_COMPACTION = "local_address_components_v1"
 LINKED_HORIZONTAL = 200.0
@@ -201,25 +202,10 @@ def _length(points):
 
 
 def _caption(edge, points):
-    # Miro always includes this separator, including when quantity is empty.
-    # Its caption can therefore be wider than the abbreviated local SVG text.
-    caption = str(edge.get("label", "")) + " · " + str(edge.get("quantity", ""))
-    # Local SVG truncates at 48 characters. Miro receives the full caption, so
-    # reserve the larger full-text box. This is deliberately an estimate: the
-    # board chooses font metrics and its own final connector route.
-    width = max(12, max((len(line) for line in caption.splitlines()), default=0) * 11 * .8 + 12)
-    height = max(1, len(caption.splitlines())) * 14 + 10
-    remaining = _length(points) / 2
-    middle = points[0]
-    for a, b in zip(points, points[1:]):
-        length = math.dist(a, b)
-        if length and remaining <= length:
-            fraction = remaining / length
-            middle = a[0] + (b[0] - a[0]) * fraction, a[1] + (b[1] - a[1]) * fraction
-            break
-        remaining -= length
-    # SVG baseline is seven units above the route, with a white text halo.
-    return middle[0] - width / 2, middle[1] - 7 - height, middle[0] + width / 2, middle[1] - 2
+    # Preserve ELK's reserved label box and the midpoint estimate used for
+    # Miro. Miro chooses its own final route and caption position, so the
+    # combined footprint is deliberately conservative.
+    return _envelope([caption_box(edge, points), caption_box(edge, points, use_layout=False)])
 
 
 def _edge_boxes(edge, points):
@@ -524,6 +510,9 @@ def _compact_addresses(nodes, edges, points, adjacent, fee_ids, bounds, budget, 
                     for edge_id, route in proposed.items():
                         points[edge_id] = route
                         edges[edge_id]["route"] = [{"x": a, "y": b} for a, b in route]
+                        # The safety check used the new route's midpoint box.
+                        # A previous ELK label position belongs to the old path.
+                        edges[edge_id].pop("label_layout", None)
                         geometry.update_edge(edge_id)
                     geometry.node_index.add(key, _box(node))
                     moved += 1
@@ -660,6 +649,7 @@ def _pack_components(nodes, edges, points, fee_ids, bounds, budget, notify, fram
                 # current straight mode and used if curves are selected later.
                 if edges[key].get("route"):
                     edges[key]["route"] = [{"x": p["x"] + dx, "y": p["y"] + dy} for p in edges[key]["route"]]
+                    translate_label(edges[key], dx, dy)
             boxes[owner] = box
             index.add(owner, box)
             moved += 1
@@ -723,6 +713,10 @@ def compact_graph(graph, progress=None):
             last[0] = now
     notify(0, len(nodes), "Compacting the saved ELK layout", True)
     locked_nodes = set(result["layout"].get("change_outputs", {}).get("locked_nodes", []))
+    # A manual hub owns its separate entry lane. Whole connected components
+    # may still translate, but a local address move must not pull the hub back
+    # into the branch it was explicitly separated from.
+    locked_nodes.update(key for key, node in nodes.items() if node.get("layout_hub") is True)
     moved_addresses, skipped_addresses = _compact_addresses(nodes, edges, points, adjacent, fee_ids, bounds, budget, notify, locked_nodes)
     _, current_bounds = _measure(nodes, edges, points, fee_ids, adjacent, annotations, frame_groups)
     moved_components, skipped_components, fee_components = _pack_components(nodes, edges, points, fee_ids, current_bounds, budget, notify, frame_groups)

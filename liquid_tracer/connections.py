@@ -17,11 +17,14 @@ PREVIEW_ID = re.compile(r"[0-9a-f]{16}-connections-[0-9a-f]{8}\Z")
 FILES = frozenset({"graph.html", "graph.svg", "graph.json", "layout-report.json", "graph.mmd",
                    "transactions.csv", "connections.json", "miro-plan.json", "SHA256SUMS"})
 LEGACY_FILES = (FILES - {"transactions.csv"}) | {"nodes.csv", "edges.csv"}
+OPTIONAL_FILES = frozenset({"details.html", "details.json"})
 
 
 def preview_files(directory):
     """Historical connection snapshots remain readable without being rewritten."""
-    return FILES if (Path(directory) / "transactions.csv").exists() else LEGACY_FILES
+    directory = Path(directory)
+    required = FILES if (directory / "transactions.csv").exists() else LEGACY_FILES
+    return required | {name for name in OPTIONAL_FILES if (directory / name).exists() or (directory / name).is_symlink()}
 SCOPE = ("Search scope: verified spends in the selected saved run, from the selected starting outputs. "
          "This view does not fetch additional transactions. Unsearched, paused, stopped or hop-limited "
          "branches may contain undiscovered connections; no result is not proof of no connection.")
@@ -184,7 +187,7 @@ def connection_plan(graph):
 
 
 def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=False, progress=None):
-    from .cli import resolve_latest, run_path, verify_export, connector_appearance, open_preview
+    from .cli import resolve_latest, run_path, verify_export, connector_appearance, layout_search_attempts, open_preview
     from .investigations import read_case
     from .services import apply_service_labels, load_services
     from .elk_layout import optimize_graph
@@ -210,7 +213,8 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
     graph = connection_graph(state, max_hops)
     counts = ensure_counts(case, state, graph=graph, progress=progress) if graph["nodes"] else None
     if graph["nodes"]:
-        graph = optimize_graph(graph, connector_style=connector_appearance(metadata), progress=progress)
+        graph = optimize_graph(graph, connector_style=connector_appearance(metadata), progress=progress,
+                               layout_attempts=layout_search_attempts(metadata))
     report = graph["connections"]
     report["service_sha256"] = digest(canonical({k: v for k, v in settings.items() if k != "history"}))
     report["archive_sha256"] = digest((archive / "SHA256SUMS").read_bytes())
@@ -233,11 +237,14 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
         save_json(destination / "connections.json", report)
         (destination / "graph.mmd").write_text(mermaid_source(graph) if graph["nodes"] else "flowchart LR\n  %% No connection found in saved searched data.\n", encoding="utf-8")
         write_transaction_csv(destination / "transactions.csv", graph, state)
-        manifest = "".join(digest((destination / name).read_bytes()) + "  " + name + "\n" for name in sorted(FILES - {"SHA256SUMS"}))
+        manifest = "".join(digest((destination / name).read_bytes()) + "  " + name + "\n"
+                           for name in sorted(preview_files(destination) - {"SHA256SUMS"}))
         (destination / "SHA256SUMS").write_text(manifest, encoding="utf-8")
     except BaseException:
         (destination / "SHA256SUMS").unlink(missing_ok=True)
         raise
+    if "layout_attempts" in graph.get("graph_options", {}):
+        result["layout_attempts"] = graph["graph_options"]["layout_attempts"]
     return {**result, "address_counts": counts, "directory": str(destination.resolve()), "preview_id": destination.name,
             "run_id": run_id, "include_fees": False, "max_hops": max_hops,
             "connection_count": report["connection_count"], "transaction_count": report["transaction_count"],

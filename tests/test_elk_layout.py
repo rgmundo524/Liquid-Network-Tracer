@@ -13,6 +13,8 @@ from liquid_tracer.common import TraceError
 from liquid_tracer.elk_layout import (_apply_candidate, _point, _request_graph, _worker, attachment_point,
                                      fallback_graph, layout_metrics, optimize_graph, segment_hits_node, segments_cross)
 from liquid_tracer.export import build_graph
+from liquid_tracer.edge_labels import (caption_box, caption_size, caption_text, route_signature,
+                                       translate_label)
 from tests.fixtures import fixture
 from tests.test_layout import chain, state_from, txid
 
@@ -50,12 +52,57 @@ def synthetic_candidate(request, seeds, **kwargs):
             ports[port["id"]] = point(x + px, y + py)
         nodes.append(node)
     edges = [{"id": edge["id"], "sections": [{"startPoint": ports[edge["sources"][0]],
-                                              "endPoint": ports[edge["targets"][0]]}]}
+                                              "endPoint": ports[edge["targets"][0]]}],
+              "labels": [{**label, "x": ports[edge["sources"][0]]["x"] + 100,
+                           "y": ports[edge["sources"][0]]["y"] - 50} for label in edge.get("labels", [])]}
              for edge in request["edges"]]
     return [{"seed": seed, "nodes": nodes, "edges": edges} for seed in seeds]
 
 
 class LayoutGeometryTests(unittest.TestCase):
+    def test_request_reserves_full_caption_with_no_private_text_in_worker(self):
+        graph = crossing_graph()
+        edge = graph["edges"][0]
+        edge.update(label="vout 123 · Change", quantity="12345678901234567890 SYNTHETIC-ASSET")
+        request, _, _ = _request_graph(graph)
+        label = request["edges"][0]["labels"][0]
+        self.assertEqual({key: label[key] for key in ("width", "height")}, caption_size(edge))
+        self.assertGreater(label["width"], 200)
+        self.assertTrue(label["text"])
+        self.assertNotIn("SYNTHETIC-ASSET", json.dumps(request))
+        self.assertNotIn("Change", json.dumps(request))
+        self.assertGreater(caption_size({"label": "界" * 20})["width"], caption_size({"label": "a" * 20})["width"])
+        self.assertGreater(caption_size({"label": "one\ntwo"})["height"], caption_size({"label": "one"})["height"])
+
+    def test_invalid_or_missing_worker_label_geometry_fails_closed(self):
+        graph = crossing_graph()
+        graph["edges"][0].update(label="vout 0", quantity="?? ??")
+        request, ports, fees = _request_graph(graph)
+        valid = synthetic_candidate(request, [1])[0]
+        mutations = [lambda edge: edge.pop("labels"),
+                     lambda edge: edge.update(labels=[None]),
+                     lambda edge: edge["labels"][0].update(x=float("nan")),
+                     lambda edge: edge["labels"][0].update(width=1),
+                     lambda edge: edge["labels"][0].update(id="wrong")]
+        for mutate in mutations:
+            candidate = copy.deepcopy(valid)
+            mutate(candidate["edges"][0])
+            with self.subTest(mutate=mutate), self.assertRaises(TraceError):
+                _apply_candidate(graph, candidate, ports, fees, "elbowed")
+
+    def test_label_position_follows_translation_but_not_rerouting(self):
+        edge = {"label": "vout 0", "quantity": "?? ??", "route": [point(0, 0), point(500, 0)]}
+        edge["label_layout"] = {"x": 100, "y": -40, **caption_size(edge),
+                                 "route_signature": route_signature([(0, 0), (500, 0)])}
+        self.assertEqual(caption_box(edge, [(0, 0), (0, 0), (500, 0)])[:2], (100, -40))
+        edge["route"] = [point(10, 20), point(510, 20)]
+        translate_label(edge, 10, 20)
+        self.assertEqual(caption_box(edge, [(10, 20), (510, 20)])[:2], (110, -20))
+        self.assertNotEqual(caption_box(edge, [(10, 20), (900, 20)])[:2], (110, -20))
+        edge["route"][-1]["x"] = 900
+        translate_label(edge, 0, 0)
+        self.assertNotIn("label_layout", edge)
+
     def test_crossings_exclude_shared_ports_and_collinear_lines(self):
         self.assertTrue(segments_cross(point(0, 0), point(10, 10), point(0, 10), point(10, 0)))
         self.assertFalse(segments_cross(point(0, 0), point(10, 10), point(0, 0), point(10, 0)))
@@ -63,6 +110,33 @@ class LayoutGeometryTests(unittest.TestCase):
         metrics = layout_metrics(crossing_graph())
         self.assertEqual(metrics["crossings"], 1)
         self.assertEqual(metrics["node_intersections"], 0)
+
+    def test_overlapping_connectors_are_counted_separately_from_crossings(self):
+        graph = crossing_graph()
+        graph["nodes"][1].update(x=100, y=100)
+        graph["nodes"][2].update(x=460, y=100)
+        metrics = layout_metrics(graph)
+        self.assertEqual(metrics["crossings"], 0)
+        self.assertEqual(metrics["connector_overlaps"], 1)
+        graph["edges"][1]["target"] = graph["edges"][1]["source"]
+        # An endpoint-only touch is not a shared line segment.
+        graph["edges"][1]["attachment"] = {
+            "startItem": {"position": {"x": "100%", "y": "50%"}},
+            "endItem": {"position": {"x": "100%", "y": "50%"}}}
+        self.assertEqual(layout_metrics(graph)["connector_overlaps"], 0)
+
+    def test_board_elbow_estimate_detects_line_through_unrelated_transaction(self):
+        graph = crossing_graph()
+        graph["edges"] = [graph["edges"][0]]
+        graph["nodes"][1].update(x=280, y=200, width=50, height=50)
+        graph["nodes"] = graph["nodes"][:3]
+        graph["edges"][0].update(connector_shape="elbowed", route=[
+            point(140, 100), point(180, 100), point(180, 300), point(420, 300)])
+        self.assertEqual(layout_metrics(graph)["node_intersections"], 0)
+        estimated = layout_metrics(graph, midpoint_elbows=True)
+        self.assertEqual(estimated["node_intersections"], 1)
+        self.assertEqual(estimated["method"], "midpoint_elbow_estimate")
+        self.assertTrue(estimated["estimated"])
 
     def test_node_intersections_respect_circle_diamond_and_rectangle_boundaries(self):
         node = {"id": "n", "x": 0, "y": 0, "width": 20, "height": 20}
@@ -113,7 +187,7 @@ class LayoutGeometryTests(unittest.TestCase):
             mutate(graph)
             with patch("liquid_tracer.elk_layout._worker") as worker:
                 with self.assertRaises(TraceError):
-                    optimize_graph(graph)
+                    optimize_graph(graph, layout_attempts=3)
                 worker.assert_not_called()
 
     def test_invalid_worker_response_cannot_change_input_graph(self):
@@ -121,7 +195,7 @@ class LayoutGeometryTests(unittest.TestCase):
         before = copy.deepcopy(graph)
         with patch("liquid_tracer.elk_layout._worker", return_value=[{"seed": 1, "nodes": [], "edges": []}]):
             with self.assertRaisesRegex(TraceError, "objects"):
-                optimize_graph(graph)
+                optimize_graph(graph, layout_attempts=3)
         self.assertEqual(graph, before)
 
     def test_worker_strips_credentials_and_runtime_injection_environment(self):
@@ -246,7 +320,7 @@ class UncappedElkTests(unittest.TestCase):
                              "outpoint": f"synthetic:{index}", "quantity": None} for index in range(count - 1)]}
         with patch("liquid_tracer.elk_layout._worker", side_effect=synthetic_candidate) as worker, \
                 patch("liquid_tracer.elk_layout.fallback_graph", side_effect=AssertionError("Unexpected fallback")):
-            result = optimize_graph(graph)
+            result = optimize_graph(graph, layout_attempts=1)
         worker.assert_called_once()
         request = worker.call_args.args[0]
         self.assertEqual(len(request["children"]), count)
@@ -261,7 +335,10 @@ class UncappedElkTests(unittest.TestCase):
         self.assertIsNone(result["layout"]["metrics"]["time_limit_seconds"])
         self.assertNotIn("fallback_reason", result["layout"])
         self.assertTrue(all("attachment" not in edge for edge in graph["edges"]))
-        self.assertGreater(max(node["x"] for node in result["nodes"]), 1e8)
+        # Very large input coordinates remain accepted; redundant horizontal
+        # gaps can now shrink without collapsing the complete output graph.
+        self.assertGreater(max(node["x"] for node in graph["nodes"]), 1e8)
+        self.assertGreater(max(node["x"] for node in result["nodes"]), count * 200)
 
     def test_worker_failures_do_not_silently_change_layout_engine(self):
         graph = crossing_graph()
@@ -269,7 +346,7 @@ class UncappedElkTests(unittest.TestCase):
         with patch("liquid_tracer.elk_layout._worker", side_effect=TraceError("Local ELK engine failure")), \
                 patch("liquid_tracer.elk_layout.fallback_graph") as fallback:
             with self.assertRaisesRegex(TraceError, "Local ELK engine failure"):
-                optimize_graph(graph, progress=progress.append)
+                optimize_graph(graph, progress=progress.append, layout_attempts=3)
         fallback.assert_not_called()
         self.assertEqual(progress[-1]["completed"], 0)
         self.assertEqual(graph, before)
@@ -334,6 +411,30 @@ class HistoricalFallbackTests(unittest.TestCase):
 
 @unittest.skipUnless(HAS_ELK, "Run liquid-layout-setup to install the pinned local ELK engine")
 class RealElkTests(unittest.TestCase):
+    def test_real_worker_places_labels_and_reserves_more_space_for_long_captions(self):
+        graph = crossing_graph()
+        for edge in graph["edges"]:
+            edge.update(label="vout 0", quantity="?? ??")
+        small = optimize_graph(graph, connector_style="elbowed", layout_attempts=3)
+        for edge in graph["edges"]:
+            edge.update(label="vout 123 · Change", quantity="12345678901234567890 SYNTHETIC-ASSET")
+        large = optimize_graph(graph, connector_style="elbowed", layout_attempts=3)
+        def gaps(result):
+            nodes = {node["id"]: node for node in result["nodes"]}
+            return [nodes[edge["target"]]["x"] - nodes[edge["target"]]["width"] / 2
+                    - nodes[edge["source"]]["x"] - nodes[edge["source"]]["width"] / 2 for edge in result["edges"]]
+        self.assertTrue(all(a > b for a, b in zip(gaps(large), gaps(small))))
+        nodes = {node["id"]: node for node in large["nodes"]}
+        boxes = []
+        for edge in large["edges"]:
+            box = caption_box(edge, [(p["x"], p["y"]) for p in edge["route"]])
+            self.assertGreater(box[0], nodes[edge["source"]]["x"] + nodes[edge["source"]]["width"] / 2)
+            self.assertLess(box[2], nodes[edge["target"]]["x"] - nodes[edge["target"]]["width"] / 2)
+            boxes.append(box)
+        self.assertNotEqual(boxes[0], boxes[1])
+        self.assertEqual(large["layout"]["edge_labels"]["reserved_count"], len(graph["edges"]))
+        self.assertTrue(large["layout"]["edge_labels"]["estimated"])
+
     def test_real_worker_accepts_input_over_the_old_32_mib_ceiling(self):
         graph = crossing_graph()
         request, ports, fees = _request_graph(graph)
@@ -346,23 +447,25 @@ class RealElkTests(unittest.TestCase):
         self.assertEqual({edge["id"] for edge in result["edges"]}, {edge["id"] for edge in graph["edges"]})
 
     def assert_topology_and_evidence_unchanged(self, before, after):
+        self.assertEqual(after["graph_options"]["layout_attempts"], 3)
         before_copy, after_copy = copy.deepcopy(before), copy.deepcopy(after)
         for graph in (before_copy, after_copy):
             for key in ("layout", "connector_attachment", "presentation_version"):
                 graph.pop(key, None)
             graph.get("graph_options", {}).pop("connector_style", None)
+            graph.get("graph_options", {}).pop("layout_attempts", None)
             for node in graph["nodes"]:
                 for key in ("x", "y", "width", "height"):
                     node.pop(key, None)
             for edge in graph["edges"]:
-                for key in ("attachment", "route", "connector_shape", "routing_exception"):
+                for key in ("attachment", "route", "connector_shape", "routing_exception", "label_layout"):
                     edge.pop(key, None)
         self.assertEqual(before_copy, after_copy)
 
     def test_real_elk_removes_crossing_without_mutating_graph(self):
         graph = crossing_graph()
         original = copy.deepcopy(graph)
-        result = optimize_graph(graph)
+        result = optimize_graph(graph, layout_attempts=3)
         self.assertEqual(graph, original)
         self.assert_topology_and_evidence_unchanged(graph, result)
         self.assertEqual(result["layout"]["algorithm"], "elk_layered_v1")
@@ -375,7 +478,7 @@ class RealElkTests(unittest.TestCase):
         state = state_from(chain(10))
         state["seeds"] = [key + ":0" for key in state["transactions"]]
         graph = build_graph(state)
-        result = optimize_graph(graph)
+        result = optimize_graph(graph, layout_attempts=3)
         self.assert_topology_and_evidence_unchanged(graph, result)
         nodes = {node["id"]: node for node in result["nodes"]}
         positions = [nodes["tx:" + txid(index)]["x"] for index in range(10)]
@@ -385,9 +488,9 @@ class RealElkTests(unittest.TestCase):
 
     def test_split_join_ports_are_spread_and_fees_do_not_change_main_layout(self):
         state = state_from({data["txid"]: data for key, data in fixture().items() if not key.endswith("outspends")})
-        hidden = optimize_graph(build_graph(state))
+        hidden = optimize_graph(build_graph(state), layout_attempts=3)
         shown_original = build_graph(state, include_fees=True)
-        shown = optimize_graph(shown_original)
+        shown = optimize_graph(shown_original, layout_attempts=3)
         self.assert_topology_and_evidence_unchanged(shown_original, shown)
         fee_ids = {key for key, value in shown["fee_items"].items() if value["endpoint"] == "shapes"}
         self.assertEqual({node["id"]: (node["x"], node["y"]) for node in hidden["nodes"]},
@@ -413,7 +516,7 @@ class RealElkTests(unittest.TestCase):
 
     def test_merged_address_cycle_uses_elk_routes_while_transaction_order_stays_forward(self):
         graph = build_graph(state_from(chain(10)), merge_addresses=True)
-        result = optimize_graph(graph)
+        result = optimize_graph(graph, layout_attempts=3)
         self.assert_topology_and_evidence_unchanged(graph, result)
         nodes = {node["id"]: node for node in result["nodes"]}
         positions = [nodes["tx:" + txid(index)]["x"] for index in range(10)]
@@ -429,17 +532,17 @@ class RealElkTests(unittest.TestCase):
         shuffled = copy.deepcopy(graph)
         random.Random(19).shuffle(shuffled["nodes"])
         random.Random(3).shuffle(shuffled["edges"])
-        first, second = optimize_graph(graph), optimize_graph(shuffled)
+        first, second = optimize_graph(graph, layout_attempts=3), optimize_graph(shuffled, layout_attempts=3)
         self.assertEqual({node["id"]: (node["x"], node["y"]) for node in first["nodes"]},
                          {node["id"]: (node["x"], node["y"]) for node in second["nodes"]})
         self.assertEqual({edge["id"]: edge["route"] for edge in first["edges"]},
                          {edge["id"]: edge["route"] for edge in second["edges"]})
 
     def test_curved_is_optional_while_returns_remain_routed(self):
-        result = optimize_graph(build_graph(state_from(chain(3)), merge_addresses=False), connector_style="curved")
+        result = optimize_graph(build_graph(state_from(chain(3)), merge_addresses=False), connector_style="curved", layout_attempts=3)
         self.assertEqual(result["graph_options"]["connector_style"], "curved")
         self.assertTrue(all(edge["connector_shape"] == "curved" for edge in result["edges"]))
-        shared = optimize_graph(build_graph(state_from(chain(3))), connector_style="curved")
+        shared = optimize_graph(build_graph(state_from(chain(3))), connector_style="curved", layout_attempts=3)
         self.assertTrue(any(edge.get("routing_exception") == "return" for edge in shared["edges"]))
         self.assertTrue(all(edge["connector_shape"] == ("elbowed" if edge.get("routing_exception") else "curved")
                             for edge in shared["edges"]))

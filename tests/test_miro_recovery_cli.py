@@ -64,12 +64,12 @@ class MiroRecoveryCliTests(unittest.TestCase):
         self.assertEqual({p.name: p.read_bytes() for p in self.archive.iterdir() if p.is_file()}, archive)
 
     def test_recovery_summary_is_local_and_contains_no_keys_paths_or_board_content(self):
-        self.assertEqual(miro_recovery_status(self.case), {"pending_count": 0, "can_confirm_empty": False})
+        self.assertEqual(miro_recovery_status(self.case), {"pending_count": 0, "can_confirm_empty": False, "can_recover_frame": False})
         state = self.fail_initial_batch()
         before = self.path.read_bytes()
         with patch("liquid_tracer.miro_recovery.MiroHTTP", side_effect=AssertionError("No API status lookup")):
             summary = miro_recovery_status(self.case)
-        self.assertEqual(summary, {"pending_count": len(state["pending_creations"]), "can_confirm_empty": True})
+        self.assertEqual(summary, {"pending_count": len(state["pending_creations"]), "can_confirm_empty": True, "can_recover_frame": False})
         self.assertNotIn(str(self.case), json.dumps(summary))
         self.assertNotIn(A, json.dumps(summary))
         self.assertEqual(self.path.read_bytes(), before)

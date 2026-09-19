@@ -10,6 +10,7 @@ from liquid_tracer.compaction import (COMPONENT_SPACING, EDGE_NODE_SPACING, LINK
                                       _Budget, _Index, _caption, _points, compact_graph)
 from liquid_tracer.elk_layout import attachment_point, layout_metrics, optimize_graph
 from liquid_tracer.export import build_graph
+from liquid_tracer.edge_labels import caption_size, route_signature
 from liquid_tracer.layout_preview import render_svg
 from tests.test_layout import state_from, txid
 from tests.fixtures import output
@@ -190,6 +191,24 @@ class CompactionTests(unittest.TestCase):
         proposed = {"one": _points(edges["one"], nodes)}
         self.assertTrue(_touch(_caption(edges["one"], proposed["one"]), _box(nodes["a"])))
         self.assertFalse(geometry.safe("a", proposed, (-1000, -1000, 2000, 2000)))
+
+    def test_unchanged_elk_label_box_blocks_a_move_even_away_from_route_midpoint(self):
+        from liquid_tracer.compaction import _Geometry
+        original = graph([node("t", "transaction", 0), node("a", "address", 1000),
+                          node("u", "transaction", -1000, 800), node("v", "transaction", 1500, 800)],
+                         [edge("one", "t", "a"), edge("two", "u", "v")])
+        nodes = {n["id"]: n for n in original["nodes"]}
+        edges = {e["id"]: e for e in original["edges"]}
+        points = {key: _points(e, nodes) for key, e in edges.items()}
+        edges["two"]["label_layout"] = {"x": 260, "y": 285, **caption_size(edges["two"]),
+                                           "route_signature": route_signature(points["two"])}
+        geometry = _Geometry(nodes, edges, points, _Budget(10))
+        nodes["a"]["x"] = 300
+        proposed = {"one": _points(edges["one"], nodes)}
+        self.assertFalse(geometry.safe("a", proposed, (-1100, 200, 1600, 900)))
+        edges["two"].pop("label_layout")
+        geometry = _Geometry(nodes, edges, points, _Budget(10))
+        self.assertTrue(geometry.safe("a", proposed, (-1100, 200, 1600, 900)))
 
     def test_repaired_route_preserves_larger_elk_between_layer_clearance(self):
         from liquid_tracer.compaction import _Geometry

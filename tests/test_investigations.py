@@ -83,6 +83,52 @@ class InvestigationTests(unittest.TestCase):
         self.assertIs(validate_settings(read_case(case)["run_defaults"])["include_fees"], False)
         self.assertEqual((case / "case.json").read_bytes(), original)
 
+    def test_context_grouping_is_opt_in_and_case_defaults_survive_global_changes(self):
+        case = create_investigation(self.root, "Existing case")
+        metadata = read_case(case)
+        self.assertIs(metadata["run_defaults"].pop("group_context_inputs"), False)
+        save_json(case / "case.json", metadata)
+        original = (case / "case.json").read_bytes()
+        save_settings(self.root, {"group_context_inputs": True})
+        self.assertIs(validate_settings(read_case(case)["run_defaults"])["group_context_inputs"], False)
+        self.assertEqual((case / "case.json").read_bytes(), original)
+        new_case = create_investigation(self.root, "New case", run_defaults=load_settings(self.root))
+        self.assertIs(read_case(new_case)["run_defaults"]["group_context_inputs"], True)
+        update_case(case, {"run_defaults": {"group_context_inputs": True}})
+        self.assertIs(read_case(case)["run_defaults"]["group_context_inputs"], True)
+
+    def test_layout_attempts_default_persist_and_legacy_cases_keep_builtin_default(self):
+        self.assertEqual(DEFAULTS["layout_attempts"], 25)
+        self.assertEqual(validate_settings({})["layout_attempts"], 25)
+        case = create_investigation(self.root, "Legacy layout")
+        metadata = read_case(case)
+        metadata["run_defaults"].pop("layout_attempts")
+        save_json(case / "case.json", metadata)
+        original = (case / "case.json").read_bytes()
+        save_settings(self.root, {"layout_attempts": 75})
+        self.assertEqual(load_settings(self.root)["layout_attempts"], 75)
+        self.assertEqual(validate_settings(read_case(case)["run_defaults"])["layout_attempts"], 25)
+        self.assertEqual((case / "case.json").read_bytes(), original)
+        created = create_investigation(self.root, "Expanded search", run_defaults=load_settings(self.root))
+        self.assertEqual(read_case(created)["run_defaults"]["layout_attempts"], 75)
+        for attempts in (1, 1000):
+            update_case(case, {"run_defaults": {"layout_attempts": attempts}})
+            self.assertEqual(read_case(case)["run_defaults"]["layout_attempts"], attempts)
+
+    def test_invalid_layout_attempts_do_not_change_saved_settings(self):
+        case = create_investigation(self.root, "Strict layout")
+        save_settings(self.root, {})
+        original_case = (case / "case.json").read_bytes()
+        original_global = (self.root / "settings.json").read_bytes()
+        for value in (None, True, False, 0, -1, 1001, 25.0, 1.5, "25", [], {}, float("nan"), float("inf")):
+            with self.subTest(value=value):
+                with self.assertRaises(TraceError):
+                    save_settings(self.root, {"layout_attempts": value})
+                with self.assertRaises(TraceError):
+                    update_case(case, {"run_defaults": {"layout_attempts": value}})
+        self.assertEqual((case / "case.json").read_bytes(), original_case)
+        self.assertEqual((self.root / "settings.json").read_bytes(), original_global)
+
     def test_invalid_fee_booleans_and_boolean_limits_do_not_write(self):
         case = create_investigation(self.root, "Strict settings")
         save_settings(self.root, {})
@@ -90,12 +136,43 @@ class InvestigationTests(unittest.TestCase):
         original_global = (self.root / "settings.json").read_bytes()
         for values in ({"include_fees": 0}, {"include_fees": 1}, {"include_fees": "false"},
                        {"include_fees": None}, {"include_fees": []}, {"hops": True},
+                       {"group_context_inputs": 0}, {"group_context_inputs": 1},
+                       {"group_context_inputs": "false"}, {"group_context_inputs": None},
                        {"max_seconds": False}):
             with self.subTest(values=values):
                 with self.assertRaises(TraceError):
                     save_settings(self.root, values)
                 with self.assertRaises(TraceError):
                     update_case(case, {"run_defaults": values})
+        self.assertEqual((case / "case.json").read_bytes(), original_case)
+        self.assertEqual((self.root / "settings.json").read_bytes(), original_global)
+
+    def test_hub_addresses_are_normalized_without_changing_case_or_evidence(self):
+        first, second = "G" + "a" * 33, "H" + "b" * 33
+        supplied = [" " + second + " ", first, second]
+        case = create_investigation(self.root, "Hubs", run_defaults={"hub_addresses": supplied})
+        self.assertEqual(read_case(case)["run_defaults"]["hub_addresses"], [first, second])
+        self.assertEqual(supplied, [" " + second + " ", first, second])
+        self.assertEqual(validate_settings({"hub_addresses": [first, first.lower()]})["hub_addresses"],
+                         [first, first.lower()])
+        save_settings(self.root, {"hub_addresses": [second]})
+        self.assertEqual(read_case(case)["run_defaults"]["hub_addresses"], [first, second])
+        legacy = validate_settings({})
+        legacy["hub_addresses"].append(first)
+        self.assertEqual(DEFAULTS["hub_addresses"], [])
+        self.assertEqual(validate_settings({})["hub_addresses"], [])
+
+    def test_invalid_hub_settings_do_not_write(self):
+        case = create_investigation(self.root, "Strict hubs")
+        save_settings(self.root, {})
+        original_case = (case / "case.json").read_bytes()
+        original_global = (self.root / "settings.json").read_bytes()
+        for value in (None, True, "Ga" * 17, {}, [1], [None], [""], ["short"],
+                      ["x" * 201], ["https://example.test/address"], ["G" * 34 + ":0"], ["G" * 20 + "…"]):
+            with self.subTest(value=value), self.assertRaises(TraceError):
+                save_settings(self.root, {"hub_addresses": value})
+            with self.subTest(value=value), self.assertRaises(TraceError):
+                update_case(case, {"run_defaults": {"hub_addresses": value}})
         self.assertEqual((case / "case.json").read_bytes(), original_case)
         self.assertEqual((self.root / "settings.json").read_bytes(), original_global)
 

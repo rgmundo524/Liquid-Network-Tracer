@@ -12,6 +12,8 @@ from bisect import bisect_left
 from collections import defaultdict
 
 from .common import output_kind
+from .edge_labels import translate_label
+from .input_order import centered_input_positions
 
 
 SPACING = 80.0
@@ -218,25 +220,66 @@ def _separate_components(main, components, original, rows):
             floor.range(spans[root], bounds[root][1] + shift)
 
 
+def _centered_output_positions(graph, nodes, aligned, fee_ids):
+    """Keep sibling output ports below the explicitly centered change spine.
+
+    Row packing can move a former upper output below the transaction. Its old
+    ELK port then crosses the new change row regardless of the random seed.
+    Reorder physical ports by their final opposite attachment, retaining every
+    edge's original vout and evidence. Fee routes use their separate lane.
+    """
+    from .elk_layout import attachment_point, _default_attachments
+
+    outgoing = defaultdict(list)
+    for edge in graph["edges"]:
+        if nodes[edge["source"]]["kind"] == "transaction" and edge["target"] not in fee_ids:
+            outgoing[edge["source"]].append(edge)
+    result = {}
+    for edges in outgoing.values():
+        if not any(edge["id"] in aligned for edge in edges):
+            continue
+
+        def destination(edge):
+            source, target = nodes[edge["source"]], nodes[edge["target"]]
+            attachment = edge.get("attachment") or _default_attachments(source, target)
+            point = attachment_point(target, attachment["endItem"])
+            suffix = edge["id"].rsplit(":", 1)[-1]
+            index = int(suffix) if suffix.isascii() and suffix.isdecimal() else float("inf")
+            return point["y"], index, edge["id"]
+
+        siblings = sorted((edge for edge in edges if edge["id"] not in aligned), key=destination)
+        for index, edge in enumerate(siblings, start=1):
+            result[edge["id"]] = 50 + 50 * index / (len(siblings) + 1)
+    return result
+
+
 def _routes(graph, nodes, original, aligned):
     from .elk_layout import attachment_point, _default_attachments
+    input_positions = centered_input_positions(graph, aligned)
     fee_ids = {key for key, value in graph.get("fee_items", {}).items() if value["endpoint"] == "shapes"}
+    output_positions = _centered_output_positions(graph, nodes, aligned, fee_ids)
     for edge in graph["edges"]:
         source, target = nodes[edge["source"]], nodes[edge["target"]]
         deltas = [(node["x"] - original[node["id"]][0], node["y"] - original[node["id"]][1])
                   for node in (source, target)]
         centered = edge["id"] in aligned
-        if not centered and deltas[0] == deltas[1]:
+        if (not centered and edge["id"] not in input_positions and edge["id"] not in output_positions
+                and deltas[0] == deltas[1]):
             if deltas[0] != (0, 0):
                 edge["route"] = [{"x": point["x"] + deltas[0][0], "y": point["y"] + deltas[0][1]}
                                  for point in edge.get("route", [])]
+                translate_label(edge, *deltas[0])
             continue
         attachment = copy.deepcopy(edge.get("attachment") or _default_attachments(source, target))
         if centered:
             attachment = {"startItem": {"position": {"x": "100%", "y": "50%"}},
                           "endItem": {"position": {"x": "0%", "y": "50%"}}}
+        if edge["id"] in input_positions:
+            attachment["endItem"] = {"position": {"x": "0%", "y": f'{input_positions[edge["id"]]:.6f}%'}}
+        if edge["id"] in output_positions:
+            attachment["startItem"] = {"position": {"x": "100%", "y": f'{output_positions[edge["id"]]:.6f}%'}}
         a, b = attachment_point(source, attachment["startItem"]), attachment_point(target, attachment["endItem"])
-        if centered:
+        if centered and input_positions.get(edge["id"], 50) == 50:
             route, reason = [a, b], None
         elif edge["target"] in fee_ids:
             lane = target["y"] + target["height"] / 2 + 70
@@ -258,6 +301,9 @@ def _routes(graph, nodes, original, aligned):
             reason = "unchecked"
         edge.update(attachment=attachment, route=route, routing_exception=reason,
                     connector_shape="elbowed" if reason else graph.get("graph_options", {}).get("connector_style", "straight"))
+        # ELK's horizontal label clearance remains, but this new route needs a
+        # fresh midpoint caption position instead of its old ELK coordinates.
+        edge.pop("label_layout", None)
 
 
 def apply_change_layout(graph):

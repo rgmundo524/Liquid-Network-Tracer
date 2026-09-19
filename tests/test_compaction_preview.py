@@ -13,7 +13,7 @@ from unittest.mock import patch
 from liquid_tracer.cli import (latest_compaction_preview, main, saved_graph, sync_run,
                                verified_compaction_preview, verify_export)
 from liquid_tracer.common import TraceError, digest, read_json, save_json
-from liquid_tracer.compaction_preview import export_compaction, service_fingerprint
+from liquid_tracer.compaction_preview import FILES, export_compaction, service_fingerprint
 from liquid_tracer.investigations import create_investigation, read_case, update_case
 from liquid_tracer.services import set_service
 from tests.fixtures import A, fixture
@@ -160,6 +160,51 @@ class CompactionPreviewTests(unittest.TestCase):
         _, meta = verified_compaction_preview(self.case, self.run, identity)
         self.assertFalse(meta["include_fees"])
         self.assertEqual(meta["connector_style"], "straight")
+
+    def test_grouping_and_hub_changes_reject_compact_apply_and_discovery(self):
+        identity, _ = self.preview()
+        for selection in ({"group_context_inputs": True}, {"hub_addresses": ["G" + "a" * 33]}):
+            with self.subTest(selection=selection):
+                update_case(self.case, {"run_defaults": selection})
+                with patch("liquid_tracer.cli.sync") as sync, self.assertRaisesRegex(TraceError, "branch hubs changed"):
+                    sync_run(self.case, self.run, reorganize=True, compact_preview=identity)
+                sync.assert_not_called()
+                self.assertIsNone(latest_compaction_preview(self.case))
+        update_case(self.case, {"run_defaults": {}})
+        self.assertEqual(latest_compaction_preview(self.case), identity)
+
+    def test_selection_change_after_preflight_blocks_live_application(self):
+        identity, _ = self.preview()
+        def preflight(*args, **kwargs):
+            self.assertTrue(kwargs["dry_run"])
+            update_case(self.case, {"run_defaults": {"group_context_inputs": True}})
+            return {"dry_run": True}
+        with patch("liquid_tracer.cli.sync", side_effect=preflight) as sync:
+            with self.assertRaisesRegex(TraceError, "branch hubs changed"):
+                sync_run(self.case, self.run, reorganize=True, compact_preview=identity)
+            sync.assert_called_once()
+
+    def test_detail_files_are_checked_when_present_but_old_manifests_still_work(self):
+        identity, directory = self.preview()
+        meta = read_json(directory / "compaction.json")
+        self.assertEqual(meta["graph_options"]["hub_addresses"], [])
+        self.assertFalse(meta["graph_options"]["group_context_inputs"])
+        self.assertIn('href="details.html"', (directory / "graph.html").read_text())
+        verified_compaction_preview(self.case, self.run, identity)
+        details = directory / "details.html"
+        details.write_text(details.read_text() + "changed")
+        with self.assertRaisesRegex(TraceError, "checksum mismatch"):
+            verified_compaction_preview(self.case, self.run, identity)
+        # Recreate the former required-file manifest without new optional files
+        # or metadata. Older ungrouped previews retain exact reviewed plans.
+        for name in ("details.html", "details.json"):
+            (directory / name).unlink()
+        meta.pop("graph_options")
+        save_json(directory / "compaction.json", meta)
+        (directory / "SHA256SUMS").write_text("".join(
+            digest((directory / name).read_bytes()) + "  " + name + "\n" for name in sorted(FILES)))
+        verified_compaction_preview(self.case, self.run, identity)
+        self.assertEqual(latest_compaction_preview(self.case), identity)
 
     def test_tampered_html_invalidates_previously_verified_preview(self):
         identity, directory = self.preview()

@@ -42,7 +42,9 @@ class ElkWorkflowTests(unittest.TestCase):
         self.assertEqual(product["layout_algorithm"], "elk_layered_v1")
         self.assertTrue(product["layout_metrics"]["estimated"])
         self.assertNotIn(str(path), json.dumps(product))
-        self.assertEqual(len(product["downloads"]), 4)
+        self.assertEqual(len(product["downloads"]), 6)
+        self.assertFalse(product["group_context_inputs"])
+        self.assertEqual(product["hub_addresses"], [])
         for file in product["downloads"]:
             status, data, response = self.request(file["url"])
             self.assertEqual(status, 200)
@@ -50,7 +52,7 @@ class ElkWorkflowTests(unittest.TestCase):
             if file["name"] == "graph.svg":
                 self.assertIn(b"<svg", data)
                 self.assertIn("attachment", response.getheader("Content-Disposition"))
-            if file["name"] in ("graph.html", "graph.svg"):
+            if file["name"] in ("graph.html", "graph.svg", "details.html"):
                 policy = response.getheader("Content-Security-Policy")
                 self.assertIn("sandbox allow-popups allow-popups-to-escape-sandbox;", policy)
                 self.assertNotIn("allow-scripts", policy)
@@ -70,6 +72,11 @@ class ElkWorkflowTests(unittest.TestCase):
         artifacts = reopened.case_summary(path, read_case(path), detail=True)["artifacts"]
         self.assertEqual(artifacts[first["run_id"]]["elk"]["downloads"], product["downloads"])
         self.assertEqual(artifacts[second["run_id"]]["elk"]["connector_style"], "curved")
+        old_directory = path / "previews" / product["preview_url"].split("/")[-2]
+        for name in ("details.html", "details.json"):
+            (old_directory / name).unlink()
+        legacy = reopened.case_summary(path, read_case(path), detail=True)["artifacts"][first["run_id"]]["elk"]
+        self.assertEqual(len(legacy["downloads"]), 4)
         verify_export(archive)
         self.assertEqual(self.snapshot(archive), original)
         # A one-action presentation override never silently edits defaults.
@@ -80,7 +87,9 @@ class ElkWorkflowTests(unittest.TestCase):
         route = "/api/cases/" + case["id"]
         saved = self.wait(self.success(route + "/actions", {"action": "trace"}, 202))
         path, metadata = self.server.case(case["id"])
-        update_case(path, {"run_defaults": {"connector_style": "elbowed"}, "miro_board": "SYNTHETIC="})
+        hub = "G" + "a" * 33
+        update_case(path, {"run_defaults": {"connector_style": "elbowed", "group_context_inputs": True,
+                                            "hub_addresses": [hub]}, "miro_board": "SYNTHETIC="})
         before = self.snapshot(path / "runs")
         events = []
         with patch("liquid_tracer.cli.Esplora", side_effect=AssertionError("No explorer calls")), \
@@ -90,6 +99,11 @@ class ElkWorkflowTests(unittest.TestCase):
         graph = read_json(output["graph"])
         self.assertEqual(graph["presentation_version"], PRESENTATION_VERSION)
         self.assertEqual(graph["graph_options"]["connector_style"], "elbowed")
+        self.assertTrue(graph["graph_options"]["group_context_inputs"])
+        self.assertEqual(graph["graph_options"]["hub_addresses"], [hub])
+        saved_product = self.success(route)["artifacts"][graph["run_id"]]["elk"]
+        self.assertTrue(saved_product["group_context_inputs"])
+        self.assertEqual(saved_product["hub_addresses"], [hub])
         self.assertEqual(report["layout_metrics"], graph["layout"]["metrics"])
         self.assertEqual(report["connector_style"], "elbowed")
         self.assertTrue(all(event["phase"] in ("optimizing", "address_counts", "address_counts_ready",

@@ -102,12 +102,53 @@ class ReuseTests(unittest.TestCase):
         save_json(self.path / 'layout-report.json', report)
         self.assertIsNone(self.reuse())
 
+    def test_pre_label_layout_previews_are_not_reused(self):
+        saved = copy.deepcopy(self.saved)
+        saved['layout'].pop('edge_labels')
+        for edge in saved['edges']:
+            edge.pop('label_layout', None)
+        report = read_json(self.path / 'layout-report.json')
+        report['layout'] = saved['layout']
+        save_json(self.path / 'graph.json', saved)
+        save_json(self.path / 'layout-report.json', report)
+        self.assertIsNone(self.reuse())
+
+    def test_pre_input_order_layout_previews_are_not_reused(self):
+        original_report = read_json(self.path / 'layout-report.json')
+        for value in (None, {'version': 0}, {'version': 2}):
+            saved = copy.deepcopy(self.saved)
+            if value is None:
+                saved['layout'].pop('input_order', None)
+            else:
+                saved['layout']['input_order'] = value
+            report = copy.deepcopy(original_report)
+            report['layout'] = saved['layout']
+            save_json(self.path / 'graph.json', saved)
+            save_json(self.path / 'layout-report.json', report)
+            with self.subTest(metadata=value):
+                self.assertIsNone(self.reuse())
+
     def test_missing_preview_still_uses_selected_elk_engine(self):
         (self.path / 'graph.html').unlink()
         from liquid_tracer.elk_layout import optimize_graph
         with patch('liquid_tracer.elk_layout.optimize_graph', wraps=optimize_graph) as worker:
             sync_run(self.case, 'latest', 'SYNTHETIC=', dry_run=True)
         worker.assert_called_once()
+
+    def test_pre_horizontal_spacing_previews_are_not_reused(self):
+        original_report = read_json(self.path / 'layout-report.json')
+        for value in (None, {'version': 0}):
+            saved = copy.deepcopy(self.saved)
+            if value is None:
+                saved['layout'].pop('horizontal_spacing', None)
+            else:
+                saved['layout']['horizontal_spacing'] = value
+            report = copy.deepcopy(original_report)
+            report['layout'] = saved['layout']
+            save_json(self.path / 'graph.json', saved)
+            save_json(self.path / 'layout-report.json', report)
+            with self.subTest(metadata=value):
+                self.assertIsNone(self.reuse())
 
 
 class StageProgressTests(unittest.TestCase):

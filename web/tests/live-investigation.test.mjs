@@ -3,6 +3,7 @@ import {readFileSync} from 'node:fs';
 import {stripTypeScriptTypes} from 'node:module';
 import {test} from 'node:test';
 import vm from 'node:vm';
+import * as frameRecovery from '../src/scripts/frame-recovery.ts';
 
 // Execute the real application handlers with a small DOM and offline HTTP stub.
 // The attribution panels are unrelated to new-investigation and lookup behavior.
@@ -13,21 +14,24 @@ const source = stripTypeScriptTypes(
     .replace('void initialize().catch(', 'globalThis.startup = initialize().catch('),
   {mode: 'transform'},
 );
-const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, openActionDialog, isBusy};');
+const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, settingsPage, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy};');
 const txid = 'a'.repeat(64);
 const defaults = {hops: 1, max_transactions: 20, max_outpoints: 100, max_requests: 30,
-  max_seconds: 60, max_new_items: 750, connector_style: 'straight'};
+  max_seconds: 60, max_new_items: 750, layout_attempts: 25, connector_style: 'straight'};
 
 async function harness(respond = () => undefined) {
-  const calls = [], listeners = {}, notifications = [];
+  frameRecovery.resetFrameRecovery();
+  const calls = [], listeners = {}, dialogListeners = {}, notifications = [];
   let currentForm = null;
   const app = {innerHTML: '', addEventListener(name, callback) {listeners[name] = callback;}};
-  const dialog = {innerHTML: '', addEventListener() {}, close() {}, showModal() {}};
+  const dialog = {innerHTML: '', open: false, addEventListener(name, callback) {dialogListeners[name] = callback;},
+    close() {if (this.open) {this.open = false; dialogListeners.close?.();}}, showModal() {this.open = true;}, querySelector() {return null;}};
   const context = vm.createContext({
-    Error, URL, console,
+    Error, URL, console, ...frameRecovery,
     resetNameColors() {}, resetAddressImport() {}, resetChangeOutputs() {},
     changeOutputsPending() {return false;}, changeOutputsPanel() {return "";},
     changeOutputsAction() {return false;}, changeOutputsLookupComplete() {return false;},
+    nameColorsAction() {return false;}, addressImportAction() {return false;},
     document: {
       querySelector(selector) {
         if (selector === '#app') return app;
@@ -60,6 +64,15 @@ async function harness(respond = () => undefined) {
   await context.startup;
   return {
     ...context.appTest, app, dialog, calls, notifications,
+    async submitDialog(values = {}) {
+      dialogListeners.submit({target: {values, reportValidity: () => true}, preventDefault() {}});
+      await new Promise(setImmediate);
+    },
+    async submitSettings(values) {
+      const form = {id: 'settings-form', values: {...defaults, ...values}, reportValidity: () => true};
+      listeners.submit({target: form, preventDefault() {}});
+      await new Promise(setImmediate);
+    },
     async submit(values) {
       currentForm = {id: 'new-case-form', values: {...defaults, ...values}, reportValidity: () => true};
       listeners.submit({target: currentForm, preventDefault() {}});
@@ -179,4 +192,216 @@ test('recovered change-output lookup cannot overwrite the new-investigation star
   assert.equal(view.state.draft.seeds, `${txid}:0`);
   assert.equal(view.state.draft.reports.length, 0);
   assert.match(view.notifications.at(-1), /Open Change outputs and load the transaction again/);
+});
+
+const pendingFrame = {title: 'Activity one', x: 10, y: 20, width: 500, height: 400};
+const frameReview = extra => ({schema_version: 1, recovery: 'pending_frame_review', review_id: 'a'.repeat(64),
+  run_id: 'interrupted', pending_frame: pendingFrame, candidates: [{...pendingFrame, id: 'frame-1'}],
+  potential_match_count: 0, can_confirm_absent: false, ...extra});
+
+async function recoveryHarness(review = frameReview(), failure = null) {
+  let recovered = false;
+  const detail = () => ({id: 'case1', name: 'My investigation', miro_board: 'board1', run_defaults: defaults,
+    runs: [{id: 'interrupted'}, {id: 'latest-run'}], latest_run: 'latest-run',
+    miro_recovery: {pending_count: recovered ? 0 : 1, can_confirm_empty: false, can_recover_frame: !recovered}});
+  const view = await harness((path, body) => {
+    if (path === '/api/cases/case1/actions') return {id: body.action === 'miro-frame-review' ? 'review1' : 'recover1', status: 'running', live: true};
+    if (path === '/api/jobs/review1') return {status: 'succeeded', result: review};
+    if (path === '/api/jobs/recover1') {
+      if (failure) return {status: 'failed', message: failure};
+      recovered = true;
+      return {status: 'succeeded', result: {recovery: review.candidates.length ? 'adopted_frame' : 'confirmed_absent_frame',
+        run_id: 'interrupted', resolved_count: 1, remaining_pending: 0}};
+    }
+    if (path === '/api/cases/case1') return detail();
+  });
+  view.state.activeCase = detail();
+  view.state.page = 'case';
+  return view;
+}
+
+test('interrupted frame browser flow reviews first, explicitly adopts, and selects the interrupted run without syncing', async () => {
+  const view = await recoveryHarness();
+  assert.match(view.workspace(), /Recover interrupted frame/);
+  await view.dispatch('miro-frame-review');
+  assert.deepEqual(view.calls.find(call => call.path.endsWith('/actions')).body, {action: 'miro-frame-review'});
+  assert.equal(view.state.job.live, true);
+  await view.pollJob();
+  assert.equal(view.dialog.open, true);
+  assert.doesNotMatch(view.dialog.innerHTML, /<input[^>]* checked/);
+  await view.submitDialog({frame_item_id: 'frame-1'});
+  assert.deepEqual(view.calls.filter(call => call.path.endsWith('/actions')).at(-1).body,
+    {action: 'miro-frame-recover', review_id: 'a'.repeat(64), item_id: 'frame-1'});
+  await view.pollJob();
+  assert.equal(view.state.selectedRun, 'interrupted');
+  assert.equal(view.state.activeCase.miro_recovery.pending_count, 0);
+  assert.match(view.workspace(), /Choose Sync to Miro to resume using the saved graph objects/);
+  assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 2);
+});
+
+test('absence confirmation sends no run/settings and a failed recheck requires a fresh review', async () => {
+  const view = await recoveryHarness(frameReview({candidates: [], can_confirm_absent: true}), 'Board changed. Review the frame again.');
+  await view.dispatch('miro-frame-review');
+  await view.pollJob();
+  assert.match(view.dialog.innerHTML, /expected frame is absent/);
+  await view.submitDialog({confirm_frame_absent: 'on'});
+  assert.deepEqual(view.calls.filter(call => call.path.endsWith('/actions')).at(-1).body,
+    {action: 'miro-frame-recover', review_id: 'a'.repeat(64), confirm_absent: true});
+  await view.pollJob();
+  assert.match(view.state.error, /Board changed/);
+  assert.equal(view.state.activeCase.miro_recovery.pending_count, 1);
+  await view.submitDialog({confirm_frame_absent: 'on'});
+  assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 2);
+  assert.match(view.state.error, /Review the interrupted frame again/);
+});
+
+test('canceling or navigating away invalidates the frame review and ignores its late job', async () => {
+  const view = await recoveryHarness();
+  await view.dispatch('miro-frame-review');
+  await view.pollJob();
+  view.dialog.close();
+  await view.submitDialog({frame_item_id: 'frame-1'});
+  assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 1);
+  await view.dispatch('miro-frame-review');
+  await view.dispatch('dashboard');
+  await view.pollJob();
+  assert.equal(view.dialog.open, false);
+  assert.match(view.notifications.at(-1), /Choose Recover interrupted frame again/);
+  assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 2);
+});
+
+
+test('context input grouping defaults off and survives new-case and trace form submission', async () => {
+  const detail = {id: 'groupcase', name: 'Grouped case', run_defaults: {...defaults, include_fees: false, group_context_inputs: true}, runs: [], seeds: [`${txid}:0`]};
+  const view = await harness(path => path === '/api/cases' || path === '/api/cases/groupcase' ? detail : undefined);
+  assert.match(view.newCase(), /name="group_context_inputs" type="checkbox"\//);
+  await view.submit({name: detail.name, txids: txid, seeds: `${txid}:0`, group_context_inputs: 'on'});
+  assert.equal(view.calls.find(call => call.path === '/api/cases').body.settings.group_context_inputs, true);
+  view.openActionDialog('trace');
+  assert.match(view.dialog.innerHTML, /name="group_context_inputs" type="checkbox" checked/);
+  const settings = view.readSettings({values: {...defaults, group_context_inputs: 'on'}});
+  assert.equal(settings.group_context_inputs, true);
+  assert.equal(view.readSettings({values: defaults}).group_context_inputs, false);
+});
+
+test('changing grouping invalidates ELK and compact previews and blocks stale compact application', async () => {
+  const view = await harness();
+  const settings = {...defaults, include_fees: false, group_context_inputs: false};
+  const artifact = {include_fees: false, connector_style: 'straight', layout_attempts: 25, preview_id: 'preview1', preview_url: '/files/artifacts/graph.html',
+    downloads: [{name: 'details.html', url: '/files/artifacts/details.html'}], compaction: {unchanged: true}};
+  const detail = {id: 'case', name: 'Case', run_defaults: settings, miro_board: 'board', runs: [{id: 'run1'}], latest_run: 'run1', artifacts: {run1: {compact: artifact}}};
+  view.state.activeCase = detail;
+  assert.match(view.elkGraph(artifact, true, settings), /Open detail pages/);
+  assert.match(view.compactGraph(artifact, true, detail), /Open detail pages/);
+  assert.ok(view.currentCompaction());
+  settings.group_context_inputs = true;
+  for (const html of [view.elkGraph(artifact, true, settings), view.compactGraph(artifact, true, detail)]) {
+    assert.match(html, /different graph settings/);
+    assert.doesNotMatch(html, /<iframe|Open detail pages|Apply compact layout to Miro/);
+  }
+  assert.equal(view.currentCompaction(), undefined);
+  view.openActionDialog('miro-compact');
+  assert.equal(view.dialog.open, false);
+  artifact.group_context_inputs = true;
+  assert.match(view.elkGraph(artifact, true, settings), /<iframe/);
+  assert.match(view.compactGraph(artifact, true, detail), /Apply compact layout to Miro/);
+});
+
+test('detail pages are optional and their links accept only local artifact URLs', async () => {
+  const view = await harness();
+  const settings = {...defaults, include_fees: false, group_context_inputs: false};
+  const artifact = {include_fees: false, connector_style: 'straight', layout_attempts: 25, preview_url: '/files/artifacts/graph.html', downloads: []};
+  assert.doesNotMatch(view.elkGraph(artifact, true, settings), /Open detail pages/);
+  artifact.downloads = [{name: 'details.html', url: 'javascript:alert(1)'}];
+  assert.doesNotMatch(view.elkGraph(artifact, true, settings), /javascript:|Open detail pages/);
+});
+
+test('separate branch hubs are normalized at creation and preserved by the trace-only form', async () => {
+  const first = 'G' + 'a'.repeat(33), second = 'H' + 'b'.repeat(33);
+  const detail = {id: 'hubcase', name: 'Hub case', run_defaults: {...defaults, include_fees: false, group_context_inputs: false, hub_addresses: [first, second]}, runs: [], seeds: [`${txid}:0`]};
+  const view = await harness(path => path === '/api/cases' || path === '/api/cases/hubcase' ? detail
+    : path === '/api/cases/hubcase/actions' ? {id: 'trace1', status: 'running'} : undefined);
+  assert.match(view.newCase(), /Separate branch hubs/);
+  await view.submit({name: detail.name, txids: txid, seeds: `${txid}:0`, hub_addresses: ` ${second}\n${first}\n\n${second} `});
+  assert.deepEqual(view.calls.find(call => call.path === '/api/cases').body.settings.hub_addresses, [first, second]);
+  view.openActionDialog('trace');
+  assert.doesNotMatch(view.dialog.innerHTML, /name="hub_addresses"/);
+  await view.submitDialog(defaults);
+  const trace = view.calls.find(call => call.path === '/api/cases/hubcase/actions');
+  assert.deepEqual(trace.body.settings.hub_addresses, [first, second]);
+});
+
+test('hub selection changes invalidate previews while duplicate and reordered lists remain equivalent', async () => {
+  const view = await harness();
+  const first = 'G' + 'a'.repeat(33), second = 'H' + 'b'.repeat(33);
+  const settings = {...defaults, include_fees: false, group_context_inputs: false, hub_addresses: [first, second]};
+  const artifact = {include_fees: false, connector_style: 'straight', layout_attempts: 25, preview_id: 'preview1', preview_url: '/files/artifacts/graph.html',
+    downloads: [], compaction: {unchanged: true}, hub_addresses: [second, first, second]};
+  const detail = {id: 'case', name: 'Case', run_defaults: settings, miro_board: 'board', runs: [{id: 'run1'}], latest_run: 'run1', artifacts: {run1: {compact: artifact}}};
+  view.state.activeCase = detail;
+  assert.match(view.elkGraph(artifact, true, settings), /<iframe/);
+  assert.match(view.compactGraph(artifact, true, detail), /<iframe/);
+  settings.hub_addresses = [first];
+  assert.match(view.elkGraph(artifact, true, settings), /different graph settings/);
+  assert.match(view.compactGraph(artifact, true, detail), /different graph settings/);
+  assert.equal(view.currentCompaction(), undefined);
+  view.openActionDialog('miro-compact');
+  assert.equal(view.dialog.open, false);
+});
+
+
+test('layout attempts default to 25 and new-investigation forms send the chosen search size', async () => {
+  const detail = {id: 'layoutcase', name: 'Layout case', run_defaults: {...defaults, layout_attempts: 80}, runs: [], seeds: [`${txid}:0`]};
+  const view = await harness(path => path === '/api/cases' || path === '/api/cases/layoutcase' ? detail : undefined);
+  assert.match(view.newCase(), /Layout attempts/);
+  assert.match(view.newCase(), /name="layout_attempts" type="number" min="1" max="1000" step="1" required value="25"/);
+  assert.match(view.newCase(), /Independent of trace hops/);
+  await view.submit({name: detail.name, txids: txid, seeds: `${txid}:0`, layout_attempts: '80'});
+  assert.equal(view.calls.find(call => call.path === '/api/cases').body.settings.layout_attempts, 80);
+  assert.match(view.workspace(), /<dt>Layout attempts<\/dt><dd>80<\/dd>/);
+});
+
+test('workspace and investigation settings submit layout attempts independently', async () => {
+  const detail = {id: 'layoutcase', name: 'Layout case', run_defaults: {...defaults, layout_attempts: 70}, runs: []};
+  const view = await harness(path => path === '/api/cases/layoutcase' ? detail : undefined);
+  view.state.page = 'settings';
+  assert.match(view.settingsPage(), /name="layout_attempts"[^>]+value="25"/);
+  await view.submitSettings({layout_attempts: '100'});
+  assert.equal(view.calls.find(call => call.path === '/api/settings').body.settings.layout_attempts, 100);
+  view.state.activeCase = detail;
+  view.state.page = 'case-settings';
+  assert.match(view.settingsPage(), /name="layout_attempts"[^>]+value="70"/);
+  await view.submitSettings({name: detail.name, board: '', layout_attempts: '90'});
+  assert.equal(view.calls.find(call => call.path === '/api/cases/layoutcase/settings').body.settings.layout_attempts, 90);
+});
+
+test('a limited form preserves the prior layout-attempt count when the input is absent', async () => {
+  const view = await harness();
+  const {layout_attempts, ...limited} = defaults;
+  assert.equal(view.readSettings({values: limited}).layout_attempts, 25);
+  assert.equal(view.readSettings({values: limited}, {...defaults, hub_addresses: [], layout_attempts: 150}).layout_attempts, 150);
+  assert.equal(view.readSettings({values: {...limited, layout_attempts: '1'}}, {...defaults, hub_addresses: [], layout_attempts: 150}).layout_attempts, 1);
+});
+
+test('legacy or different layout-attempt counts invalidate both previews and compact application', async () => {
+  const view = await harness();
+  const settings = {...defaults, include_fees: false, group_context_inputs: false, hub_addresses: []};
+  const artifact = {include_fees: false, connector_style: 'straight', preview_id: 'preview1', preview_url: '/files/artifacts/graph.html',
+    downloads: [], compaction: {unchanged: true}};
+  const detail = {id: 'case', name: 'Case', run_defaults: settings, miro_board: 'board', runs: [{id: 'run1'}], latest_run: 'run1', artifacts: {run1: {compact: artifact}}};
+  view.state.activeCase = detail;
+  for (const attempts of [undefined, 1, 24, 26]) {
+    if (attempts === undefined) delete artifact.layout_attempts;
+    else artifact.layout_attempts = attempts;
+    for (const html of [view.elkGraph(artifact, true, settings), view.compactGraph(artifact, true, detail)]) {
+      assert.match(html, /different graph settings/);
+      assert.doesNotMatch(html, /<iframe|Apply compact layout to Miro/);
+    }
+    assert.equal(view.currentCompaction(), undefined);
+  }
+  artifact.layout_attempts = 25;
+  assert.match(view.elkGraph(artifact, true, settings), /<iframe/);
+  assert.match(view.compactGraph(artifact, true, detail), /Apply compact layout to Miro/);
+  settings.layout_attempts = 100;
+  assert.equal(view.currentCompaction(), undefined);
 });

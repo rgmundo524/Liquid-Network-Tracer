@@ -16,7 +16,7 @@ from .services import confidence_value
 from .attribution_presentation import display_name, attribution_reference
 from .name_colors import apply_name_colors, color_text
 
-PRESENTATION_VERSION = 19
+PRESENTATION_VERSION = 20
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -49,7 +49,8 @@ def legend_lines(graph=None):
         f"Circles: {name('address').lower()} = context. Optional name colors match case-insensitively; confidence never selects a color.",
         f"Color priority: selected seed {name('seed').lower()} > assigned name color > unspent {name('unspent_endpoint').lower()} > candidate {name('candidate').lower()} > context {name('address').lower()}. Shared seed addresses retain the seed color.",
         f"{name('unspent_endpoint')} circles: traced branch ends at a UTXO observed unspent. Unchecked or hop-limited outputs do not qualify.",
-        f"Arrows: {name('traced_edge').lower()} = traced UTXO links; {name('context_edge').lower()} = context only.",
+        f"Arrows: thicker {name('traced_edge').lower()} = traced UTXO links; thinner {name('context_edge').lower()} = context only.",
+        "Optional context rectangles summarize isolated input addresses; each input remains a separate arrow. Full members stay in local exports; a summary does not imply common ownership.",
         "Captions: vin/vout number · amount asset. ?? = not publicly available. Known amounts are in base units.",
         "STOP TRACING: an explicit address boundary, independent of confidence. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards.",
         "Thick red border: INPUT MERGE = distinct starting lineages meet in a transaction; shared-address receipts from distinct branches also highlight the receiving address and all participating senders. Neither proves ownership or value allocation.",
@@ -116,7 +117,7 @@ def _unspent_endpoints(state):
                  or (isinstance(item.get("spend_observation_id"), str) and item["spend_observation_id"].strip()))}
 
 
-def build_graph(state, merge_addresses=True, include_fees=False):
+def build_graph(state, merge_addresses=True, include_fees=False, *, group_context_inputs=False, hub_addresses=None):
     nodes, edges, fee_items = {}, [], {}
     occurrence_keys = defaultdict(set)
     unspent_endpoints = _unspent_endpoints(state)
@@ -284,6 +285,19 @@ def build_graph(state, merge_addresses=True, include_fees=False):
     annotate(graph, state)
     from .change_layout import annotate_changes
     annotate_changes(graph, state)
+    from .investigations import validate_settings
+    selected_hubs = validate_settings({"hub_addresses": [] if hub_addresses is None else hub_addresses})["hub_addresses"]
+    if selected_hubs:
+        graph["graph_options"]["hub_addresses"] = selected_hubs
+    for node in graph["nodes"]:
+        details = node.get("details", {})
+        if (node["kind"] == "address" and details.get("network") == "liquid"
+                and details.get("address") in selected_hubs):
+            node["layout_hub"] = True
+    from .context_groups import group_context_inputs as group_inputs
+    graph = group_inputs(graph, enabled=group_context_inputs)
+    if group_context_inputs:
+        graph["activity_frames"] = activity_frames(graph)
     return graph
 
 
@@ -378,17 +392,25 @@ def _svg_edge_route(start, end):
 
 
 def svg_graph(graph):
+    import textwrap
+    from .connector_styles import stroke_width
+
     lookup = {n["id"]: n for n in graph["nodes"]}
     routes = [(edge, _svg_edge_route(lookup[edge["source"]], lookup[edge["target"]]))
               for edge in graph["edges"]]
-    bounds = [(n["x"] - n["width"] / 2, n["y"] - n["height"] / 2) for n in lookup.values()]
-    bounds += [(n["x"] + n["width"] / 2, n["y"] + n["height"] / 2) for n in lookup.values()]
+    bounds = [(n["x"] - n["width"] / 2 - node_border(n)[1] / 2,
+               n["y"] - n["height"] / 2 - node_border(n)[1] / 2) for n in lookup.values()]
+    bounds += [(n["x"] + n["width"] / 2 + node_border(n)[1] / 2,
+                n["y"] + n["height"] / 2 + node_border(n)[1] / 2) for n in lookup.values()]
     bounds += [point for _, (_, _, points) in routes for point in points]
-    legend = legend_lines(graph)
-    header_top = min((y for _, y in bounds), default=160) - max(170, 24 + len(legend) * 18 + 30)
     min_x = min(0, min((x for x, _ in bounds), default=0) - 30)
-    min_y = min(0, header_top - 30)
     width = max(1100, max((x for x, _ in bounds), default=500) + 80) - min_x
+    # The legend must fit a small export as well as a full investigation.
+    # Wrapping it cannot alter graph geometry or hide the complete text.
+    legend_chars = max(20, min(140, int((min_x + width - 80) / 8)))
+    legend = [part for line in legend_lines(graph) for part in textwrap.wrap(line, legend_chars)]
+    header_top = min((y for _, y in bounds), default=160) - max(170, 24 + len(legend) * 18 + 30)
+    min_y = min(0, header_top - 30)
     height = max((y for _, y in bounds), default=300) + 50 - min_y
     chunks = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{min_x} {min_y} {width} {height}" width="{width}" height="{height}">',
         '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/></marker></defs>',
@@ -401,25 +423,27 @@ def svg_graph(graph):
         context = edge["role"].startswith("context")
         color = edge_color(edge["role"])
         chunks.append(f'<g class="edge {"context" if context else "tracked"}" data-edge-key="{html.escape(edge["id"], quote=True)}"><title>{html.escape(edge["outpoint"] + " | " + edge["quantity"])}</title>'
-            f'<path d="{path}" fill="none" stroke="{color}" stroke-width="2" marker-end="url(#arrow)"/>'
+            f'<path d="{path}" fill="none" stroke="{color}" stroke-width="{stroke_width(edge["role"])}" marker-end="url(#arrow)"/>'
             f'<text x="{label_x}" y="{label_y-10}" text-anchor="middle" font-size="11" fill="{color}">{html.escape(edge["label"])}</text></g>')
     for node in graph["nodes"]:
         x, y, fill = node["x"], node["y"], node["color"]
+        node_width, node_height = node["width"], node["height"]
         title = node["label"] + "\n" + json.dumps(node["details"], ensure_ascii=False)
         chunks.append(f'<g class="node" data-key="{html.escape(node["id"], quote=True)}" tabindex="0" style="cursor:pointer"><title>{html.escape(title)}</title>')
         if node["kind"] == "address":
-            shape = f'<circle cx="{x}" cy="{y}" r="80"'
-        elif node["kind"] == "transaction":
-            shape = f'<rect x="{x-80}" y="{y-80}" width="160" height="160"'
+            shape = (f'<circle cx="{x}" cy="{y}" r="{node_width / 2}"' if node_width == node_height
+                     else f'<ellipse cx="{x}" cy="{y}" rx="{node_width / 2}" ry="{node_height / 2}"')
+        elif node["kind"] in ("transaction", "context_group"):
+            shape = f'<rect x="{x-node_width/2}" y="{y-node_height/2}" width="{node_width}" height="{node_height}"'
         else:
-            shape = f'<polygon points="{x},{y-80} {x+80},{y} {x},{y+80} {x-80},{y}"'
+            shape = f'<polygon points="{x},{y-node_height/2} {x+node_width/2},{y} {x},{y+node_height/2} {x-node_width/2},{y}"'
         border, thickness = node_border(node)
         chunks.append(shape + f' fill="{fill}" stroke="{border}" stroke-width="{thickness}"/>')
         from .address_counts import caption as count_caption
         from .layout_preview import _explorer_url, _short_lines
         url = _explorer_url(graph, node)
         count = count_caption(node)
-        labels = _short_lines(node["label"], 160, 160, node["kind"], int(bool(url)) + int(count is not None))
+        labels = _short_lines(node["label"], node_width, node_height, node["kind"], int(bool(url)) + int(count is not None))
         rows = [(text, "label") for text in labels]
         if url:
             rows.append(("Explorer", "explorer"))

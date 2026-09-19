@@ -84,12 +84,13 @@ def mermaid_source(graph):
     """Return deterministic, standalone Mermaid text, including every edge."""
     nodes, edges, ids = _items(graph)
     lines = ["flowchart LR", "  %% Local Liquid Network trace; IDs map to mermaid-node-map.json."]
-    shapes = {"transaction": ("[", "]"), "address": ("((", "))"), "event": ("{", "}")}
+    shapes = {"transaction": ("[", "]"), "context_group": ("[", "]"),
+              "address": ("((", "))"), "event": ("{", "}")}
     for node in nodes:
         if node["kind"] not in shapes:
             raise TraceError("The graph contains an unsupported node kind")
         start, end = shapes[node["kind"]]
-        color = node.get("color", COLORS[node["kind"]])
+        color = node.get("color", COLORS.get(node["kind"], COLORS["address"]))
         if not isinstance(color, str) or not _COLOR.fullmatch(color):
             raise TraceError("The graph contains an invalid node color")
         identifier = ids[node["id"]]

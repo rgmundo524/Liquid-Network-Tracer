@@ -7,8 +7,8 @@ import subprocess
 from unittest.mock import patch
 
 from liquid_tracer.cli import main
-from liquid_tracer.common import canonical, digest, read_json, save_json
-from liquid_tracer.connections import preview_connections, reviewed_connections
+from liquid_tracer.common import TraceError, canonical, digest, read_json, save_json
+from liquid_tracer.connections import FILES, preview_connections, reviewed_connections
 from liquid_tracer.investigations import read_case
 from liquid_tracer.menu import create_app
 from tests import test_web, test_menu_addresses
@@ -56,9 +56,31 @@ class ConnectionWebTests(unittest.TestCase):
         self.assertIn("/connections-", "/"+result["preview_id"][17:])
         page = self.success(result["preview_url"])
         self.assertIn(b"Starter-to-starter", page)
+        self.assertIn(b'href="details.html"', page)
+        for name in ("details.html", "details.json"):
+            url = next(f["url"] for f in result["downloads"] if f["name"] == name)
+            self.assertEqual(self.request(url)[0], 200)
         detail = self.success(route)
         self.assertEqual(detail["artifacts"][state["run_id"]]["connections"]["connection_count"], 1)
+        self.assertEqual(detail["artifacts"][state["run_id"]]["connections"]["downloads"], result["downloads"])
         self.assertEqual((case/"case.json").read_bytes(), before)
+
+    def test_connection_details_are_verified_and_older_snapshots_need_no_atlas(self):
+        case, route, state = self.setup_case()
+        result = preview_connections(case, max_hops=2)
+        directory = case / "previews" / result["preview_id"]
+        details = directory / "details.html"
+        details.write_text(details.read_text() + "changed")
+        with self.assertRaisesRegex(TraceError, "preview changed"):
+            reviewed_connections(case, result["preview_id"])
+        self.assertNotIn("connections", self.success(route)["artifacts"].get(state["run_id"], {}))
+        for name in ("details.html", "details.json"):
+            (directory / name).unlink()
+        (directory / "SHA256SUMS").write_text("".join(
+            digest((directory / name).read_bytes()) + "  " + name + "\n" for name in sorted(FILES - {"SHA256SUMS"})))
+        reviewed_connections(case, result["preview_id"])
+        product = self.success(route)["artifacts"][state["run_id"]]["connections"]
+        self.assertFalse(any(item["name"].startswith("details.") for item in product["downloads"]))
 
     def test_invalid_hops_and_unconfirmed_publish_do_not_start_worker(self):
         case, route, _ = self.setup_case()
@@ -90,6 +112,7 @@ class ConnectionWebTests(unittest.TestCase):
         self.assertEqual(graph["nodes"], [])
         self.assertEqual(plan["shapes"], [])
         self.assertEqual(plan["connectors"], [])
+        self.assertFalse((case / "previews" / result["preview_id"] / "details.html").exists())
 
 
 class ConnectionMenuTests(unittest.IsolatedAsyncioTestCase):

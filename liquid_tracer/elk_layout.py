@@ -20,6 +20,14 @@ from pathlib import Path
 from .common import TraceError
 from .processes import defer_cancellation_during_spawn
 from .render_runtime import renderer_failure, renderer_heap_mb
+from .edge_labels import FONT_SIZE, LABEL_LAYOUT_VERSION, caption_size, caption_text, route_signature
+from .input_order import input_orders, input_order_metadata
+from .attachment_order import attachment_order_metrics
+from .endpoint_alignment import align_near_horizontal_endpoints
+from .horizontal_spacing import compact_candidate
+from .layout_search import LAYOUT_SEARCH_VERSION, layout_seeds, normalize_layout_attempts
+from .branch_layout import (BRANCH_LAYOUT_VERSION, edge_priorities, organization_metrics,
+                            compact_context_inputs, hub_nodes)
 
 
 ALGORITHM = "elk_layered_v1"
@@ -161,7 +169,7 @@ def _pairs(boxes):
         active.append(index)
 
 
-def layout_metrics(graph, *, routed=True, max_comparisons=MAX_COMPARISONS):
+def layout_metrics(graph, *, routed=True, max_comparisons=MAX_COMPARISONS, midpoint_elbows=False):
     """Bounded geometric estimates. Label bounds and Miro auto-routing excluded.
 
     Truncated counts are explicitly lower bounds. Rectangular object-overlap
@@ -174,7 +182,16 @@ def layout_metrics(graph, *, routed=True, max_comparisons=MAX_COMPARISONS):
         points = [attachment_point(nodes[edge["source"]], attachment["startItem"]),
                   attachment_point(nodes[edge["target"]], attachment["endItem"])]
         endpoints[edge["id"]] = {edge["source"]: points[0], edge["target"]: points[-1]}
-        if routed and edge.get("connector_shape") in ("elbowed", "curved") and edge.get("route"):
+        if (midpoint_elbows and edge.get("connector_shape") in ("elbowed", "curved")
+                and points[-1]["x"] > points[0]["x"]
+                and edge.get("routing_exception") not in ("return", "fee")):
+            # Miro does not accept ELK bends. A simple midpoint elbow exposes
+            # the obstacle/crossing pattern seen on the board, but remains an
+            # estimate, not a simulation of Miro's undocumented route chooser.
+            a, b = points
+            middle = (a["x"] + b["x"]) / 2
+            points = [a, {"x": middle, "y": a["y"]}, {"x": middle, "y": b["y"]}, b]
+        elif routed and edge.get("connector_shape") in ("elbowed", "curved") and edge.get("route"):
             points = [points[0], *edge["route"][1:-1], points[-1]]
         for a, b in zip(points, points[1:]):
             edge_length += math.hypot(a["x"] - b["x"], a["y"] - b["y"])
@@ -183,7 +200,7 @@ def layout_metrics(graph, *, routed=True, max_comparisons=MAX_COMPARISONS):
     node_list = list(nodes.values())
     node_boxes = [_box_node(node) for node in node_list]
     all_boxes = boxes + node_boxes
-    crossings, intersections, overlaps = set(), set(), 0
+    crossings, intersections, line_overlaps, overlaps = set(), set(), set(), 0
     comparisons, truncated = 0, False
     for i, j in _pairs(all_boxes):
         comparisons += 1
@@ -199,6 +216,15 @@ def layout_metrics(graph, *, routed=True, max_comparisons=MAX_COMPARISONS):
             first, a, b = segments[i]
             second, c, d = segments[j]
             if first["id"] != second["id"]:
+                # Count positive-length collinear overlaps separately from
+                # crossings. Shared endpoints alone are not overlaps.
+                if (abs(_cross(a, b, c)) < _EPS and abs(_cross(a, b, d)) < _EPS
+                        and math.hypot(a["x"] - b["x"], a["y"] - b["y"]) > _EPS
+                        and math.hypot(c["x"] - d["x"], c["y"] - d["y"]) > _EPS):
+                    axis = "x" if abs(a["x"] - b["x"]) >= abs(a["y"] - b["y"]) else "y"
+                    overlap = min(max(a[axis], b[axis]), max(c[axis], d[axis])) - max(min(a[axis], b[axis]), min(c[axis], d[axis]))
+                    if overlap > _EPS:
+                        line_overlaps.add(tuple(sorted((first["id"], second["id"]))))
                 intersection = _intersection(a, b, c, d)
                 shared = endpoints[first["id"]].keys() & endpoints[second["id"]].keys()
                 meets_at_shared_port = intersection and any(
@@ -213,10 +239,11 @@ def layout_metrics(graph, *, routed=True, max_comparisons=MAX_COMPARISONS):
             node = node_list[ni - len(segments)]
             if node["id"] not in (edge["source"], edge["target"]) and segment_hits_node(a, b, node):
                 intersections.add((edge["id"], node["id"]))
-    return {"crossings": len(crossings), "node_overlaps": overlaps, "node_intersections": len(intersections),
+    return {"crossings": len(crossings), "connector_overlaps": len(line_overlaps),
+            "node_overlaps": overlaps, "node_intersections": len(intersections),
             "edge_length": round(edge_length, 2), "comparisons": min(comparisons, max_comparisons),
             "truncated": truncated, "estimated": True,
-            "method": "planned_segments" if routed else "straight_segments",
+            "method": "midpoint_elbow_estimate" if midpoint_elbows else "planned_segments" if routed else "straight_segments",
             "labels_measured": False, "curves_approximated": True}
 
 
@@ -278,7 +305,7 @@ def _worker(graph, seeds, progress=None):
         result = json.loads(output)
         if not isinstance(result, dict) or result.get("version") != ELK_VERSION or not isinstance(result.get("candidates"), list):
             raise ValueError("invalid worker response")
-        if len(result["candidates"]) != len(seeds):
+        if not len(seeds) <= len(result["candidates"]) <= 2 * len(seeds):
             raise ValueError("missing candidates")
         return result["candidates"]
     except OSError as exc:
@@ -299,12 +326,19 @@ def _request_graph(graph):
     nodes = {node["id"]: node for node in graph["nodes"]}
     fee_ids = {key for key, item in graph.get("fee_items", {}).items() if item["endpoint"] == "shapes"}
     main = {key: node for key, node in nodes.items() if key not in fee_ids}
+    hubs = hub_nodes(graph) & main.keys()
+    # A selected busy address gets its own entry lane, preserving a single
+    # identity. Its incoming funds remain explicit return connections. Other
+    # nodes keep their recorded transaction-dependency partitions unchanged.
+    hub_column = min((node["column"] for node in main.values()), default=0) - 1
+    columns = {key: hub_column if key in hubs else node["column"] for key, node in main.items()}
     children, port_map = {}, {}
     for key, node in sorted(main.items()):
         children[key] = {"id": key, "width": node["width"], "height": node["height"], "ports": [],
-                         "layoutOptions": {"elk.partitioning.partition": str(node["column"]),
+                         "layoutOptions": {"elk.partitioning.partition": str(columns[key]),
                                            "elk.portConstraints": "FIXED_SIDE"}}
     edge_values = []
+    priorities = edge_priorities(graph)
     main_edges = sorted((edge for edge in graph["edges"] if edge["source"] in main and edge["target"] in main),
                         key=lambda edge: edge["id"])
     for index, edge in enumerate(main_edges):
@@ -314,15 +348,24 @@ def _request_graph(graph):
             if node["kind"] == "transaction":
                 east = outgoing
             else:
-                east = main[other]["column"] > node["column"]
-                if main[other]["column"] == node["column"]:
+                east = columns[other] > columns[key]
+                if columns[other] == columns[key]:
                     east = not outgoing
             port_id = "p" + str(index) + ("s" if outgoing else "t")
             children[key]["ports"].append({"id": port_id, "width": 0, "height": 0,
                                            "layoutOptions": {"elk.port.side": "EAST" if east else "WEST"}})
             ports.append(port_id)
         port_map[edge["id"]] = ports
-        edge_values.append({"id": edge["id"], "sources": [ports[0]], "targets": [ports[1]]})
+        item = {"id": edge["id"], "sources": [ports[0]], "targets": [ports[1]],
+                "layoutOptions": {"elk.layered.priority.straightness": str(priorities[edge["id"]])}}
+        if caption_text(edge):
+            # ELK needs dimensions, not confidential caption text, to reserve
+            # room. Keep the full public-facing text in the Python graph only.
+            # ELK ignores labels with no text, even if dimensions are supplied.
+            # This constant activates placement without sharing caption text.
+            item["labels"] = [{"id": "label:" + edge["id"], "text": "caption", **caption_size(edge),
+                               "layoutOptions": {"elk.edgeLabels.placement": "CENTER"}}]
+        edge_values.append(item)
     return {"id": "liquid-layout", "layoutOptions": {
         "elk.algorithm": "layered", "elk.direction": "RIGHT", "elk.edgeRouting": "ORTHOGONAL",
         "elk.partitioning.activate": "true", "elk.spacing.nodeNode": "80", "elk.spacing.componentComponent": "120",
@@ -333,11 +376,18 @@ def _request_graph(graph):
         "elk.layered.crossingMinimization.greedySwitch.type": "TWO_SIDED",
         "elk.layered.nodePlacement.strategy": "BRANDES_KOEPF",
         "elk.layered.nodePlacement.favorStraightEdges": "true",
+        "elk.layered.edgeLabels.sideSelection": "ALWAYS_UP", "elk.spacing.edgeLabel": "7",
         "elk.padding": "[top=0,left=0,bottom=0,right=0]"},
-        "children": list(children.values()), "edges": edge_values}, port_map, fee_ids
+        "children": list(children.values()), "edges": edge_values,
+        "branchOrganization": BRANCH_LAYOUT_VERSION,
+        "inputPortOrders": {key: [port_map[edge_id][1] for edge_id in order]
+                            for key, order in input_orders(graph).items()}}, port_map, fee_ids
 
 
 def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
+    input_policy = candidate.get("inputOrderPolicy", "traced_first")
+    if input_policy not in ("traced_first", "geometry"):
+        raise TraceError("ELK returned an invalid input ordering policy")
     result = copy.deepcopy(graph)
     nodes = {node["id"]: node for node in result["nodes"]}
     raw_nodes = candidate.get("nodes")
@@ -361,7 +411,7 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
                             "y": point["y"] + node["height"] / 2 + offset_y}))
         for port in raw.get("ports", []):
             ports[port["id"]] = _port(node, **_point(port))
-    route_map = {}
+    route_map, label_map = {}, {}
     for raw in raw_edges:
         sections = raw.get("sections")
         if not isinstance(sections, list) or len(sections) != 1:
@@ -370,11 +420,25 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
         points = [section.get("startPoint"), *section.get("bendPoints", []), section.get("endPoint")]
         route_map[raw["id"]] = [_point({"x": point["x"] + offset_x, "y": point["y"] + offset_y})
                                 for point in map(_point, points)]
+        labels = raw.get("labels", [])
+        if not isinstance(labels, list) or len(labels) > 1:
+            raise TraceError("ELK returned invalid connector labels")
+        if labels:
+            label = labels[0]
+            if (not isinstance(label, dict) or label.get("id") != "label:" + raw["id"]
+                    or any(not _finite(label.get(key)) or label[key] <= 0 for key in ("width", "height"))):
+                raise TraceError("ELK returned invalid connector label dimensions")
+            position = _point(label)
+            label_map[raw["id"]] = {**_point({"x": position["x"] + offset_x, "y": position["y"] + offset_y}),
+                                    "width": label["width"], "height": label["height"]}
     # Existing fee row x positions already encode confirmed height/time order.
     fees = sorted((nodes[key] for key in fee_ids & nodes.keys()), key=lambda node: (node["x"], node["id"]))
     for index, node in enumerate(fees):
         node.update(x=130 + index * 230, y=-100)
     for edge in result["edges"]:
+        edge.pop("label_layout", None)
+        if edge["id"] in port_map and bool(caption_text(edge)) != (edge["id"] in label_map):
+            raise TraceError("ELK omitted or changed connector labels")
         source, target = nodes[edge["source"]], nodes[edge["target"]]
         if edge["id"] in port_map:
             try:
@@ -390,6 +454,12 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
                      {"x": start["x"] + 100, "y": 50}, {"x": end["x"], "y": 50}, end]
         a, b = attachment_point(source, attachment["startItem"]), attachment_point(target, attachment["endItem"])
         route[0], route[-1] = a, b
+        if edge["id"] in label_map:
+            label = label_map[edge["id"]]
+            size = caption_size(edge)
+            if any(label[key] != size[key] for key in ("width", "height")):
+                raise TraceError("ELK changed connector label dimensions")
+            edge["label_layout"] = {**label, "route_signature": route_signature([(p["x"], p["y"]) for p in route])}
         returns = b["x"] <= a["x"] or segment_hits_node(a, b, source) or segment_hits_node(a, b, target)
         reason = "return" if returns else ("fee" if target["id"] in fee_ids else None)
         edge.update(attachment=attachment, route=route, connector_shape="elbowed" if reason else connector_style,
@@ -436,7 +506,16 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
                         "fee_row_y": -100 if fees else None,
                         "cycle_groups": copy.deepcopy(graph.get("layout", {}).get("cycle_groups", [])),
                         "annotations": {"legend": {"x": 700, "y": -160 + shift}, "run": {"x": 700, "y": -480 + shift}},
-                        "routing_exceptions": exceptions, "routing_checks_truncated": routing_checks_truncated}
+                        "routing_exceptions": exceptions, "routing_checks_truncated": routing_checks_truncated,
+                        "input_order": input_order_metadata(graph, input_policy),
+                        "branch_organization": {"version": BRANCH_LAYOUT_VERSION,
+                                                 "profile": candidate.get("branchProfile", "balanced"),
+                                                 "hubs": sorted(hub_nodes(graph)),
+                                                 "hub_rule": "separate_entry_lane_with_return_connections"},
+                        "horizontal_spacing": copy.deepcopy(candidate.get("horizontal_spacing", {})),
+                        "edge_labels": {"version": LABEL_LAYOUT_VERSION, "estimated": True,
+                                        "font_size": FONT_SIZE, "placement": "center_above",
+                                        "reserved_count": len(label_map), "miro_positions_exact": False}}
     result.setdefault("graph_options", {})["connector_style"] = connector_style
     result["connector_attachment"] = "transaction_ports_v2"
     result["presentation_version"] = max(6, graph.get("presentation_version", 0))
@@ -451,7 +530,7 @@ def _validate_graph(graph, connector_style):
     nodes = {}
     for node in graph["nodes"]:
         if (not isinstance(node, dict) or not isinstance(node.get("id"), str) or node["id"] in nodes
-                or node.get("kind") not in ("transaction", "address", "event")
+                or node.get("kind") not in ("transaction", "address", "event", "context_group")
                 or not isinstance(node.get("column"), int)
                 or any(not _finite(node.get(name)) for name in ("x", "y", "width", "height"))
                 or min(node["width"], node["height"]) <= 0):
@@ -490,6 +569,8 @@ def fallback_graph(graph, connector_style="straight", reason="size_limit"):
     fee_ids = {key for key, item in result.get("fee_items", {}).items()
                if item["endpoint"] == "shapes" and key in nodes}
     ports = defaultdict(list)
+    ordered_inputs = {key: {edge_id: index for index, edge_id in enumerate(order)}
+                      for key, order in input_orders(result).items()}
     for edge in result["edges"]:
         edge["attachment"] = {}
         for field, key, other, outgoing in (
@@ -502,7 +583,9 @@ def fallback_graph(graph, connector_style="straight", reason="size_limit"):
             ports[key, side].append((neighbor["y"], other, edge["id"], field, edge))
     for (key, side), values in ports.items():
         node = nodes[key]
-        for index, (_, _, _, field, edge) in enumerate(sorted(values, key=lambda item: item[:4])):
+        ranks = ordered_inputs.get(key) if side == "west" else None
+        ordered = sorted(values, key=lambda item: (item[0], ranks[item[2]] if ranks is not None else 0, *item[1:4]))
+        for index, (_, _, _, field, edge) in enumerate(ordered):
             fraction = (index + 1) / (len(values) + 1)
             x = fraction * node["width"] if side == "bottom" else node["width"] if side == "east" else 0
             y = node["height"] if side == "bottom" else fraction * node["height"]
@@ -545,7 +628,7 @@ def fallback_graph(graph, connector_style="straight", reason="size_limit"):
                         "fallback_reason": reason, "fallback_notice": notice,
                         "placement": "complete_graph_v1",
                         "routing_exceptions": exceptions, "routing_checks_truncated": False,
-                        "crossing_optimization": False}
+                        "crossing_optimization": False, "input_order": input_order_metadata(result, "geometry")}
     result["layout"]["metrics"] = {"before": layout_metrics(graph), "after": layout_metrics(result),
                                     "estimated": True, "candidate_count": 0,
                                     "routing_exceptions": exceptions, "miro_routes_exact": False}
@@ -555,43 +638,116 @@ def fallback_graph(graph, connector_style="straight", reason="size_limit"):
     return result
 
 
-def optimize_graph(graph, connector_style="straight", progress=None):
-    """Calculate an ELK layout without application size or time ceilings.
+def optimize_graph(graph, connector_style="straight", progress=None, *, layout_attempts=None):
+    """Compare sequential ELK attempts without application size or time ceilings.
 
-    Failed or cancelled calculations leave the graph unchanged. Quality
-    measurement has a separate work budget that never removes graph elements.
+    Only the current seed's candidates and the best result are retained. Failed
+    or cancelled searches leave the input graph unchanged. Quality measurement
+    has a separate work budget that never removes graph elements.
     """
     nodes = _validate_graph(graph, connector_style)
-    _report_progress(progress, "Calculating local ELK layout; cancel to stop", stage="preparing",
+    attempts = normalize_layout_attempts(
+        graph.get("graph_options", {}).get("layout_attempts") if layout_attempts is None else layout_attempts)
+    seeds = layout_seeds(attempts)
+
+    def attempt_progress(index, seed):
+        def report(event):
+            if progress:
+                progress({**event, "attempt_index": index, "attempt_total": attempts, "seed": seed})
+        return report
+
+    report = attempt_progress(1, seeds[0])
+    _report_progress(report, "Preparing local ELK search; cancel to stop", stage="preparing",
                      node_count=len(graph["nodes"]), edge_count=len(graph["edges"]))
     request, ports, fee_ids = _request_graph(graph)
-    seeds = [1, 7, 19] if len(request["children"]) <= 300 else [1]
-    _report_progress(progress, "Measuring input layout", stage="measuring_input")
+    _report_progress(report, "Measuring input layout", stage="measuring_input")
     before = layout_metrics(graph)
-    if request["children"]:
-        candidates = _worker(request, seeds, progress=progress)
+    best = None
+    candidate_count = 0
+    for index, seed in enumerate(seeds, 1):
+        report = attempt_progress(index, seed)
+        # This choice depends on graph size and attempt position, never the
+        # requested total. Increasing the count therefore preserves the prefix
+        # of candidates, including the historical first three small-graph runs.
+        profile = "balanced" if len(request["children"]) <= 300 and index == 1 else "flow_weighted"
+        if request["children"]:
+            candidates = _worker({**request, "branchProfile": profile}, [seed], progress=report)
+        else:
+            candidates = [{"seed": seed, "nodes": [], "edges": [], "branchProfile": profile}]
+        candidate_count += len(candidates)
+        while candidates:
+            candidate = candidates.pop(0)
+            _report_progress(report, "Validating ELK coordinates and routes", stage="applying")
+            try:
+                compact_candidate(candidate)
+                result = _apply_candidate(graph, candidate, ports, fee_ids, connector_style)
+                from .change_layout import apply_change_layout
+                apply_change_layout(result)
+                align_near_horizontal_endpoints(result)
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                raise TraceError("ELK returned an invalid layout; no Miro changes were made") from exc
+            _report_progress(report, "Measuring completed ELK layout", stage="measuring_output")
+            metrics = layout_metrics(result)
+            main = {"nodes": [node for node in result["nodes"] if node["id"] not in fee_ids],
+                    "edges": [edge for edge in result["edges"] if edge["source"] not in fee_ids and edge["target"] not in fee_ids]}
+            score_metrics = layout_metrics(main) if fee_ids & nodes.keys() else metrics
+            endpoint_metrics = attachment_order_metrics(main)
+            miro_estimate = layout_metrics(main, midpoint_elbows=True)
+            organization = organization_metrics(main)
+            result["layout"]["branch_organization"]["travel"] = organization
+            # Compare native ELK routes with a simple board-routing estimate. A
+            # forced semantic slot order must not win merely because ELK can draw
+            # bends that Miro cannot receive. Prefer the previous traced-first
+            # rule when measured safety and attachment quality are equal.
+            score = (score_metrics["node_overlaps"], score_metrics["node_intersections"],
+                     miro_estimate["node_intersections"], score_metrics["crossings"], miro_estimate["crossings"],
+                     endpoint_metrics["endpoint_order_inversions"], endpoint_metrics["coincident_ports"],
+                     score_metrics["connector_overlaps"], miro_estimate["connector_overlaps"],
+                     result["layout"]["input_order"]["policy"] != "traced_first",
+                     organization["weighted_vertical_travel"] + score_metrics["edge_length"], score_metrics["edge_length"])
+            if best is None or score < best[0]:
+                best = (score, result, metrics, candidate["seed"])
+            # Drop the current candidate and its graph views before requesting
+            # another seed. The best tuple alone owns the retained winner.
+            del candidate, result, main
+        del candidates
+    _, result, after, seed = best
+    _report_progress(report, "Packing nearby transaction context", stage="applying")
+    # Moving a circle closer can put Miro's midpoint elbow through a different
+    # object even when ELK's saved route remains safe. Check that final pass
+    # against the same endpoint/board estimates before accepting its positions.
+    compacted = copy.deepcopy(result)
+    compact_context_inputs(compacted)
+    if compacted["layout"]["branch_organization"].get("context_inputs_moved", 0):
+        alignment = compacted["layout"].get("endpoint_alignment", {})
+        align_near_horizontal_endpoints(compacted)
+        compacted["layout"]["endpoint_alignment"] = {
+            **alignment, "after_context_compaction": compacted["layout"]["endpoint_alignment"]}
+        original_estimate = layout_metrics(result, midpoint_elbows=True)
+        compacted_estimate = layout_metrics(compacted, midpoint_elbows=True)
+        original_ports, compacted_ports = attachment_order_metrics(result), attachment_order_metrics(compacted)
+        def routing_quality(value):
+            return (value["node_intersections"], value["crossings"], value["connector_overlaps"])
+        safe = (not original_estimate["truncated"] and not compacted_estimate["truncated"]
+                and routing_quality(compacted_estimate) <= routing_quality(original_estimate)
+                and compacted_ports["endpoint_order_inversions"] <= original_ports["endpoint_order_inversions"]
+                and compacted_ports["coincident_ports"] <= original_ports["coincident_ports"])
+        if safe:
+            result = compacted
+        else:
+            result["layout"]["branch_organization"]["context_compaction_rejected"] = "attachment_routing_estimate"
     else:
-        candidates = [{"seed": 1, "nodes": [], "edges": []}]
-    scored = []
-    for candidate in candidates:
-        _report_progress(progress, "Validating ELK coordinates and routes", stage="applying")
-        try:
-            result = _apply_candidate(graph, candidate, ports, fee_ids, connector_style)
-            from .change_layout import apply_change_layout
-            apply_change_layout(result)
-        except (KeyError, TypeError, ValueError, OverflowError) as exc:
-            raise TraceError("ELK returned an invalid layout; no Miro changes were made") from exc
-        _report_progress(progress, "Measuring completed ELK layout", stage="measuring_output")
-        metrics = layout_metrics(result)
-        main = {"nodes": [node for node in result["nodes"] if node["id"] not in fee_ids],
-                "edges": [edge for edge in result["edges"] if edge["source"] not in fee_ids and edge["target"] not in fee_ids]}
-        score_metrics = layout_metrics(main) if fee_ids & nodes.keys() else metrics
-        score = (score_metrics["node_overlaps"], score_metrics["node_intersections"], score_metrics["crossings"], score_metrics["edge_length"])
-        scored.append((score, result, metrics, candidate["seed"]))
-    _, result, after, seed = min(scored, key=lambda item: item[0])
+        result = compacted
+    after = layout_metrics(result)
     result["layout"]["metrics"] = {"before": before, "after": after, "estimated": True,
-                                    "candidate_count": len(candidates), "selected_seed": seed,
+                                    "attempt_count": attempts, "candidate_count": candidate_count, "selected_seed": seed,
+                                    "attachments": attachment_order_metrics(result),
+                                    "miro_routing_estimate": layout_metrics(result, midpoint_elbows=True),
                                     "routing_exceptions": result["layout"]["routing_exceptions"],
                                     "miro_routes_exact": False, "time_limit_seconds": None}
-    _report_progress(progress, "Local ELK layout ready", completed=1, stage="ready")
+    result["layout"]["search"] = {"version": LAYOUT_SEARCH_VERSION, "attempt_count": attempts,
+                                  "seeds": list(seeds), "candidate_count": candidate_count,
+                                  "selected_seed": seed, "execution": "sequential"}
+    result.setdefault("graph_options", {})["layout_attempts"] = attempts
+    _report_progress(report, "Local ELK layout ready", completed=1, stage="ready")
     return result

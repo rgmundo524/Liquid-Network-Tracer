@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 
 from .common import TraceError, now, parse_outpoint, read_json, save_json
+from .layout_search import DEFAULT_LAYOUT_ATTEMPTS, normalize_layout_attempts
 
 
 DEFAULTS = {
@@ -17,7 +18,10 @@ DEFAULTS = {
     "max_requests": 30,
     "max_seconds": 60,
     "max_new_items": 750,
+    "layout_attempts": DEFAULT_LAYOUT_ATTEMPTS,
     "include_fees": False,
+    "group_context_inputs": False,
+    "hub_addresses": [],
     "connector_style": "straight",
 }
 
@@ -32,13 +36,26 @@ def validate_settings(settings):
         raise TraceError("Run settings must contain only supported tracing limits and graph options")
     result = {**DEFAULTS, **settings}
     for key, value in result.items():
+        if key == "layout_attempts":
+            if value is None:
+                raise TraceError("layout_attempts must be a whole number from 1 to 1000")
+            result[key] = normalize_layout_attempts(value)
+            continue
+        if key == "hub_addresses":
+            if (not isinstance(value, list)
+                    or any(not isinstance(address, str)
+                           or not re.fullmatch(r"[A-Za-z0-9]{14,200}", address.strip())
+                           for address in value)):
+                raise TraceError("hub_addresses must be a list of full Liquid addresses, using 14 to 200 letters or numbers each")
+            result[key] = sorted({address.strip() for address in value})
+            continue
         if key == "connector_style":
             if not isinstance(value, str) or value not in ("straight", "curved", "elbowed"):
                 raise TraceError("connector_style must be straight, curved, or elbowed")
             continue
-        if key == "include_fees":
+        if key in ("include_fees", "group_context_inputs"):
             if type(value) is not bool:
-                raise TraceError("include_fees must be true or false")
+                raise TraceError(f"{key} must be true or false")
             continue
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
             raise TraceError(f"{key} must be a finite number")
@@ -54,7 +71,7 @@ def validate_settings(settings):
 
 def load_settings(root):
     path = Path(root) / "settings.json"
-    return validate_settings(read_json(path)) if path.exists() else dict(DEFAULTS)
+    return validate_settings(read_json(path)) if path.exists() else validate_settings({})
 
 
 def save_settings(root, settings):
