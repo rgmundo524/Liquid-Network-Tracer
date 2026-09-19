@@ -63,6 +63,10 @@ def parser():
     batch.add_argument("--max-seconds", type=float, help="Shared lookup duration limit (default: 30 seconds per distinct transaction)")
     batch.add_argument("--base-url", default=ENTERPRISE)
     batch.add_argument("--auth", choices=["blockstream", "none"], default="blockstream")
+    inputs = commands.add_parser("input-export", help="Export current CSV inputs without a run or network requests")
+    inputs.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    inputs.add_argument("--kind", choices=("all", "attributions", "name-colors", "change-outputs"), default="all")
+    inputs.add_argument("--out", type=Path, help="New output directory outside runs/ (default: a new case exports directory)")
     bulk = commands.add_parser("address-import", help="Preview/apply bulk address attributions before or between runs; offline")
     bulk.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     bulk.add_argument("--file", type=Path, required=True, help="UTF-8 CSV, JSON array, or plain address list")
@@ -800,6 +804,10 @@ def main(argv=None, *, progress=None):
         args = parser().parse_args(argv)
         if args.command == "credentials-check":
             return check_credentials(args.service)
+        if args.command == "input-export":
+            from .input_export import save_input_export
+            print(json.dumps(save_input_export(args.case, args.kind, args.out), indent=2, ensure_ascii=False))
+            return 0
         if args.command == "address-import":
             from .address_import import apply_import, preview_import, read_import
             text = read_import(args.file)

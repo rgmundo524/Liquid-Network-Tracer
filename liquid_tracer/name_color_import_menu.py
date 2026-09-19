@@ -21,6 +21,8 @@ def name_color_import_screen(base, button, case):
             with VerticalScroll(classes="form-panel"):
                 yield Label("Import name colors", classes="title")
                 yield Static(NOTICE, markup=False)
+                yield button("Export saved CSV", id="name-color-import-export")
+                yield Static("", id="name-color-import-export-status", markup=False)
                 yield Label("CSV / JSON file path (optional; takes precedence over pasted text)")
                 yield Input(id="name-color-import-file")
                 yield Label("Or paste Name,Color CSV / JSON")
@@ -94,6 +96,10 @@ def name_color_import_screen(base, button, case):
         def on_button_pressed(self, event):
             event.stop()
             if self.app.busy:
+                return
+            if event.button.id == "name-color-import-export":
+                from .input_export_menu import export_saved_inputs
+                self.query_one("#name-color-import-export-status", Static).update(export_saved_inputs(case, "name-colors"))
                 return
             error = self.query_one("#name-color-import-error", Static)
             try:

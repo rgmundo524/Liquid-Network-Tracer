@@ -97,6 +97,10 @@ Only `Name,Color` fields belong in this file. Graph-role colors, selected-seed
 priority, confidence, stop flags, and saved trace evidence remain unchanged.
 Imported name colors also apply to future addresses using the same name.
 
+Choose **Export saved CSV** to download all saved name-color assignments in this
+same format, including assignments outside the current search or page. Larger
+exports contain numbered CSV parts in a ZIP. See [CSV input exports](input-csv-exports.md).
+
 The CLI uses the same preview and apply flow:
 
 ```bash

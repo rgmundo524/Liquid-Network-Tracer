@@ -939,6 +939,13 @@ class Handler(BaseHTTPRequestHandler):
                 if job is None:
                     raise RequestError("Job unavailable. Refresh the investigation to review saved runs.", 404)
                 self.send(200, dict(job))
+        elif len(parts) == 5 and parts[:2] == ["api", "cases"] and parts[3] == "input-exports":
+            if parts[4] not in {"attributions", "name-colors", "change-outputs", "all"}:
+                raise RequestError("Input export not found", 404)
+            from .input_export import build_input_export
+            case, _ = self.server.case(parts[2])
+            product = build_input_export(case, parts[4])
+            self.send(200, product["data"], product["content_type"], download=product["filename"])
         elif len(parts) == 5 and parts[0] == "files":
             case, _ = self.server.case(parts[1])
             path = self.server.artifact(case, parts[2:])

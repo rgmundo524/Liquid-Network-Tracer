@@ -23,6 +23,8 @@ def import_screen(base, button, case):
                 yield Static("Import before the first run or between runs. No Blockstream calls or Miro changes. "
                              "A plain list uses suspected confidence with tracing stops enabled. "
                              "CSV/JSON can specify names, sources, notes, confidence and independent stop flags.", markup=False)
+                yield button("Export saved CSV", id="import-export")
+                yield Static("", id="import-export-status", markup=False)
                 yield Label("CSV / JSON / text file path (optional; takes precedence over pasted text)")
                 yield Input(id="import-file")
                 yield Label("Or paste addresses / CSV / JSON")
@@ -88,6 +90,10 @@ def import_screen(base, button, case):
         def on_button_pressed(self, event):
             event.stop()
             if self.app.busy:
+                return
+            if event.button.id == "import-export":
+                from .input_export_menu import export_saved_inputs
+                self.query_one("#import-export-status", Static).update(export_saved_inputs(case, "attributions"))
                 return
             error = self.query_one("#import-error", Static)
             try:

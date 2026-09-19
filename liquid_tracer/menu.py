@@ -593,6 +593,8 @@ def create_app(root=None):
                 yield Static("Review address activity, record a name and confidence, and choose whether tracing stops. "
                              "Opening this screen does not call Blockstream.", markup=False)
                 yield Button("Assign name colors", id="review-name-colors")
+                yield Button("Export saved CSV", id="address-export")
+                yield Static("", id="address-export-status", markup=False)
                 yield Input(placeholder="Search addresses or service names", id="address-search")
                 yield Checkbox("Show suspected attributions only", id="address-suspected-only")
                 with Horizontal(classes="buttons"):
@@ -727,6 +729,9 @@ def create_app(root=None):
                 if action == "review-name-colors":
                     from .name_colors_menu import name_color_screen
                     self.app.push_screen(name_color_screen(BaseScreen, Button, self.case))
+                elif action == "address-export":
+                    from .input_export_menu import export_saved_inputs
+                    self.query_one("#address-export-status", Static).update(export_saved_inputs(self.case, "attributions"))
                 elif action == "address-back":
                     self.action_back()
                 elif action in ("address-find", "address-previous", "address-next"):
@@ -991,7 +996,10 @@ def create_app(root=None):
                 with Horizontal(classes="buttons"):
                     yield Button("Import address attributions", id="addresses-import")
                     yield Button("Assign name colors", id="name-colors")
-                yield Button("Change outputs", id="change-outputs")
+                with Horizontal(classes="buttons"):
+                    yield Button("Change outputs", id="change-outputs")
+                    yield Button("Export input CSVs", id="input-export")
+                yield Static("", id="input-export-status", markup=False)
                 yield Button("Fetch address transaction counts", id="address-counts")
                 yield Static("Counts use one statistics request per uncached address, within this investigation's API/time budget. Then regenerate a preview or sync Miro.", markup=False)
                 yield Button("Merge duplicate addresses", id="address-merge")
@@ -1117,6 +1125,9 @@ def create_app(root=None):
                 elif action == "change-outputs":
                     from .change_outputs_menu import change_output_screen
                     self.app.push_screen(change_output_screen(BaseScreen, Button, self.case))
+                elif action == "input-export":
+                    from .input_export_menu import export_saved_inputs
+                    self.query_one("#input-export-status", Static).update(export_saved_inputs(self.case, "all"))
                 elif action == "addresses-import":
                     from .address_import_menu import import_screen
                     self.app.push_screen(import_screen(BaseScreen, Button, self.case))
