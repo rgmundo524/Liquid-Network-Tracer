@@ -515,6 +515,18 @@ liquid-live miro-sync --case cases/theft-liquid
 
 Creation accepts `--name TEXT`, `--visibility private|team`, and `--team-id ID`. Repeating the command reuses a linked board or a saved successful creation receipt. If a connection failure leaves the outcome uncertain, it blocks another creation request. Inspect Miro, then link the created board through **Investigation settings**. If no board exists, create one in Miro and link it there. Completed run evidence remains unchanged.
 
+To start over with the updated graph, choose **Rebuild on new board** in the Miro panel or investigation menu. This creates a new private board, publishes the selected saved run with current labels and display settings, and makes it the investigation's linked board. The previous board, its comments and manual edits, and its local publication mapping remain intact. Frames are still created separately with **Create / update Miro frames** after the graph is finished.
+
+The rebuild prepares and validates the layout before creating the board. Its editable new-item allowance must cover the complete fresh graph, including shapes and connectors; an insufficient allowance stops before board creation. Increasing this one-action allowance does not change the investigation defaults. Existing uncertain items on the previous board do not prevent rebuilding on a separate board.
+
+```bash
+liquid-live miro-rebuild-board --case cases/theft-liquid --run latest \
+  --source-board 'CURRENT_BOARD_ID' --name 'Updated investigation graph' \
+  --max-new-items 5000
+```
+
+The source-board selection identifies this rebuild. If interrupted, **Resume board rebuild** or the same CLI command reuses its saved graph and acknowledged new board instead of creating another. If Miro did not confirm board creation, inspect Miro and link the recovered board in settings before using normal sync; an uncertain creation request is never automatically repeated. Once a rebuild is complete, another deliberate rebuild starts from the newly linked board. Earlier board URLs remain recorded with the rebuild.
+
 To use an existing board, save its URL or ID through **Investigation settings**, or pass it directly:
 
 ```bash

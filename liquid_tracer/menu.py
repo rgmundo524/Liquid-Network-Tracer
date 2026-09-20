@@ -30,6 +30,16 @@ LIMIT_FIELDS = (
 ACTION_ERRORS = (TraceError, OSError, ValueError, KeyError, TypeError)
 
 
+def _rebuild_status(case):
+    from .board_rebuild import rebuild_status
+
+    try:
+        return rebuild_status(case)
+    except ACTION_ERRORS:
+        return {"status": "unavailable", "notice": "The saved board rebuild receipt is unavailable. "
+                "Restore it before rebuilding again. Your saved investigation remains available."}
+
+
 class _OfflineCalculation:
     """Own one local renderer process until its CLI has cleaned up its children."""
 
@@ -882,6 +892,72 @@ def create_app(root=None):
                 except ACTION_ERRORS as error:
                     self.query_one("#form-error", Static).update(str(error))
 
+    class RebuildBoardScreen(BaseScreen):
+        def __init__(self, case):
+            super().__init__()
+            self.case = case
+            self.metadata = read_case(case)
+            self.progress = _rebuild_status(case)
+            self.resume = bool(self.progress and self.progress.get("status") not in ("complete", "unavailable"))
+            _, state = _latest(case, self.metadata, verify=True)
+            self.run_id = self.progress["run_id"] if self.resume else state["run_id"]
+            self.source = self.progress["previous_board_id"] if self.resume else self.metadata.get("miro_board")
+            self.settings = validate_settings(self.metadata.get("run_defaults", {}))
+
+        def compose(self) -> ComposeResult:
+            from .boards import default_board_name
+
+            yield Header()
+            with VerticalScroll(classes="form-panel"):
+                yield Label("Resume board rebuild" if self.resume else "Rebuild on a new private board", classes="title")
+                yield Static(f"Saved run: {self.run_id}\nPrevious board: https://miro.com/app/board/{self.source}/",
+                             id="rebuild-selection", markup=False)
+                yield Static("Recreate the saved graph using current labels, grouping and layout settings. "
+                             "The previous board and its comments and manual edits stay there; they are not copied. "
+                             "The new private board becomes this investigation's linked board. "
+                             "Create frames separately when the graph is finished.", id="rebuild-notice", markup=False)
+                if self.progress:
+                    yield Static(self.progress.get("notice", "Resume the saved board rebuild."), markup=False)
+                yield Label("New board name")
+                name = self.progress.get("name") if self.resume else None
+                yield Input(name or default_board_name(self.metadata)[:50] + " · Rebuilt", id="board-name",
+                            disabled=self.resume)
+                yield Label("New item budget for this rebuild")
+                yield Input(str(self.settings["max_new_items"]), id="max_new_items", type="integer")
+                yield Static("Include all graph objects and connections. The layout and full budget are checked "
+                             "before creating the board. This one-time budget does not change investigation defaults. "
+                             "An acknowledged replacement board is reused when resuming.", markup=False)
+                yield Static("", id="form-error", markup=False)
+            with Horizontal(classes="buttons form-actions"):
+                yield Button("Cancel", id="cancel")
+                yield Button("Resume board rebuild" if self.resume else "Create board and rebuild", id="submit", variant="primary",
+                             disabled=bool(self.progress and self.progress.get("status") in ("pending", "unavailable")))
+            yield Footer()
+
+        def on_mount(self):
+            self.query_one("#cancel", Button).focus()
+
+        def on_button_pressed(self, event: Button.Pressed):
+            event.stop()
+            if event.button.id == "cancel":
+                self.dismiss(None)
+            elif event.button.id == "submit":
+                try:
+                    from .boards import board_options
+                    from .cli import board_id, run_path, verify_export
+
+                    source = board_id(self.source)
+                    verify_export(run_path(self.case, self.run_id))
+                    name = self.query_one("#board-name", Input).value.strip()
+                    board_options(name, visibility="private")
+                    budget = int(self.query_one("#max_new_items", Input).value)
+                    if not 0 <= budget <= 2 ** 53 - 1:
+                        raise TraceError("Enter a nonnegative whole-number budget for all objects and connections.")
+                    self.dismiss((["miro-rebuild-board", "--case", str(self.case), "--run", self.run_id,
+                                   "--source-board", source, "--name", name, "--max-new-items", str(budget)], True))
+                except ACTION_ERRORS as error:
+                    self.query_one("#form-error", Static).update(str(error))
+
     class CompactApplyScreen(BaseScreen):
         def __init__(self, case, run_id, preview_id):
             super().__init__()
@@ -1044,6 +1120,8 @@ def create_app(root=None):
                     yield Button("Create Miro board", id="create-board")
                     yield Button("Sync and reorganize Miro graph", id="layout")
                 yield Button("Create / update Miro frames", id="frames")
+                yield Button("Rebuild on new board", id="rebuild-board")
+                yield Static("", id="rebuild-status", markup=False)
                 with Horizontal(classes="buttons"):
                     yield Button("Investigation settings", id="case-settings")
                     yield Button("Back", id="back")
@@ -1068,6 +1146,12 @@ def create_app(root=None):
                     f"Layout attempts: {settings['layout_attempts']}\nDirectory: {self.case}")
                 self.query_one("#run", Button).label = "Continue latest run" if metadata.get("latest_run") else "Start first run"
                 self.query_one("#create-board", Button).disabled = self.app.busy or bool(board)
+                rebuild = _rebuild_status(self.case)
+                rebuilding = bool(rebuild and rebuild.get("status") != "complete")
+                self.query_one("#rebuild-board", Button).label = "Resume board rebuild" if rebuilding else "Rebuild on new board"
+                self.query_one("#rebuild-board", Button).disabled = (self.app.busy or not (board and metadata.get("latest_run"))
+                    or bool(rebuild and rebuild.get("status") in ("pending", "unavailable")))
+                self.query_one("#rebuild-status", Static).update((rebuild or {}).get("notice", ""))
                 self.query_one("#layout", Button).disabled = self.app.busy or not (board and metadata.get("latest_run"))
                 self.query_one("#frames", Button).disabled = self.app.busy or not (board and metadata.get("latest_run"))
                 self.query_one("#address-merge", Button).disabled = self.app.busy or not (board and metadata.get("latest_run"))
@@ -1122,6 +1206,8 @@ def create_app(root=None):
                     self.app.push_screen(FormScreen("case", self.case))
                 elif action == "create-board":
                     self.app.push_screen(CreateBoardScreen(self.case), self.perform)
+                elif action == "rebuild-board":
+                    self.app.push_screen(RebuildBoardScreen(self.case), self.perform)
                 elif action in ("connections", "connections-publish"):
                     from .connections_menu import connection_screen
                     self.app.push_screen(connection_screen(BaseScreen, Button, self.case,
@@ -1258,6 +1344,10 @@ def create_app(root=None):
             elif getattr(self, "current_action", None) == "miro-create-board":
                 message = ("Miro board saved. Choose Preview Miro, then Sync to Miro to add the traced graph."
                            if status == 0 else "Board creation did not complete. Check the terminal result before retrying.")
+            elif getattr(self, "current_action", None) == "miro-rebuild-board":
+                message = ("Graph rebuilt on a new board. The previous board is preserved. Create frames when finished."
+                           if status == 0 else "Board rebuild stopped. The previous board is preserved. "
+                           "Review the terminal result; use Resume board rebuild for an acknowledged replacement board.")
             elif getattr(self, "current_action", None) == "connections":
                 message = "Connection preview did not complete; saved evidence is unchanged."
                 if status == 0:

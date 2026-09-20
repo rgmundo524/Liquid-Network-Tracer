@@ -500,3 +500,84 @@ test('frame result counts distinguish frame updates from detached graph children
   assert.match(html, /<strong>2<\/strong>Updated frames/);
   assert.doesNotMatch(html, /<strong>29<\/strong>Updated frames/);
 });
+
+test('fresh board action stays available during old-board recovery and pins reviewed snapshot/source', async () => {
+  const detail = {id: 'case1', name: 'Fresh graph', miro_board: 'OLD=', latest_run: 'saved1',
+    run_defaults: defaults, runs: [{id: 'saved1'}, {id: 'saved2'}],
+    miro_recovery: {pending_count: 1}};
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'rebuild1', status: 'running'} : undefined);
+  view.state.activeCase = detail;
+  const control = view.workspace().match(/<button[^>]*data-action="miro-rebuild-dialog"[^>]*>/)[0];
+  assert.doesNotMatch(control, /disabled/);
+  await view.dispatch('miro-rebuild-dialog');
+  assert.match(view.dialog.innerHTML, /previous board and its comments and manual edits stay there/i);
+  assert.match(view.dialog.innerHTML, /name="max_new_items"/);
+  assert.match(view.dialog.innerHTML, /all graph objects and connections/);
+  assert.match(view.dialog.innerHTML, /Create frames separately/);
+  view.state.selectedRun = 'saved2';
+  detail.miro_board = 'CHANGED';
+  await view.submitDialog({board_name: 'Fresh copy', max_new_items: '5000'});
+  assert.deepEqual(view.calls.find(call => call.path.endsWith('/actions')).body, {
+    action: 'miro-rebuild', run_id: 'saved1', source_board: 'OLD=', name: 'Fresh copy', max_new_items: 5000});
+});
+
+test('resume rebuild forwards original source and saved run after replacement became linked', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'resume1', status: 'running'} : undefined);
+  view.state.activeCase = {id: 'case1', name: 'Fresh graph', miro_board: 'NEW=', latest_run: 'later',
+    run_defaults: defaults, runs: [{id: 'original'}, {id: 'later'}],
+    miro_rebuild: {status: 'syncing', previous_board_id: 'OLD=', board_id: 'NEW=', run_id: 'original', name: 'Saved copy'}};
+  assert.match(view.workspace(), /Resume board rebuild/);
+  await view.dispatch('miro-rebuild-dialog');
+  assert.match(view.dialog.innerHTML, /value="Saved copy" readonly/);
+  await view.submitDialog({board_name: 'Saved copy', max_new_items: '6000'});
+  assert.deepEqual(view.calls.find(call => call.path.endsWith('/actions')).body, {
+    action: 'miro-rebuild', run_id: 'original', source_board: 'OLD=', name: 'Saved copy', max_new_items: 6000});
+});
+
+test('uncertain board creation cannot request another board; completed rebuild can use current board', async () => {
+  const view = await harness();
+  const detail = {id: 'case1', name: 'Fresh graph', miro_board: 'NEW=', latest_run: 'saved1',
+    run_defaults: defaults, runs: [{id: 'saved1'}],
+    miro_rebuild: {status: 'pending', previous_board_id: 'OLD=', run_id: 'saved1', name: 'Saved copy', notice: 'Inspect your Miro boards.'}};
+  view.state.activeCase = detail;
+  const control = view.workspace().match(/<button[^>]*data-action="miro-rebuild-dialog"[^>]*>/)[0];
+  assert.match(control, /disabled/);
+  await view.dispatch('miro-rebuild-dialog');
+  assert.equal(view.dialog.open, false);
+  detail.miro_rebuild.status = 'complete';
+  await view.dispatch('miro-rebuild-dialog');
+  assert.equal(view.dialog.open, true);
+  assert.match(view.dialog.innerHTML, /board\/NEW%3D/);
+});
+
+test('failed rebuild refreshes receipt status and renders a resume action', async () => {
+  const refreshed = {id: 'case1', name: 'Fresh graph', miro_board: 'NEW=', latest_run: 'saved1',
+    run_defaults: defaults, runs: [{id: 'saved1'}],
+    miro_rebuild: {status: 'syncing', previous_board_id: 'OLD=', board_id: 'NEW=', run_id: 'saved1', name: 'Saved copy'}};
+  const view = await harness(path => path === '/api/jobs/rebuild1'
+    ? {status: 'failed', message: 'Publication interrupted.'}
+    : path === '/api/cases/case1' ? refreshed : undefined);
+  view.state.activeCase = {...refreshed, miro_board: 'OLD=', miro_rebuild: undefined};
+  view.state.job = {id: 'rebuild1', action: 'miro-rebuild', caseId: 'case1', live: true};
+  await view.pollJob();
+  assert.equal(view.state.activeCase.miro_board, 'NEW=');
+  assert.match(view.workspace(), /Resume board rebuild/);
+});
+
+test('completed rebuild displays both board links and selects the published snapshot', async () => {
+  const detail = {id: 'case1', name: 'Fresh graph', miro_board: 'NEW=', latest_run: 'later',
+    run_defaults: defaults, runs: [{id: 'original'}, {id: 'later'}]};
+  const result = {run_id: 'original', board_id: 'NEW=', previous_board_id: 'OLD=', rebuild_status: 'complete'};
+  const view = await harness(path => path === '/api/jobs/rebuild1' ? {status: 'succeeded', result}
+    : path === '/api/cases/case1' ? detail : undefined);
+  view.state.activeCase = {...detail, miro_board: 'OLD='};
+  view.state.selectedRun = 'later';
+  view.state.job = {id: 'rebuild1', action: 'miro-rebuild', caseId: 'case1', live: true};
+  await view.pollJob();
+  assert.equal(view.state.selectedRun, 'original');
+  const html = view.workspace();
+  assert.match(html, /Open rebuilt board/);
+  assert.match(html, /Open previous board/);
+  assert.match(html, /board\/NEW%3D/);
+  assert.match(html, /board\/OLD%3D/);
+});

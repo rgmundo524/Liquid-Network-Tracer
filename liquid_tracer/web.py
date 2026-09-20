@@ -389,10 +389,20 @@ class LocalServer(ThreadingHTTPServer):
             summary["status"] = "Saved run unavailable"
         if detail:
             from .cli import miro_recovery_status
+            from .board_rebuild import rebuild_status
 
             summary["runs"] = sorted(runs, key=lambda run: (run.get("created_at") or "", run["id"]), reverse=True)
             summary["artifacts"] = self.saved_artifacts(case, metadata, {run["id"] for run in runs})
             summary["miro_recovery"] = miro_recovery_status(case)
+            try:
+                rebuild = rebuild_status(case)
+            except (TraceError, OSError, ValueError, TypeError, KeyError):
+                rebuild = {"status": "unavailable", "notice": "The saved board rebuild receipt is unavailable. "
+                           "Restore it before rebuilding again. Your saved investigation remains available."}
+            if rebuild:
+                summary["miro_rebuild"] = {key: value for key, value in rebuild.items()
+                    if key in {"status", "previous_board_id", "board_id", "run_id", "name", "notice"}
+                    and isinstance(value, str)}
         return summary
 
     def saved_artifacts(self, case, metadata, runs):
@@ -719,6 +729,16 @@ class LocalServer(ThreadingHTTPServer):
                   "existing_items", "items", "runs", "max_items", "remote_preflight_required"}
         value = {key: item for key, item in result.items()
                  if key in fields and (item is None or isinstance(item, (str, int, float, bool)))}
+        if action == "miro-rebuild":
+            from .cli import board_id
+
+            # Construct links from validated IDs, never navigate to a worker URL.
+            for key, url_key in (("board_id", "board_url"), ("previous_board_id", "previous_board_url")):
+                identity = board_id(result.get(key))
+                value[key] = identity
+                value[url_key] = "https://miro.com/app/board/" + quote(identity, safe="") + "/"
+            if result.get("rebuild_status") in ("complete", "created", "syncing"):
+                value["rebuild_status"] = result["rebuild_status"]
         if type(result.get("frames_only")) is bool:
             value["frames_only"] = result["frames_only"]
         for key in ("created_frames", "updated_frames"):
@@ -852,6 +872,8 @@ class LocalServer(ThreadingHTTPServer):
             return self.start_job(arguments, action=action, live=live, case=case, txids=[txid])
         if action == "miro-frames" and not set(body) <= {"action", "run_id"}:
             raise RequestError("Frame creation uses the selected saved run and linked board only.")
+        if action == "miro-rebuild" and set(body) != {"action", "run_id", "source_board", "name", "max_new_items"}:
+            raise RequestError("Rebuilding uses a saved run, the reviewed source board, a name and a new-item budget only.")
         settings = validate_settings(body.get("settings", metadata.get("run_defaults", {})))
         selected = body.get("run_id", "latest")
         live = False
@@ -903,6 +925,24 @@ class LocalServer(ThreadingHTTPServer):
             arguments = ["address-inspect", "--case", str(case), "--address", address, "--run", selected,
                          "--max-pages", "5", "--max-requests", "10", "--max-seconds", "60"]
             live = not bool(metadata.get("fixture"))
+        elif action == "miro-rebuild":
+            from .cli import board_id
+
+            if not metadata.get("miro_board"):
+                raise RequestError("Create or link a Miro board first.")
+            source = board_id(body.get("source_board"))
+            if not isinstance(selected, str) or not RUN_ID.fullmatch(selected):
+                raise RequestError("Choose a saved run for the rebuilt graph.")
+            safe_path(case, ["runs", selected, "trace.json"])
+            verify_export(run_path(case, selected))
+            name = body.get("name")
+            board_options(name, visibility="private")
+            budget = body.get("max_new_items")
+            if type(budget) is not int or not 0 <= budget <= 2 ** 53 - 1:
+                raise RequestError("Enter a nonnegative whole-number budget for all shapes and connections.")
+            arguments = ["miro-rebuild-board", "--case", str(case), "--run", selected,
+                         "--source-board", source, "--name", name, "--max-new-items", str(budget)]
+            live = True
         elif action == "miro-create":
             name = body.get("name") or default_board_name(metadata)
             board_options(name, visibility="private")
