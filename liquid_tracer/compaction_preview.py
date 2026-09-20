@@ -14,6 +14,7 @@ from .layout_preview import _preview_html, export_layout, render_svg
 from .miro import make_plan, validate_plan
 from .services import load_services
 from .layout_search import normalize_layout_attempts
+from .layout_search_reporting import layout_search_warning
 
 PREVIEW_ID = re.compile(r"[0-9a-f]{16}-compact-[0-9a-f]{8}\Z")
 FILES = frozenset({"graph.html", "graph.svg", "graph.json", "before.html", "before.svg", "before.json",
@@ -262,6 +263,9 @@ summary{cursor:pointer;font-size:18px;font-weight:600;margin:8px}.chart{overflow
 .metrics{overflow:auto}body:has(#chart:target) header,body:has(#chart:target) .baseline{display:none}#chart:target svg{width:100%;height:auto}
 </style></head><body><header><h1>Compact graph comparison</h1>'''
         document += "<p>" + html.escape(summary + limit) + "</p>"
+        search_warning = layout_search_warning(after["layout"].get("search"))
+        if search_warning:
+            document += '<p role="status">' + html.escape(search_warning) + "</p>"
         document += "<p>Before is a fresh ELK layout of the selected saved run, not your current Miro arrangement. Node sizes and default clearances are retained. Label bounds and curved paths are estimates; Miro routes may differ.</p>"
         document += '<div class="metrics"><table><thead><tr><th>Measure</th><th>Before</th><th>After</th></tr></thead><tbody>' + "".join(rows) + '</tbody></table></div>'
         document += '<p><a href="before.html" target="_blank" rel="noopener noreferrer">Open before separately</a> · <a href="graph.svg" download>Download compact SVG</a> · <a href="before.svg" download>Download before SVG</a> · <a href="layout-report.json" download>Layout report</a></p>'

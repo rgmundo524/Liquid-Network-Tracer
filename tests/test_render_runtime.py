@@ -1,11 +1,12 @@
 """Memory selection is bounded by the environment, without a graph ceiling."""
 
+import json
 import os
 import unittest
 from unittest.mock import patch
 
 from liquid_tracer.common import TraceError
-from liquid_tracer.render_runtime import _available_bytes, renderer_failure, renderer_heap_mb
+from liquid_tracer.render_runtime import _available_bytes, renderer_failure, renderer_failure_code, renderer_heap_mb
 
 
 GIB = 1024 ** 3
@@ -121,6 +122,60 @@ class MemoryBudgetTests(unittest.TestCase):
 
 
 class RendererDiagnosticTests(unittest.TestCase):
+    def test_structured_engine_error_reports_only_safe_code_and_context(self):
+        stderr = "PRIVATE-CASE-ID\nLIQUID_ELK_FAILURE " + json.dumps({
+            "version": 1, "code": "elk_illegal_state", "stage": "traced_first_layout", "seed": 19,
+            "branch_profile": "flow_weighted", "input_order_policy": "traced_first",
+            "message": "PRIVATE-TOKEN /private/case/graph.json",
+        })
+        self.assertEqual(renderer_failure_code(stderr, 1), "elk_illegal_state")
+        error = renderer_failure(stderr, 1, "ELK", 26902)
+        self.assertIn("invalid internal layout state", error)
+        self.assertIn("calculating the traced-first layout; seed 19; flow-weighted profile", error)
+        self.assertNotIn("private", error.lower())
+        self.assertNotIn("memory exhaustion", error)
+
+    def test_invalid_structured_fields_cannot_be_reflected(self):
+        for fields in ({"stage": ["private"]}, {"seed": True}, {"seed": 2147483648},
+                       {"branch_profile": {"private": "value"}}, {"input_order_policy": "private"}):
+            with self.subTest(fields=fields):
+                stderr = "LIQUID_ELK_FAILURE " + json.dumps({"version": 1, "code": "elk_engine_error", **fields})
+                error = renderer_failure(stderr, 1, "ELK", 1024)
+                self.assertIn("unclassified engine error", error)
+                self.assertNotIn("private", error)
+                self.assertNotIn("Worker context", error)
+
+    def test_untrusted_or_malformed_marker_does_not_establish_a_cause(self):
+        for payload in ("PRIVATE", "null", "[]", '{"version":1,"code":"PRIVATE"}',
+                        '{"version":true,"code":"elk_index_error"}',
+                        '{"version":2,"code":"elk_index_error"}',
+                        '{"version":1,"code":["PRIVATE"]}', "[" * 2000):
+            with self.subTest(payload=payload[:70]):
+                stderr = "LIQUID_ELK_FAILURE " + payload
+                self.assertEqual(renderer_failure_code(stderr, 1), "unknown_exit")
+                error = renderer_failure(stderr, 1, "ELK", 26902)
+                self.assertNotIn("PRIVATE", error)
+                self.assertIn("recognized cause", error)
+
+    def test_mermaid_does_not_accept_elk_marker(self):
+        stderr = 'LIQUID_ELK_FAILURE {"version":1,"code":"elk_index_error","seed":19}'
+        self.assertEqual(renderer_failure_code(stderr, 1, "Mermaid"), "unknown_exit")
+
+    def test_node_startup_failure_has_fixed_category_without_echoing_paths(self):
+        for stderr in ("Error [ERR_MODULE_NOT_FOUND]: cannot find /PRIVATE/module.js",
+                       "Error: MODULE_NOT_FOUND /PRIVATE/module.js",
+                       "SyntaxError: unexpected PRIVATE at /PRIVATE/run.mjs"):
+            with self.subTest(stderr=stderr):
+                self.assertEqual(renderer_failure_code(stderr, 1), "elk_worker_setup")
+                error = renderer_failure(stderr, 1, "ELK", 1024)
+                self.assertIn("could not load or initialize", error)
+                self.assertNotIn("PRIVATE", error)
+
+    def test_fatal_runtime_signature_takes_precedence_over_structured_caught_error(self):
+        stderr = ('LIQUID_ELK_FAILURE {"version":1,"code":"elk_engine_error"}\n'
+                  'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory')
+        self.assertEqual(renderer_failure_code(stderr, -6), "heap_exhausted")
+
     def test_heap_abort_is_recognized_without_echoing_stderr(self):
         error = renderer_failure("SYNTHETIC-PRIVATE\nFATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory", -6, "ELK", 32768)
         self.assertIn("JavaScript heap was exhausted", error)

@@ -3,8 +3,9 @@
 Ordinary **Sync to Miro** now checks completed full-graph ELK previews under the
 investigation's `previews/` directory before launching another layout calculation.
 A matching preview reports **Reusing the completed ELK layout; no recalculation**.
-Previews made before connector-label spacing, input ordering or horizontal-spacing
-correction, the configurable seed search, or the current change-output and small-jog attachment corrections are no longer reused.
+Previews made before the current search revision 3, including the failed-attempt
+outcome metadata, are no longer reused. The earlier connector-label spacing,
+input ordering, horizontal spacing, change-output and small-jog corrections remain included.
 Choose **Refresh layout preview** to save a compatible replacement.
 Keep the entire preview directory, not just its SVG: graph.json,
 layout-report.json, graph.svg and the completed graph.html are required.
@@ -16,6 +17,16 @@ evidence before comparison.
 Incomplete, stale, malformed or symlinked previews are ignored. An unmatched
 request still uses ELK, without imposing new time/size limits or a fallback engine.
 Custom external `--out` directories are not searched automatically.
+
+A completed search can contain failed worker attempts. ELK still tries the full
+requested seed sequence and saves the best verified candidate from successful
+attempts, with visible success/failure counts. That completed preview is reusable
+when its outcome counts and failed-seed records are consistent and its selected
+seed succeeded, as well as matching the usual graph and display settings. Reuse
+keeps the warning; it does not silently rerun failed seeds. A failed seed never
+removes objects or connections from the graph. If every attempt fails, no new
+preview is produced. Setup errors, invalid input, malformed results and
+cancellation remain fatal and cannot produce a partial search preview.
 
 This reuses layout geometry, not previously published Miro objects. Normal sync
 still validates the destination mapping and preserves manual positions and edits.
@@ -32,4 +43,8 @@ running the ELK worker, validating its returned coordinates, measuring the outpu
 and building the Miro publication plan. During the worker calculation it reports
 object/connection counts, Node heap budget, elapsed time, and the current layout attempt out of the configured total. These are activity
 indicators, not an estimated completion percentage. No credentials or arbitrary
-worker/API text are copied into progress messages.
+worker/API text are copied into progress messages. A failed attempt reports a
+fixed warning and continues; completion reports how many attempts succeeded and
+failed. Saved failure records contain only attempt indexes, seeds and fixed
+error codes. Unknown engine failures remain undiagnosed rather than being
+reported as confirmed memory errors.

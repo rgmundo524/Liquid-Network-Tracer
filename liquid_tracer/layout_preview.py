@@ -14,6 +14,7 @@ from .name_colors import color_text
 from .graph_markers import node_border
 from .connector_styles import stroke_width
 from .common import TraceError, save_json
+from .layout_search_reporting import layout_search_warning
 from .export import COLORS, edge_color, legend_lines
 from .edge_labels import (FONT_SIZE, LINE_HEIGHT, PADDING_Y, caption_box, caption_text,
                           validate_label_layout)
@@ -53,6 +54,10 @@ def layout_notice(graph):
         return (str(layout.get("fallback_notice") or "Dependency layout; ELK optimization was not applied.")
                 + " Miro routes may differ. Crossing counts are estimates.")
     notice = LAYOUT_NOTICE
+    search_warning = (layout_search_warning(layout.get("metrics"))
+                      or layout_search_warning(layout.get("search")))
+    if search_warning:
+        notice += " " + search_warning
     changes = layout.get("change_outputs")
     if changes:
         notice += f" Change rows: {len(changes.get('applied', []))} aligned; {len(changes.get('skipped', []))} skipped."
