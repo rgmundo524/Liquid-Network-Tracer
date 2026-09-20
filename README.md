@@ -643,7 +643,13 @@ liquid-live trace \
   --miro-board 'https://miro.com/app/board/YOUR_CASE_BOARD_ID/'
 ```
 
-The run and checksums are saved before Miro updates. If sync fails, its run ID and retry details are printed; use `miro-sync` on that saved run without spending more explorer requests. A partial publication retains acknowledged progress.
+The run and checksums are saved before Miro updates. A partial publication retains acknowledged progress. Follow the error's recovery instruction and reuse the same saved run and Miro mapping.
+
+If Miro rejects an existing-item update with **HTTP 400 or 422**, repeating the unchanged request is not a fix. The error now identifies the item and endpoint, submitted field names, and recognized rejected fields, error codes and request IDs when available. It excludes field values, board text, raw server messages and credentials. Share those diagnostics to identify the rejected request; an older generic `Miro PATCH returned HTTP 400` log does not contain enough information to determine its exact cause.
+
+Temporary update failures use bounded recovery. Sync reads the item after an uncertain PATCH and accepts a confirmed update, or retries only when the relevant fields still match their previous state. Intervening edits and ambiguous attachment, parent or frame changes stop automatic replay. Rate limits still wait automatically. Shape moves finish before connector updates, while independent updates remain parallel. New-item POSTs retain their separate recovery rules.
+
+Live sync saves a validated ELK preview before publishing. Retrying the same run with the same graph and presentation settings reuses that layout instead of repeating the entire layout search. Changed evidence, labels or layout settings invalidate reuse; saved evidence is never overwritten.
 
 If ELK finishes and Miro fails at **Adding new Miro items** with HTTP 500, layout succeeded and the failure occurred during publication. The error alone does not identify the server's underlying cause or demonstrate a graph-size limit. [Miro supports up to 20 items per bulk request](https://developers.miro.com/reference/create-items), which is the default batch size. Creation errors now include the endpoint, item count, and recognized error codes or request IDs when available, without printing submitted board content or raw server messages.
 

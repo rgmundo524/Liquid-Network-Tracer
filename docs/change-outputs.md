@@ -38,6 +38,12 @@ selection or clear it with a blank `ChangeVout`. JSON arrays with the same field
 are also accepted; use an integer index or `null` to clear. Headers are
 case-insensitive and transaction hashes are normalized to lowercase.
 
+CSV columns can appear in any order. Unrelated columns, such as a spreadsheet
+`Duplicate count`, are ignored and are not saved. Each recognized header must
+appear only once, and supported fields retain their normal validation. Duplicate
+rows are compared using `Txid`, `ChangeVout`, and `Notes`, so different helper
+values do not create a conflict. JSON imports still reject unsupported fields.
+
 Imports are offline. Unknown transaction hashes may be saved before a trace
 reaches them. Outputs already in saved evidence are checked for existence and
 spendability. An invalid row blocks the whole import. Identical duplicates are

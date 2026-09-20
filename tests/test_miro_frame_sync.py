@@ -214,7 +214,7 @@ class MiroFrameSyncTests(unittest.TestCase):
                     raise TraceError("Synthetic frame PATCH response lost")
             return result
 
-        with self.assertRaisesRegex(TraceError, "frame PATCH response lost"):
+        with self.assertRaisesRegex(TraceError, "Miro PATCH response was lost.*rerun Create / update Miro frames"):
             self.frame(transport=transport)
         # Concurrent failure can leave queued-but-unsent entries in the journal.
         # Only writes actually applied remotely must not be sent again.
@@ -329,7 +329,7 @@ class MiroFrameSyncTests(unittest.TestCase):
                 raise TraceError("Synthetic detach response lost")
             return result
 
-        with self.assertRaisesRegex(TraceError, "detach response lost"):
+        with self.assertRaisesRegex(TraceError, "Miro PATCH response was lost.*rerun Create / update Miro frames"):
             self.frame(transport=transport)
         self.remote.calls.clear()
         self.frame()

@@ -3,7 +3,6 @@
 import copy
 import csv
 import fcntl
-import io
 import json
 import os
 import re
@@ -12,6 +11,7 @@ import uuid
 from pathlib import Path
 
 from .common import TraceError, canonical, digest, now, save_json
+from .csv_import import csv_rows
 from .name_colors import _names, color_value, name_key
 from .services import load_services
 
@@ -106,13 +106,8 @@ def parse_import(text, format="auto"):
                 raise TraceError("JSON imports must be an array of Name and Color objects")
             rows = enumerate(raw, 1)
         else:
-            reader = csv.DictReader(io.StringIO(text, newline=""), strict=True)
-            headers = [_header(field) for field in reader.fieldnames or []]
-            if len(headers) != len(set(headers)):
-                raise TraceError("CSV needs unique Name and Color columns")
-            if set(headers) != FIELDS:
-                raise TraceError("CSV requires exactly Name and Color columns")
-            rows = ((reader.line_num, row) for row in reader)
+            rows = csv_rows(text, fields=FIELDS, required=FIELDS, normalize=_header,
+                            missing_message="CSV requires Name and Color columns")
         accepted, errors, duplicates, total = {}, [], 0, 0
         for number, raw in rows:
             total += 1

@@ -12,8 +12,15 @@ REPLACE_WITH_PUBLIC_LIQUID_ADDRESS,Example Exchange,suspected,true,Investigator 
 `confirmed`. Stop tracing accepts `true` or `false` (CSV also accepts yes/no and
 1/0). Column names are case-insensitive; `rationale` remains an alias for `notes`.
 Classification is no longer an input field or a prerequisite for stopping.
-Remove that column from old CSV templates. Old candidate/corroborated values are
-not accepted in new uploads: choose suspected or confirmed explicitly.
+An old Classification column is ignored in CSV files. Old candidate/corroborated
+confidence values are not accepted in new uploads: choose suspected or confirmed
+explicitly.
+
+CSV columns can appear in any order. Unrelated columns, such as a spreadsheet
+`Duplicate count`, are ignored and are not saved as attribution data. Supported
+columns still use their normal validation, including the legacy aliases and
+optional `kind=address` and `network=liquid` compatibility fields. Each recognized
+column must appear only once. JSON imports still reject unsupported fields.
 
 Only Address is required. Omitted confidence defaults to suspected; omitted
 stop_tracing defaults to true. An address-only list therefore creates suspected,

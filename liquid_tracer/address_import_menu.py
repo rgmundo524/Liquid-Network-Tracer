@@ -22,7 +22,9 @@ def import_screen(base, button, case):
                 yield Label("Import address attributions", classes="title")
                 yield Static("Import before the first run or between runs. No Blockstream calls or Miro changes. "
                              "A plain list uses suspected confidence with tracing stops enabled. "
-                             "CSV/JSON can specify names, sources, notes, confidence and independent stop flags.", markup=False)
+                             "CSV/JSON can specify names, sources, notes, confidence and independent stop flags. "
+                             "CSV columns can be in any order; unrelated columns such as Duplicate count are ignored. "
+                             "Supported fields still require valid values, and JSON rejects unsupported fields.", markup=False)
                 yield button("Export saved CSV", id="import-export")
                 yield Static("", id="import-export-status", markup=False)
                 yield Label("CSV / JSON / text file path (optional; takes precedence over pasted text)")

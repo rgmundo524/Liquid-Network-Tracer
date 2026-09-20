@@ -159,7 +159,7 @@ class SeparateMiroFramesTests(unittest.TestCase):
                 raise TraceError("Lost legacy frame PATCH response")
             return result
 
-        with self.assertRaisesRegex(TraceError, "Lost legacy frame PATCH"):
+        with self.assertRaisesRegex(TraceError, "Miro PATCH response was lost.*rerun Create / update Miro frames"):
             self.apply(sync_frames, transport=lose_patch)
         legacy = read_json(self.path)
         legacy["active_run_id"] = legacy.pop("active_frame_run_id")

@@ -24,6 +24,7 @@ from .graph_markers import node_border
 from .miro_http import MiroHTTP
 from .miro_errors import creation_error
 from .miro_requests import MiroRequestNotSent, MiroRequests
+from .miro_updates import patch_item
 from .miro_state import SyncState, load_state
 from .miro_reads import check_empty_frames, preflight, validate_frame_children
 from .miro_quota import SharedMiroQuota
@@ -1669,12 +1670,9 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
             if not patch:
                 return None
             record = state["items"][key]
-            result = requests.request("PATCH", _remote_url(base, record), headers, patch)
-            status, _, raw = result
-            if not 200 <= status < 300:
-                retry_action = "Create / update Miro frames" if frames_only else "sync"
-                raise TraceError("Miro PATCH returned HTTP " + str(status) + "; acknowledged progress is saved; rerun " + retry_action)
-            response = _response(raw, "PATCH")
+            retry_action = "Create / update Miro frames" if frames_only else "sync"
+            response = patch_item(requests, _remote_url(base, record), headers, patch,
+                                  remote[key], record["endpoint"], record["id"], retry_action=retry_action)
             if response.get("id") != record["id"]:
                 retry_action = "Create / update Miro frames" if frames_only else "sync"
                 raise TraceError("Miro PATCH returned the wrong item ID; rerun " + retry_action + " to reconcile the saved update journal")
@@ -1712,8 +1710,12 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
         # Native frame children must be detached and acknowledged before a
         # frame moves. Parallelizing these two groups together can move a child
         # twice even though every individual PATCH reports success.
-        requests.map((job for job in updates if state["items"][job[0]]["endpoint"] != "frames"),
-                     update_item, accept_update)
+        # A connector's anchors depend on its shapes' current geometry. Finish
+        # shape moves before editing their connectors; keep independent items
+        # within each phase parallel and checkpointed as before.
+        for endpoint in ("shapes", "connectors"):
+            requests.map((job for job in updates if state["items"][job[0]]["endpoint"] == endpoint),
+                         update_item, accept_update)
         changing_frames = {job[0]: state["items"][job[0]] for job in updates
                            if state["items"][job[0]]["endpoint"] == "frames"
                            and ("position" in job[1] or "geometry" in job[1])}

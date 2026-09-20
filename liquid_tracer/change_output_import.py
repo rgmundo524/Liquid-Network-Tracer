@@ -3,7 +3,6 @@
 import copy
 import csv
 import fcntl
-import io
 import json
 import os
 import re
@@ -12,6 +11,7 @@ import uuid
 from pathlib import Path
 
 from .common import TraceError, canonical, digest, now, save_json
+from .csv_import import csv_rows
 from .change_outputs import (_saved_state, check_known_output, notes_value, validate_txid, vout_value)
 from .services import load_services
 
@@ -106,13 +106,8 @@ def parse_import(text, format="auto"):
                 raise TraceError("JSON imports must be an array of Txid and ChangeVout objects")
             rows = enumerate(raw, 1)
         else:
-            reader = csv.DictReader(io.StringIO(text, newline=""), strict=True)
-            headers = [_header(field) for field in reader.fieldnames or []]
-            if len(headers) != len(set(headers)):
-                raise TraceError("CSV requires unique column names")
-            if not REQUIRED <= set(headers) <= FIELDS:
-                raise TraceError("CSV requires Txid,ChangeVout and optional Notes columns")
-            rows = ((reader.line_num, row) for row in reader)
+            rows = csv_rows(text, fields=FIELDS, required=REQUIRED, normalize=_header,
+                            missing_message="CSV requires Txid and ChangeVout columns; Notes is optional")
         accepted, errors, duplicates, total = {}, [], 0, 0
         for number, raw in rows:
             total += 1

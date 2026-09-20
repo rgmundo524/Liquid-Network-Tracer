@@ -138,6 +138,8 @@ def public_progress(event):
             value.update(reason=reason, message="Waiting for the Miro rate limit to reset")
         elif reason == "server_retry":
             value.update(reason=reason, message="Waiting before retrying a temporary Miro read error")
+        elif reason == "update_retry":
+            value.update(reason=reason, message="Checking a temporary Miro update failure before retrying")
     delay = event.get("retry_after")
     if type(delay) in (int, float) and 0 <= delay <= 2 ** 53 - 1 and math.isfinite(delay):
         value["retry_after"] = delay

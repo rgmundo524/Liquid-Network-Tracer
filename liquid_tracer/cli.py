@@ -464,7 +464,7 @@ def layout_search_attempts(metadata, explicit=None):
 
 def refresh_presentation(plan, trace_path, include_fees=False, connector_style="straight", progress=None,
                          service_settings=None, preview_directory=None, fetch_address_counts=False, count_report=None,
-                         group_context_inputs=False, hub_addresses=None, layout_attempts=None):
+                         group_context_inputs=False, hub_addresses=None, layout_attempts=None, save_layout=False):
     """Verify historical topology, then create a current shared-address view."""
     namespace = _namespace(plan)
     state = read_json(trace_path)
@@ -516,6 +516,7 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
     from .layout_reuse import reusable_elk_preview, report_phase
     laid_out = reusable_elk_preview(graph, preview_directory, connector_style, progress,
                                     layout_attempts=layout_attempts)
+    calculated_layout = laid_out is None
     if laid_out is None:
         laid_out = optimize_graph(graph, connector_style=connector_style, progress=progress,
                                  layout_attempts=layout_attempts)
@@ -526,6 +527,16 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
     if (_namespace(refreshed) != {**namespace, "address_mode": "merged"}
             or refreshed["run_id"] != plan["run_id"] or topology(refreshed) != expected):
         raise TraceError("Presentation refresh would change saved graph topology; use an explicit verified --plan or regenerate an export for review")
+    if save_layout and calculated_layout and preview_directory is not None:
+        # Keep a completed layout before the first live Miro write. A rejected
+        # update then retries publication without calculating every seed again.
+        # The normal preview reader still validates all semantics and current
+        # renderer revisions before any later reuse; the evidence is untouched.
+        from .layout_preview import export_layout
+        destination = Path(preview_directory) / (plan["run_id"] + "-elk-" + uuid.uuid4().hex[:8])
+        if destination.resolve().is_relative_to((count_case / "runs").resolve()):
+            raise TraceError("Save ELK previews outside runs/ to preserve archived evidence")
+        export_layout(laid_out, destination)
     return refreshed
 
 
@@ -671,7 +682,8 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
                                     fetch_address_counts=not dry_run, count_report=count_report,
                                     group_context_inputs=context_input_grouping(metadata, group_context_inputs),
                                     hub_addresses=branch_hubs(metadata),
-                                    layout_attempts=layout_search_attempts(metadata, layout_attempts))
+                                    layout_attempts=layout_search_attempts(metadata, layout_attempts),
+                                    save_layout=not dry_run)
     # Validate the mapping, lineage, and item budget locally before saving a selection.
     options = {"reorganize": True} if reorganize else {}
     if progress is not None:

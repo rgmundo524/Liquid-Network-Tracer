@@ -93,8 +93,13 @@ group. Import the attribution first if the name is new. Identical duplicate
 rows are combined; different colors for the same case-insensitive name are an
 error. Any invalid row blocks the entire import. There is no partial save.
 
-Only `Name,Color` fields belong in this file. Graph-role colors, selected-seed
-priority, confidence, stop flags, and saved trace evidence remain unchanged.
+CSV imports identify `Name` and `Color` by their headers in any column order.
+Unrelated columns, such as a spreadsheet `Duplicate count`, are ignored and are
+not saved. Each required header must appear only once; names and colors retain
+their normal validation. Duplicate rows are compared using the name and color,
+so different helper values do not create a conflict. JSON imports still accept
+only `Name` and `Color` fields. Graph-role colors, selected-seed priority,
+confidence, stop flags, and saved trace evidence remain unchanged.
 Imported name colors also apply to future addresses using the same name.
 
 Choose **Export saved CSV** to download all saved name-color assignments in this
