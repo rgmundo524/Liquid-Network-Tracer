@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .address_activity import validate_address
 from .common import TraceError, canonical, digest, now, save_json
+from .csv_import import csv_rows
 from .services import _text, load_services, rule_fields, validate_rule_fields, notes_for
 
 MAX_BYTES = 512 * 1024
@@ -124,25 +125,26 @@ def parse_import(text, format="auto"):
     text = text.lstrip("\ufeff")
     if not text.strip():
         raise TraceError("Choose a file or paste addresses before previewing the import")
-    if format == "auto":
-        first = text.strip().splitlines()[0]
-        format = "json" if text.lstrip().startswith(("[", "{")) else (
-            "csv" if any(_header(cell.strip('"')) == "address" for cell in first.split(",")) else "text")
     try:
+        if format == "auto":
+            if text.lstrip().startswith(("[", "{")):
+                format = "json"
+            else:
+                try:
+                    first = next(csv.reader(io.StringIO(text.strip(), newline=""), strict=True), [])
+                except csv.Error:
+                    # A long whitespace-separated address list is one oversized
+                    # CSV cell. Preserve text detection without relaxing CSV parsing.
+                    first = [cell.strip('"') for cell in text.strip().splitlines()[0].split(",")]
+                format = "csv" if any(_header(cell) == "address" for cell in first) else "text"
         if format == "json":
             raw = json.loads(text, object_pairs_hook=_json_pairs)
             if not isinstance(raw, list):
                 raise TraceError("JSON imports must be an array of addresses or attribution objects")
             rows = enumerate(raw, 1)
         elif format == "csv":
-            reader = csv.DictReader(io.StringIO(text, newline=""), strict=True)
-            headers = reader.fieldnames or []
-            normalized = [_header(field) for field in headers]
-            if not headers or "address" not in normalized or len(normalized) != len(set(normalized)):
-                raise TraceError("CSV needs one address column and unique column names")
-            if set(normalized) - (FIELDS | {"kind", "network"}):
-                raise TraceError("CSV contains unsupported columns; use the supplied import template")
-            rows = ((reader.line_num, row) for row in reader)
+            rows = csv_rows(text, fields=FIELDS | {"kind", "network"}, required={"address"},
+                            normalize=_header, missing_message="CSV needs one address column")
         else:
             rows = ((number, part) for number, line in enumerate(text.splitlines(), 1)
                     if not line.lstrip().startswith("#") for part in re.split(r"[,;\s]+", line.strip()) if part)

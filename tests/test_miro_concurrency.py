@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from liquid_tracer.miro_state import load_state
-from liquid_tracer.common import TraceError, read_json, save_json
+from liquid_tracer.common import TraceError, canonical, read_json, save_json
 from liquid_tracer.miro import make_plan, sync
 from liquid_tracer.miro_requests import MiroRequests, MiroRequestNotSent
 from tests.test_miro_sync import FakeMiro, graph
@@ -140,6 +140,32 @@ class MiroConcurrencyTests(unittest.TestCase):
         self.assertEqual(self.state_path.read_bytes(), before)
         self.assertGreater(self.remote.peak["GET"], 1)
 
+    def test_connector_updates_wait_for_all_shape_moves(self):
+        plan = self.revised_plan()
+        expected = {self.remote_id(node["id"]) for node in graph()["nodes"]}
+        completed = set()
+        connector_calls = []
+        lock = threading.Lock()
+
+        def transport(method, url, *args):
+            if method == "PATCH" and "/shapes/" in url:
+                # Delay one shape so connector writes would overlap the old
+                # mixed work queue even when other shapes finish quickly.
+                if url.endswith("/" + self.remote_id("addr:b")):
+                    time.sleep(.05)
+                result = self.remote(method, url, *args)
+                with lock:
+                    completed.add(url.rsplit("/", 1)[-1])
+                return result
+            if method == "PATCH" and "/connectors/" in url:
+                with lock:
+                    self.assertTrue(expected.issubset(completed))
+                    connector_calls.append(url)
+            return self.remote(method, url, *args)
+
+        self.call(plan, workers=4, reorganize=True, transport=transport)
+        self.assertEqual(len(connector_calls), len(plan["connectors"]))
+
     def test_failed_patch_drains_other_inflight_success_and_keeps_recovery_journal(self):
         failed_id = self.remote_id("addr:a")
         successful_id = self.remote_id("addr:b")
@@ -147,6 +173,7 @@ class MiroConcurrencyTests(unittest.TestCase):
         failure_returned = threading.Event()
         plan = self.revised_plan({"addr:a", "addr:b"}, extended=True)
         pending_seen = []
+        rejections = []
 
         def transport(method, url, *args):
             if method == "PATCH":
@@ -161,11 +188,18 @@ class MiroConcurrencyTests(unittest.TestCase):
                     if not success_started.wait(3):
                         raise AssertionError("The successful PATCH did not start concurrently")
                     failure_returned.set()
-                    return 500, {}, b"{}"
+                    rejections.append(url)
+                    return 400, {}, canonical({"code": "badRequest", "context": {"field": "style.fillColor"},
+                                                "message": "Private rejected board text"})
             return self.remote(method, url, *args)
 
-        with self.assertRaises(TraceError):
+        with self.assertRaises(TraceError) as raised:
             self.call(plan, workers=2, transport=transport)
+        self.assertEqual(len(rejections), 1)
+        self.assertIn("shapes", str(raised.exception))
+        self.assertIn("style.fillColor", str(raised.exception))
+        self.assertNotIn("Private rejected board text", str(raised.exception))
+        self.assertNotIn("rerun sync", str(raised.exception))
         state = read_json(self.state_path)
         intended = next(item["body"]["data"]["content"] for item in plan["shapes"] if item["key"] == "addr:b")
         self.assertEqual(state["items"]["addr:b"]["managed"]["data"]["content"], intended)
@@ -188,13 +222,17 @@ class MiroConcurrencyTests(unittest.TestCase):
 
         def transport(method, url, *args):
             nonlocal lost
+            if lost and method == "GET" and url.endswith("/" + item_id):
+                # Readback is also unavailable, so reconciliation must wait
+                # for the next sync instead of recovering within this call.
+                return 503, {}, b"{}"
             result = self.remote(method, url, *args)
             if method == "PATCH" and url.endswith("/" + item_id) and not lost:
                 lost = True
                 raise TraceError("Synthetic lost PATCH response")
             return result
 
-        with self.assertRaisesRegex(TraceError, "lost PATCH"):
+        with self.assertRaises(TraceError):
             self.call(plan, workers=2, transport=transport)
         self.assertIn("addr:a", read_json(self.state_path)["pending_updates"])
         self.remote.calls.clear()

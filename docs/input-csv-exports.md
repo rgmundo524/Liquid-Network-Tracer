@@ -35,15 +35,24 @@ empty table exports its headers so you can fill it in.
 To edit and import again:
 
 1. Download the table or ZIP. Extract ZIP files before editing or uploading.
-2. Edit the CSV while preserving its headers and full addresses or transaction
-   hashes. Import text columns as **Text** in your spreadsheet so their contents
-   stay literal. Text containing commas, quotes, or line breaks is CSV-quoted.
+2. Edit the CSV while preserving the supported headers and full addresses or
+   transaction hashes. Columns can be reordered, and unrelated helper columns
+   such as `Duplicate count` can remain in the file. Import text columns as
+   **Text** in your spreadsheet so their contents stay literal. Text containing
+   commas, quotes, or line breaks is CSV-quoted.
 3. Open the matching importer and preview the edited CSV. Import split parts
    individually. When transferring tables, import address attributions before
    name colors; the color importer requires names already known to the
    investigation.
 4. Choose replacement if you intend to change existing entries, review the
    proposed changes, and apply.
+
+All three CSV importers match supported columns by header and ignore unrelated
+columns. Helper values are not saved or used to compare duplicate rows. Required
+columns, recognized-header uniqueness, field validation, and malformed-row
+checks still apply. JSON imports continue to reject unsupported fields. The
+review binds the whole uploaded file, so editing even a helper value after the
+preview requires previewing again before applying.
 
 Import remains an add/update operation. Removing a CSV row does not delete a
 saved entry. Use the existing disable/clear controls or the importer's explicit

@@ -22,6 +22,14 @@ SENTINEL = "SYNTHETIC-PRIVATE-PROGRESS-SENTINEL"
 
 
 class ProgressReportTests(unittest.TestCase):
+    def test_update_recovery_has_a_safe_distinct_progress_message(self):
+        result = public_progress({"phase": "waiting", "completed": 2, "total": 5,
+                                  "reason": "update_retry", "retry_after": 1,
+                                  "message": SENTINEL})
+        self.assertEqual(result["reason"], "update_retry")
+        self.assertIn("Miro update", result["message"])
+        self.assertNotIn(SENTINEL, json.dumps(result))
+
     def test_only_known_progress_fields_reach_the_browser_or_terminal(self):
         for phase in ("optimizing", "preflight", "layout", "updating", "removing", "creating", "waiting", "complete"):
             with self.subTest(phase=phase):

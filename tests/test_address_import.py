@@ -113,7 +113,7 @@ class ImportTests(unittest.TestCase):
     def test_malformed_format_header_duplicate_keys_and_bounds(self):
         for text, format in (('[]', 'json'), ('{}', 'json'), ('[', 'json'), ('', 'auto'),
                             ('address,value\n' + A + ',' + A, 'csv'),
-                            ('address,unsupported\n' + A + ',yes', 'csv'),
+                            ('name,unsupported\nExample,yes', 'csv'),
                             ('[{"address":"' + A + '","address":"' + B + '"}]', 'json'),
                             ('x' * (MAX_BYTES + 1), 'text'), ('\n'.join([A] * 5001), 'text')):
             with self.subTest(format=format), self.assertRaises(TraceError):

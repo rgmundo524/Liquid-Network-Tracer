@@ -132,8 +132,8 @@ class NameColorImportTests(unittest.TestCase):
         unknown = name_color_import.preview_import(self.case, "Name,Color\nUnknown,#000000\n")
         self.assertIn("import or save", unknown["errors"][0]["message"])
 
-    def test_rejects_unsupported_headers_duplicate_fields_and_malformed_sources(self):
-        for source in ("", "Name,Color\n", "Name,Color,role\nBTSE,#123456,seed\n",
+    def test_rejects_missing_headers_duplicate_fields_and_malformed_sources(self):
+        for source in ("", "Name,Color\n", "Name,role\nBTSE,seed\n",
                        "Name,Color,NAME\nBTSE,#123456,btse\n", "Name\nBTSE\n",
                        '{"Name":"BTSE","Color":"#123456"}', "[]",
                        '[{"name":"BTSE","name":"btse","color":"#123456"}]',

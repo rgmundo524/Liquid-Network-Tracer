@@ -22,6 +22,8 @@ def change_output_import_screen(base, button, case):
             with VerticalScroll(classes="form-panel"):
                 yield Label("Import change outputs", classes="title")
                 yield Static(NOTICE, markup=False)
+                yield Static("CSV columns can be in any order; unrelated columns such as Duplicate count are ignored. "
+                             "Supported fields still require valid values, and JSON rejects unsupported fields.", markup=False)
                 yield button("Export saved CSV", id="change-import-export")
                 yield Static("", id="change-import-export-status", markup=False)
                 yield Label("CSV / JSON file path (optional; takes precedence over pasted text)")
