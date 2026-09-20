@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from liquid_tracer.common import TraceError, canonical, digest, read_json
-from liquid_tracer.miro import make_plan, publish, resolve, sync, validate_plan
+from liquid_tracer.miro import make_plan, publish, resolve, sync, sync_frames, validate_plan
 from liquid_tracer.miro_frames import activity_frames
 from tests.test_miro_layout import DeletingMiro
 from tests.test_miro_sync import graph
@@ -75,9 +75,17 @@ class MiroFrameSyncTests(unittest.TestCase):
         self.path = Path(self.tmp.name) / "state.json"
         self.remote = FrameMiro()
 
-    def sync(self, value=None, **kwargs):
+    def frame(self, value=None, **kwargs):
+        return sync_frames(make_plan(value or framed_graph()), "board=", self.path, token="synthetic-token",
+                    transport=kwargs.pop("transport", self.remote), interval=0, **kwargs)
+
+    def sync_graph(self, value=None, **kwargs):
         return sync(make_plan(value or framed_graph()), "board=", self.path, token="synthetic-token",
                     transport=kwargs.pop("transport", self.remote), interval=0, **kwargs)
+
+    def initialize(self, value=None):
+        self.sync_graph(value)
+        return self.frame(value)
 
     def state(self):
         return read_json(self.path)
@@ -87,7 +95,7 @@ class MiroFrameSyncTests(unittest.TestCase):
 
     def test_three_trees_create_four_frames_then_merge_to_three(self):
         value = framed_graph()
-        initial = self.sync(value)
+        initial = self.initialize(value)
         self.assertEqual(initial["new_frames"], 4)
         state = self.state()
         self.assertEqual(len(frame_keys(state)), 4)
@@ -98,7 +106,8 @@ class MiroFrameSyncTests(unittest.TestCase):
             for key in activity["shape_keys"]:
                 self.assertTrue(contains(frame, self.item(key)))
             self.assertTrue(contains(self.item("frame:graph"), frame))
-        report = self.sync(framed_graph("two", merged=True))
+        self.sync_graph(framed_graph("two", merged=True))
+        report = self.frame(framed_graph("two", merged=True))
         current = self.state()
         self.assertEqual(len(frame_keys(current)), 3)
         self.assertEqual((report["frames_to_remove"], report["deleted"], report["new_frames"]), (1, 1, 0))
@@ -112,16 +121,17 @@ class MiroFrameSyncTests(unittest.TestCase):
         self.assertTrue(contains(self.item("frame:graph"), self.item("run:one")))
         self.assertTrue(contains(self.item("frame:graph"), self.item("run:two")))
         writes = len(self.remote.writes)
-        repeated = self.sync(framed_graph("two", merged=True), max_items=0)
+        repeated = self.frame(framed_graph("two", merged=True), max_items=0)
         self.assertEqual((repeated["created"], repeated["updated"], repeated["deleted"]), (0, 0, 0))
         self.assertEqual(len(self.remote.writes), writes)
 
     def test_existing_graph_acquires_frames_without_replotting_shapes(self):
         old = framed_graph()
         del old["activity_frames"]
-        self.sync(old)
+        self.sync_graph(old)
         previous = copy.deepcopy(self.state()["items"])
-        report = self.sync()
+        self.sync_graph()
+        report = self.frame()
         self.assertEqual((report["created"], report["new_shapes"], report["new_connectors"]), (4, 0, 0))
         self.assertEqual(len(frame_keys(self.state())), 4)
         for key, record in previous.items():
@@ -129,7 +139,7 @@ class MiroFrameSyncTests(unittest.TestCase):
 
     def test_manual_shapes_and_frame_titles_survive_automatic_bounds_refresh(self):
         value = framed_graph()
-        self.sync(value)
+        self.initialize(value)
         activity = value["activity_frames"]["activities"][0]
         shape = self.item(activity["shape_keys"][0])
         shape["position"].update({"x": 50000, "y": 8000})
@@ -138,7 +148,7 @@ class MiroFrameSyncTests(unittest.TestCase):
         frame["data"]["title"] = "Reviewed activity"
         frame["style"]["fillColor"] = "#ffffffff"
         before = copy.deepcopy(shape)
-        report = self.sync(value)
+        report = self.frame(value)
         self.assertEqual(shape, before)
         self.assertEqual(frame["data"]["title"], "Reviewed activity")
         self.assertTrue(contains(frame, shape))
@@ -147,11 +157,14 @@ class MiroFrameSyncTests(unittest.TestCase):
 
     def test_frame_budget_is_checked_before_network(self):
         plan = make_plan(framed_graph())
-        count = len(plan["shapes"]) + len(plan["connectors"]) + 4
+        self.sync_graph()
+        before = self.path.read_bytes()
+        self.remote.calls.clear()
+        count = len(plan["frames"])
         with self.assertRaisesRegex(TraceError, "above max-items"):
-            self.sync(max_items=count - 1)
+            self.frame(max_items=count - 1)
         self.assertEqual(self.remote.calls, [])
-        self.assertFalse(self.path.exists())
+        self.assertEqual(self.path.read_bytes(), before)
 
     def test_frame_plan_tampering_is_rejected_before_network(self):
         plan = make_plan(framed_graph())
@@ -161,6 +174,7 @@ class MiroFrameSyncTests(unittest.TestCase):
             validate_plan(plan)
 
     def test_lost_frame_post_requires_explicit_reconciliation_without_duplicate(self):
+        self.sync_graph()
         lost = [False]
 
         def transport(method, url, headers, body, timeout):
@@ -171,21 +185,21 @@ class MiroFrameSyncTests(unittest.TestCase):
             return result
 
         with self.assertRaisesRegex(TraceError, "frame POST response lost"):
-            self.sync(transport=transport)
+            self.frame(transport=transport)
         pending = self.state()["pending_creations"]
         self.assertEqual(list(pending), ["frame:graph"])
         self.assertEqual(pending["frame:graph"]["endpoint"], "frames")
         with self.assertRaisesRegex(TraceError, "miro-resolve --key"):
-            self.sync()
+            self.frame()
         created = [item for item in self.remote.items.values() if item.get("data", {}).get("title") == "Liquid UTXO trace · Complete graph"]
         self.assertEqual(len(created), 1)
         resolve(self.path, item_id=created[0]["id"], key="frame:graph")
-        self.sync()
+        self.frame()
         self.assertEqual(len(frame_keys(self.state())), 4)
         self.assertEqual(len([item for item in self.remote.items.values() if item.get("type") == "frame"]), 4)
 
     def test_lost_frame_patch_is_observed_and_not_repeated(self):
-        self.sync()
+        self.initialize()
         key = framed_graph()["activity_frames"]["activities"][0]["shape_keys"][0]
         self.item(key)["position"]["x"] += 20000
         lost = [False]
@@ -201,36 +215,37 @@ class MiroFrameSyncTests(unittest.TestCase):
             return result
 
         with self.assertRaisesRegex(TraceError, "frame PATCH response lost"):
-            self.sync(transport=transport)
+            self.frame(transport=transport)
         # Concurrent failure can leave queued-but-unsent entries in the journal.
         # Only writes actually applied remotely must not be sent again.
         pending = {entry["id"] for entry in self.state()["pending_updates"].values()}
         acknowledged = pending & applied_frame_ids
         self.assertTrue(acknowledged)
         self.remote.calls.clear()
-        self.sync()
+        self.frame()
         patches = [url.rsplit("/", 1)[-1] for method, url, _ in self.remote.calls if method == "PATCH"]
         self.assertTrue(acknowledged.isdisjoint(patches))
         self.assertEqual(self.state()["pending_updates"], {})
 
     def test_lost_frame_delete_recovers_only_attempted_removal(self):
-        self.sync()
+        self.initialize()
+        self.sync_graph(framed_graph("two", merged=True))
         self.remote.lose_next_delete = True
         with self.assertRaisesRegex(TraceError, "lost DELETE response"):
-            self.sync(framed_graph("two", merged=True))
+            self.frame(framed_graph("two", merged=True))
         pending = self.state()["pending_frame_deletions"]
         self.assertEqual(len(pending), 1)
         self.assertTrue(next(iter(pending.values()))["attempted"])
-        self.sync(framed_graph("two", merged=True))
+        self.frame(framed_graph("two", merged=True))
         self.assertEqual(self.state()["pending_frame_deletions"], {})
         self.assertEqual(len(frame_keys(self.state())), 3)
 
     def test_unexplained_missing_frame_aborts_without_writes(self):
-        self.sync()
+        self.initialize()
         del self.remote.items[self.state()["items"]["frame:graph"]["id"]]
         before, writes = self.path.read_bytes(), len(self.remote.writes)
         with self.assertRaisesRegex(TraceError, "missing or inaccessible"):
-            self.sync()
+            self.frame()
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(len(self.remote.writes), writes)
 
@@ -245,7 +260,7 @@ class MiroFrameSyncTests(unittest.TestCase):
 
     def test_attached_shapes_are_detached_before_frames_move(self):
         value = framed_graph()
-        self.sync(value)
+        self.initialize(value)
         activity = value["activity_frames"]["activities"][0]
         key = activity["shape_keys"][0]
         expected = self.attach(key, activity["key"])
@@ -253,7 +268,7 @@ class MiroFrameSyncTests(unittest.TestCase):
         frame["position"]["x"] += 120
         expected["x"] += 120
         self.remote.calls.clear()
-        self.sync(value)
+        self.frame(value)
         item = self.item(key)
         self.assertEqual(item["parent"], {"id": None})
         self.assertEqual({axis: item["position"][axis] for axis in ("x", "y")}, expected)
@@ -264,9 +279,10 @@ class MiroFrameSyncTests(unittest.TestCase):
         self.assertTrue(all(detach < index for index in frame_updates))
 
     def test_old_run_note_is_detached_before_continuation_resizes_outer_frame(self):
-        self.sync()
+        self.initialize()
         expected = self.attach("run:one")
-        self.sync(framed_graph("two", merged=True))
+        self.sync_graph(framed_graph("two", merged=True))
+        self.frame(framed_graph("two", merged=True))
         note = self.item("run:one")
         self.assertEqual(note["parent"], {"id": None})
         self.assertEqual({axis: note["position"][axis] for axis in ("x", "y")}, expected)
@@ -277,28 +293,29 @@ class MiroFrameSyncTests(unittest.TestCase):
                     self.assertNotIn("parent", item)
 
     def test_unmanaged_attached_note_stops_before_any_writes(self):
-        self.sync()
+        self.initialize()
         frame_id = self.item("frame:graph")["id"]
         self.remote.items["manual-note"] = {"id": "manual-note", "type": "text", "parent": {"id": frame_id},
                                              "position": {"x": 50, "y": 50, "relativeTo": "parent_top_left"}}
+        self.sync_graph(framed_graph("two", merged=True))
         before, writes = self.path.read_bytes(), len(self.remote.writes)
         with self.assertRaisesRegex(TraceError, "unmanaged|attached|outside"):
-            self.sync(framed_graph("two", merged=True))
+            self.frame(framed_graph("two", merged=True))
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(len(self.remote.writes), writes)
         self.assertIn("manual-note", self.remote.items)
 
     def test_unmanaged_note_in_unchanged_frame_does_not_block_noop_sync(self):
-        self.sync()
+        self.initialize()
         self.remote.items["manual-note"] = {"id": "manual-note", "type": "text",
                                              "parent": {"id": self.item("frame:graph")["id"]}}
         writes = len(self.remote.writes)
-        report = self.sync(max_items=0)
+        report = self.frame(max_items=0)
         self.assertEqual((report["created"], report["updated"], report["deleted"]), (0, 0, 0))
         self.assertEqual(len(self.remote.writes), writes)
 
     def test_lost_detach_response_preserves_position_on_retry(self):
-        self.sync()
+        self.initialize()
         key = "addr:a:branch1"
         expected = self.attach(key)
         self.item("frame:graph")["position"]["x"] += 50000
@@ -313,9 +330,9 @@ class MiroFrameSyncTests(unittest.TestCase):
             return result
 
         with self.assertRaisesRegex(TraceError, "detach response lost"):
-            self.sync(transport=transport)
+            self.frame(transport=transport)
         self.remote.calls.clear()
-        self.sync()
+        self.frame()
         self.assertEqual({axis: self.item(key)["position"][axis] for axis in ("x", "y")}, expected)
         self.assertFalse(any(method == "PATCH" and body.get("parent") == {"id": None}
                              for method, _, body in self.remote.writes))

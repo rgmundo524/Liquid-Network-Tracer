@@ -11,7 +11,7 @@ from liquid_tracer.common import TraceError, canonical, digest, read_json
 from liquid_tracer.compaction import compact_graph
 from liquid_tracer.elk_layout import optimize_graph
 from liquid_tracer.export import build_graph
-from liquid_tracer.miro import _bounds, _bounds_collision, make_plan, sync, validate_plan
+from liquid_tracer.miro import _bounds, _bounds_collision, make_plan, sync, sync_frames, validate_plan
 from liquid_tracer.miro_frames import activity_frames
 from tests.test_miro_frame_sync import FrameMiro, contains, framed_graph
 from tests.test_miro_layout import FEE_SHAPE, presented
@@ -45,11 +45,17 @@ class MiroCompactionTests(unittest.TestCase):
         return sync(plan, "board=", self.path, token="synthetic-token", interval=0,
                     transport=self.remote, **kwargs)
 
+    def frame(self, plan):
+        return sync_frames(plan, "board=", self.path, token="synthetic-token", interval=0,
+                           transport=self.remote)
+
     def item(self, key):
         return self.remote.items[read_json(self.path)["items"][key]["id"]]
 
     def test_enlarged_address_that_fits_keeps_exact_positions_and_live_geometry(self):
-        self.sync(compact_plan(compact=False, spread=1500))
+        initial = compact_plan(compact=False, spread=1500)
+        self.sync(initial)
+        self.frame(initial)
         ids = {key: record["id"] for key, record in read_json(self.path)["items"].items()}
         address = self.item("addr:b")
         address["geometry"].update({"width": 300, "height": 160, "rotation": 10})
@@ -66,6 +72,7 @@ class MiroCompactionTests(unittest.TestCase):
         self.assertEqual(address["geometry"], original["geometry"])
         self.assertEqual(address["data"], original["data"])
         self.assertEqual(address["style"], original["style"])
+        self.frame(plan)
         activity = plan["activity_frames"]["activities"][0]["key"]
         rotated = _bounds(address, "addr:b")
         fitted = copy.deepcopy(address)
@@ -119,6 +126,7 @@ class MiroCompactionTests(unittest.TestCase):
         self.assertEqual(len(translations), 1)
         self.assertNotEqual(translations, {(0, 0)})
         self.assertEqual(note, previous)
+        self.frame(plan)
         self.assertTrue(contains(self.item("frame:graph"), note))
 
     def test_marker_does_not_bypass_local_geometry_validation(self):
@@ -147,10 +155,11 @@ class MiroCompactionTests(unittest.TestCase):
         # Main shapes retain 200 units of vertical clearance. The extra frame
         # title/padding would nevertheless overlap the adjacent activity frame.
         self.item("addr:b:branch2")["geometry"]["height"] = 1040
+        self.sync(plan, reorganize=True)
         before = self.path.read_bytes()
         writes = len(self.remote.writes)
         with self.assertRaisesRegex(TraceError, "activity frames overlap"):
-            self.sync(plan, reorganize=True)
+            self.frame(plan)
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(len(self.remote.writes), writes)
 
@@ -164,6 +173,7 @@ class MiroCompactionTests(unittest.TestCase):
         self.sync(plan)
         self.item("addr:b:branch2")["geometry"]["height"] = 180
         self.sync(plan, reorganize=True)
+        self.frame(plan)
 
     def test_fee_row_retains_existing_spacing_and_return_links_keep_exceptions(self):
         value = presented(include_fees=True)

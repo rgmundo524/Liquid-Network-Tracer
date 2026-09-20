@@ -310,7 +310,7 @@ def create_app(root=None):
             titles = {"new": "New investigation", "global": "Settings", "case": "Investigation settings",
                       "run": "Continue latest run" if self.metadata.get("latest_run") else "Start first run",
                       "preview": "Preview Miro changes", "sync": "Sync latest to Miro",
-                      "layout": "Sync and reorganize Miro graph"}
+                      "layout": "Sync and reorganize Miro graph", "frames": "Create / update Miro frames"}
             yield Header()
             with VerticalScroll(classes="form-panel"):
                 yield Label(titles[self.mode], classes="title")
@@ -329,7 +329,7 @@ def create_app(root=None):
                     yield Static("Replace NUMBER with an actual output number, not the word 'vout'. "
                                  "Separate multiple outputs with spaces, commas or new lines.", markup=False)
                     yield TextArea(id="seeds")
-                if self.mode in ("new", "case", "preview", "sync", "layout"):
+                if self.mode in ("new", "case", "preview", "sync", "layout", "frames"):
                     yield Label("Miro board URL or ID" + (" (optional)" if self.mode in ("new", "case") else ""))
                     yield Input(self.metadata.get("miro_board") or "", id="board")
                 if self.mode == "global":
@@ -392,8 +392,13 @@ def create_app(root=None):
                                      "You can still drag items in Miro afterward.", id="layout-notice", markup=False)
                     elif self.mode == "sync":
                         yield Static("Existing item positions are retained. Choose Sync and reorganize Miro graph to rearrange and sync in one action.", markup=False)
+                if self.mode == "frames":
+                    yield Static("Create or update export frames when you have finished the graph. "
+                                 "Uses the last synced graph and its current Miro positions. "
+                                 "Sync any new run first. This action does not trace, fetch address counts, "
+                                 "or calculate a new layout.", id="frames-notice", markup=False)
                 for key, label, converter, _ in LIMIT_FIELDS:
-                    if self.mode in ("preview", "sync", "layout") and key != "max_new_items":
+                    if self.mode in ("preview", "sync", "layout", "frames") and key != "max_new_items":
                         continue
                     yield Label(label)
                     yield Input(str(self.settings[key]), id=key,
@@ -403,13 +408,13 @@ def create_app(root=None):
                 yield Button("Cancel", id="cancel")
                 labels = {"new": "Create investigation", "global": "Save defaults", "case": "Save settings",
                           "run": "Run trace", "preview": "Preview (offline)", "sync": "Sync to Miro",
-                          "layout": "Sync and reorganize"}
+                          "layout": "Sync and reorganize", "frames": "Create / update frames"}
                 yield Button(labels[self.mode], id="submit", variant="primary")
             yield Footer()
 
         def on_mount(self):
             # Run and publication require a deliberate selection; Enter initially cancels.
-            if self.mode in ("run", "sync", "layout"):
+            if self.mode in ("run", "sync", "layout", "frames"):
                 self.query_one("#cancel", Button).focus()
             elif self.mode in ("new", "case"):
                 self.query_one("#case-name", Input).focus()
@@ -421,7 +426,7 @@ def create_app(root=None):
         def read_limits(self):
             settings = dict(self.settings)
             for key, label, converter, minimum in LIMIT_FIELDS:
-                if self.mode in ("preview", "sync", "layout") and key != "max_new_items":
+                if self.mode in ("preview", "sync", "layout", "frames") and key != "max_new_items":
                     continue
                 try:
                     value = converter(self.query_one("#" + key, Input).value)
@@ -458,7 +463,7 @@ def create_app(root=None):
                 from .cli import board_id
                 settings = self.read_limits()
                 board = None
-                if self.mode in ("new", "case", "preview", "sync", "layout"):
+                if self.mode in ("new", "case", "preview", "sync", "layout", "frames"):
                     value = self.query_one("#board", Input).value.strip()
                     board = board_id(value) if value else None
                 if self.mode in ("new", "case"):
@@ -486,14 +491,14 @@ def create_app(root=None):
                     if not board:
                         raise TraceError("Enter the existing Miro board URL or ID.")
                     _latest(self.case, read_case(self.case), verify=True)
-                    arguments = ["miro-sync", "--case", str(self.case), "--run", "latest", "--board", board,
+                    arguments = ["miro-frames" if self.mode == "frames" else "miro-sync", "--case", str(self.case), "--run", "latest", "--board", board,
                                  "--max-new-items", str(settings["max_new_items"])]
                     if self.mode == "preview":
                         arguments.append("--dry-run")
                     elif self.mode == "layout":
                         arguments.append("--reorganize")
                     # The CLI saves a live board selection only after its local preflight.
-                    self.dismiss((arguments, self.mode in ("sync", "layout")))
+                    self.dismiss((arguments, self.mode in ("sync", "layout", "frames")))
             except ACTION_ERRORS as error:
                 self.query_one("#form-error", Static).update(str(error))
 
@@ -891,7 +896,7 @@ def create_app(root=None):
                              f"Miro board: {self.board}", id="compact-selection", markup=False)
                 yield Static("The comparison starts from the saved graph's ELK layout, not the current Miro board. "
                              "Applying it replaces the positions of managed graph items, including your manual moves. "
-                             "It also syncs this saved run's graph and resizes its generated frames. "
+                             "It also syncs this saved run's graph. Create or update export frames separately when finished. "
                              "Saved investigation evidence is unchanged.", id="compact-notice", markup=False)
                 yield Button("Open saved comparison", id="compact-open")
                 yield Checkbox("I reviewed this comparison and approve replacing managed positions.",
@@ -965,7 +970,7 @@ def create_app(root=None):
                 yield Static("This preview uses local evidence and the saved Miro mapping. Applying checks the live board. "
                              "Manual text/style edits on redundant circles and unmanaged attached connectors block removal. "
                              "A backup of the mapping and accessible item fields is saved before writes. "
-                             "After conversion, Sync to Miro refreshes labels and frames; Sync and reorganize applies a new layout.", markup=False)
+                             "After conversion, Sync to Miro refreshes labels; Sync and reorganize applies a new layout. Create or update frames separately when finished.", markup=False)
                 yield Checkbox("I reviewed the conversion and preserved any comments on redundant circles.",
                                value=False, id="address-merge-approved")
                 yield Static("", id="form-error", markup=False)
@@ -1038,6 +1043,7 @@ def create_app(root=None):
                 with Horizontal(classes="buttons"):
                     yield Button("Create Miro board", id="create-board")
                     yield Button("Sync and reorganize Miro graph", id="layout")
+                yield Button("Create / update Miro frames", id="frames")
                 with Horizontal(classes="buttons"):
                     yield Button("Investigation settings", id="case-settings")
                     yield Button("Back", id="back")
@@ -1063,6 +1069,7 @@ def create_app(root=None):
                 self.query_one("#run", Button).label = "Continue latest run" if metadata.get("latest_run") else "Start first run"
                 self.query_one("#create-board", Button).disabled = self.app.busy or bool(board)
                 self.query_one("#layout", Button).disabled = self.app.busy or not (board and metadata.get("latest_run"))
+                self.query_one("#frames", Button).disabled = self.app.busy or not (board and metadata.get("latest_run"))
                 self.query_one("#address-merge", Button).disabled = self.app.busy or not (board and metadata.get("latest_run"))
                 self.query_one("#mermaid", Button).disabled = self.app.busy or not metadata.get("latest_run")
                 for action in ("connections", "connections-publish"):
@@ -1144,7 +1151,7 @@ def create_app(root=None):
                 elif action == "csv":
                     _latest(self.case, read_case(self.case), verify=True)
                     self.perform((["csv-export", "--case", str(self.case), "--run", "latest"], False))
-                elif action in ("run", "preview", "sync", "layout"):
+                elif action in ("run", "preview", "sync", "layout", "frames"):
                     self.app.push_screen(FormScreen(action, self.case), self.perform)
                 elif action == "review":
                     self.app.push_screen(ReviewScreen(self.case))
@@ -1242,9 +1249,12 @@ def create_app(root=None):
             if cancelled:
                 message = "Calculation cancelled. Saved investigation evidence remains available."
             elif getattr(self, "current_action", None) == "miro-merge-addresses":
-                message = ("Address objects merged. Sync to Miro to refresh labels and frames; "
+                message = ("Address objects merged. Sync to Miro to refresh labels; "
                            "Sync and reorganize applies a fresh layout." if status == 0 else
                            "Address conversion stopped. Review the terminal message and reopen Merge duplicate addresses to resume.")
+            elif getattr(self, "current_action", None) == "miro-frames":
+                message = ("Miro export frames updated." if status == 0 else
+                           "Miro framing stopped. Check the terminal result before retrying.")
             elif getattr(self, "current_action", None) == "miro-create-board":
                 message = ("Miro board saved. Choose Preview Miro, then Sync to Miro to add the traced graph."
                            if status == 0 else "Board creation did not complete. Check the terminal result before retrying.")

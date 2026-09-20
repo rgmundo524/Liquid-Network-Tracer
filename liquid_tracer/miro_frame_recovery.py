@@ -75,7 +75,9 @@ def pending_frame(state):
             raise TraceError("Other Miro operations need recovery first; preserve the sync state.")
     if state.get("address_migration") is not None and state.get("address_migration") != {}:
         raise TraceError("Other Miro operations need recovery first; preserve the sync state.")
-    run_id = state.get("active_run_id")
+    # New frame-only actions leave graph lineage completed. Older publishers
+    # stored their interrupted framing phase under the graph's active run.
+    run_id = state.get("active_frame_run_id") or state.get("active_run_id")
     key, entry = next(iter(entries.items()))
     if (not isinstance(run_id, str) or not run_id.strip() or not isinstance(entry, dict)
             or not isinstance(key, str) or entry.get("key") != key or key in state["items"]

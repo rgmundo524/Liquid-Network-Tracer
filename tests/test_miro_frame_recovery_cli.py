@@ -18,7 +18,9 @@ class FrameRecoveryCliTests(unittest.TestCase):
     setUp = test_miro_recovery_cli.MiroRecoveryCliTests.setUp
 
     def fail_frame(self):
+        from liquid_tracer.miro import sync_frames
         remote = FrameMiro()
+        sync(self.plan, "SYNTHETIC=", self.path, token="synthetic", transport=remote, interval=0)
 
         def transport(method, url, headers, body, timeout):
             if method == "POST" and url.endswith("/frames"):
@@ -26,7 +28,7 @@ class FrameRecoveryCliTests(unittest.TestCase):
             return remote(method, url, headers, body, timeout)
 
         with self.assertRaisesRegex(TraceError, "HTTP 500"):
-            sync(self.plan, "SYNTHETIC=", self.path, token="synthetic", transport=transport, interval=0)
+            sync_frames(self.plan, "SYNTHETIC=", self.path, token="synthetic", transport=transport, interval=0)
         return load_state(self.path)
 
     def test_status_and_review_use_interrupted_archive_without_layout_or_network_status_lookup(self):
@@ -43,8 +45,19 @@ class FrameRecoveryCliTests(unittest.TestCase):
         review.assert_called_once_with(self.path, "SYNTHETIC=", state["namespace"], progress=None)
         self.assertEqual(result["board_url"], "https://miro.com/app/board/SYNTHETIC%3D/")
         self.assertEqual(result["run_id"], self.run)
+        self.assertEqual(result["resume_action"], "miro-frames")
         self.assertEqual(load_state(self.path), state)
         self.assertEqual({p.name: p.read_bytes() for p in self.archive.iterdir() if p.is_file()}, before)
+
+    def test_legacy_interrupted_graph_sync_is_directed_to_sync_once_before_framing(self):
+        state = self.fail_frame()
+        state.pop("frame_plan")
+        state.pop("active_frame_run_id", None)
+        state.update(active_run_id=self.run, latest_run_id=None, runs={})
+        save_json(self.path, state)
+        with patch("liquid_tracer.miro_frame_recovery.review_pending_frame", return_value={"run_id": self.run}):
+            report = recover_miro_frame(self.case)
+        self.assertEqual(report["resume_action"], "miro-sync")
 
     def test_apply_passes_exact_review_and_explicit_choice(self):
         state = self.fail_frame()

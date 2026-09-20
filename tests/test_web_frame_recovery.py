@@ -210,6 +210,18 @@ class PublicFrameRecoveryTests(unittest.TestCase):
             with self.subTest(key=key, value=value), self.assertRaises(TraceError):
                 public_frame_recovery({**report, key: value}, review=False)
 
+    def test_only_known_resume_actions_cross_the_browser_boundary(self):
+        recovered = {"recovery": "adopted_frame", "run_id": RUN_ID,
+                     "resolved_count": 1, "remaining_pending": 0}
+        for review, report in ((True, review_report()), (False, recovered)):
+            for action in ("miro-frames", "miro-sync"):
+                with self.subTest(review=review, action=action):
+                    expected = {**report, "resume_action": action}
+                    self.assertEqual(public_frame_recovery(expected, review=review), expected)
+            for action in (None, False, "trace", "/private", ["miro-frames"]):
+                with self.subTest(review=review, action=action), self.assertRaises(TraceError):
+                    public_frame_recovery({**report, "resume_action": action}, review=review)
+
 
 if __name__ == "__main__":
     unittest.main()

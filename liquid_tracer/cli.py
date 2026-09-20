@@ -259,6 +259,12 @@ def parser():
     update.add_argument("--reorganize", action="store_true",
                         help="Apply the current automatic layout to managed graph items, replacing their manual positions")
     update.add_argument("--max-new-items", type=int, default=750)
+    frames = commands.add_parser("miro-frames", help="Create or update Miro export frames after the graph is finished")
+    frames.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    frames.add_argument("--run", default="latest", help="Already synced run ID (default: latest saved run)")
+    frames.add_argument("--board", help="Miro board URL or ID (default: saved case board)")
+    frames.add_argument("--max-new-items", type=int, default=750, help="Maximum new frames for this action")
+    frames.add_argument("--dry-run", action="store_true", help="Check saved mapping and frame counts without network or writes")
     miro = commands.add_parser("miro-publish", help="Legacy: create a separate snapshot; use miro-sync for cumulative graphs")
     miro.add_argument("--plan", type=Path, required=True)
     miro.add_argument("--board-id", required=True)
@@ -275,7 +281,7 @@ def parser():
     recover.add_argument("--confirm-empty", action="store_true", required=True,
                          help="You inspected the linked board after the failed sync and confirmed it is empty; verify by API before clearing pending items")
     frame_review = commands.add_parser("miro-frame-review", help="Review existing frames after an uncertain frame POST; reads Miro only")
-    frame_recover = commands.add_parser("miro-frame-recover", help="Reconcile one reviewed frame locally, then resume with miro-sync")
+    frame_recover = commands.add_parser("miro-frame-recover", help="Reconcile one reviewed frame locally, then resume with miro-frames")
     for command in (frame_review, frame_recover):
         command.add_argument("--case", type=Path, default=case_default, required=case_default is None)
         command.add_argument("--output", type=Path, help="Write JSON to a new file instead of stdout")
@@ -585,7 +591,10 @@ def recover_miro_frame(case, review_id=None, item_id=None, confirmed_absent=Fals
     else:
         report = recover_pending_frame(path, target, namespace, review_id=review_id,
                                        item_id=item_id, confirmed_absent=confirmed_absent, progress=progress)
-    return {**report, "board_url": "https://miro.com/app/board/" + quote(target, safe="") + "/"}
+    resume_action = ("miro-frames" if state.get("frame_plan") and state.get("latest_run_id") == entry["run_id"]
+                     and not state.get("active_run_id") else "miro-sync")
+    return {**report, "board_url": "https://miro.com/app/board/" + quote(target, safe="") + "/",
+            "resume_action": resume_action}
 
 
 def recover_miro_run(case, confirmed_empty=False, progress=None):
@@ -683,6 +692,61 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
                       connector_style=compaction_meta["connector_style"])
     if not dry_run:
         report_path = case / "miro" / "reports" / (run_id + "-" + uuid.uuid4().hex[:12] + ".json")
+        report["report_file"] = str(report_path.resolve())
+        save_json(report_path, report)
+    return report
+
+
+def frame_run(case, run_id="latest", board=None, max_new_items=750, dry_run=False, progress=None):
+    """Frame the exact published presentation without recalculating its graph."""
+    from .miro import sync_frames
+    from .miro_state import load_state
+
+    case = Path(case)
+    run_id = resolve_latest(case, run_id)
+    archive = run_path(case, run_id)
+    verify_export(archive)
+    archived_plan = read_json(archive / "miro-plan.json")
+    validate_plan(archived_plan)
+    metadata = read_case(case)
+    archived_namespace = _namespace(archived_plan)
+    if archived_plan["run_id"] != run_id or archived_namespace["case_id"] != metadata["case_id"]:
+        raise TraceError("Saved plan does not match this investigation and run")
+    if type(max_new_items) is not int or max_new_items < 0:
+        raise TraceError("--max-new-items must be a nonnegative integer")
+    target = resolve_board(metadata, board)
+    state_path = case / "miro" / (digest(target.encode())[:24] + ".json")
+    if not state_path.is_file():
+        raise TraceError("Sync this saved graph to Miro before creating frames")
+    namespace = _namespace(load_state(state_path))
+    if any(namespace[key] != archived_namespace[key] for key in ("case_id", "source")):
+        raise TraceError("Miro mapping does not match this investigation's saved graph")
+    state = _load_sync_state(state_path, target, namespace)
+    if state.get("latest_run_id") != run_id or state.get("active_run_id"):
+        raise TraceError("Sync this saved graph to Miro before creating frames; frames require the latest completed graph sync")
+    plan = state.get("frame_plan")
+    if plan is None:
+        # Older successful syncs may have published the archive verbatim. Never
+        # infer presentation settings from current defaults or rerun ELK here.
+        summary = state["runs"].get(run_id, {})
+        hashes = summary.get("plan_sha256s", []) if isinstance(summary, dict) else []
+        if (isinstance(hashes, list) and hashes and archived_plan["sha256"] == hashes[-1]
+                and archived_namespace == namespace):
+            plan = archived_plan
+        else:
+            raise TraceError("This older Miro mapping has no saved frame presentation. Sync to Miro once, then choose Create / update Miro frames")
+    validate_plan(plan)
+    if plan["run_id"] != run_id or _namespace(plan) != namespace:
+        raise TraceError("Saved frame presentation does not match the selected graph; sync it again before creating frames")
+    options = {"progress": progress} if progress is not None else {}
+    result = sync_frames(plan, target, state_path, max_items=max_new_items, dry_run=True, **options)
+    if not dry_run:
+        result = sync_frames(plan, target, state_path, max_items=max_new_items, dry_run=False, **options)
+    report = {**result, "frames_only": True, "run_id": run_id, "board_id": target,
+              "board_url": "https://miro.com/app/board/" + quote(target, safe="") + "/",
+              "plan_sha256": plan["sha256"], "state_file": str(state_path.resolve())}
+    if not dry_run:
+        report_path = case / "miro" / "reports" / (run_id + "-frames-" + uuid.uuid4().hex[:12] + ".json")
         report["report_file"] = str(report_path.resolve())
         save_json(report_path, report)
     return report
@@ -1091,6 +1155,9 @@ def main(argv=None, *, progress=None):
                                       connector_style=args.connector_style, compact_preview=args.compact_preview,
                                       group_context_inputs=args.group_context_inputs,
                                       layout_attempts=args.layout_attempts), indent=2))
+        elif args.command == "miro-frames":
+            print(json.dumps(frame_run(args.case, args.run, args.board, args.max_new_items,
+                                       args.dry_run, progress=progress), indent=2))
         elif args.command == "miro-publish":
             print(json.dumps(publish(read_json(args.plan), board_id(args.board_id), args.state, args.max_items), indent=2))
         elif args.command == "miro-resolve":

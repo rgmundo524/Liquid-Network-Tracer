@@ -211,7 +211,7 @@ async function recoveryHarness(review = frameReview(), failure = null) {
       if (failure) return {status: 'failed', message: failure};
       recovered = true;
       return {status: 'succeeded', result: {recovery: review.candidates.length ? 'adopted_frame' : 'confirmed_absent_frame',
-        run_id: 'interrupted', resolved_count: 1, remaining_pending: 0}};
+        run_id: 'interrupted', resolved_count: 1, remaining_pending: 0, resume_action: review.resume_action || 'miro-frames'}};
     }
     if (path === '/api/cases/case1') return detail();
   });
@@ -235,7 +235,7 @@ test('interrupted frame browser flow reviews first, explicitly adopts, and selec
   await view.pollJob();
   assert.equal(view.state.selectedRun, 'interrupted');
   assert.equal(view.state.activeCase.miro_recovery.pending_count, 0);
-  assert.match(view.workspace(), /Choose Sync to Miro to resume using the saved graph objects/);
+  assert.match(view.workspace(), /Choose Create \/ update Miro frames to finish framing the saved graph/);
   assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 2);
 });
 
@@ -427,4 +427,76 @@ test('legacy or different layout-attempt counts invalidate both previews and com
   assert.match(view.compactGraph(artifact, true, detail), /Apply compact layout to Miro/);
   settings.layout_attempts = 100;
   assert.equal(view.currentCompaction(), undefined);
+});
+
+
+test('frames use a separate confirmed live job for the selected snapshot', async () => {
+  const detail = {id: 'case1', name: 'Completed graph', miro_board: 'board1', run_defaults: defaults,
+    runs: [{id: 'first'}, {id: 'last'}], latest_run: 'last', miro_recovery: {pending_count: 0}};
+  const view = await harness((path) => path.endsWith('/actions')
+    ? {id: 'frames1', status: 'running', live: true} : undefined);
+  view.state.activeCase = detail;
+  view.state.selectedRun = 'first';
+  assert.match(view.workspace(), /Create \/ update Miro frames/);
+  assert.match(view.workspace(), /When the graph is finished, create its frames separately/);
+  await view.dispatch('miro-frames-dialog');
+  assert.equal(view.dialog.open, true);
+  assert.match(view.dialog.innerHTML, /current Miro positions/);
+  assert.match(view.dialog.innerHTML, /Changes your Miro workspace/);
+  assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 0);
+  await view.submitDialog();
+  assert.deepEqual(view.calls.find(call => call.path.endsWith('/actions')).body,
+    {action: 'miro-frames', run_id: 'first'});
+  assert.equal(view.state.job.live, true);
+});
+
+test('frame controls require a saved run, board, idle workspace, and resolved recovery', async () => {
+  for (const condition of ['run', 'board', 'busy', 'recovery']) {
+    const view = await harness();
+    view.state.activeCase = {id: 'case1', name: 'Graph', miro_board: condition === 'board' ? null : 'board1',
+      run_defaults: defaults, runs: condition === 'run' ? [] : [{id: 'run1'}],
+      latest_run: condition === 'run' ? undefined : 'run1',
+      miro_recovery: {pending_count: condition === 'recovery' ? 1 : 0}};
+    if (condition === 'busy') view.state.job = {id: 'busy', status: 'running', action: 'trace'};
+    const control = view.workspace().match(/<button[^>]*data-action="miro-frames-dialog"[^>]*>/)[0];
+    assert.match(control, /disabled/);
+    await view.dispatch('miro-frames-dialog');
+    assert.equal(view.dialog.open, false, condition);
+    assert.equal(view.calls.length, 1);
+  }
+});
+
+test('a pending recovery appearing after frame confirmation opened blocks submission', async () => {
+  const view = await harness();
+  view.state.activeCase = {id: 'case1', name: 'Graph', miro_board: 'board1', run_defaults: defaults,
+    runs: [{id: 'run1'}], latest_run: 'run1', miro_recovery: {pending_count: 0}};
+  await view.dispatch('miro-frames-dialog');
+  assert.equal(view.dialog.open, true);
+  view.state.activeCase.miro_recovery.pending_count = 1;
+  await view.submitDialog();
+  assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 0);
+});
+
+
+test('legacy interrupted graph sync recovery guides one graph sync before separate framing', async () => {
+  const view = await recoveryHarness(frameReview({resume_action: 'miro-sync'}));
+  await view.dispatch('miro-frame-review');
+  await view.pollJob();
+  assert.match(view.dialog.innerHTML, /finish Sync to Miro for this snapshot before choosing Create \/ update Miro frames/);
+  await view.submitDialog({frame_item_id: 'frame-1'});
+  await view.pollJob();
+  assert.match(view.workspace(), /Finish Sync to Miro for this snapshot, then choose Create \/ update Miro frames/);
+  assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 2);
+});
+
+
+test('frame result counts distinguish frame updates from detached graph children', async () => {
+  const view = await harness();
+  view.state.activeCase = {id: 'case1', name: 'Graph', miro_board: 'board1', run_defaults: defaults,
+    runs: [{id: 'run1'}], latest_run: 'run1'};
+  view.state.results.set('case1', {action: 'miro-frames', result: {
+    run_id: 'run1', created: 3, created_frames: 3, updated: 29, updated_frames: 2, deleted: 1}});
+  const html = view.workspace();
+  assert.match(html, /<strong>2<\/strong>Updated frames/);
+  assert.doesNotMatch(html, /<strong>29<\/strong>Updated frames/);
 });

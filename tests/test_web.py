@@ -317,7 +317,7 @@ class LocalWebTests(unittest.TestCase):
         self.assertGreater(result["new_items"], 0)
         self.assertTrue(result["remote_preflight_required"])
         self.assertIn("fee_items_to_remove", result)
-        self.assertGreaterEqual(result["new_frames"], 2)
+        self.assertEqual(result["new_frames"], 0)
         self.assertIn("frames_to_remove", result)
         self.assertNotIn("state_file", result)
         self.assertEqual(self.server.public_result({"conflicts": [{"private": "annotation"}]}, "miro-sync", None, None),

@@ -10,7 +10,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 from liquid_tracer.common import TraceError, canonical, save_json
-from liquid_tracer.miro import make_plan, sync
+from liquid_tracer.miro import make_plan, sync, sync_frames
 from liquid_tracer.miro_frame_recovery import pending_frame, recover_pending_frame, review_pending_frame
 from liquid_tracer.miro_state import load_state
 from tests.test_miro_frame_sync import FrameMiro, framed_graph
@@ -50,6 +50,7 @@ class MiroFrameRecoveryTests(unittest.TestCase):
         self.plan = make_plan(framed_graph())
 
     def interrupt(self, committed=False):
+        sync(self.plan, BOARD, self.path, token="synthetic-token", transport=self.remote, interval=0)
         count = 0
 
         def transport(method, url, headers, body, timeout):
@@ -63,7 +64,7 @@ class MiroFrameRecoveryTests(unittest.TestCase):
             return self.remote(method, url, headers, body, timeout)
 
         with self.assertRaisesRegex(TraceError, "HTTP 500"):
-            sync(self.plan, BOARD, self.path, token="synthetic-token", transport=transport, interval=0)
+            sync_frames(self.plan, BOARD, self.path, token="synthetic-token", transport=transport, interval=0)
         self.initial = load_state(self.path)
         self.key, self.entry = pending_frame(self.initial)
         self.assertEqual(sum(record["endpoint"] == "frames" for record in self.initial["items"].values()), 2)
@@ -98,11 +99,12 @@ class MiroFrameRecoveryTests(unittest.TestCase):
                                   "resolved_count": 1, "remaining_pending": 0})
         state = load_state(self.path)
         self.assertEqual(state["items"], self.initial["items"])
-        self.assertEqual(state["active_run_id"], "one")
+        self.assertEqual(state["active_frame_run_id"], "one")
+        self.assertIsNone(state["active_run_id"])
         self.assertTrue(all(call[0] == "GET" for call in self.remote.calls))
         self.assertEqual(state["pending_creations"], {})
         self.assertTrue(state["recovery_history"][-1]["confirmed_absent"])
-        resumed = sync(self.plan, BOARD, self.path, token="synthetic-token", transport=self.remote, interval=0)
+        resumed = sync_frames(self.plan, BOARD, self.path, token="synthetic-token", transport=self.remote, interval=0)
         self.assertEqual((resumed["created"], resumed["new_shapes"], resumed["new_connectors"]), (2, 0, 0))
         self.assertEqual(sum(item["type"] == "frame" for item in self.remote.items.values()), 4)
         for key, record in self.initial["items"].items():
@@ -123,8 +125,28 @@ class MiroFrameRecoveryTests(unittest.TestCase):
         for key, record in self.initial["items"].items():
             self.assertEqual(state["items"][key], record)
         self.assertTrue(all(call[0] == "GET" for call in self.remote.calls))
-        resumed = sync(self.plan, BOARD, self.path, token="synthetic-token", transport=self.remote, interval=0)
+        resumed = sync_frames(self.plan, BOARD, self.path, token="synthetic-token", transport=self.remote, interval=0)
         self.assertEqual(resumed["created"], 1)
+        self.assertEqual(sum(item["type"] == "frame" for item in self.remote.items.values()), 4)
+
+    def test_legacy_interrupted_graph_frame_recovers_into_separate_frame_workflow(self):
+        self.interrupt(committed=True)
+        legacy = copy.deepcopy(self.initial)
+        legacy.pop("active_frame_run_id")
+        legacy.pop("frame_plan")
+        legacy.update(active_run_id="one", latest_run_id=None, runs={})
+        save_json(self.path, legacy)
+        review = self.review()
+        self.recover(review, item_id=review["candidates"][0]["id"])
+        self.assertTrue(all(call[0] == "GET" for call in self.remote.calls))
+        graph_report = sync(self.plan, BOARD, self.path, token="synthetic-token",
+                            transport=self.remote, interval=0)
+        self.assertEqual(graph_report["new_frames"], 0)
+        self.assertFalse(any(method == "POST" and url.endswith("/frames")
+                             for method, url, _ in self.remote.calls))
+        report = sync_frames(self.plan, BOARD, self.path, token="synthetic-token",
+                             transport=self.remote, interval=0)
+        self.assertEqual(report["created"], 1)
         self.assertEqual(sum(item["type"] == "frame" for item in self.remote.items.values()), 4)
 
     def test_ambiguous_matches_require_explicit_selection_and_preserve_other_frame(self):
