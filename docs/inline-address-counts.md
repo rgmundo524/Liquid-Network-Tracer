@@ -53,5 +53,5 @@ before any board writes and asks for a fresh preview. Regenerate old starter-
 connection or compact previews before publishing. Graph presentation version 18
 prevents reusing old-version ELK previews as if they had the new display. No new
 blockchain trace or frontend rebuild is needed for this Python-rendering change.
-The 75% automatic renderer heap policy, colors, borders, and transaction CSV
-columns are unchanged.
+The automatic renderer heap policy uses 90% of currently available memory.
+Colors, borders, and transaction CSV columns are unchanged by inline counts.

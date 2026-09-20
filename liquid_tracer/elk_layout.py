@@ -729,9 +729,15 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
         del candidates
         successful_count += 1
     if best is None:
-        codes = ", ".join(sorted({attempt["failure_code"] for attempt in failed_attempts}))
+        failure_codes = {attempt["failure_code"] for attempt in failed_attempts}
+        codes = ", ".join(sorted(failure_codes))
+        guidance = (" Memory exhaustion was reported. Close other applications and retry this saved run; "
+                    "automatic heap budgets are recalculated before each attempt."
+                    if failure_codes & {"heap_exhausted", "memory_exhausted"} else "")
+        if not guidance and "worker_killed" in failure_codes:
+            guidance = " A worker was killed; memory exhaustion is possible but unconfirmed."
         raise TraceError(f"All {attempts} ELK layout attempts failed; no valid layout was produced. "
-                         f"Failure categories: {codes}. No Miro changes were made")
+                         f"Failure categories: {codes}.{guidance} No Miro changes were made")
     _, result, after, seed = best
     _report_progress(report, "Packing nearby transaction context", stage="applying")
     # Moving a circle closer can put Miro's midpoint elbow through a different

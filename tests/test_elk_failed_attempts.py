@@ -83,6 +83,8 @@ class FailedSeedSearchTests(unittest.TestCase):
         self.assertEqual(worker.call_count, 4)
         self.assertEqual(graph, original)
         self.assertIn("heap_exhausted", str(caught.exception))
+        self.assertIn("Memory exhaustion was reported", str(caught.exception))
+        self.assertIn("Close other applications", str(caught.exception))
         self.assertIn("No Miro changes", str(caught.exception))
         self.assertNotIn("private worker detail", str(caught.exception) + json.dumps(events))
         self.assertFalse(any(event["stage"] in ("ready", "ready_with_failures") for event in events))
@@ -102,6 +104,15 @@ class FailedSeedSearchTests(unittest.TestCase):
                 optimize_graph(graph, layout_attempts=5)
             self.assertEqual(mocked.call_count, 2)
             self.assertEqual(graph, original)
+
+    def test_all_killed_workers_do_not_claim_confirmed_memory_exhaustion(self):
+        with patch("liquid_tracer.elk_layout._worker", side_effect=ElkWorkerFailure(
+                "private worker detail", failure_code="worker_killed", returncode=-9)):
+            with self.assertRaises(TraceError) as caught:
+                optimize_graph(crossing_graph(), layout_attempts=2)
+        self.assertIn("worker was killed; memory exhaustion is possible but unconfirmed", str(caught.exception))
+        self.assertNotIn("Memory exhaustion was reported", str(caught.exception))
+        self.assertNotIn("private worker detail", str(caught.exception))
 
     def test_invalid_geometry_is_not_skipped_after_a_valid_candidate(self):
         graph = crossing_graph()

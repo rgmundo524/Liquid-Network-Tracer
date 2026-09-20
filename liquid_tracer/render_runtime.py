@@ -80,7 +80,7 @@ def _available_bytes():
 
 
 def renderer_heap_mb():
-    """Choose 75% of currently available memory, or an explicit old-space MiB cap.
+    """Choose 90% of currently available memory, or an explicit old-space MiB cap.
 
     This is a V8 heap allowance, not a reservation or a cap on total process
     memory. Python, native buffers and Chromium also need room. Re-evaluate for
@@ -94,7 +94,7 @@ def renderer_heap_mb():
     available = _available_bytes()
     if available is None:
         return 1024  # Conservative portable fallback when memory is unreadable.
-    budget = (available * 3) // (4 * _MIB)
+    budget = (available * 9) // (10 * _MIB)
     if budget < 1:
         raise TraceError("Too little available memory to start the local renderer; free memory and retry the saved run")
     return min(budget, 2147483647)
