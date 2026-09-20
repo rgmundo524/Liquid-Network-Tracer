@@ -22,7 +22,11 @@ def _emit(report, event):
 def _request(request, index):
     # A larger search preserves the previous seeds and their profile choices.
     profile = "balanced" if len(request["children"]) <= 300 and index == 1 else "flow_weighted"
-    return {**request, "branchProfile": profile}
+    # Keep the first and every odd attempt unconstrained. Boundary ordering is
+    # another candidate within the existing budget, independent of placement
+    # profile and worker completion order.
+    return {**request, "branchProfile": profile,
+            "boundaryOrdering": bool(request.get("branchNodeOrder")) and index % 2 == 0}
 
 
 def _batch(request, jobs, worker, progress_for_attempt, worker_count, total_heap_mb, heap_mb):
@@ -86,7 +90,8 @@ def iter_attempts(request, seeds, worker, progress_for_attempt, metadata):
         if not request["children"]:
             seed = seeds[next_index - 1]
             yield next_index, seed, [{"seed": seed, "nodes": [], "edges": [],
-                                     "branchProfile": _request(request, next_index)["branchProfile"]}]
+                                     "branchProfile": _request(request, next_index)["branchProfile"],
+                                     "branchBoundary": False}]
             next_index += 1
             continue
         # Recalculate only after the previous processes have exited and their

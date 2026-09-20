@@ -31,6 +31,7 @@ from .horizontal_spacing import compact_candidate
 from .layout_search import LAYOUT_SEARCH_VERSION, layout_seeds, normalize_layout_attempts
 from .branch_layout import (BRANCH_LAYOUT_VERSION, edge_priorities, organization_metrics,
                             compact_context_inputs, hub_nodes)
+from .branch_boundaries import branch_order, boundary_metrics
 
 
 ALGORITHM = "elk_layered_v1"
@@ -331,6 +332,12 @@ def _worker(graph, seeds, progress=None, *, heap_mb=None, cancel_event=None):
             raise ValueError("invalid worker response")
         if not len(seeds) <= len(result["candidates"]) <= 2 * len(seeds):
             raise ValueError("missing candidates")
+        expected_boundary = graph.get("boundaryOrdering", False)
+        if any(not isinstance(candidate, dict)
+               or type(candidate.get("branchBoundary", False)) is not bool
+               or candidate.get("branchBoundary", False) != expected_boundary
+               for candidate in result["candidates"]):
+            raise ValueError("invalid branch boundary ordering result")
         peak_rss_mb = renderer_peak_rss_mb(errors)
         if peak_rss_mb is not None:
             _report_progress(progress, f"Measured ELK worker peak RAM: {peak_rss_mb:,} MiB",
@@ -394,6 +401,9 @@ def _request_graph(graph):
             item["labels"] = [{"id": "label:" + edge["id"], "text": "caption", **caption_size(edge),
                                "layoutOptions": {"elk.edgeLabels.placement": "CENTER"}}]
         edge_values.append(item)
+    ordered_nodes = branch_order(graph)
+    boundary_order = ({"branchNodeOrder": [key for key in ordered_nodes if key in main]}
+                      if ordered_nodes is not None else {})
     return {"id": "liquid-layout", "layoutOptions": {
         "elk.algorithm": "layered", "elk.direction": "RIGHT", "elk.edgeRouting": "ORTHOGONAL",
         "elk.partitioning.activate": "true", "elk.spacing.nodeNode": "80", "elk.spacing.componentComponent": "120",
@@ -408,6 +418,7 @@ def _request_graph(graph):
         "elk.padding": "[top=0,left=0,bottom=0,right=0]"},
         "children": list(children.values()), "edges": edge_values,
         "branchOrganization": BRANCH_LAYOUT_VERSION,
+        **boundary_order,
         "inputPortOrders": {key: [port_map[edge_id][1] for edge_id in order]
                             for key, order in input_orders(graph).items()}}, port_map, fee_ids
 
@@ -416,6 +427,9 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
     input_policy = candidate.get("inputOrderPolicy", "traced_first")
     if input_policy not in ("traced_first", "geometry"):
         raise TraceError("ELK returned an invalid input ordering policy")
+    boundary_ordering = candidate.get("branchBoundary", False)
+    if type(boundary_ordering) is not bool:
+        raise TraceError("ELK returned an invalid branch boundary ordering policy")
     result = copy.deepcopy(graph)
     nodes = {node["id"]: node for node in result["nodes"]}
     raw_nodes = candidate.get("nodes")
@@ -538,6 +552,7 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
                         "input_order": input_order_metadata(graph, input_policy),
                         "branch_organization": {"version": BRANCH_LAYOUT_VERSION,
                                                  "profile": candidate.get("branchProfile", "balanced"),
+                                                 "boundary_ordering": boundary_ordering,
                                                  "hubs": sorted(hub_nodes(graph)),
                                                  "hub_rule": "separate_entry_lane_with_return_connections"},
                         "horizontal_spacing": copy.deepcopy(candidate.get("horizontal_spacing", {})),
@@ -726,14 +741,17 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
             miro_estimate = layout_metrics(main, midpoint_elbows=True)
             organization = organization_metrics(main)
             result["layout"]["branch_organization"]["travel"] = organization
+            boundaries = boundary_metrics(result)
+            result["layout"]["branch_organization"]["boundaries"] = boundaries
             # Compare native ELK routes with a simple board-routing estimate. A
             # forced semantic slot order must not win merely because ELK can draw
-            # bends that Miro cannot receive. Prefer the previous traced-first
-            # rule when measured safety and attachment quality are equal.
+            # bends that Miro cannot receive. Branch separation follows every
+            # collision gate; traced-first and shorter travel break later ties.
             score = (score_metrics["node_overlaps"], score_metrics["node_intersections"],
                      miro_estimate["node_intersections"], score_metrics["crossings"], miro_estimate["crossings"],
                      endpoint_metrics["endpoint_order_inversions"], endpoint_metrics["coincident_ports"],
                      score_metrics["connector_overlaps"], miro_estimate["connector_overlaps"],
+                     boundaries["interleavings"], boundaries["boundary_depth"], boundaries["interbranch_travel"],
                      result["layout"]["input_order"]["policy"] != "traced_first",
                      organization["weighted_vertical_travel"] + score_metrics["edge_length"], score_metrics["edge_length"])
             if best is None or score < best[0]:
@@ -768,18 +786,24 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
         original_estimate = layout_metrics(result, midpoint_elbows=True)
         compacted_estimate = layout_metrics(compacted, midpoint_elbows=True)
         original_ports, compacted_ports = attachment_order_metrics(result), attachment_order_metrics(compacted)
+        original_boundaries, compacted_boundaries = boundary_metrics(result), boundary_metrics(compacted)
         def routing_quality(value):
             return (value["node_intersections"], value["crossings"], value["connector_overlaps"])
+        safe_boundaries = all(compacted_boundaries[key] <= original_boundaries[key]
+                              for key in ("interleavings", "boundary_depth", "interbranch_travel"))
         safe = (not original_estimate["truncated"] and not compacted_estimate["truncated"]
                 and routing_quality(compacted_estimate) <= routing_quality(original_estimate)
                 and compacted_ports["endpoint_order_inversions"] <= original_ports["endpoint_order_inversions"]
-                and compacted_ports["coincident_ports"] <= original_ports["coincident_ports"])
+                and compacted_ports["coincident_ports"] <= original_ports["coincident_ports"]
+                and safe_boundaries)
         if safe:
             result = compacted
         else:
-            result["layout"]["branch_organization"]["context_compaction_rejected"] = "attachment_routing_estimate"
+            result["layout"]["branch_organization"]["context_compaction_rejected"] = (
+                "branch_boundary_quality" if not safe_boundaries else "attachment_routing_estimate")
     else:
         result = compacted
+    result["layout"]["branch_organization"]["boundaries"] = boundary_metrics(result)
     after = layout_metrics(result)
     result["layout"]["metrics"] = {"before": before, "after": after, "estimated": True,
                                     "attempt_count": attempts, "candidate_count": candidate_count, "selected_seed": seed,

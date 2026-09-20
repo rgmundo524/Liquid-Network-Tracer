@@ -9,7 +9,7 @@ import math
 from collections import defaultdict
 
 
-BRANCH_LAYOUT_VERSION = 1
+BRANCH_LAYOUT_VERSION = 2
 
 
 def hub_nodes(graph):
