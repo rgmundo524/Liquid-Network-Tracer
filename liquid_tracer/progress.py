@@ -44,6 +44,13 @@ ELK_STAGES = {
 }
 
 
+_ELK_MEMORY_FAILURES = {
+    "heap_exhausted": "JavaScript heap exhausted; close other applications to free memory",
+    "memory_exhausted": "renderer reported memory exhaustion; close other applications to free memory",
+    "worker_killed": "worker was killed; memory exhaustion is possible but unconfirmed",
+}
+
+
 def public_progress(event):
     """Allow only known phases and bounded numbers across the browser boundary.
 
@@ -62,6 +69,12 @@ def public_progress(event):
         stage = event.get("stage")
         if isinstance(stage, str) and stage in ELK_STAGES:
             value.update(stage=stage, message=ELK_STAGES[stage])
+        failure_code = event.get("failure_code")
+        if (stage == "attempt_failed" and isinstance(failure_code, str)
+                and failure_code in _ELK_MEMORY_FAILURES):
+            value["failure_code"] = failure_code
+            value["message"] = ("ELK layout attempt failed: " + _ELK_MEMORY_FAILURES[failure_code]
+                                + "; continuing the layout search")
         search_counts = public_search_counts(
             {**event, "attempt_count": event.get("attempt_count", event.get("attempt_total"))},
             allow_no_success=True)

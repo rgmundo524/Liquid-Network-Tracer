@@ -71,6 +71,29 @@ class LayoutFailureReportingTests(unittest.TestCase):
         self.assertIn(WARNING, value["message"])
         self.assertEqual(value["failed_count"], 1)
 
+    def test_memory_failure_reason_reaches_terminal_and_browser_without_raw_diagnostics(self):
+        for code, message in (("heap_exhausted", "JavaScript heap exhausted"),
+                              ("memory_exhausted", "renderer reported memory exhaustion"),
+                              ("worker_killed", "memory exhaustion is possible but unconfirmed")):
+            with self.subTest(code=code):
+                value = public_progress({"phase": "optimizing", "stage": "attempt_failed", "completed": 0,
+                                         "total": 0, "failure_code": code, "message": "PRIVATE", "stderr": "PRIVATE"})
+                self.assertEqual(value["failure_code"], code)
+                self.assertIn(message, value["message"])
+                self.assertNotIn("PRIVATE", json.dumps(value))
+                if code != "worker_killed":
+                    self.assertIn("close other applications", value["message"])
+                else:
+                    self.assertNotIn("reported memory exhaustion", value["message"])
+
+    def test_invalid_memory_reason_is_ignored(self):
+        for code in (None, True, {}, [], "PRIVATE", "heap_exhausted PRIVATE"):
+            with self.subTest(code=code):
+                value = public_progress({"phase": "optimizing", "stage": "attempt_failed", "completed": 0,
+                                         "total": 0, "failure_code": code})
+                self.assertNotIn("failure_code", value)
+                self.assertNotIn("PRIVATE", json.dumps(value))
+
     def test_first_failed_attempt_can_report_zero_success_without_claiming_retained_layout(self):
         value = public_progress({"phase": "optimizing", "stage": "attempt_failed", "completed": 0, "total": 0,
                                  "attempt_index": 1, "attempt_total": 25,
