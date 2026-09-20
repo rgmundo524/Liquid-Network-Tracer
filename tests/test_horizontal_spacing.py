@@ -24,10 +24,10 @@ class HorizontalSpacingTests(unittest.TestCase):
     def test_caption_padding_shrinks_without_resizing_or_moving_ports(self):
         original = candidate()
         result = compact_candidate(copy.deepcopy(original))
-        self.assertAlmostEqual(result["nodes"][1]["x"], 518.4)
-        self.assertAlmostEqual(result["edges"][0]["labels"][0]["x"], 276)
+        self.assertAlmostEqual(result["nodes"][1]["x"], 468.4)
+        self.assertAlmostEqual(result["edges"][0]["labels"][0]["x"], 251)
         report = result["horizontal_spacing"]
-        self.assertEqual(report, {"version": HORIZONTAL_SPACING_VERSION, "removed_width": 168.0,
+        self.assertEqual(report, {"version": HORIZONTAL_SPACING_VERSION, "removed_width": 218.0,
                                   "removed_bands": 2})
         for before, after in zip(original["nodes"], result["nodes"]):
             self.assertEqual({k: v for k, v in before.items() if k != "x"},
@@ -36,15 +36,16 @@ class HorizontalSpacingTests(unittest.TestCase):
         self.assertEqual(result["edges"][0]["sections"][0]["endPoint"]["x"],
                          result["nodes"][1]["x"])
 
-    def test_original_node_clearance_and_already_tighter_gaps_stay_unchanged(self):
+    def test_node_clearance_reduces_by_quarter_and_keeps_already_tighter_gaps(self):
         for x in (360, 300, 160):
             raw = candidate()
             raw["nodes"][1]["x"] = x
             raw["edges"][0]["labels"] = []
             raw["edges"][0]["sections"][0]["endPoint"]["x"] = x
             result = compact_candidate(raw)
-            self.assertEqual(result["nodes"][1]["x"], x)
-            self.assertEqual(result["horizontal_spacing"]["removed_width"], 0)
+            expected = min(x, 310)  # 160-unit object plus the new 150-unit gap.
+            self.assertEqual(result["nodes"][1]["x"], expected)
+            self.assertEqual(result["horizontal_spacing"]["removed_width"], x - expected)
 
     def test_empty_graph_is_valid(self):
         result = compact_candidate({"nodes": [], "edges": []})

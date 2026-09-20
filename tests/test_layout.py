@@ -64,7 +64,7 @@ class LayoutTests(unittest.TestCase):
         nodes = {node["id"]: node for node in graph["nodes"]}
         for index in range(9):
             self.assertEqual(nodes["tx:" + txid(index + 1)]["x"] - nodes["tx:" + txid(index)]["x"], 2 * COLUMN_GAP)
-            self.assertGreaterEqual(nodes["tx:" + txid(index + 1)]["x"] - nodes["tx:" + txid(index)]["x"], 720)
+            self.assertGreaterEqual(nodes["tx:" + txid(index + 1)]["x"] - nodes["tx:" + txid(index)]["x"], 620)
         self.assertEqual(len({node["y"] for node in graph["nodes"]}), 1)
         self.assertEqual(len([node for node in graph["nodes"] if node["kind"] == "address"]), 11)
 
@@ -76,7 +76,7 @@ class LayoutTests(unittest.TestCase):
         for key in ("liquid:outpoint:" + A + ":0", "liquid:outpoint:" + B + ":0"):
             neighbor = nodes[key]
             clearance = abs(transaction["x"] - neighbor["x"]) - (transaction["width"] + neighbor["width"]) / 2
-            self.assertGreaterEqual(clearance, 200)
+            self.assertGreaterEqual(clearance, 150)
         self.assertGreaterEqual(abs(nodes["liquid:outpoint:" + B + ":0"]["y"]
                                     - nodes["liquid:outpoint:" + B + ":1"]["y"]), 240)
 
