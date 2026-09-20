@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from liquid_tracer.common import TraceError, canonical, digest, read_json
-from liquid_tracer.compaction import compact_graph
+from liquid_tracer.compaction import LINKED_HORIZONTAL, compact_graph
 from liquid_tracer.elk_layout import optimize_graph
 from liquid_tracer.export import build_graph
 from liquid_tracer.miro import _bounds, _bounds_collision, make_plan, sync, sync_frames, validate_plan
@@ -28,7 +28,7 @@ def compact_plan(*, compact=True, spread=500, run="one"):
     if compact:
         value["layout"]["compaction"] = {
             "algorithm": "local_address_components_v1", "version": 1,
-            "clearances": {"linked_horizontal": 200.0, "node_node": 80.0,
+            "clearances": {"linked_horizontal": LINKED_HORIZONTAL, "node_node": 80.0,
                            "components": 120.0, "edge_node": 60.0, "edge_edge": 22.0}}
     value["activity_frames"] = activity_frames(value)
     return make_plan(value)

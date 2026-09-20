@@ -28,6 +28,7 @@ from .input_order import input_orders, input_order_metadata
 from .attachment_order import attachment_order_metrics
 from .endpoint_alignment import align_near_horizontal_endpoints
 from .horizontal_spacing import compact_candidate
+from .layout import HORIZONTAL_NODE_GAP
 from .layout_search import LAYOUT_SEARCH_VERSION, layout_seeds, normalize_layout_attempts
 from .branch_layout import (BRANCH_LAYOUT_VERSION, edge_priorities, organization_metrics,
                             compact_context_inputs, hub_nodes)
@@ -407,7 +408,7 @@ def _request_graph(graph):
     return {"id": "liquid-layout", "layoutOptions": {
         "elk.algorithm": "layered", "elk.direction": "RIGHT", "elk.edgeRouting": "ORTHOGONAL",
         "elk.partitioning.activate": "true", "elk.spacing.nodeNode": "80", "elk.spacing.componentComponent": "120",
-        "elk.layered.spacing.nodeNodeBetweenLayers": "200", "elk.spacing.edgeNode": "35",
+        "elk.layered.spacing.nodeNodeBetweenLayers": str(HORIZONTAL_NODE_GAP), "elk.spacing.edgeNode": "35",
         "elk.layered.spacing.edgeNodeBetweenLayers": "60", "elk.spacing.edgeEdge": "22",
         "elk.layered.spacing.edgeEdgeBetweenLayers": "22", "elk.layered.thoroughness": "8",
         "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",

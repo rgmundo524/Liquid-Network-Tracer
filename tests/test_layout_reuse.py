@@ -137,7 +137,7 @@ class ReuseTests(unittest.TestCase):
 
     def test_pre_horizontal_spacing_previews_are_not_reused(self):
         original_report = read_json(self.path / 'layout-report.json')
-        for value in (None, {'version': 0}):
+        for value in (None, {'version': 0}, {'version': 1}):
             saved = copy.deepcopy(self.saved)
             if value is None:
                 saved['layout'].pop('horizontal_spacing', None)

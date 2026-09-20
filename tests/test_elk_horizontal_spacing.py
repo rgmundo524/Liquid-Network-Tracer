@@ -39,7 +39,7 @@ class HorizontalSpacingIntegrationTests(unittest.TestCase):
         for edge in result["edges"]:
             source, target = nodes[edge["source"]], nodes[edge["target"]]
             gap = target["x"] - target["width"] / 2 - source["x"] - source["width"] / 2
-            self.assertGreaterEqual(gap, 200 - 1e-6)
+            self.assertGreaterEqual(gap, 150 - 1e-6)
             box = caption_box(edge, [(p["x"], p["y"]) for p in edge["route"]])
             self.assertAlmostEqual(box[2] - box[0], caption_size(edge)["width"])
             self.assertGreater(box[0], source["x"] + source["width"] / 2)

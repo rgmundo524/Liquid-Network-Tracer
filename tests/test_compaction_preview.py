@@ -13,6 +13,7 @@ from unittest.mock import patch
 from liquid_tracer.cli import (latest_compaction_preview, main, saved_graph, sync_run,
                                verified_compaction_preview, verify_export)
 from liquid_tracer.common import TraceError, digest, read_json, save_json
+from liquid_tracer.compaction import LINKED_HORIZONTAL
 from liquid_tracer.compaction_preview import FILES, export_compaction, service_fingerprint
 from liquid_tracer.investigations import create_investigation, read_case, update_case
 from liquid_tracer.services import set_service
@@ -27,7 +28,7 @@ def report():
             "before": copy.deepcopy(metrics), "after": copy.deepcopy(metrics),
             "moved_addresses": 0, "moved_components": 0, "accepted_moves": 0,
             "skipped_moves": 0, "truncated": False, "unchanged": True,
-            "clearances": {"linked_horizontal": 200, "node_node": 80, "components": 120,
+            "clearances": {"linked_horizontal": LINKED_HORIZONTAL, "node_node": 80, "components": 120,
                            "edge_node": 60, "edge_edge": 22},
             "labels_estimated": True, "miro_routes_exact": False}
 

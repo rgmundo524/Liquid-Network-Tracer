@@ -11,9 +11,10 @@ from heapq import heappop, heappush
 from statistics import median
 
 
-COLUMN_GAP = 360
 ROW_GAP = 240
 NODE_SIZE = 160
+HORIZONTAL_NODE_GAP = 150
+COLUMN_GAP = NODE_SIZE + HORIZONTAL_NODE_GAP
 COMPONENT_GAP = 120
 
 

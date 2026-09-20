@@ -1,6 +1,6 @@
 """Remove redundant horizontal gaps without changing ELK's organization.
 
-Center captions occupy extra ELK layers. The usual 200-unit layer clearance is
+Center captions occupy extra ELK layers. The configured layer clearance is
 then charged on each side of a caption. Protected horizontal intervals let us
 remove some of that duplicate padding while keeping nodes, captions and route
 channels rigid. Every y coordinate, dimension and port offset stays unchanged.
@@ -10,10 +10,11 @@ from bisect import bisect_right
 import math
 
 from .common import TraceError
+from .layout import HORIZONTAL_NODE_GAP
 
 
-HORIZONTAL_SPACING_VERSION = 1
-_NODE_GUARD = 100.0  # Two real nodes retain the existing 200-unit clearance.
+HORIZONTAL_SPACING_VERSION = 2
+_NODE_GUARD = HORIZONTAL_NODE_GAP / 2  # Two nodes retain the configured clearance.
 _LABEL_GUARD = 16.0
 _ROUTE_GUARD = 11.0  # Two vertical route channels retain 22 units.
 _EPS = 1e-6

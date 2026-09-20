@@ -13,13 +13,14 @@ from collections import defaultdict
 from itertools import product
 
 from .common import TraceError
+from .layout import HORIZONTAL_NODE_GAP
 from .miro_frames import _padded
 from .elk_layout import ALGORITHM, _default_attachments, _validate_graph, attachment_point, segment_hits_node, layout_metrics
 from .layout_search_reporting import public_search_counts
 from .edge_labels import caption_box, translate_label
 
 ALGORITHM_COMPACTION = "local_address_components_v1"
-LINKED_HORIZONTAL = 200.0
+LINKED_HORIZONTAL = float(HORIZONTAL_NODE_GAP)
 NODE_SPACING = 80.0
 COMPONENT_SPACING = 120.0
 # ELK uses 35 within a layer and 60 between layers. Addresses can leave their

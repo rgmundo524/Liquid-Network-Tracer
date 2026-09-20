@@ -64,7 +64,7 @@ class CompactionTests(unittest.TestCase):
         before = copy.deepcopy(original)
         result = compact_graph(original)
         self.assertEqual(original, before)
-        self.assertEqual(result["nodes"][1]["x"], 300)
+        self.assertEqual(result["nodes"][1]["x"], 250)
         self.assertEqual(result["nodes"][0], original["nodes"][0])
         self.assertEqual(result["nodes"][1]["x"] - result["nodes"][0]["x"] - 100, LINKED_HORIZONTAL)
         report = result["layout"]["compaction"]
@@ -77,7 +77,7 @@ class CompactionTests(unittest.TestCase):
         original = graph([node("a", "address", 0, 1000), node("t", "transaction", 1000)], [edge("e", "a", "t")])
         result = compact_graph(original)
         moved = result["nodes"][0]
-        self.assertEqual((moved["x"], moved["y"]), (700, 300))
+        self.assertEqual((moved["x"], moved["y"]), (750, 300))
         self.assertLess(result["layout"]["compaction"]["after"]["main"]["height"],
                         result["layout"]["compaction"]["before"]["main"]["height"])
         self.assert_ports(result)
@@ -87,7 +87,7 @@ class CompactionTests(unittest.TestCase):
                           node("u", "transaction", 2000, column=5)],
                          [edge("one", "t", "a"), edge("two", "a", "u")])
         result = compact_graph(original)
-        self.assertEqual(result["nodes"][1]["x"], 300)
+        self.assertEqual(result["nodes"][1]["x"], 250)
         self.assertEqual(result["nodes"][1]["column"], 4)
         self.assertEqual([result["nodes"][i] for i in (0, 2)], [original["nodes"][i] for i in (0, 2)])
         self.assertEqual(result["layout"]["compaction"]["before"]["main"]["edge_length"],
@@ -157,7 +157,7 @@ class CompactionTests(unittest.TestCase):
         self.assertLess(report["after"]["main"]["area"], report["before"]["main"]["area"])
         self.assertEqual(result["activity_frames"], original["activity_frames"])
         first, last = result["nodes"][2:]
-        self.assertEqual(last["x"] - first["x"], 300)
+        self.assertEqual(last["x"] - first["x"], 250)
         self.assertEqual(last["y"] - first["y"], 0)
         self.assertTrue(abs(first["y"] - result["nodes"][0]["y"]) >= 100 + COMPONENT_SPACING
                         or first["x"] - result["nodes"][1]["x"] >= 100 + COMPONENT_SPACING)
