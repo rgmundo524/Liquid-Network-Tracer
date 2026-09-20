@@ -15,12 +15,14 @@ import signal
 import subprocess
 import time
 from collections import defaultdict
+from concurrent.futures import CancelledError
 from pathlib import Path
 
 from .common import TraceError
 from .elk_errors import ELK_FATAL_FAILURE_CODES, ElkWorkerFailure
+from .elk_parallel import POLL_SECONDS, iter_attempts
 from .processes import defer_cancellation_during_spawn
-from .render_runtime import renderer_failure, renderer_failure_code, renderer_heap_mb
+from .render_runtime import renderer_failure, renderer_failure_code, renderer_heap_mb, renderer_peak_rss_mb
 from .edge_labels import FONT_SIZE, LABEL_LAYOUT_VERSION, caption_size, caption_text, route_signature
 from .input_order import input_orders, input_order_metadata
 from .attachment_order import attachment_order_metrics
@@ -262,7 +264,7 @@ def _report_progress(progress, message, *, completed=0, elapsed_seconds=None, st
             pass  # An advisory progress sink must not change layout behavior.
 
 
-def _worker(graph, seeds, progress=None):
+def _worker(graph, seeds, progress=None, *, heap_mb=None, cancel_event=None):
     project = Path(os.environ.get("LIQUID_TRACER_ROOT", Path(__file__).resolve().parents[1]))
     runner = project / "layout" / "run.mjs"
     node = os.environ.get("LIQUID_NODE_BIN") or shutil.which("node")
@@ -270,7 +272,9 @@ def _worker(graph, seeds, progress=None):
         raise TraceError("LIQUID_NODE_BIN must be an absolute path to the pinned Node executable")
     if not node or not runner.is_file() or not (runner.parent / "node_modules" / "elkjs" / "package.json").is_file():
         raise TraceError("Local ELK dependencies are unavailable. Enter the project devenv shell and run liquid-layout-setup")
-    heap_mb = renderer_heap_mb()
+    heap_mb = renderer_heap_mb() if heap_mb is None else heap_mb
+    if type(heap_mb) is not int or heap_mb < 1:
+        raise TraceError("The local ELK worker requires a positive heap budget")
     node_count, edge_count = len(graph.get("children", [])), len(graph.get("edges", []))
     graph_size = f"{node_count:,} objects, {edge_count:,} connections"
     context = f"{graph_size}; Node heap budget {heap_mb:,} MiB"
@@ -279,27 +283,42 @@ def _worker(graph, seeds, progress=None):
     environment = {name: os.environ[name] for name in ("PATH", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT") if name in os.environ}
     process = None
     try:
+        if cancel_event is not None and cancel_event.is_set():
+            raise CancelledError()
         _report_progress(progress, f"Calculating local ELK layout ({context}); cancel to stop",
                          stage="calculating", node_count=node_count, edge_count=edge_count, heap_mb=heap_mb)
         with defer_cancellation_during_spawn():
             process = subprocess.Popen([node, f"--max-old-space-size={heap_mb}", str(runner)],
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE, text=True, env=environment, start_new_session=True)
+        # Signals are handled by the main thread. It can cancel while this
+        # thread is inside Popen; ownership is established before we unwind.
+        if cancel_event is not None and cancel_event.is_set():
+            raise CancelledError()
         started = time.monotonic()
+        last_report = 0
         payload = json.dumps({"graph": graph, "seeds": seeds})
         while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise CancelledError()
             try:
                 # communicate resumes pipe reads/writes after TimeoutExpired;
                 # passing input again would duplicate the request. Its timeout
                 # only lets us report that this local calculation is active.
-                output, errors = process.communicate(payload, timeout=PROGRESS_INTERVAL_SECONDS)
+                output, errors = process.communicate(
+                    payload, timeout=POLL_SECONDS if cancel_event is not None else PROGRESS_INTERVAL_SECONDS)
                 break
             except subprocess.TimeoutExpired:
                 payload = None
                 elapsed = max(0, int(time.monotonic() - started))
+                if elapsed < last_report + PROGRESS_INTERVAL_SECONDS:
+                    continue
+                last_report = elapsed
                 _report_progress(progress, f"Calculating local ELK layout ({context}; {elapsed:,} seconds elapsed); cancel to stop",
                                  elapsed_seconds=elapsed, stage="calculating",
                                  node_count=node_count, edge_count=edge_count, heap_mb=heap_mb)
+        if cancel_event is not None and cancel_event.is_set():
+            raise CancelledError()
         if process.returncode:
             detail = renderer_failure(errors, process.returncode, "ELK", heap_mb)
             failure_code = renderer_failure_code(errors, process.returncode, "ELK")
@@ -312,6 +331,10 @@ def _worker(graph, seeds, progress=None):
             raise ValueError("invalid worker response")
         if not len(seeds) <= len(result["candidates"]) <= 2 * len(seeds):
             raise ValueError("missing candidates")
+        peak_rss_mb = renderer_peak_rss_mb(errors)
+        if peak_rss_mb is not None:
+            _report_progress(progress, f"Measured ELK worker peak RAM: {peak_rss_mb:,} MiB",
+                             stage="memory_measured", peak_rss_mb=peak_rss_mb)
         return result["candidates"]
     except OSError as exc:
         raise TraceError("The local ELK worker could not start or communicate; check the Node executable and local system resources. "
@@ -644,13 +667,13 @@ def fallback_graph(graph, connector_style="straight", reason="size_limit"):
 
 
 def optimize_graph(graph, connector_style="straight", progress=None, *, layout_attempts=None):
-    """Compare sequential ELK attempts without application size or time ceilings.
+    """Compare bounded parallel ELK attempts without graph size or time ceilings.
 
-    Only the current seed's candidates and the best result are retained. A
-    worker-process failure skips that seed, retaining earlier valid results.
-    Invalid data and cancellation still abort the search. The input graph is
-    never modified. Quality measurement has a separate work budget that never
-    removes graph elements.
+    A bounded candidate batch and the best result are retained. Possible memory
+    failures retry alone with the full heap budget, then remain sequential.
+    Other worker-process failures skip a seed, retaining earlier valid results.
+    Invalid data and cancellation abort the search. The input is never modified.
+    Quality measurement has its own work budget and never removes graph elements.
     """
     nodes = _validate_graph(graph, connector_style)
     attempts = normalize_layout_attempts(
@@ -673,23 +696,15 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
     candidate_count = 0
     successful_count = 0
     failed_attempts = []
-    for index, seed in enumerate(seeds, 1):
+    execution = {}
+    for index, seed, candidates in iter_attempts(request, seeds, _worker, attempt_progress, execution):
         report = attempt_progress(index, seed)
-        # This choice depends on graph size and attempt position, never the
-        # requested total. Increasing the count therefore preserves the prefix
-        # of candidates, including the historical first three small-graph runs.
-        profile = "balanced" if len(request["children"]) <= 300 and index == 1 else "flow_weighted"
-        if request["children"]:
-            try:
-                candidates = _worker({**request, "branchProfile": profile}, [seed], progress=report)
-            except ElkWorkerFailure as exc:
-                failed_attempts.append({"attempt_index": index, "seed": seed, "failure_code": exc.failure_code})
-                _report_progress(report, "ELK layout attempt failed; retaining completed layouts and continuing the search",
-                                 stage="attempt_failed", attempted_count=index, successful_count=successful_count,
-                                 failed_count=len(failed_attempts), failure_code=exc.failure_code)
-                continue
-        else:
-            candidates = [{"seed": seed, "nodes": [], "edges": [], "branchProfile": profile}]
+        if isinstance(candidates, ElkWorkerFailure):
+            failed_attempts.append({"attempt_index": index, "seed": seed, "failure_code": candidates.failure_code})
+            _report_progress(report, "ELK layout attempt failed; retaining completed layouts and continuing the search",
+                             stage="attempt_failed", attempted_count=index, successful_count=successful_count,
+                             failed_count=len(failed_attempts), failure_code=candidates.failure_code)
+            continue
         candidate_count += len(candidates)
         while candidates:
             candidate = candidates.pop(0)
@@ -732,7 +747,7 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
         failure_codes = {attempt["failure_code"] for attempt in failed_attempts}
         codes = ", ".join(sorted(failure_codes))
         guidance = (" Memory exhaustion was reported. Close other applications and retry this saved run; "
-                    "automatic heap budgets are recalculated before each attempt."
+                    "automatic heap budgets are recalculated before each batch or standalone attempt."
                     if failure_codes & {"heap_exhausted", "memory_exhausted"} else "")
         if not guidance and "worker_killed" in failure_codes:
             guidance = " A worker was killed; memory exhaustion is possible but unconfirmed."
@@ -778,7 +793,7 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
                                   "seeds": list(seeds), "candidate_count": candidate_count,
                                   "attempted_count": attempts, "successful_count": successful_count,
                                   "failed_count": len(failed_attempts), "failed_attempts": failed_attempts,
-                                  "selected_seed": seed, "execution": "sequential"}
+                                  "selected_seed": seed, **execution}
     result.setdefault("graph_options", {})["layout_attempts"] = attempts
     _report_progress(report, "Local ELK layout ready" if not failed_attempts
                      else "Best completed ELK layout ready; some layout attempts failed",

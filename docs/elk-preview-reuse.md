@@ -13,7 +13,7 @@ layout-report.json, graph.svg and the completed graph.html are required.
 The saved run, case/network namespace, node/edge identities, labels, dimensions,
 colors, service settings, fee visibility, connector style, label-layout and
 input-order and horizontal-spacing revisions, search version, attempt count and deterministic seed sequence must match. The current graph is rebuilt from verified archived
-evidence before comparison.
+evidence before comparison. Sequential and parallel searches with the same candidate settings are compatible; changing worker count or available RAM does not invalidate a completed preview.
 Incomplete, stale, malformed or symlinked previews are ignored. An unmatched
 request still uses ELK, without imposing new time/size limits or a fallback engine.
 Custom external `--out` directories are not searched automatically.
@@ -41,7 +41,7 @@ always targets the full trace, not a filtered connection-only chart.
 Progress now distinguishes preparing ELK input, measuring the input layout,
 running the ELK worker, validating its returned coordinates, measuring the output,
 and building the Miro publication plan. During the worker calculation it reports
-object/connection counts, Node heap budget, elapsed time, and the current layout attempt out of the configured total. These are activity
+object/connection counts, per-worker and shared Node heap budgets, active worker count, elapsed time, and the current layout attempt out of the configured total. Parallel attempts can report progress in a different order, while final scoring remains in seed order. These are activity
 indicators, not an estimated completion percentage. No credentials or arbitrary
 worker/API text are copied into progress messages. A failed attempt reports a
 fixed warning and continues; completion reports how many attempts succeeded and

@@ -3,6 +3,7 @@
 import contextlib
 import copy
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,6 +22,7 @@ from tests.fixtures import A, fixture
 
 class PartialLayoutWorkflows(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.dict(os.environ, {"LIQUID_ELK_WORKERS": "1"}))
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.case = Path(temporary.name) / "case"
@@ -40,11 +42,11 @@ class PartialLayoutWorkflows(unittest.TestCase):
         return {str(path.relative_to(directory)): path.read_bytes()
                 for path in directory.rglob("*") if path.is_file()}
 
-    def worker_with_failed_third_seed(self, graph, seeds, progress=None):
+    def worker_with_failed_third_seed(self, graph, seeds, progress=None, **kwargs):
         self.calls.extend(seeds)
         if seeds == [19]:
             raise ElkWorkerFailure("Synthetic engine failure", failure_code="unknown_exit", returncode=1)
-        return _worker(graph, seeds, progress=progress)
+        return _worker(graph, seeds, progress=progress, **kwargs)
 
     def preview(self, *, compact=False):
         action = compact_preview_run if compact else layout_preview_run

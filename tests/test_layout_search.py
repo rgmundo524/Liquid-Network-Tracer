@@ -1,4 +1,4 @@
-"""Sequential candidate search keeps large graphs intact and memory bounded."""
+"""Candidate search keeps large graphs intact and serial mode remains supported."""
 
 import copy
 import json
@@ -38,6 +38,7 @@ class LayoutSearchTests(unittest.TestCase):
         self.assertEqual(normalize_layout_attempts(), 25)
         self.assertEqual(normalize_layout_attempts(1000), 1000)
 
+    @patch.dict(os.environ, {"LIQUID_ELK_WORKERS": "1"})
     def test_large_graph_uses_all_default_seeds_one_worker_call_at_a_time(self):
         graph = disconnected_graph(301)
         before = copy.deepcopy(graph)
@@ -60,6 +61,7 @@ class LayoutSearchTests(unittest.TestCase):
         self.assertEqual(len(result["nodes"]), 301)
         self.assertEqual(graph, before)
 
+    @patch.dict(os.environ, {"LIQUID_ELK_WORKERS": "1"})
     def test_small_graph_profile_prefix_does_not_depend_on_requested_count(self):
         graph = disconnected_graph(2)
         observed = []
@@ -83,6 +85,7 @@ class LayoutSearchTests(unittest.TestCase):
         self.assertEqual([node["id"] for node in result["nodes"]], [node["id"] for node in graph["nodes"]])
         self.assertEqual(result["layout"]["search"]["seeds"], list(layout_seeds(4)))
 
+    @patch.dict(os.environ, {"LIQUID_ELK_WORKERS": "1"})
     def test_candidate_geometry_is_released_before_next_seed(self):
         class Candidate(dict):
             pass
@@ -152,6 +155,7 @@ class LayoutSearchTests(unittest.TestCase):
                 optimize_graph(graph, layout_attempts=3)
             self.assertEqual(graph, before)
 
+    @patch.dict(os.environ, {"LIQUID_ELK_WORKERS": "1"})
     def test_progress_metadata_includes_worker_heartbeat_and_every_stage(self):
         graph = crossing_graph()
         request, _, _ = _request_graph(graph)
@@ -166,6 +170,7 @@ class LayoutSearchTests(unittest.TestCase):
         events = []
         with patch.dict(os.environ, {"LIQUID_TRACER_ROOT": str(ROOT), "LIQUID_NODE_BIN": "/synthetic/node"}), \
                 patch("pathlib.Path.is_file", return_value=True), \
+                patch("liquid_tracer.elk_layout.time.monotonic", side_effect=[0, 5, 10, 15]), \
                 patch("liquid_tracer.elk_layout.subprocess.Popen", side_effect=processes):
             optimize_graph(graph, progress=events.append, layout_attempts=2)
         self.assertTrue(all(event["attempt_total"] == 2 for event in events))
@@ -189,5 +194,12 @@ class LayoutSearchWorkerTests(unittest.TestCase):
         graph = crossing_graph()
         first = optimize_graph(graph, layout_attempts=4)
         second = optimize_graph(graph, layout_attempts=4)
+        for result in (first, second):
+            search = result["layout"]["search"]
+            self.assertGreater(search["peak_rss_mb"], 0)
+            # Available memory and measured peak RSS can vary across runs;
+            # neither may change the selected graph or its quality metrics.
+            for field in ("execution", "worker_count", "peak_rss_mb", "memory_retry_count"):
+                search.pop(field, None)
         self.assertEqual(first, second)
         self.assertIn(first["layout"]["metrics"]["candidate_count"], range(4, 9))

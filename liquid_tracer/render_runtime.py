@@ -10,6 +10,7 @@ from .common import TraceError
 
 _MIB = 1024 * 1024
 _SETTING = "LIQUID_RENDER_HEAP_MB"
+_WORKER_SETTING = "LIQUID_ELK_WORKERS"
 
 
 def _read(path):
@@ -100,6 +101,88 @@ def renderer_heap_mb():
     return min(budget, 2147483647)
 
 
+def _cgroup_cpu_counts():
+    """Read CPU quotas from the usual Linux cgroup mounts and ancestors."""
+    roots = [(Path("/sys/fs/cgroup"), ""),
+             (Path("/sys/fs/cgroup/cpu"), "cpu"),
+             (Path("/sys/fs/cgroup/cpu,cpuacct"), "cpu"),
+             (Path("/sys/fs/cgroup/cpuacct,cpu"), "cpu")]
+    groups = []
+    for line in _read("/proc/self/cgroup").splitlines():
+        parts = line.split(":", 2)
+        if len(parts) == 3:
+            groups.append((parts[1].split(","), Path(parts[2].lstrip("/"))))
+    values = []
+    for root, controller in roots:
+        paths = {root}
+        for controllers, relative in groups:
+            if controller not in controllers or ".." in relative.parts:
+                continue
+            current = root / relative
+            while current != root:
+                paths.add(current)
+                current = current.parent
+        for path in paths:
+            if controller:
+                quota = _number(path / "cpu.cfs_quota_us")
+                period = _number(path / "cpu.cfs_period_us")
+            else:
+                fields = _read(path / "cpu.max").split()
+                if len(fields) != 2 or not all(re.fullmatch(r"[0-9]{1,20}", field) for field in fields):
+                    continue
+                quota, period = map(int, fields)
+            if quota is not None and period is not None and quota > 0 and period > 0:
+                # Fractional quotas still allow one worker, but do not justify
+                # another CPU-bound process competing for the same allowance.
+                values.append(max(1, quota // period))
+    return values
+
+
+def _available_cpu_count():
+    """Use the tightest known CPU count, affinity mask, or cgroup quota."""
+    values = []
+    count = os.cpu_count()
+    if count is not None and count > 0:
+        values.append(count)
+    try:
+        affinity_count = len(os.sched_getaffinity(0))
+        if affinity_count > 0:
+            values.append(affinity_count)
+    except (AttributeError, OSError, NotImplementedError):
+        pass
+    values.extend(_cgroup_cpu_counts())
+    return min(values) if values else 1
+
+
+def elk_worker_budget(attempts, *, peak_rss_mb=None):
+    """Return worker count, total heap MiB, and an equal per-worker heap cap.
+
+    The first worker gets the entire allowance. Once its peak process memory is
+    measured, concurrent workers each receive at least twice that measured peak
+    (and at least 1024 MiB). The caller must wait for a whole batch to finish
+    before requesting another budget, using the largest observed peak so far.
+    LIQUID_RENDER_HEAP_MB is shared, never multiplied by the worker count.
+    Mermaid retains its single-render budget.
+    """
+    if type(attempts) is not int or attempts < 1:
+        raise TraceError("ELK layout attempts must be a positive integer")
+    value = os.environ.get(_WORKER_SETTING, "auto").strip().lower()
+    if value == "auto":
+        ceiling = 64
+    elif re.fullmatch(r"[0-9]{1,2}", value) and 1 <= int(value) <= 64:
+        ceiling = int(value)
+    else:
+        raise TraceError(f"{_WORKER_SETTING} must be auto or an integer from 1 to 64; set it in devenv.nix")
+    if peak_rss_mb is not None and (type(peak_rss_mb) is not int or not 1 <= peak_rss_mb <= 2147483647):
+        raise TraceError("ELK worker peak memory must be a positive integer in MiB")
+    total_heap_mb = renderer_heap_mb()
+    if peak_rss_mb is None:
+        return 1, total_heap_mb, total_heap_mb
+    memory_workers = max(1, total_heap_mb // max(1024, 2 * peak_rss_mb))
+    workers = min(ceiling, attempts, _available_cpu_count(), memory_workers)
+    return workers, total_heap_mb, total_heap_mb // workers
+
+
 _ELK_FAILURE_DETAILS = {
     "elk_invalid_request": "The local ELK worker rejected its generated layout request.",
     "elk_invalid_output": "The local ELK worker could not validate or encode the engine's returned layout.",
@@ -135,6 +218,24 @@ def _stderr_excerpt(stderr):
     if not isinstance(stderr, str):
         stderr = ""
     return stderr if len(stderr) <= 131072 else stderr[:65536] + "\n" + stderr[-65536:]
+
+
+def renderer_peak_rss_mb(stderr):
+    """Read bounded ELK memory telemetry without returning arbitrary stderr."""
+    prefix = "LIQUID_ELK_USAGE "
+    for line in reversed(_stderr_excerpt(stderr).splitlines()):
+        if not line.startswith(prefix) or len(line) > 4096:
+            continue
+        try:
+            payload = json.loads(line[len(prefix):])
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(payload, dict) or type(payload.get("version")) is not int or payload["version"] != 1:
+            continue
+        peak = payload.get("peak_rss_mb")
+        if type(peak) is int and 1 <= peak <= 2147483647:
+            return peak
+    return None
 
 
 def _elk_failure_diagnostic(stderr):

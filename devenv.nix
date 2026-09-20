@@ -33,10 +33,14 @@
     # local files and never needs API credentials or a separate server.
     LIQUID_MERMAID_BIN = "${pkgs.mermaid-cli}/bin/mmdc";
     LIQUID_NODE_BIN = "${pkgs.nodejs_24}/bin/node";
-    # V8 old-space budget for ELK and Mermaid, chosen at each render. Auto uses
-    # 90% of available RAM, accounting for standard Linux cgroup limits. A number
-    # sets MiB explicitly, e.g. "32768" for a 32 GiB heap on a 64 GiB workstation.
+    # Total V8 old-space allowance, shared by concurrent ELK workers. Mermaid
+    # uses the allowance for one renderer. Auto uses 90% of available RAM,
+    # accounting for Linux cgroup limits; a number sets total MiB explicitly.
     LIQUID_RENDER_HEAP_MB = "auto";
+    # Auto measures the first ELK attempt, then sizes parallel batches from
+    # peak RAM with 2x headroom, available CPUs and the shared memory budget.
+    # Set 1 for serial execution or 1..64 as an explicit concurrency ceiling.
+    LIQUID_ELK_WORKERS = "auto";
   };
 
   # SecretSpec's runtime dotenv provider is supported as an alternative to

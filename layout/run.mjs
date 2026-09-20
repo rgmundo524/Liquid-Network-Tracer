@@ -209,6 +209,18 @@ try {
   }
   diagnostic.stage = 'serialize';
   process.stdout.write(JSON.stringify({version: '0.12.0', candidates}));
+  // Include parsing, both layout passes and result serialization in the OS
+  // high-water mark. This is process RAM, not just the JavaScript heap. Keep
+  // advisory telemetry separate from the geometry response and never include
+  // graph labels, paths, environment values or arbitrary runtime messages.
+  try {
+    const peakRssMiB = Math.ceil(process.resourceUsage().maxRSS / 1024);
+    if (Number.isSafeInteger(peakRssMiB) && peakRssMiB > 0 && peakRssMiB <= 2147483647) {
+      process.stderr.write(`LIQUID_ELK_USAGE ${JSON.stringify({version: 1, peak_rss_mb: peakRssMiB})}\n`);
+    }
+  } catch {
+    // A missing measurement leaves the Python scheduler in serial mode.
+  }
 } catch (error) {
   // Do not echo user graph input, parser excerpts, paths, or environment values.
   process.stderr.write(`LIQUID_ELK_FAILURE ${JSON.stringify({...diagnostic, code: failureCode(error)})}\n`);
