@@ -12,6 +12,7 @@ from .api import ENTERPRISE, Esplora, Limits
 from .hop_limits import UNSET
 from .address_counts import apply_saved_counts, ensure_counts, ensure_graph_counts
 from .boards import create_board
+from .board_rebuild import rebuild_board
 from .common import HEX64, TraceError, digest, load_labels, output_kind, parse_outpoint, read_json, save_json
 from .export import build_graph, export_run
 from .investigations import read_case, update_case, validate_settings
@@ -239,6 +240,13 @@ def parser():
     board.add_argument("--team-id", help="Optional destination Miro team ID")
     board.add_argument("--visibility", choices=["private", "team"], default="private",
                        help="Private or editable by the destination team (default: private)")
+    rebuild = commands.add_parser("miro-rebuild-board", help="Rebuild the current saved graph on a new private Miro board; preserve the old board")
+    rebuild.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    rebuild.add_argument("--run", default="latest", help="Saved run ID (default: latest; a retry retains its original run)")
+    rebuild.add_argument("--source-board", required=True, help="Currently linked board ID or URL; keep this original value when retrying")
+    rebuild.add_argument("--name", help="New board name (default: investigation name, at most 60 characters)")
+    rebuild.add_argument("--max-new-items", type=int, default=750,
+                         help="Maximum new shapes plus connectors; the entire graph must fit before board creation")
     migration = commands.add_parser("miro-merge-addresses", help="Review or resume in-place conversion to shared address circles")
     migration.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     migration.add_argument("--board", help="Existing mapped board (default: saved case board)")
@@ -1144,6 +1152,9 @@ def main(argv=None, *, progress=None):
             print(json.dumps(csv_run(args.case, args.run, args.out, args.include_fees), indent=2))
         elif args.command == "miro-create-board":
             print(json.dumps(create_board(args.case, args.name, args.team_id, args.visibility), indent=2))
+        elif args.command == "miro-rebuild-board":
+            print(json.dumps(rebuild_board(args.case, args.run, args.source_board, args.name,
+                                           args.max_new_items, progress=progress), indent=2))
         elif args.command == "miro-merge-addresses":
             from .address_migration import preview_merge, apply_merge
             result = (preview_merge(args.case, args.board) if args.dry_run else
