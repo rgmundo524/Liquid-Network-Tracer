@@ -15,6 +15,7 @@ from tests.test_layout_search import disconnected_graph
 
 
 class FailedSeedSearchTests(unittest.TestCase):
+    @patch.dict(os.environ, {"LIQUID_ELK_WORKERS": "1"})
     def test_failed_third_seed_retains_earlier_best_and_attempts_later_seeds(self):
         graph = disconnected_graph(2)
         original = copy.deepcopy(graph)
@@ -72,6 +73,7 @@ class FailedSeedSearchTests(unittest.TestCase):
             self.assertEqual(len(result["nodes"]), 4)
             self.assertEqual(len(result["edges"]), 2)
 
+    @patch.dict(os.environ, {"LIQUID_ELK_WORKERS": "1"})
     def test_all_failed_seeds_raise_without_a_result_or_mutating_input(self):
         graph = crossing_graph()
         original = copy.deepcopy(graph)
@@ -89,6 +91,7 @@ class FailedSeedSearchTests(unittest.TestCase):
         self.assertNotIn("private worker detail", str(caught.exception) + json.dumps(events))
         self.assertFalse(any(event["stage"] in ("ready", "ready_with_failures") for event in events))
 
+    @patch.dict(os.environ, {"LIQUID_ELK_WORKERS": "1"})
     def test_setup_validation_and_cancellation_abort_even_with_a_completed_candidate(self):
         graph = crossing_graph()
         original = copy.deepcopy(graph)
@@ -114,6 +117,7 @@ class FailedSeedSearchTests(unittest.TestCase):
         self.assertNotIn("Memory exhaustion was reported", str(caught.exception))
         self.assertNotIn("private worker detail", str(caught.exception))
 
+    @patch.dict(os.environ, {"LIQUID_ELK_WORKERS": "1"})
     def test_invalid_geometry_is_not_skipped_after_a_valid_candidate(self):
         graph = crossing_graph()
 

@@ -10,9 +10,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from liquid_tracer.elk_layout import _worker
+from liquid_tracer.elk_layout import _worker, optimize_graph
 from liquid_tracer.mermaid import _render
 from liquid_tracer.processes import defer_cancellation_during_spawn
+from tests.test_elk_layout import crossing_graph, synthetic_candidate
 
 
 def interrupt(signum, frame):
@@ -21,6 +22,84 @@ def interrupt(signum, frame):
 
 @unittest.skipUnless(os.name == "posix", "Renderer process groups require POSIX")
 class RendererCancellationTests(unittest.TestCase):
+    def test_parallel_signal_during_spawn_reaps_every_renderer_and_descendant(self):
+        real_popen = subprocess.Popen
+        child_script = (
+            "import itertools,pathlib,sys,time\n"
+            "p=pathlib.Path(sys.argv[1])\n"
+            "for tick in itertools.count(): p.write_text(str(tick)); time.sleep(.01)\n"
+        )
+        parent_script = (
+            "import subprocess,sys\n"
+            "child=subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]])\n"
+            "child.wait()\n"
+        )
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signum=signum), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                layout = root / "layout"
+                (layout / "node_modules" / "elkjs").mkdir(parents=True)
+                (layout / "run.mjs").write_text("// Synthetic worker")
+                (layout / "node_modules" / "elkjs" / "package.json").write_text("{}")
+                processes, tick_files, returned = [], [], []
+                lock, both_spawned = threading.Lock(), threading.Barrier(2)
+
+                def launch_then_signal(*args, **kwargs):
+                    with lock:
+                        index = len(processes)
+                        tick_file = root / f"child-{index}.tick"
+                        process = real_popen([sys.executable, "-c", parent_script,
+                                              child_script, str(tick_file)], **kwargs)
+                        processes.append(process)
+                        tick_files.append(tick_file)
+                    deadline = time.monotonic() + 5
+                    while not tick_file.exists() and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    self.assertTrue(tick_file.exists(), "Renderer descendant did not start")
+                    both_spawned.wait(timeout=5)
+                    if index == 1:
+                        # The main thread handles the signal while this worker
+                        # still owns a newly spawned, not-yet-returned process.
+                        os.kill(os.getpid(), signum)
+                        time.sleep(.05)
+                    returned.append(process.pid)
+                    return process
+
+                def worker(request, seeds, progress=None, **kwargs):
+                    if seeds == [1]:
+                        progress({"stage": "memory_measured", "peak_rss_mb": 512})
+                        return synthetic_candidate(request, seeds)
+                    return _worker(request, seeds, progress=progress, **kwargs)
+
+                def budget(attempts, *, peak_rss_mb=None):
+                    count = min(attempts, 2) if peak_rss_mb else 1
+                    return count, 8192, 8192 // count
+
+                previous = signal.signal(signum, interrupt)
+                try:
+                    with patch.dict(os.environ, {"LIQUID_TRACER_ROOT": str(root),
+                                                  "LIQUID_NODE_BIN": sys.executable}), \
+                            patch("liquid_tracer.elk_parallel.elk_worker_budget", side_effect=budget), \
+                            patch("liquid_tracer.elk_layout._worker", side_effect=worker), \
+                            patch("liquid_tracer.elk_layout.subprocess.Popen", side_effect=launch_then_signal), \
+                            self.assertRaises(KeyboardInterrupt):
+                        optimize_graph(crossing_graph(), layout_attempts=7)
+                    self.assertEqual(len(processes), 2, "Cancellation launched another attempt")
+                    self.assertCountEqual(returned, [process.pid for process in processes])
+                    self.assertTrue(all(process.returncode is not None for process in processes),
+                                    "A renderer parent was not reaped")
+                    self.assertIs(signal.getsignal(signum), interrupt)
+                    ticks = [path.read_text() for path in tick_files]
+                    time.sleep(.08)
+                    self.assertEqual([path.read_text() for path in tick_files], ticks,
+                                     "A renderer descendant survived cancellation")
+                finally:
+                    signal.signal(signum, previous)
+                    for process in processes:
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(process.pid, signal.SIGKILL)
+                        process.wait(timeout=5)
+
     def test_actual_signal_during_spawn_reaps_renderer_and_its_children(self):
         real_popen = subprocess.Popen
         child_script = (

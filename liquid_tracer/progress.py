@@ -38,8 +38,10 @@ ELK_STAGES = {
     "calculating": "Calculating the graph layout with ELK",
     "applying": "Validating ELK coordinates and connector routes",
     "measuring_output": "Measuring the completed ELK layout",
+    "memory_measured": "ELK worker memory measurement completed",
     "ready": "ELK layout completed",
     "attempt_failed": "ELK layout attempt failed; continuing the layout search",
+    "retrying_memory": "Retrying the ELK layout attempt alone with the full shared heap budget",
     "ready_with_failures": "ELK layout completed with failed attempts",
 }
 
@@ -49,6 +51,21 @@ _ELK_MEMORY_FAILURES = {
     "memory_exhausted": "renderer reported memory exhaustion; close other applications to free memory",
     "worker_killed": "worker was killed; memory exhaustion is possible but unconfirmed",
 }
+
+
+def _public_elk_workers(event, attempt_total):
+    """Keep concurrency counts consistent and memory caps within their shared pool."""
+    workers, active = event.get("worker_count"), event.get("active_workers")
+    if (type(workers) is not int or type(active) is not int
+            or not 1 <= workers <= (attempt_total or 1000)
+            or not 0 <= active <= workers):
+        return {}
+    value = {"worker_count": workers, "active_workers": active}
+    total_heap, heap = event.get("total_heap_mb"), event.get("heap_mb")
+    if (type(total_heap) is int and type(heap) is int
+            and 1 <= heap <= total_heap <= 2 ** 53 - 1):
+        value["total_heap_mb"] = total_heap
+    return value
 
 
 def public_progress(event):
@@ -69,12 +86,21 @@ def public_progress(event):
         stage = event.get("stage")
         if isinstance(stage, str) and stage in ELK_STAGES:
             value.update(stage=stage, message=ELK_STAGES[stage])
+        peak_rss = event.get("peak_rss_mb")
+        if (stage == "memory_measured" and type(peak_rss) is int
+                and 1 <= peak_rss <= 2 ** 31 - 1):
+            value.update(peak_rss_mb=peak_rss,
+                         message=f"Measured ELK worker peak RAM: {peak_rss:,} MiB")
         failure_code = event.get("failure_code")
         if (stage == "attempt_failed" and isinstance(failure_code, str)
                 and failure_code in _ELK_MEMORY_FAILURES):
             value["failure_code"] = failure_code
             value["message"] = ("ELK layout attempt failed: " + _ELK_MEMORY_FAILURES[failure_code]
                                 + "; continuing the layout search")
+        elif (stage == "retrying_memory" and isinstance(failure_code, str)
+                and failure_code in _ELK_MEMORY_FAILURES):
+            value["failure_code"] = failure_code
+            value["message"] += "; " + _ELK_MEMORY_FAILURES[failure_code]
         search_counts = public_search_counts(
             {**event, "attempt_count": event.get("attempt_count", event.get("attempt_total"))},
             allow_no_success=True)
@@ -96,7 +122,15 @@ def public_progress(event):
                 value[field] = number
         if "node_count" in value and "edge_count" in value:
             value["message"] += f" ({value['node_count']:,} objects, {value['edge_count']:,} connections)"
-        if "heap_mb" in value:
+        value.update(_public_elk_workers(event, value.get("attempt_total")))
+        if value.get("worker_count", 1) > 1:
+            value["message"] += (f"; up to {value['worker_count']} ELK workers"
+                                 f"; {value['active_workers']} active")
+            if "total_heap_mb" in value:
+                value["message"] += f"; shared heap budget {value['total_heap_mb']:,} MiB"
+            if "heap_mb" in value:
+                value["message"] += f"; per-worker Node heap budget {value['heap_mb']:,} MiB"
+        elif "heap_mb" in value:
             value["message"] += f"; Node heap budget {value['heap_mb']:,} MiB"
     if value["phase"] == "waiting":
         reason = event.get("reason")

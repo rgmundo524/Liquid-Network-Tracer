@@ -65,7 +65,21 @@ def _complete_search(search, metrics, attempts):
     """A partial-success preview still must describe every requested attempt."""
     counts = public_search_counts(search)
     if (not counts or counts["attempt_count"] != attempts or counts["attempted_count"] != attempts
-            or public_search_counts(metrics) != counts or search.get("execution") != "sequential"):
+            or public_search_counts(metrics) != counts or search.get("execution") not in ("sequential", "parallel")):
+        return False
+    # Execution scheduling does not alter the deterministic candidate sequence.
+    # Keep existing revision-3 sequential previews reusable, and validate the
+    # bounded scheduling metadata on new parallel previews without requiring
+    # the current machine to have the same CPU count or memory allowance.
+    workers = search.get("worker_count", 1)
+    retries = search.get("memory_retry_count", 0)
+    if (type(workers) is not int or not 1 <= workers <= min(64, attempts)
+            or type(retries) is not int or not 0 <= retries <= attempts
+            or (search["execution"] == "sequential" and (workers != 1 or retries != 0))
+            or (search["execution"] == "parallel" and workers < 2)):
+        return False
+    if "peak_rss_mb" in search and (type(search["peak_rss_mb"]) is not int
+                                      or not 1 <= search["peak_rss_mb"] <= 2147483647):
         return False
     seeds = search.get("seeds")
     if (not isinstance(seeds, list) or any(type(seed) is not int for seed in seeds)
