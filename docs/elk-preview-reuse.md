@@ -6,6 +6,7 @@ A matching preview reports **Reusing the completed ELK layout; no recalculation*
 Previews made before the current search revision 3, including the failed-attempt
 outcome metadata, are no longer reused. The earlier connector-label spacing,
 input ordering, horizontal spacing, change-output and small-jog corrections remain included.
+The current branch-organization revision 2 is also required, including the new branch-boundary candidate ordering and quality measurements.
 Choose **Refresh layout preview** to save a compatible replacement.
 Keep the entire preview directory, not just its SVG: graph.json,
 layout-report.json, graph.svg and the completed graph.html are required.

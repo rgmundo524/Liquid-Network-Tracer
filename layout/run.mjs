@@ -82,11 +82,11 @@ function validateInputOrder(graph, orders) {
   }
 }
 
-function layoutCandidate(result, seed, branchProfile, inputOrderPolicy) {
+function layoutCandidate(result, seed, branchProfile, inputOrderPolicy, branchBoundary) {
   // Snapshot data-only geometry before a second layout can mutate its request.
   // Sections contain nested points, so copying only their array is insufficient.
   return {
-    seed, branchProfile, inputOrderPolicy,
+    seed, branchProfile, inputOrderPolicy, branchBoundary,
     nodes: result.children.map(({id, x, y, width, height, ports}) =>
       ({id, x, y, width, height, ports: (ports || []).map(({id, x, y}) => ({id, x, y}))})),
     edges: result.edges.map(({id, sections, labels}) => ({id, sections: structuredClone(sections),
@@ -148,8 +148,22 @@ try {
     throw new Error('Invalid branch placement profile');
   }
   delete request.graph.branchProfile;
+  const boundaryOrdering = request.graph.boundaryOrdering === undefined ? false : request.graph.boundaryOrdering;
+  const branchNodeOrder = request.graph.branchNodeOrder;
+  delete request.graph.boundaryOrdering;
+  delete request.graph.branchNodeOrder;
+  if (typeof boundaryOrdering !== 'boolean') throw new Error('Invalid branch boundary ordering');
+  if (branchNodeOrder !== undefined) {
+    const childIds = new Set(request.graph.children.map(node => node.id));
+    if (!Array.isArray(branchNodeOrder) || branchNodeOrder.length !== childIds.size
+        || new Set(branchNodeOrder).size !== childIds.size
+        || branchNodeOrder.some(id => typeof id !== 'string' || !childIds.has(id))) {
+      throw new Error('Invalid branch boundary node order');
+    }
+  }
+  if (boundaryOrdering && !branchNodeOrder) throw new Error('Missing branch boundary node order');
   const orders = inputPortOrders(request.graph);
-  const organizeBranches = request.graph.branchOrganization === 1;
+  const organizeBranches = [1, 2].includes(request.graph.branchOrganization);
   delete request.graph.branchOrganization;
   // Load and construct inside the diagnostic boundary so setup failures do
   // not expose module paths or get retried as stochastic seed failures.
@@ -164,6 +178,21 @@ try {
     // second complete copy throughout ELK's calculation.
     let graph = request.seeds.length === 1 ? request.graph : structuredClone(request.graph);
     if (request.seeds.length === 1) request.graph = null;
+    if (boundaryOrdering) {
+      const children = new Map(graph.children.map(node => [node.id, node]));
+      graph.children = branchNodeOrder.map(id => children.get(id));
+      const ranks = new Map();
+      graph.children.forEach((child, index) => {
+        ranks.set(child.id, index);
+        for (const port of child.ports || []) ranks.set(port.id, index);
+      });
+      graph.edges.sort((first, second) => ranks.get(first.sources[0]) - ranks.get(second.sources[0])
+        || ranks.get(first.targets[0]) - ranks.get(second.targets[0]) || first.id.localeCompare(second.id));
+      // Preserve dependency partitions and let ELK place ports and route all
+      // edges. Only vertical node order is constrained for this alternative.
+      graph.layoutOptions['elk.layered.considerModelOrder.strategy'] = 'NODES_AND_EDGES';
+      graph.layoutOptions['elk.layered.crossingMinimization.forceNodeModelOrder'] = 'true';
+    }
     graph.layoutOptions['elk.randomSeed'] = String(seed);
     // Explicit metadata preserves the placement profile when seeds are sent
     // separately. Keep the historical defaults for direct batched callers.
@@ -188,7 +217,7 @@ try {
     let result = await elk.layout(graph);
     graph = null;
     diagnostic.stage = 'order_constraints';
-    const firstCandidate = layoutCandidate(result, seed, branchProfile, 'geometry');
+    const firstCandidate = layoutCandidate(result, seed, branchProfile, 'geometry', boundaryOrdering);
     const constraints = constrainInputOrder(result, orders);
     if (constraints) {
       // Compare ELK's crossing-aware port order with the historical traced-first
@@ -200,7 +229,7 @@ try {
       result = await elk.layout(result);
       diagnostic.stage = 'validate_input_order';
       validateInputOrder(result, constraints);
-      candidates.push(layoutCandidate(result, seed, branchProfile, 'traced_first'));
+      candidates.push(layoutCandidate(result, seed, branchProfile, 'traced_first', boundaryOrdering));
     } else {
       // Identical policies need only one candidate; retain the preferred order.
       firstCandidate.inputOrderPolicy = 'traced_first';

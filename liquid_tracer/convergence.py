@@ -11,8 +11,10 @@ from .common import TraceError, output_kind
 from .services import is_service_stop
 
 
-def _lineage_analysis(state, catalog):
+def _lineage_analysis(state, catalog, *, _layout=None):
     """Return input-merge records and per-outpoint origins, respecting boundaries."""
+    if _layout is not None:
+        _layout.update(transactions={}, inputs={}, outputs={})
     if len(catalog) < 2:
         return {}, {}
     transactions = state["transactions"]
@@ -49,6 +51,8 @@ def _lineage_analysis(state, catalog):
     limited = has_hop_limits(state["labels"])
     budgets = {}
     origins = {key: root_bits.get(key.rpartition(":")[0], 0) for key in seeds}
+    if _layout is not None:
+        _layout["outputs"] = origins
     ready = deque(sorted(key for key, count in indegree.items() if count == 0))
     result, visited = {}, 0
 
@@ -81,6 +85,11 @@ def _lineage_analysis(state, catalog):
         if own:
             groups.add(own)
         combined = input_bits | own
+        if _layout is not None:
+            if combined:
+                _layout["transactions"]["tx:" + txid] = combined
+            for key, bits in contributing:
+                _layout["inputs"]["tx:" + txid, key] = bits
         # Do not mark every descendant carrying an already-merged lineage. Two
         # identical inherited origin sets do not introduce a new interaction.
         if len(groups) > 1 and combined.bit_count() > 1:
@@ -128,7 +137,7 @@ def _numbers(bits):
     return result
 
 
-def branch_interactions(state, catalog):
+def branch_interactions(state, catalog, *, _layout=None):
     """Compute input merges and retroactive shared-address receipts separately.
 
     Scan every permitted tracked receipt, including seeds and stopped arrivals.
@@ -137,7 +146,7 @@ def branch_interactions(state, catalog):
     records are stored once per address; senders reference only their own outputs
     so an address with many deposits does not create quadratic metadata copies.
     """
-    transactions, origins = _lineage_analysis(state, catalog)
+    transactions, origins = _lineage_analysis(state, catalog, _layout=_layout)
     receipts = defaultdict(list)
     for key in sorted(origins):
         bits = origins[key]
@@ -196,9 +205,60 @@ def branch_interactions(state, catalog):
     return {"transactions": transactions, "addresses": addresses, "senders": dict(senders)}
 
 
+def _branch_structure(graph, catalog, lineages):
+    """Expose presentation memberships without inferring through shared circles.
+
+    Root identity is a starting transaction, not each selected output. A merged
+    address displays the union of its observed outpoints while its spending
+    edges retain their own exact UTXO origins. Empty context membership is
+    intentional: layout may keep context near a transaction without calling it
+    traced lineage. The existing evidence walk supplies every origin once.
+    """
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    roots = [{"key": entry["key"], "index": entry["index"]}
+             for entry in catalog if entry["key"] in nodes]
+    by_index = {entry["index"]: entry["key"] for entry in roots}
+    outputs = lineages["outputs"]
+    numbers = {}
+
+    def keys(bits):
+        if bits not in numbers:
+            numbers[bits] = tuple(by_index[index] for index in _numbers(bits)
+                                  if index in by_index)
+        return list(numbers[bits])
+
+    members = {}
+    for key, node in sorted(nodes.items()):
+        bits = 0
+        if node["kind"] == "transaction":
+            bits = lineages["transactions"].get(key, 0)
+        elif node["kind"] == "address" and node.get("details", {}).get("network") == "liquid":
+            for occurrence in node["details"].get("occurrences", []):
+                bits |= outputs.get(occurrence["outpoint"], 0)
+        elif node["kind"] == "event":
+            bits = outputs.get(node.get("details", {}).get("outpoint"), 0)
+        if bits:
+            members[key] = keys(bits)
+
+    connections = {}
+    for edge in sorted(graph["edges"], key=lambda edge: edge["id"]):
+        bits = 0
+        if nodes[edge["source"]]["kind"] == "transaction":
+            bits = outputs.get(edge.get("outpoint"), 0)
+        elif edge.get("role") == "traced_input":
+            bits = lineages["inputs"].get((edge["target"], edge.get("outpoint")), 0)
+        if bits:
+            connections[edge["id"]] = keys(bits)
+    return {"version": 1, "roots": roots, "node_memberships": members,
+            "edge_memberships": connections}
+
+
 def annotate_branch_interactions(graph, state):
     """Decorate a freshly generated graph; never rewrite a saved trace or edges."""
-    result = branch_interactions(state, graph["activity_frames"]["starting_transactions"])
+    catalog = graph["activity_frames"]["starting_transactions"]
+    lineages = {}
+    result = branch_interactions(state, catalog, _layout=lineages)
+    graph["branch_structure"] = _branch_structure(graph, catalog, lineages)
     graph["address_convergences"] = result["addresses"]
     for node in graph["nodes"]:
         key, kind = node["id"], node["kind"]
