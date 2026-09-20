@@ -307,6 +307,29 @@ test('changing grouping invalidates ELK and compact previews and blocks stale co
   assert.match(view.compactGraph(artifact, true, detail), /Apply compact layout to Miro/);
 });
 
+test('partial ELK success stays visible in saved ELK and compact previews', async () => {
+  const view = await harness();
+  const settings = {...defaults, include_fees: false, group_context_inputs: false};
+  const counts = {crossings: 0, node_overlaps: 0, node_intersections: 0};
+  const metrics = {before: counts, after: counts, estimated: true,
+    attempt_count: 25, attempted_count: 25, successful_count: 24, failed_count: 1};
+  const artifact = {include_fees: false, connector_style: 'straight', layout_attempts: 25,
+    preview_id: 'preview1', preview_url: '/files/artifacts/graph.html', downloads: [],
+    layout_metrics: metrics, compaction: {unchanged: true}};
+  const detail = {id: 'case', name: 'Case', run_defaults: settings, miro_board: 'board'};
+  for (const html of [view.elkGraph(artifact, true, settings), view.compactGraph(artifact, true, detail)]) {
+    assert.match(html, /24 of 25 layout attempts succeeded; 1 failed\. Best completed layout retained\./);
+    assert.match(html, /<iframe/);
+  }
+  metrics.successful_count = 25;
+  metrics.failed_count = 0;
+  assert.doesNotMatch(view.elkGraph(artifact, true, settings), /Some layout attempts failed/);
+  metrics.successful_count = '<script>PRIVATE</script>';
+  metrics.failed_count = 1;
+  const html = view.elkGraph(artifact, true, settings);
+  assert.doesNotMatch(html, /PRIVATE|Some layout attempts failed/);
+});
+
 test('detail pages are optional and their links accept only local artifact URLs', async () => {
   const view = await harness();
   const settings = {...defaults, include_fees: false, group_context_inputs: false};

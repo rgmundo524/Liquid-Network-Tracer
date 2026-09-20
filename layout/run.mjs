@@ -1,5 +1,4 @@
 // A local, data-only worker. No browser, network request, or evidence file access.
-import ELK from 'elkjs/lib/elk.bundled.js';
 
 function inputPortOrders(graph) {
   const requested = graph.inputPortOrders;
@@ -95,6 +94,39 @@ function layoutCandidate(result, seed, branchProfile, inputOrderPolicy) {
   };
 }
 
+// Only these fixed codes and adapter-owned values leave a failed worker.
+// ELK errors can contain graph IDs, labels, paths or whole parser excerpts.
+const diagnostic = {version: 1, stage: 'read_request'};
+function failureCode(error) {
+  if (diagnostic.stage === 'load_engine') return 'elk_worker_setup';
+  if (['read_request', 'validate_request'].includes(diagnostic.stage)) return 'elk_invalid_request';
+  const message = typeof error?.message === 'string' ? error.message : '';
+  const name = typeof error?.name === 'string' ? error.name : '';
+  const signature = `${name}\n${message}`;
+  if (['Invalid ordered layout ports', 'Missing ordered layout node', 'ELK did not preserve input port order'].includes(message)) return 'elk_input_order';
+  // Exceptions while inspecting or encoding returned geometry must remain
+  // fatal. A malformed result is not a failed stochastic layout candidate.
+  if (['order_constraints', 'validate_input_order', 'serialize'].includes(diagnostic.stage)) return 'elk_invalid_output';
+  if (/javascript heap out of memory|reached heap limit|ineffective mark-compacts near heap limit|FatalProcessOutOfMemory/i.test(signature)) return 'heap_exhausted';
+  if (/out of memory|out-of-memory|cannot allocate memory/i.test(signature)) return 'memory_exhausted';
+  if (/maximum call stack size exceeded|too much recursion|StackOverflowError/i.test(signature)) return 'stack_limit';
+  const knownClasses = [
+    ['UnsupportedGraphException', 'elk_unsupported_graph'],
+    ['UnsupportedConfigurationException', 'elk_unsupported_configuration'],
+    ['ArrayIndexOutOfBoundsException|BasicIndexOutOfBoundsException|IndexOutOfBoundsException|StringIndexOutOfBoundsException|NegativeArraySizeException', 'elk_index_error'],
+    ['IllegalStateException|ConcurrentModificationException|NoSuchElementException|EmptyStackException', 'elk_illegal_state'],
+    ['IllegalArgumentException', 'elk_illegal_argument'],
+    ['NullPointerException', 'elk_null_pointer'],
+    ['AssertionError', 'elk_assertion'],
+    ['TypeError|ClassCastException|ArrayStoreException', 'elk_type_error'],
+    ['ReferenceError', 'elk_reference_error'],
+  ];
+  for (const [classes, code] of knownClasses) {
+    if (new RegExp(`\\b(?:${classes})\\b`).test(signature)) return code;
+  }
+  return 'elk_engine_error';
+}
+
 try {
   let request;
   {
@@ -106,6 +138,7 @@ try {
     // The parsed graph is sufficient; do not retain its encoded input too.
     chunks.length = 0;
   }
+  diagnostic.stage = 'validate_request';
   if (!request.graph || !Array.isArray(request.seeds) || request.seeds.length === 0 || request.seeds.length > 3
       || request.seeds.some(seed => !Number.isInteger(seed) || seed <= 0 || seed > 2147483647)) {
     throw new Error('Invalid layout request');
@@ -118,7 +151,13 @@ try {
   const orders = inputPortOrders(request.graph);
   const organizeBranches = request.graph.branchOrganization === 1;
   delete request.graph.branchOrganization;
+  // Load and construct inside the diagnostic boundary so setup failures do
+  // not expose module paths or get retried as stochastic seed failures.
+  diagnostic.stage = 'load_engine';
+  const {default: ELK} = await import('elkjs/lib/elk.bundled.js');
   const elk = new ELK();
+  if (typeof elk.layout !== 'function') throw new Error('Invalid layout engine');
+  diagnostic.stage = 'validate_request';
   const candidates = [];
   for (const [seedIndex, seed] of request.seeds.entries()) {
     // The Python search sends one seed at a time. Reuse that graph instead of retaining a
@@ -130,6 +169,8 @@ try {
     // separately. Keep the historical defaults for direct batched callers.
     const branchProfile = requestedProfile ?? (organizeBranches && (request.seeds.length === 1 || seedIndex > 0)
       ? 'flow_weighted' : 'balanced');
+    Object.assign(diagnostic, {seed, branch_profile: branchProfile,
+      input_order_policy: 'geometry', stage: 'geometry_layout'});
     if (organizeBranches) {
       graph.layoutOptions['elk.layered.nodePlacement.strategy'] = branchProfile === 'flow_weighted'
         ? 'NETWORK_SIMPLEX' : 'BRANDES_KOEPF';
@@ -146,6 +187,7 @@ try {
     }
     let result = await elk.layout(graph);
     graph = null;
+    diagnostic.stage = 'order_constraints';
     const firstCandidate = layoutCandidate(result, seed, branchProfile, 'geometry');
     const constraints = constrainInputOrder(result, orders);
     if (constraints) {
@@ -154,7 +196,9 @@ try {
       candidates.push(firstCandidate);
       // Reuse the first result as the second request rather than cloning a
       // large graph. Fixed indices override the first pass's port positions.
+      Object.assign(diagnostic, {input_order_policy: 'traced_first', stage: 'traced_first_layout'});
       result = await elk.layout(result);
+      diagnostic.stage = 'validate_input_order';
       validateInputOrder(result, constraints);
       candidates.push(layoutCandidate(result, seed, branchProfile, 'traced_first'));
     } else {
@@ -163,14 +207,10 @@ try {
       candidates.push(firstCandidate);
     }
   }
+  diagnostic.stage = 'serialize';
   process.stdout.write(JSON.stringify({version: '0.12.0', candidates}));
 } catch (error) {
   // Do not echo user graph input, parser excerpts, paths, or environment values.
-  const message = typeof error?.message === 'string' ? error.message : '';
-  if (/maximum call stack size exceeded|too much recursion|StackOverflowError/i.test(message)) {
-    process.stderr.write('Maximum call stack size exceeded in the local ELK worker.\n');
-  } else {
-    process.stderr.write('The local ELK layout worker could not calculate a layout.\n');
-  }
+  process.stderr.write(`LIQUID_ELK_FAILURE ${JSON.stringify({...diagnostic, code: failureCode(error)})}\n`);
   process.exitCode = 1;
 }

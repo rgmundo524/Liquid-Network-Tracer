@@ -11,12 +11,15 @@ from pathlib import Path
 
 from .common import TraceError, canonical, read_json
 from .elk_layout import ALGORITHM, ELK_VERSION, _validate_graph
+from .elk_errors import ELK_FATAL_FAILURE_CODES
 from .layout_preview import _geometry
 from .edge_labels import LABEL_LAYOUT_VERSION
 from .input_order import INPUT_ORDER_VERSION
 from .horizontal_spacing import HORIZONTAL_SPACING_VERSION
 from .branch_layout import BRANCH_LAYOUT_VERSION
 from .layout_search import LAYOUT_SEARCH_VERSION, layout_seeds, normalize_layout_attempts
+from .layout_search_reporting import public_search_counts
+from .render_runtime import RENDERER_FAILURE_CODES
 
 _NODE_GEOMETRY = frozenset({"x", "y"})
 _EDGE_GEOMETRY = frozenset({"attachment", "route", "connector_shape", "routing_exception", "label_layout"})
@@ -56,6 +59,41 @@ def report_phase(progress, phase):
             progress({"phase": phase, "completed": 0, "total": 0})
         except Exception:
             pass  # Advisory UI output never changes publication behavior.
+
+
+def _complete_search(search, metrics, attempts):
+    """A partial-success preview still must describe every requested attempt."""
+    counts = public_search_counts(search)
+    if (not counts or counts["attempt_count"] != attempts or counts["attempted_count"] != attempts
+            or public_search_counts(metrics) != counts or search.get("execution") != "sequential"):
+        return False
+    seeds = search.get("seeds")
+    if (not isinstance(seeds, list) or any(type(seed) is not int for seed in seeds)
+            or seeds != list(layout_seeds(attempts))):
+        return False
+    failures = search.get("failed_attempts")
+    if not isinstance(failures, list) or len(failures) != counts["failed_count"]:
+        return False
+    failed_seeds = set()
+    last_index = 0
+    for failure in failures:
+        if not isinstance(failure, dict) or set(failure) != {"attempt_index", "seed", "failure_code"}:
+            return False
+        index, seed, code = failure["attempt_index"], failure["seed"], failure["failure_code"]
+        if (type(index) is not int or not last_index < index <= attempts or type(seed) is not int
+                or seed != seeds[index - 1] or not isinstance(code, str) or code not in RENDERER_FAILURE_CODES
+                or code in ELK_FATAL_FAILURE_CODES):
+            return False
+        failed_seeds.add(seed)
+        last_index = index
+    selected = search.get("selected_seed")
+    candidates = search.get("candidate_count")
+    if (type(selected) is not int or selected not in seeds or selected in failed_seeds
+            or type(candidates) is not int
+            or not counts["successful_count"] <= candidates <= 2 * counts["successful_count"]):
+        return False
+    return (type(metrics.get("selected_seed")) is int and metrics["selected_seed"] == selected
+            and type(metrics.get("candidate_count")) is int and metrics["candidate_count"] == candidates)
 
 
 def reusable_elk_preview(graph, directory, connector_style="straight", progress=None, *, layout_attempts=None):
@@ -103,6 +141,7 @@ def reusable_elk_preview(graph, directory, connector_style="straight", progress=
                     or layout.get("horizontal_spacing", {}).get("version") != HORIZONTAL_SPACING_VERSION
                     or layout.get("branch_organization", {}).get("version") != BRANCH_LAYOUT_VERSION
                     or any(search.get(key) != value for key, value in expected_search.items())
+                    or not _complete_search(search, layout.get("metrics"), attempts)
                     or "compaction" in layout or "fallback_reason" in layout
                     or saved.get("connector_attachment") != "transaction_ports_v2"
                     or saved.get("graph_options", {}).get("connector_style") != connector_style

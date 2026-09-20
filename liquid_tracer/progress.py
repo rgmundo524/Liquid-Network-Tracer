@@ -7,6 +7,8 @@ import sys
 import time
 from pathlib import Path
 
+from .layout_search_reporting import layout_search_warning, public_search_counts
+
 
 MESSAGES = {
     "address_counts": "Fetching address transaction counts",
@@ -37,6 +39,8 @@ ELK_STAGES = {
     "applying": "Validating ELK coordinates and connector routes",
     "measuring_output": "Measuring the completed ELK layout",
     "ready": "ELK layout completed",
+    "attempt_failed": "ELK layout attempt failed; continuing the layout search",
+    "ready_with_failures": "ELK layout completed with failed attempts",
 }
 
 
@@ -58,6 +62,14 @@ def public_progress(event):
         stage = event.get("stage")
         if isinstance(stage, str) and stage in ELK_STAGES:
             value.update(stage=stage, message=ELK_STAGES[stage])
+        search_counts = public_search_counts(
+            {**event, "attempt_count": event.get("attempt_count", event.get("attempt_total"))},
+            allow_no_success=True)
+        value.update(search_counts)
+        if stage == "ready_with_failures":
+            warning = layout_search_warning(search_counts)
+            if warning:
+                value["message"] = "ELK layout completed: " + warning
         attempt, attempts, seed = (event.get(key) for key in ("attempt_index", "attempt_total", "seed"))
         if (type(attempt) is int and type(attempts) is int
                 and 1 <= attempt <= attempts <= 1000):

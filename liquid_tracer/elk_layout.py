@@ -18,8 +18,9 @@ from collections import defaultdict
 from pathlib import Path
 
 from .common import TraceError
+from .elk_errors import ELK_FATAL_FAILURE_CODES, ElkWorkerFailure
 from .processes import defer_cancellation_during_spawn
-from .render_runtime import renderer_failure, renderer_heap_mb
+from .render_runtime import renderer_failure, renderer_failure_code, renderer_heap_mb
 from .edge_labels import FONT_SIZE, LABEL_LAYOUT_VERSION, caption_size, caption_text, route_signature
 from .input_order import input_orders, input_order_metadata
 from .attachment_order import attachment_order_metrics
@@ -301,7 +302,11 @@ def _worker(graph, seeds, progress=None):
                                  node_count=node_count, edge_count=edge_count, heap_mb=heap_mb)
         if process.returncode:
             detail = renderer_failure(errors, process.returncode, "ELK", heap_mb)
-            raise TraceError(f"{detail} Graph: {graph_size}. No Miro changes were made")
+            failure_code = renderer_failure_code(errors, process.returncode, "ELK")
+            message = f"{detail} Graph: {graph_size}. No Miro changes were made"
+            if failure_code in ELK_FATAL_FAILURE_CODES:
+                raise TraceError(message)
+            raise ElkWorkerFailure(message, failure_code=failure_code, returncode=process.returncode)
         result = json.loads(output)
         if not isinstance(result, dict) or result.get("version") != ELK_VERSION or not isinstance(result.get("candidates"), list):
             raise ValueError("invalid worker response")
@@ -641,9 +646,11 @@ def fallback_graph(graph, connector_style="straight", reason="size_limit"):
 def optimize_graph(graph, connector_style="straight", progress=None, *, layout_attempts=None):
     """Compare sequential ELK attempts without application size or time ceilings.
 
-    Only the current seed's candidates and the best result are retained. Failed
-    or cancelled searches leave the input graph unchanged. Quality measurement
-    has a separate work budget that never removes graph elements.
+    Only the current seed's candidates and the best result are retained. A
+    worker-process failure skips that seed, retaining earlier valid results.
+    Invalid data and cancellation still abort the search. The input graph is
+    never modified. Quality measurement has a separate work budget that never
+    removes graph elements.
     """
     nodes = _validate_graph(graph, connector_style)
     attempts = normalize_layout_attempts(
@@ -664,6 +671,8 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
     before = layout_metrics(graph)
     best = None
     candidate_count = 0
+    successful_count = 0
+    failed_attempts = []
     for index, seed in enumerate(seeds, 1):
         report = attempt_progress(index, seed)
         # This choice depends on graph size and attempt position, never the
@@ -671,7 +680,14 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
         # of candidates, including the historical first three small-graph runs.
         profile = "balanced" if len(request["children"]) <= 300 and index == 1 else "flow_weighted"
         if request["children"]:
-            candidates = _worker({**request, "branchProfile": profile}, [seed], progress=report)
+            try:
+                candidates = _worker({**request, "branchProfile": profile}, [seed], progress=report)
+            except ElkWorkerFailure as exc:
+                failed_attempts.append({"attempt_index": index, "seed": seed, "failure_code": exc.failure_code})
+                _report_progress(report, "ELK layout attempt failed; retaining completed layouts and continuing the search",
+                                 stage="attempt_failed", attempted_count=index, successful_count=successful_count,
+                                 failed_count=len(failed_attempts), failure_code=exc.failure_code)
+                continue
         else:
             candidates = [{"seed": seed, "nodes": [], "edges": [], "branchProfile": profile}]
         candidate_count += len(candidates)
@@ -711,6 +727,11 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
             # another seed. The best tuple alone owns the retained winner.
             del candidate, result, main
         del candidates
+        successful_count += 1
+    if best is None:
+        codes = ", ".join(sorted({attempt["failure_code"] for attempt in failed_attempts}))
+        raise TraceError(f"All {attempts} ELK layout attempts failed; no valid layout was produced. "
+                         f"Failure categories: {codes}. No Miro changes were made")
     _, result, after, seed = best
     _report_progress(report, "Packing nearby transaction context", stage="applying")
     # Moving a circle closer can put Miro's midpoint elbow through a different
@@ -741,13 +762,20 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
     after = layout_metrics(result)
     result["layout"]["metrics"] = {"before": before, "after": after, "estimated": True,
                                     "attempt_count": attempts, "candidate_count": candidate_count, "selected_seed": seed,
+                                    "attempted_count": attempts, "successful_count": successful_count,
+                                    "failed_count": len(failed_attempts),
                                     "attachments": attachment_order_metrics(result),
                                     "miro_routing_estimate": layout_metrics(result, midpoint_elbows=True),
                                     "routing_exceptions": result["layout"]["routing_exceptions"],
                                     "miro_routes_exact": False, "time_limit_seconds": None}
     result["layout"]["search"] = {"version": LAYOUT_SEARCH_VERSION, "attempt_count": attempts,
                                   "seeds": list(seeds), "candidate_count": candidate_count,
+                                  "attempted_count": attempts, "successful_count": successful_count,
+                                  "failed_count": len(failed_attempts), "failed_attempts": failed_attempts,
                                   "selected_seed": seed, "execution": "sequential"}
     result.setdefault("graph_options", {})["layout_attempts"] = attempts
-    _report_progress(report, "Local ELK layout ready", completed=1, stage="ready")
+    _report_progress(report, "Local ELK layout ready" if not failed_attempts
+                     else "Best completed ELK layout ready; some layout attempts failed",
+                     completed=1, stage="ready_with_failures" if failed_attempts else "ready",
+                     attempted_count=attempts, successful_count=successful_count, failed_count=len(failed_attempts))
     return result

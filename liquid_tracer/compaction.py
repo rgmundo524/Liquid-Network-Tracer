@@ -15,6 +15,7 @@ from itertools import product
 from .common import TraceError
 from .miro_frames import _padded
 from .elk_layout import ALGORITHM, _default_attachments, _validate_graph, attachment_point, segment_hits_node, layout_metrics
+from .layout_search_reporting import public_search_counts
 from .edge_labels import caption_box, translate_label
 
 ALGORITHM_COMPACTION = "local_address_components_v1"
@@ -729,6 +730,7 @@ def compact_graph(graph, progress=None):
     result["layout"]["metrics"] = {"before": before_metrics, "after": layout_metrics(result),
                                    "estimated": True, "miro_routes_exact": False,
                                    "method": "compaction_comparison", "acceptance_uses_metrics": False}
+    result["layout"]["metrics"].update(public_search_counts(result["layout"].get("search")))
     result["layout"]["compaction"] = {
         "algorithm": ALGORITHM_COMPACTION, "version": 1, "before": before, "after": after,
         "moved_addresses": moved_addresses, "moved_components": moved_components,

@@ -29,6 +29,7 @@ from .investigations import (create_investigation, default_root, load_settings,
 from .menu import _command, _environment, _lookup_reports, _project, _seed_values, _trace_arguments
 from .progress import public_progress
 from .layout_search import MAX_LAYOUT_ATTEMPTS, normalize_layout_attempts
+from .layout_search_reporting import public_search_counts
 
 MAX_BODY = 64 * 1024
 CASE_ID = re.compile(r"[0-9a-f]{32}")
@@ -190,6 +191,7 @@ def public_layout_metrics(metrics):
     attempts = metrics.get("attempt_count")
     if type(attempts) is int and 1 <= attempts <= MAX_LAYOUT_ATTEMPTS:
         result["attempt_count"] = attempts
+    result.update(public_search_counts(metrics))
     for phase in ("before", "after"):
         values = metrics.get(phase)
         if not isinstance(values, dict):
@@ -461,6 +463,10 @@ class LocalServer(ThreadingHTTPServer):
                         report = info["connections"]
                         product.update(preview_id=directory.name, max_hops=report["max_hops"],
                                        connection_count=report["connection_count"], connection_status=report["status"])
+                        layout = info.get("layout")
+                        metrics = public_layout_metrics(layout.get("metrics")) if isinstance(layout, dict) else None
+                        if metrics is not None:
+                            product["layout_metrics"] = metrics
                     if kind in ("elk", "compact"):
                         style = options.get("connector_style")
                         layout = info.get("layout")
