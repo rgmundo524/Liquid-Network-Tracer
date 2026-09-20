@@ -702,28 +702,6 @@ def _frame_removals(plan, state):
     return removals
 
 
-def _live_frames(plan, state, remote, positions, removals):
-    """Fit frames to the geometry that this sync will actually leave on canvas.
-
-    Older run notes remain included in the full-graph export frame. Retained
-    shapes contribute their live sizes and rotations, including manual edits.
-    Frames are presentation containers, so their bounds are always refreshed.
-    """
-    if "activity_frames" not in plan:
-        return []
-    bounds = {key: _bounds(remote[key], key) for key, record in state["items"].items()
-              if record["endpoint"] == "shapes" and key not in removals}
-    for item in plan["shapes"]:
-        key = item["key"]
-        value = bounds.get(key) or _bounds(item["body"], key)
-        if plan.get("presentation_items", {}).get(key, {}).get("kind") == "attribution":
-            geometry = presentation_items.note_geometry(item["body"], remote.get(key))
-            resized = {**remote.get(key, item["body"]), "geometry": geometry}
-            value = _bounds(resized, key)
-        bounds[key] = (*positions[key], value[2], value[3]) if key in positions else value
-    return frame_bodies(plan["activity_frames"], bounds)
-
-
 def _bounds(body, key):
     position = body.get("position", {})
     if (position.get("relativeTo") not in (None, "canvas_center")
@@ -1160,7 +1138,8 @@ def _create_items(plan, state, journal, requests, base, headers, positions, mapp
     pool drains acknowledgements; only jobs proved never sent lose their intent.
     A POST with no trustworthy response is never retried automatically.
     """
-    progress.emit("creating", 0, report["new_items"], "Adding new shapes and connections")
+    if not report.get("frames_only"):
+        progress.emit("creating", 0, report["new_items"], "Adding new shapes and connections")
 
     def pending_item(item, endpoint):
         key = item["key"]
@@ -1230,7 +1209,8 @@ def _create_items(plan, state, journal, requests, base, headers, positions, mapp
                 raise known_error
             raise TraceError(creation_error(status, job["endpoint"], len(job["items"]),
                                             response_headers, raw, request_headers=headers) +
-                             ("; fix the error and rerun sync" if rejected
+                             (("; fix the error and rerun Create / update Miro frames" if job["endpoint"] == "frames"
+                               else "; fix the error and rerun sync") if rejected
                               else "; use Recover interrupted frame or miro-frame-review before retrying; acknowledged graph items are saved"
                               if job["endpoint"] == "frames"
                               else "; reconcile the pending items before retrying"))
@@ -1307,6 +1287,79 @@ def _require_inline_counts(plan):
 
 def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, interval=.02, dry_run=False,
          reorganize=False, progress=None, workers=4):
+    """Sync graph objects, leaving export frames for the separate frame action."""
+    return _sync(plan, board_id, state_path, max_items, token, transport, interval, dry_run,
+                 reorganize, progress, workers)
+
+
+def sync_frames(plan, board_id, state_path, max_items=750, token=None, transport=http, interval=.02,
+                dry_run=False, progress=None, workers=4):
+    """Create or refresh export frames around the completed graph's live geometry.
+
+    This operation never adds, removes, relabels, resizes, or reorganizes graph
+    objects. Verified children may be detached at their existing canvas position
+    before a managed frame is changed. The exact graph must already be synced.
+    """
+    return _sync(plan, board_id, state_path, max_items, token, transport, interval, dry_run,
+                 False, progress, workers, frames_only=True)
+
+
+def _legacy_frame_operation(plan, state):
+    """Recognize interrupted framing from the previous combined publisher."""
+    return (not state.get("active_frame_run_id") and state.get("active_run_id") == plan["run_id"]
+            and bool(state.get("pending_frame_deletions")
+                     or any(entry["endpoint"] == "frames" for entry in state.get("pending_updates", {}).values())))
+
+
+def _check_frame_operation(plan, state, frames_only):
+    active = state.get("active_frame_run_id")
+    if active is not None and (not isinstance(active, str) or not active):
+        raise TraceError("Malformed Miro frame operation; restore the sync state")
+    if not frames_only:
+        if _legacy_frame_operation(plan, state):
+            # The old combined sync already journaled frame edits. Validate its
+            # exact removal intent, but defer all frame writes until requested.
+            _frame_removals(plan, state)
+            return
+        if (active or state.get("pending_frame_deletions")
+                or any(entry["endpoint"] == "frames" for entry in state.get("pending_updates", {}).values())):
+            raise TraceError("Finish the interrupted Create or update frames action before syncing the graph")
+        return
+    summary = state["runs"].get(plan["run_id"], {})
+    synced_plan = state.get("frame_plan")
+    if (not isinstance(summary, dict) or not isinstance(summary.get("plan_sha256s", []), list)
+            or (synced_plan is not None and not isinstance(synced_plan, dict))):
+        raise TraceError("Malformed completed Miro graph snapshot; restore the sync state")
+    hashes = summary.get("plan_sha256s", [])
+    latest_hash = synced_plan.get("sha256") if isinstance(synced_plan, dict) else (hashes[-1] if hashes else None)
+    if (latest_hash != plan["sha256"] or state.get("active_run_id") or state.get("latest_run_id") != plan["run_id"]
+            or plan["sha256"] not in summary.get("plan_sha256s", [])
+            or state.get("pending_deletions") or state.get("pending_creation_detaches")):
+        raise TraceError("Sync this graph completely before creating or updating frames; use its saved synced plan")
+    if active and active != plan["run_id"]:
+        raise TraceError("Finish the interrupted frame action with its original synced graph")
+    if "activity_frames" not in plan:
+        raise TraceError("The synced graph has no frame metadata; generate and sync a fresh graph before framing")
+    for endpoint in ("shapes", "connectors"):
+        for item in plan[endpoint]:
+            record = state["items"].get(item["key"])
+            if not record or record["endpoint"] != endpoint:
+                raise TraceError("Sync every graph object before creating or updating frames")
+            if endpoint == "connectors" and any(record.get(name) != item[name] for name in ("source", "target")):
+                raise TraceError("The frame plan does not match the synced connections; sync the graph first")
+    if not active and state.get("pending_updates"):
+        raise TraceError("Finish the interrupted graph updates before creating or updating frames")
+    for entry in state.get("pending_updates", {}).values():
+        if entry["endpoint"] == "frames":
+            continue
+        patch = entry["patch"]
+        if (not active or entry["endpoint"] != "shapes" or set(patch) != {"parent", "position"}
+                or patch["parent"] != {"id": None}):
+            raise TraceError("Finish the interrupted graph updates before creating or updating frames")
+
+
+def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http, interval=.02, dry_run=False,
+          reorganize=False, progress=None, workers=4, *, frames_only=False):
     """Add bounded runs to one board; preserve manually edited fields and geometry.
 
     Official REST references (boards:read and boards:write):
@@ -1345,24 +1398,26 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
     status_progress = _SyncProgress(progress)
     state_path = Path(state_path)
     state = _load_sync_state(state_path, board_id, namespace)
-    collections = (("shapes", plan["shapes"]), ("connectors", plan["connectors"]),
-                   ("frames", plan.get("frames", [])))
+    collections = (("shapes", [] if frames_only else plan["shapes"]),
+                   ("connectors", [] if frames_only else plan["connectors"]),
+                   ("frames", plan.get("frames", []) if frames_only else []))
 
     def preview(current):
         _check_lineage(plan, current)
-        removals = _fee_removals(plan, current)
-        frame_removals = _frame_removals(plan, current)
+        _check_frame_operation(plan, current, frames_only)
+        removals = {} if frames_only else _fee_removals(plan, current)
+        frame_removals = _frame_removals(plan, current) if frames_only else {}
         if not reorganize and any(proof.get("kind") == "context_group_replacement" for proof in removals.values()):
             raise TraceError("Changing context grouping on an existing board replaces generated objects; "
                              "choose Sync and reorganize to apply this layout change. Ordinary sync preserves manual positions and ports.")
         report = {"dry_run": dry_run, "board_url": "https://miro.com/app/board/" + urllib.parse.quote(board_id, safe="") + "/",
                   "run_id": plan["run_id"], "namespace": namespace, "state_path": str(state_path), "max_items": max_items,
-                  "reorganize": reorganize, "fee_items_to_remove": sum(not key.startswith(presentation_items.PREFIX) and proof.get("kind") != "context_group_replacement" for key, proof in removals.items()),
+                  "reorganize": reorganize, "frames_only": frames_only, "fee_items_to_remove": sum(not key.startswith(presentation_items.PREFIX) and proof.get("kind") != "context_group_replacement" for key, proof in removals.items()),
                   "annotations_to_remove": sum(key.startswith(presentation_items.PREFIX) for key in removals),
                   "frames_to_remove": len(frame_removals),
                   "context_items_to_replace": sum(proof.get("kind") == "context_group_replacement" for proof in removals.values())}
         layout = plan.get("layout", {})
-        if layout.get("algorithm"):
+        if not frames_only and layout.get("algorithm"):
             report["layout_algorithm"] = layout["algorithm"]
             report["connector_style"] = plan.get("graph_options", {}).get("connector_style", "straight")
             if "fallback_reason" in layout:
@@ -1402,8 +1457,17 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
             raise TraceError("Another publisher is using this state file") from None
         state = _load_sync_state(state_path, board_id, namespace)
         report = preview(state)
-        removals = _fee_removals(plan, state)
-        frame_removals = _frame_removals(plan, state)
+        removals = {} if frames_only else _fee_removals(plan, state)
+        frame_removals = _frame_removals(plan, state) if frames_only else {}
+        legacy_frames = not frames_only and _legacy_frame_operation(plan, state)
+        deferred_frame_updates = {key: copy.deepcopy(entry) for key, entry in state.get("pending_updates", {}).items()
+                                  if legacy_frames and entry["endpoint"] == "frames"}
+        # Only the old DELETE journal may explain a missing managed frame. A
+        # normal graph sync never deletes frames, even during this migration.
+        preflight_frame_removals = frame_removals
+        if legacy_frames:
+            legacy_removals = _frame_removals(plan, state)
+            preflight_frame_removals = {key: legacy_removals[key] for key in state.get("pending_frame_deletions", {})}
         base = "https://api.miro.com/v2/boards/" + urllib.parse.quote(board_id, safe="")
         headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json", "Accept": "application/json"}
         quota = None
@@ -1418,12 +1482,13 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
             with SyncState(state_path, state) as recovery_journal:
                 finish_creation_detaches(state, recovery_journal, requests, base, headers)
         # The complete live preflight must succeed before new sync writes.
-        remote = preflight(requests, base, headers, state, {**removals, **frame_removals}, progress=status_progress)
+        remote = preflight(requests, base, headers, state, {**removals, **preflight_frame_removals}, progress=status_progress)
         live_frame_records = {key: record for key, record in state["items"].items()
                               if record["endpoint"] == "frames" and key in remote}
         live_frame_ids = {record["id"] for record in live_frame_records.values()}
 
-        status_progress.emit("layout", 0, 1, "Checking connections and preparing the layout")
+        status_progress.emit("framing" if frames_only else "layout", 0, 1,
+                             "Checking live graph bounds for frames" if frames_only else "Checking connections and preparing the layout")
         context_removals = {key: proof for key, proof in removals.items()
                             if proof.get("kind") == "context_group_replacement"}
         _check_fee_removals(state, remote, {key: proof for key, proof in removals.items()
@@ -1442,11 +1507,26 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
         original_recovered = {key: copy.deepcopy(state["items"][key])
                               for key in state.get("pending_updates", {})}
         _recover_updates(state, remote)
-        positions, shift_x = _placements(plan, state, remote, removals, reorganize)
-        frames = _live_frames(plan, state, remote, positions, removals)
-        if reorganize and _compact_layout(plan):
+        if frames_only:
+            # Read every retained shape, including older run notes, at its actual
+            # canvas position. No graph placement or annotation resizing runs.
+            live_bounds = {key: _bounds(remote[key], key) for key, record in state["items"].items()
+                           if record["endpoint"] == "shapes"}
+            positions = {key: bounds[:2] for key, bounds in live_bounds.items()}
+            shift_x = 0
+            frames = frame_bodies(plan["activity_frames"], live_bounds)
+            for item in plan["connectors"]:
+                record = state["items"][item["key"]]
+                for field, logical in (("startItem", "source"), ("endItem", "target")):
+                    if remote[item["key"]].get(field, {}).get("id") != state["items"][record[logical]]["id"]:
+                        raise TraceError("Miro connector endpoints changed; repair the connection before framing. No board writes made.")
+        else:
+            positions, shift_x = _placements(plan, state, remote, removals, reorganize)
+            frames = []
+        if frames_only and _compact_layout(plan):
             _check_compact_frames(plan, frames, positions)
-        live_collections = (("shapes", plan["shapes"]), ("connectors", plan["connectors"]), ("frames", frames))
+        live_collections = (("shapes", [] if frames_only else plan["shapes"]),
+                            ("connectors", [] if frames_only else plan["connectors"]), ("frames", frames))
         updates, conflicts, attachment_intents = [], [], {}
         for endpoint, collection in live_collections:
             for item in collection:
@@ -1507,10 +1587,13 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
                 job = (key, {}, copy.deepcopy(record["managed"]), copy.deepcopy(record["intent"]))
                 updates.append(job)
             job[1].update({"parent": {"id": None}, "position": {"x": x, "y": y}})
-        status_progress.emit("layout", 1, 1, "Checking connections and preparing the layout")
+        status_progress.emit("framing" if frames_only else "layout", 1, 1,
+                             "Checking live graph bounds for frames" if frames_only else "Checking connections and preparing the layout")
         # State changes begin only after local and remote preflight succeeds.
         report.update({"created": 0, "updated": 0, "deleted": 0, "moved": 0, "reattached": 0,
                        "conflicts": conflicts, "new_batch_offset_x": shift_x})
+        if frames_only:
+            report.update({"created_frames": 0, "updated_frames": 0})
         changes = [{"key": key, "item_id": state["items"][key]["id"],
                     "before": copy.deepcopy(remote[key]["position"]), "after": copy.deepcopy(patch["position"])}
                    for key, patch, _, _ in updates if "position" in patch]
@@ -1534,13 +1617,15 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
                 snapshot["connector_shapes"] = connector_shapes
             state.setdefault("layout_history", []).append(snapshot)
             report["layout_snapshot"] = copy.deepcopy(snapshot)
-        state["active_run_id"] = plan["run_id"]
+        active_key = "active_frame_run_id" if frames_only else "active_run_id"
+        state[active_key] = plan["run_id"]
         # Journal every planned edit before dispatch. On retry, the full live
         # preflight reconciles these fields instead of blindly replaying them.
         state["pending_updates"] = {
             key: {"id": state["items"][key]["id"], "endpoint": state["items"][key]["endpoint"],
                   "patch": copy.deepcopy(patch)}
             for key, patch, _, _ in updates if patch}
+        state["pending_updates"].update(deferred_frame_updates)
         pending_deletions = state.setdefault("pending_deletions", {})
         for key, proof in removals.items():
             pending_deletions.setdefault(key, {"id": state["items"][key]["id"], "proof": copy.deepcopy(proof), "attempted": False})
@@ -1548,7 +1633,7 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
         for key, proof in frame_removals.items():
             pending_frame_deletions.setdefault(key, {
                 "id": state["items"][key]["id"], "proof": copy.deepcopy(proof), "attempted": False})
-        initial_sets = [(("active_run_id",), state["active_run_id"]),
+        initial_sets = [((active_key,), state[active_key]),
                         (("pending_updates",), state["pending_updates"]),
                         (("pending_deletions",), pending_deletions),
                         (("pending_frame_deletions",), pending_frame_deletions)]
@@ -1559,7 +1644,8 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
         initial_sets.extend((("items", key), record) for key, record in recovered_records.items())
         journal.commit(sets=initial_sets)
         mapped_ids = {record["id"] for record in state["items"].values()}
-        status_progress.emit("removing", 0, len(removals), "Removing obsolete generated items")
+        if not frames_only:
+            status_progress.emit("removing", 0, len(removals), "Removing obsolete generated items")
         for key in sorted(removals, key=lambda key: (0 if state["items"][key]["endpoint"] == "connectors" else 1, key)):
             record = state["items"][key]
             # Save intent before DELETE so a lost response can be reconciled by
@@ -1586,10 +1672,12 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
             result = requests.request("PATCH", _remote_url(base, record), headers, patch)
             status, _, raw = result
             if not 200 <= status < 300:
-                raise TraceError("Miro PATCH returned HTTP " + str(status) + "; acknowledged progress is saved; rerun sync")
+                retry_action = "Create / update Miro frames" if frames_only else "sync"
+                raise TraceError("Miro PATCH returned HTTP " + str(status) + "; acknowledged progress is saved; rerun " + retry_action)
             response = _response(raw, "PATCH")
             if response.get("id") != record["id"]:
-                raise TraceError("Miro PATCH returned the wrong item ID; rerun sync to reconcile the saved update journal")
+                retry_action = "Create / update Miro frames" if frames_only else "sync"
+                raise TraceError("Miro PATCH returned the wrong item ID; rerun " + retry_action + " to reconcile the saved update journal")
             return response
 
         def accept_update(job, response):
@@ -1602,6 +1690,8 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
                     _set(intent, path, value)
                     _set(managed, path, _get(actual, path))
                 report["updated"] += 1
+                if record["endpoint"] == "frames":
+                    report["updated_frames"] += 1
                 if "position" in patch:
                     report["moved"] += 1
                 if "startItem" in patch or "endItem" in patch:
@@ -1632,7 +1722,10 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
             status_progress.emit("framing", 0, len(changing_frames), "Updating graph export frames")
         requests.map((job for job in updates if state["items"][job[0]]["endpoint"] == "frames"),
                      update_item, accept_update)
-        _create_items({**plan, "frames": frames}, state, journal, requests, base, headers, positions, mapped_ids,
+        creation_plan = {**plan, "frames": frames}
+        if frames_only:
+            creation_plan.update({"shapes": [], "connectors": []})
+        _create_items(creation_plan, state, journal, requests, base, headers, positions, mapped_ids,
                       report, status_progress)
         # Obsolete component frames are removed only after the new graph and
         # replacement export regions exist. These IDs are ours, never frames
@@ -1647,23 +1740,31 @@ def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, 
             journal.commit(sets=[(("pending_frame_deletions", key), pending_frame_deletions[key])])
             status, _, _ = requests.request("DELETE", _remote_url(base, record), headers)
             if not (200 <= status < 300 or status == 404):
-                raise TraceError("Miro frame DELETE returned HTTP " + str(status) + "; acknowledged progress is saved; rerun sync")
+                raise TraceError("Miro frame DELETE returned HTTP " + str(status) +
+                                 "; acknowledged progress is saved; rerun Create / update Miro frames")
             journal.commit(deletes=[("items", key), ("pending_frame_deletions", key)])
             mapped_ids.remove(record["id"])
             report["deleted"] += 1
             status_progress.emit("framing", index, len(frame_removals), "Updating graph export frames")
-        summary = state["runs"].setdefault(plan["run_id"], {"first_synced_at": now(), "plan_sha256s": []})
-        if plan["sha256"] not in summary["plan_sha256s"]:
-            summary["plan_sha256s"].append(plan["sha256"])
-        summary.update({"last_synced_at": now(), "shapes": len(plan["shapes"]), "connectors": len(plan["connectors"]),
-                        "frames": len(frames),
-                        "conflicts": conflicts, "run": copy.deepcopy(plan.get("run", {}))})
-        state["latest_run_id"], state["active_run_id"] = plan["run_id"], None
-        journal.commit(sets=[(("runs", plan["run_id"]), summary),
-                             (("latest_run_id",), state["latest_run_id"]), (("active_run_id",), None)])
+        if frames_only:
+            frame_summary = {"run_id": plan["run_id"], "plan_sha256": plan["sha256"],
+                             "last_framed_at": now(), "frames": len(frames), "conflicts": conflicts}
+            journal.commit(sets=[(("frame_summary",), frame_summary), (("active_frame_run_id",), None)])
+        else:
+            summary = state["runs"].setdefault(plan["run_id"], {"first_synced_at": now(), "plan_sha256s": []})
+            if plan["sha256"] not in summary["plan_sha256s"]:
+                summary["plan_sha256s"].append(plan["sha256"])
+            summary.pop("frames", None)
+            summary.update({"last_synced_at": now(), "shapes": len(plan["shapes"]), "connectors": len(plan["connectors"]),
+                            "conflicts": conflicts, "run": copy.deepcopy(plan.get("run", {}))})
+            state["latest_run_id"], state["active_run_id"] = plan["run_id"], None
+            journal.commit(sets=[(("runs", plan["run_id"]), summary),
+                                 (("latest_run_id",), state["latest_run_id"]), (("active_run_id",), None),
+                                 (("frame_plan",), copy.deepcopy(plan))] +
+                           ([(("active_frame_run_id",), plan["run_id"])] if legacy_frames else []))
         report["items"] = len(state["items"])
         report["runs"] = len(state["runs"])
-        status_progress.emit("complete", 1, 1, "Miro sync complete")
+        status_progress.emit("complete", 1, 1, "Miro frames complete" if frames_only else "Miro sync complete")
         return report
 
 

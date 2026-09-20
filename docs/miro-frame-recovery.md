@@ -10,13 +10,13 @@ Keep the investigation's saved Miro state. You do not need to erase the board, d
 2. Review the requested frame and open the linked board. Complete any Proton Pass prompt in the launching terminal.
 3. If the frame exists, explicitly select its matching frame ID. If no possible match exists, inspect the board and confirm that this specific frame is absent. Confirming absence applies to the frame, not the populated board.
 4. Apply recovery. The app checks the frame inventory again and updates only the local mapping. It selects the interrupted snapshot.
-5. Choose **Sync to Miro** to finish publication. Previously acknowledged objects keep their saved IDs. Choose **Sync and reorganize** only if you also want to apply the automatic layout again.
+5. Choose **Create / update Miro frames** to finish framing. Previously acknowledged objects keep their saved IDs. If this was an older failure inside graph sync, first finish **Sync to Miro**, then run the frame action. Normal sync now updates graph objects without maintaining frames.
 
-Recovery does not create, delete, or move any Miro objects. A successful recovery does not start another sync automatically. Ordinary sync still checks live objects and preserves manual edits under its existing rules.
+Recovery does not create, delete, or move any Miro objects. A successful recovery does not start another action automatically. The separate frame action reads the completed graph's live geometry and preserves manual frame titles and colors.
 
 If several frames exactly match, choose the correct existing ID after inspecting the board. A frame with the same title but different bounds, or matching bounds but a different title, blocks absence confirmation: it may have been manually edited. Restore its identifying properties and review again, or use the existing per-item `miro-resolve` command after identifying it yourself.
 
-Incomplete API reads, changed local state, or changed board inventory invalidate the review. Start a fresh review. Recovery remains available if another frame fails during the next sync.
+Incomplete API reads, changed local state, or changed board inventory invalidate the review. Start a fresh review. Recovery remains available if another frame fails during the next frame action.
 
 ## Terminal commands
 
@@ -43,8 +43,10 @@ liquid-live miro-frame-recover --case cases/YOUR_CASE_DIRECTORY \
 Resume the `run_id` returned by recovery:
 
 ```bash
-liquid-live miro-sync --case cases/YOUR_CASE_DIRECTORY --run RUN_ID
+liquid-live miro-frames --case cases/YOUR_CASE_DIRECTORY --run RUN_ID
 ```
+
+For an older frame failure that interrupted graph sync, first run `liquid-live miro-sync --case cases/YOUR_CASE_DIRECTORY --run RUN_ID` once to finish the graph and record its framing snapshot. Then use `miro-frames`.
 
 Both recovery commands support `--output NEW_REPORT.json`. These reports contain frame titles and geometry; store them with the investigation.
 

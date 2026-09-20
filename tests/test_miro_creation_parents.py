@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from liquid_tracer.common import TraceError, canonical, read_json, save_json
-from liquid_tracer.miro import make_plan, sync
+from liquid_tracer.miro import make_plan, sync, sync_frames
 from liquid_tracer.miro_creation_parents import validate_creation_detaches
 from liquid_tracer.miro_frames import activity_frames
 from liquid_tracer.miro_state import load_state
@@ -126,6 +126,8 @@ class CreationParentTests(unittest.TestCase):
         first["activity_frames"] = activity_frames(first)
         self.remote.auto_parent = False
         self.sync(first)
+        sync_frames(make_plan(first), "synthetic-board=", self.path, token="synthetic-token",
+                    transport=self.remote, interval=0)
         self.remote.parent_id = read_json(self.path)["items"]["frame:graph"]["id"]
         self.remote.auto_parent = True
         second = graph("two", True)

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from liquid_tracer.common import TraceError, read_json
 from liquid_tracer.export import build_graph, svg_graph
-from liquid_tracer.miro import make_plan, sync, validate_plan
+from liquid_tracer.miro import make_plan, sync, sync_frames, validate_plan
 from liquid_tracer.miro_frames import activity_frames, validate_activity_frames
 from tests.fixtures import A, B, C, output
 from tests.test_layout import state_from
@@ -204,12 +204,14 @@ class ChronologicalFrameSyncTests(unittest.TestCase):
             remote = FrameMiro()
             options = {'token': 'synthetic-token', 'transport': remote, 'interval': 0}
             sync(old_plan, 'board=', path, **options)
+            sync_frames(old_plan, 'board=', path, **options)
             original = read_json(path)
             keys = [g['key'] for g in graph['activity_frames']['activities']]
             manual_id = original['items'][keys[0]]['id']
             remote.items[manual_id]['data']['title'] = 'Analyst-reviewed title'
             graph['activity_frames'] = activity_frames(graph)
-            report = sync(make_plan(graph), 'board=', path, max_items=0, **options)
+            sync(make_plan(graph), 'board=', path, max_items=0, **options)
+            report = sync_frames(make_plan(graph), 'board=', path, max_items=0, **options)
             current = read_json(path)
             self.assertEqual(report['created'], 0)
             self.assertEqual(report['deleted'], 0)
@@ -220,7 +222,7 @@ class ChronologicalFrameSyncTests(unittest.TestCase):
                 remote_id = current['items'][group['key']]['id']
                 self.assertEqual(remote.items[remote_id]['data']['title'], group['title'])
             self.assertEqual(old_plan, untouched)
-            repeated = sync(make_plan(graph), 'board=', path, max_items=0, **options)
+            repeated = sync_frames(make_plan(graph), 'board=', path, max_items=0, **options)
             self.assertEqual(repeated['updated'], 0)
 
 

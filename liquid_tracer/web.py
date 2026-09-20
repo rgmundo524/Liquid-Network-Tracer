@@ -136,13 +136,18 @@ def public_frame_recovery(result, *, review):
     run_id = result.get("run_id")
     if not isinstance(run_id, str) or not RUN_ID.fullmatch(run_id):
         raise TraceError(error)
+    resume = {}
+    if "resume_action" in result:
+        if result["resume_action"] not in ("miro-frames", "miro-sync"):
+            raise TraceError(error)
+        resume["resume_action"] = result["resume_action"]
     if not review:
         if (result.get("recovery") not in ("adopted_frame", "confirmed_absent_frame")
                 or type(result.get("resolved_count")) is not int or result["resolved_count"] != 1
                 or type(result.get("remaining_pending")) is not int or result["remaining_pending"] != 0):
             raise TraceError(error)
         return {"recovery": result["recovery"], "run_id": run_id,
-                "resolved_count": 1, "remaining_pending": 0}
+                "resolved_count": 1, "remaining_pending": 0, **resume}
 
     review_id = result.get("review_id")
     potential = result.get("potential_match_count")
@@ -178,7 +183,7 @@ def public_frame_recovery(result, *, review):
     if (len({item["id"] for item in candidates}) != len(candidates)
             or (result["can_confirm_absent"] and (candidates or potential))):
         raise TraceError(error)
-    return {"schema_version": 1, "recovery": "pending_frame_review", "review_id": review_id,
+    return {"schema_version": 1, "recovery": "pending_frame_review", "review_id": review_id, **resume,
             "run_id": run_id, "pending_frame": pending, "candidates": candidates,
             "potential_match_count": potential, "can_confirm_absent": result["can_confirm_absent"]}
 
@@ -620,7 +625,9 @@ class LocalServer(ThreadingHTTPServer):
                 value = self.public_result(report["result"], action, case, txids)
             with self.job_lock:
                 self.jobs[identity].update(status="succeeded", cancellable=False,
-                    message=("Frame recovery complete. Choose Sync to Miro to resume." if action == "miro-frame-recover"
+                    message=(("Frame recovery complete. Choose Create / update Miro frames to resume."
+                              if value.get("resume_action") == "miro-frames" else
+                              "Frame recovery complete. Finish Sync to Miro, then create or update frames.") if action == "miro-frame-recover"
                              else "Frame review ready. Inspect the linked board before choosing a recovery." if action == "miro-frame-review"
                              else "Recovery complete. Choose Sync to Miro to resume." if action == "miro-recover"
                              else "Action completed."), result=value)
@@ -712,6 +719,11 @@ class LocalServer(ThreadingHTTPServer):
                   "existing_items", "items", "runs", "max_items", "remote_preflight_required"}
         value = {key: item for key, item in result.items()
                  if key in fields and (item is None or isinstance(item, (str, int, float, bool)))}
+        if type(result.get("frames_only")) is bool:
+            value["frames_only"] = result["frames_only"]
+        for key in ("created_frames", "updated_frames"):
+            if type(result.get(key)) is int and 0 <= result[key] <= 2 ** 53 - 1:
+                value[key] = result[key]
         if action == "miro-recover":
             value.pop("run_id", None)
         if action == "miro-recover" and result.get("recovery") == "confirmed_empty_board":
@@ -838,6 +850,8 @@ class LocalServer(ThreadingHTTPServer):
                 raise RequestError(str(error)) from None
             arguments = ["change-output-lookup", "--case", str(case), "--txid", txid]
             return self.start_job(arguments, action=action, live=live, case=case, txids=[txid])
+        if action == "miro-frames" and not set(body) <= {"action", "run_id"}:
+            raise RequestError("Frame creation uses the selected saved run and linked board only.")
         settings = validate_settings(body.get("settings", metadata.get("run_defaults", {})))
         selected = body.get("run_id", "latest")
         live = False
@@ -917,7 +931,7 @@ class LocalServer(ThreadingHTTPServer):
                 raise RequestError("Empty-board recovery is unavailable. Review the pending Miro items before retrying.")
             arguments = ["miro-recover", "--case", str(case), "--confirm-empty"]
             live = True
-        elif action in ("mermaid", "csv", "layout", "compact", "miro-preview", "miro-sync", "miro-organize", "miro-compact"):
+        elif action in ("mermaid", "csv", "layout", "compact", "miro-preview", "miro-sync", "miro-organize", "miro-compact", "miro-frames"):
             if not isinstance(selected, str) or (selected != "latest" and not RUN_ID.fullmatch(selected)):
                 raise RequestError("Choose a saved run for this graph.")
             selected = resolve_latest(case, selected)
@@ -931,9 +945,13 @@ class LocalServer(ThreadingHTTPServer):
             else:
                 if not metadata.get("miro_board"):
                     raise RequestError("Create or link a Miro board in investigation settings first.")
-                arguments = ["miro-sync", "--case", str(case), "--run", selected,
+                command = "miro-frames" if action == "miro-frames" else "miro-sync"
+                arguments = [command, "--case", str(case), "--run", selected,
                              "--board", metadata["miro_board"], "--max-new-items", str(settings["max_new_items"])]
-                if action == "miro-preview":
+                if action == "miro-frames":
+                    if miro_recovery_status(case)["pending_count"]:
+                        raise RequestError("Recover the pending Miro items before creating or updating frames.")
+                elif action == "miro-preview":
                     arguments.append("--dry-run")
                 elif action == "miro-organize":
                     arguments.append("--reorganize")
@@ -949,9 +967,9 @@ class LocalServer(ThreadingHTTPServer):
                     verified_compaction_preview(case, selected, identity)
                     arguments.extend(["--compact-preview", identity, "--reorganize"])
                 live = action != "miro-preview"
-            if action != "miro-compact":
+            if action not in ("miro-compact", "miro-frames"):
                 arguments.append("--include-fees" if settings["include_fees"] else "--exclude-fees")
-            if action not in ("mermaid", "csv", "miro-compact"):
+            if action not in ("mermaid", "csv", "miro-compact", "miro-frames"):
                 arguments.extend(["--connector-style", settings["connector_style"]])
                 arguments.extend(["--layout-attempts", str(settings["layout_attempts"])])
                 arguments.append("--group-context-inputs" if settings["group_context_inputs"] else "--ungroup-context-inputs")

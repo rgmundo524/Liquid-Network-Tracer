@@ -27,10 +27,11 @@ stolen value. No tracing links, fees, service rules or archived evidence change.
 ## Existing investigations
 
 After updating the development branch and restarting the application, select
-**Sync to Miro** to refresh generated frame titles and starting-transaction labels.
+**Sync to Miro** to refresh starting-transaction labels, then
+**Create / update Miro frames** to refresh generated frame titles when the graph is finished.
 No new trace or address-merge migration is required for this title change. Existing
-frame keys and remote IDs are retained. Ordinary sync preserves manual title and
-node-content edits; it does not force-reset them. **Sync and reorganize Miro graph**
+frame keys and remote IDs are retained. These actions preserve manual title and
+node-content edits; they do not force-reset them. **Sync and reorganize Miro graph**
 is only needed when you also want new automatic positions.
 
 Regenerated ELK, Mermaid and compact previews use the new numbers. Already saved
