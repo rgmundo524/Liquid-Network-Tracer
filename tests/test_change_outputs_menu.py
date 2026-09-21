@@ -30,6 +30,7 @@ class ChangeOutputMenuTests(unittest.IsolatedAsyncioTestCase):
     async def open_import(self, app, pilot):
         await self.open_editor(app, pilot)
         await self.click(app, pilot, "#change-output-import")
+        await self.click(app, pilot, "#input-import-advanced-change-outputs")
         return app.screen
 
     def lookup_process(self, command, **kwargs):

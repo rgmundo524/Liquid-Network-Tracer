@@ -79,9 +79,9 @@ class InputExportMenuTests(unittest.IsolatedAsyncioTestCase):
     async def test_import_exports_preserve_paste_review_and_approval_on_success_and_error(self):
         from textual.widgets import Button, Checkbox, Static, TextArea
         scenarios = [
-            (("addresses-import",), "import", "Address,Name\nSYNTHETIC-draft,Draft name\n", "Name", "Saved name"),
-            (("name-colors", "name-color-import"), "name-color-import", "Name,Color\nSaved name,#abcdef\n", "Color", "#123456"),
-            (("change-outputs", "change-output-import"), "change-import", f"Txid,ChangeVout\n{B},0\n", "Txid", A),
+            (("addresses-import", "input-import-advanced-attributions"), "import", "Address,Name\nSYNTHETIC-draft,Draft name\n", "Name", "Saved name"),
+            (("name-colors", "name-color-import", "input-import-advanced-name-colors"), "name-color-import", "Name,Color\nSaved name,#abcdef\n", "Color", "#123456"),
+            (("change-outputs", "change-output-import", "input-import-advanced-change-outputs"), "change-import", f"Txid,ChangeVout\n{B},0\n", "Txid", A),
         ]
         for navigation, prefix, draft, column, expected in scenarios:
             with self.subTest(prefix=prefix):

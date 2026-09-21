@@ -87,9 +87,10 @@ Address,Name,confidence,stop_tracing,hop_limit,source,notes
 
 ## Import name-group colors
 
-After importing or saving the address attributions, open **Assign name colors**
-and choose **Import name colors**. Select a UTF-8 CSV or JSON file, or paste its
-contents. This assigns a color to each name group, including all capitalization
+Choose **Import CSV files** and select a UTF-8 name-color CSV. You can include
+the attribution and change-output CSVs in the same batch; new attribution names
+are processed before colors automatically. JSON and pasted contents remain
+available through the advanced name-color importer. This assigns a color to each name group, including all capitalization
 variants, without editing the address attributions themselves.
 
 ```csv
@@ -106,17 +107,18 @@ names with those in your investigation. JSON uses an array of objects with
 case-insensitive. Colors must be six-digit hex values including `#`; short hex,
 color names, and CSS expressions are rejected.
 
-1. Choose **Preview import** to review each name's current color, requested color,
+1. Preview the selected files to review each name's current color, requested color,
    and proposed action.
-2. Existing assignments are kept by default. Select **Replace existing colors**
+2. Existing assignments are kept by default. Choose the replacement policy
    and preview again to overwrite them. A blank CSV color or JSON `null` clears
    an existing assignment only with this replacement policy.
 3. Review the preview, check the review checkbox, and apply the import.
 4. Regenerate a preview or choose **Sync to Miro** to update the graph.
 
-Names must already exist in the attribution list or saved color assignments.
+Names must exist in the attribution list, saved color assignments, or the
+attribution CSV being applied in the same batch.
 Unknown names are reported as errors so a typo cannot silently create an unused
-group. Import the attribution first if the name is new. Identical duplicate
+group. Include the attribution CSV if the name is new. Identical duplicate
 rows are combined; different colors for the same case-insensitive name are an
 error. Any invalid row blocks the entire import. There is no partial save.
 

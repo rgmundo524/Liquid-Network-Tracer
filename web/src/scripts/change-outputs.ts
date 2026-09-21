@@ -135,7 +135,7 @@ export function changeOutputsPanel(caseId: string, busy: boolean): string {
   <div class="table-wrap"><table><thead><tr><th>Transaction</th><th>Change</th><th>Notes</th><th>Actions</th></tr></thead><tbody>${(catalog?.rows || []).map((row, index) => `<tr><td class="mono">${esc(row.txid)}</td><td>${esc(voutText(row.vout))}</td><td>${esc(row.notes)}</td><td><button class="btn" data-action="change-outputs-edit" data-change-index="${index}"${off(locked)}>Edit</button> <button class="btn" data-action="change-outputs-clear" data-change-index="${index}"${off(locked)}>Clear</button></td></tr>`).join('')}</tbody></table></div>
   ${catalog && !catalog.total ? '<p class="address-note">No matching change outputs saved.</p>' : ''}
   <div class="form-actions"><span>${esc(catalog?.total || 0)} saved annotations. Page ${Math.floor(state.offset / 100) + 1}.</span><button class="btn" data-action="change-outputs-prev"${off(locked || state.offset === 0)}>Previous</button><button class="btn" data-action="change-outputs-next"${off(locked || !catalog || state.offset + 100 >= catalog.total)}>Next</button></div>
-  <div class="settings-divider"></div>${importPanel(locked)}<p class="address-note">${esc(REFRESH)}</p><p role="status">${esc(state.message)}</p></div></section>`;
+  <div class="settings-divider"></div><div class="form-actions"><button class="btn" data-action="input-import-open"${off(locked)}>Import CSV files</button></div><details id="advanced-change-outputs"><summary>Advanced imports: paste change outputs or import JSON</summary>${importPanel(locked)}</details><p class="address-note">${esc(REFRESH)}</p><p role="status">${esc(state.message)}</p></div></section>`;
 }
 
 async function loadCatalog(owner: typeof state, context: Context): Promise<void> {

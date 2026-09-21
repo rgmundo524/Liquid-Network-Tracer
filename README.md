@@ -196,7 +196,14 @@ liquid-trace service-set --case cases/theft-liquid --address ADDRESS --disable
 
 After importing attributions, choose **Assign name colors** in the browser or terminal import screen. Each unique name appears once, case-insensitively. Choose and save a color; later imports with the same name inherit it. Confidence does not choose a color. **Selected seed outputs always take red priority**, including shared-address nodes and named or unspent seeds. Source, notes, stop indicators and unspent labels remain available. Use **Sync to Miro** or regenerate previews to apply the display changes without retracing. See [name colors and seed priority](docs/name-colors.md).
 
-For bulk assignments, choose **Import name colors** inside that editor. Upload or paste a `Name,Color` CSV (or JSON array), preview the proposed changes, and apply the reviewed import. Names and headers match case-insensitively; colors use `#RRGGBB`. Existing colors are kept unless you choose replacement. Import address attributions first so the name groups exist. See the [CSV template](examples/name-colors-template.csv) and [bulk color import instructions](docs/name-colors.md#import-name-group-colors).
+For bulk assignments, choose **Import CSV files** and select a `Name,Color` CSV,
+optionally together with the address attributions and change-output files.
+The importer detects each type and processes new attribution names before
+colors automatically. Review one batch and apply all files once. Names and
+headers match case-insensitively; colors use `#RRGGBB`. Existing entries are kept
+unless you choose replacement. Pasted and JSON imports remain in the advanced
+importers. See the [CSV template](examples/name-colors-template.csv) and
+[combined CSV workflow](docs/input-csv-exports.md#import-csv-files-together).
 
 Choose **Export saved CSV** in the attribution, name-color, or change-output
 screen to edit current saved entries in their import format. **Export input CSVs**
@@ -206,12 +213,14 @@ parts. See [exporting and reimporting CSV inputs](docs/input-csv-exports.md).
 
 ### Bulk address attributions before the first run
 
-Create or open an investigation, then use **Import attributions** in the browser
-workspace/Address review, or **Import address attributions** in the terminal.
-Upload CSV/JSON/text or paste a list, preview the complete batch, and approve
-**Apply reviewed import**. No saved run, credentials, blockchain request or Miro
+Create or open an investigation, then choose **Import CSV files** in the browser
+or terminal. Select one CSV or the attribution, name-color, and change-output
+CSVs together. Preview the complete batch and approve it once. For JSON or pasted
+address lists, use the advanced attribution importer. No saved run, credentials, blockchain request or Miro
 update is required. Existing decisions are kept unless replacement is explicitly
 reviewed. Invalid rows block the entire batch; unchanged reimports do not write.
+When revising an existing address's hop limit or stop flag, select replacement
+so the uploaded decision replaces the saved one.
 
 The standard CSV is now:
 

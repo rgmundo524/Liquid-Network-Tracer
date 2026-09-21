@@ -1110,7 +1110,7 @@ def create_app(root=None):
                     yield Button("ELK layout preview", id="elk-preview")
                     yield Button("Address review", id="addresses-review")
                 with Horizontal(classes="buttons"):
-                    yield Button("Import address attributions", id="addresses-import")
+                    yield Button("Import CSV files", id="addresses-import")
                     yield Button("Assign name colors", id="name-colors")
                 with Horizontal(classes="buttons"):
                     yield Button("Change outputs", id="change-outputs")
@@ -1261,8 +1261,8 @@ def create_app(root=None):
                     from .input_export_menu import export_saved_inputs
                     self.query_one("#input-export-status", Static).update(export_saved_inputs(self.case, "all"))
                 elif action == "addresses-import":
-                    from .address_import_menu import import_screen
-                    self.app.push_screen(import_screen(BaseScreen, Button, self.case))
+                    from .input_import_menu import input_import_screen
+                    self.app.push_screen(input_import_screen(BaseScreen, Button, self.case))
                 elif action == "addresses-review":
                     self.app.push_screen(AddressScreen(self.case))
             except ACTION_ERRORS as error:

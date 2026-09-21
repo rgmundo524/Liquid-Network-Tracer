@@ -21,6 +21,7 @@ class NameColorImportMenuTests(unittest.IsolatedAsyncioTestCase):
         await pilot.pause()
         await self.click(app, pilot, "#name-colors")
         await self.click(app, pilot, "#name-color-import")
+        await self.click(app, pilot, "#input-import-advanced-name-colors")
         return app.screen
 
     async def test_reviewed_paste_is_local_preserves_roles_and_refreshes_parent(self):

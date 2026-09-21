@@ -85,6 +85,7 @@ class MenuImportTests(unittest.IsolatedAsyncioTestCase):
     async def open_import(self, app, pilot):
         app.created(self.case); await pilot.pause()
         await self.click(app, pilot, '#addresses-import')
+        await self.click(app, pilot, '#input-import-advanced-attributions')
         return app.screen
 
     async def test_paste_preview_requires_approval_then_applies_offline(self):

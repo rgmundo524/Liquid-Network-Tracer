@@ -80,6 +80,14 @@ def parser():
     inputs.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     inputs.add_argument("--kind", choices=("all", "attributions", "name-colors", "change-outputs"), default="all")
     inputs.add_argument("--out", type=Path, help="New output directory outside runs/ (default: a new case exports directory)")
+    input_import = commands.add_parser("input-import", help="Preview/apply attribution, color, and change-output CSVs together; offline")
+    input_import.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    input_import.add_argument("--file", type=Path, action="append", required=True,
+                              help="UTF-8 CSV; repeat for up to three files, one per input type")
+    input_import.add_argument("--on-conflict", choices=("keep", "replace"), default="keep")
+    input_approval = input_import.add_mutually_exclusive_group()
+    input_approval.add_argument("--dry-run", action="store_true", help="Preview only (the default)")
+    input_approval.add_argument("--approve-plan", help="Apply the exact approval_sha256 from a reviewed preview")
     bulk = commands.add_parser("address-import", help="Preview/apply bulk address attributions before or between runs; offline")
     bulk.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     bulk.add_argument("--file", type=Path, required=True, help="UTF-8 CSV, JSON array, or plain address list")
@@ -1029,6 +1037,16 @@ def main(argv=None, *, progress=None):
             from .input_export import save_input_export
             print(json.dumps(save_input_export(args.case, args.kind, args.out), indent=2, ensure_ascii=False))
             return 0
+        if args.command == "input-import":
+            from .input_import import apply_import, preview_import, read_import
+            if len(args.file) > 3:
+                raise TraceError("Choose up to three CSV files, one per input type")
+            files = [{"name": path.name, "text": read_import(path), "policy": args.on_conflict}
+                     for path in args.file]
+            result = (apply_import(args.case, files, approval_sha256=args.approve_plan)
+                      if args.approve_plan else preview_import(args.case, files))
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0 if result.get("valid", True) else 1
         if args.command == "address-import":
             from .address_import import apply_import, preview_import, read_import
             text = read_import(args.file)

@@ -1109,8 +1109,11 @@ class Handler(BaseHTTPRequestHandler):
             if mutation:
                 # Only reviewed import routes accept larger, bounded text bodies.
                 is_import = (len(parts) == 4 and parts[:2] == ["api", "cases"]
-                             and parts[3] in ("address-import", "name-color-import", "change-output-import"))
-                body = self.body(4 * 1024 * 1024 if is_import else MAX_BODY)
+                             and parts[3] in ("address-import", "name-color-import", "change-output-import", "input-import"))
+                # Three CSVs may each contain 512 KiB; JSON escaping can expand
+                # their representation. Individual source limits still apply.
+                import_limit = 12 * 1024 * 1024 if is_import and parts[3] == "input-import" else 4 * 1024 * 1024
+                body = self.body(import_limit if is_import else MAX_BODY)
                 with self.server.job_lock:
                     if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "cancel":
                         result, status = self.server.cancel_job(parts[2]), 202
@@ -1206,6 +1209,17 @@ class Handler(BaseHTTPRequestHandler):
                         notes=body.get("notes", ""), expected_revision=revision), 200
                 except TraceError as error:
                     raise RequestError(str(error)) from None
+            if parts[3] == "input-import":
+                from .input_import import apply_import, preview_import
+
+                if set(body) - {"files", "approve_plan"}:
+                    raise RequestError("CSV import accepts uploaded files and approval only; not file paths.")
+                try:
+                    result = (apply_import(case, body.get("files"), approval_sha256=body["approve_plan"])
+                              if "approve_plan" in body else preview_import(case, body.get("files")))
+                except TraceError as error:
+                    raise RequestError(str(error)) from None
+                return result, 200
             if parts[3] == "change-output-import":
                 from .change_output_import import apply_import, preview_import
 

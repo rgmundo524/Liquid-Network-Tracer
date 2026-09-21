@@ -22,7 +22,7 @@ def name_color_screen(base, button, case):
             with VerticalScroll(classes="form-panel"):
                 yield Label("Assign colors", classes="title")
                 yield Static(NOTICE, markup=False)
-                yield button("Import name colors", id="name-color-import")
+                yield button("Import CSV files", id="name-color-import")
                 yield button("Export saved CSV", id="name-color-export")
                 yield Static("", id="name-color-export-status", markup=False)
                 yield Input(placeholder="Search attribution names", id="name-color-search")
@@ -135,8 +135,8 @@ def name_color_screen(base, button, case):
                 if action == "name-color-back":
                     self.action_back()
                 elif action == "name-color-import":
-                    from .name_color_import_menu import name_color_import_screen
-                    self.app.push_screen(name_color_import_screen(base, button, case))
+                    from .input_import_menu import input_import_screen
+                    self.app.push_screen(input_import_screen(base, button, case))
                 elif action in ("name-color-find", "name-color-prev", "name-color-next"):
                     self.page_offset = (max(0, self.page_offset - 100) if action == "name-color-prev" else
                                    self.page_offset + 100 if action == "name-color-next" else 0)

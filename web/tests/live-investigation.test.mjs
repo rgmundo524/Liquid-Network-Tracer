@@ -21,14 +21,20 @@ const defaults = {hops: 1, max_transactions: 20, max_outpoints: 100, max_request
 
 async function harness(respond = () => undefined) {
   frameRecovery.resetFrameRecovery();
-  const calls = [], listeners = {}, dialogListeners = {}, notifications = [];
+  const calls = [], listeners = {}, dialogListeners = {}, notifications = [], importActions = [];
   let currentForm = null;
   const app = {innerHTML: '', addEventListener(name, callback) {listeners[name] = callback;}};
   const dialog = {innerHTML: '', open: false, addEventListener(name, callback) {dialogListeners[name] = callback;},
     close() {if (this.open) {this.open = false; dialogListeners.close?.();}}, showModal() {this.open = true;}, querySelector() {return null;}};
   const context = vm.createContext({
     Error, URL, console, ...frameRecovery,
-    resetNameColors() {}, resetAddressImport() {}, resetChangeOutputs() {},
+    resetNameColors() {}, resetAddressImport() {}, resetChangeOutputs() {}, resetInputImport() {},
+    inputImportPending() {return false;}, inputImportPanel() {return "";},
+    inputImportAction(action, context) {
+      if (!action.startsWith('input-import-')) return false;
+      if (!context.busy) importActions.push({action, caseId: context.caseId});
+      return true;
+    },
     changeOutputsPending() {return false;}, changeOutputsPanel() {return "";},
     changeOutputsAction() {return false;}, changeOutputsLookupComplete() {return false;},
     nameColorsAction() {return false;}, addressImportAction() {return false;},
@@ -63,7 +69,7 @@ async function harness(respond = () => undefined) {
   script.runInContext(context);
   await context.startup;
   return {
-    ...context.appTest, app, dialog, calls, notifications,
+    ...context.appTest, app, dialog, calls, notifications, importActions,
     async submitDialog(values = {}) {
       dialogListeners.submit({target: {values, reportValidity: () => true}, preventDefault() {}});
       await new Promise(setImmediate);
@@ -626,4 +632,20 @@ test('changing attribution arrow colors invalidates Mermaid, ELK and compact pre
   assert.match(view.localGraph(artifact, true, settings), /<iframe/);
   assert.match(view.elkGraph(artifact, true, settings), /<iframe/);
   assert.ok(view.currentCompaction());
+});
+
+
+test('one CSV import entry is available before the first trace and opens from review pages', async () => {
+  const view = await harness();
+  view.state.activeCase = {id: 'csvcase', name: 'CSV investigation', run_defaults: defaults, runs: [], seeds: [`${txid}:0`]};
+  assert.match(view.workspace(), /data-action="input-import-open"[^>]*>Import CSV files/);
+  assert.doesNotMatch(view.workspace(), /data-action="address-import-open"/);
+  view.state.page = 'addresses';
+  await view.dispatch('input-import-open');
+  assert.equal(view.state.page, 'case');
+  assert.deepEqual(view.importActions, [{action: 'input-import-open', caseId: 'csvcase'}]);
+  assert.equal(view.calls.length, 1, 'opening the shared importer needs no lookup or trace');
+  view.state.job = {id: 'running', action: 'trace', caseId: 'csvcase'};
+  await view.dispatch('input-import-open');
+  assert.equal(view.importActions.length, 1, 'running jobs keep importing disabled');
 });
