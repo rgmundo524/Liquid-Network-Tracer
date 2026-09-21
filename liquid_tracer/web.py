@@ -725,7 +725,7 @@ class LocalServer(ThreadingHTTPServer):
                   "created", "reused", "name", "visibility", "new_shapes", "new_connectors", "new_frames",
                   "mapped_frames", "frames_to_remove",
                   "mapped_shapes", "mapped_connectors", "new_items", "updated", "deleted", "moved",
-                  "reattached", "dry_run", "reorganize", "presentation_refreshed", "fee_items_to_remove",
+                  "reattached", "dry_run", "reorganize", "presentation_refreshed", "fee_items_to_remove", "run_notes_to_remove",
                   "existing_items", "items", "runs", "max_items", "remote_preflight_required"}
         value = {key: item for key, item in result.items()
                  if key in fields and (item is None or isinstance(item, (str, int, float, bool)))}

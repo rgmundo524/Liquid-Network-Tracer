@@ -688,10 +688,8 @@ def compact_graph(graph, progress=None):
     # extent reporting and stay untouched, so compacting never expands notes.
     annotations = []
     for key, position in result["layout"].get("annotations", {}).items():
-        if key in ("legend", "run"):
-            if key == "run" and "namespace" not in result:
-                continue
-            width, height = (1300, 260) if key == "legend" else (1300, 280)
+        if key == "legend":
+            width, height = 1300, 260
             annotations.append((position["x"] - width / 2, position["y"] - height / 2,
                                 position["x"] + width / 2, position["y"] + height / 2))
     try:

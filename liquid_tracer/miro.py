@@ -45,23 +45,6 @@ def make_plan(graph):
         + "</p><p>" + html.escape(graph["notice"]) + "</p>"},
         "position": {"x": 700, "y": -160, "origin": "center"}, "geometry": {"width": 1300, "height": 260},
         "style": {"fillColor": COLORS["address"], "fontSize": "14", "textAlign": "left"}}})
-    if incremental:
-        details = graph.get("run", {})
-        lines = ["Run: " + graph["run_id"]]
-        for key in ("started_at", "finished_at", "status", "parent_run", "stop_reason", "max_hops", "seeds", "limits", "stats"):
-            if key in details:
-                value = details[key]
-                if key == "seeds" and isinstance(value, list):
-                    transactions = {str(seed).rpartition(":")[0] for seed in value}
-                    lines.append(f"Starting outputs: {len(value)} across {len(transactions)} transactions")
-                    continue
-                lines.append(key.replace("_", " ") + ": " + (json.dumps(value, ensure_ascii=False)
-                             if isinstance(value, (dict, list)) else str(value)))
-        shapes.append({"key": "run:" + graph["run_id"], "body": {
-            "data": {"shape": "rectangle", "content": "<p>" + "<br>".join(html.escape(s) for s in lines) + "</p>"},
-            "position": {"x": 700, "y": -480, "origin": "center"},
-            "geometry": {"width": 1300, "height": 280},
-            "style": {"fillColor": "#e0f2fe", "fontSize": "14", "textAlign": "left"}}})
     for node in graph["nodes"]:
         # References remain in local registers/exports, not as dangling Miro
         # labels after the on-board cards have been retired.
@@ -106,13 +89,9 @@ def make_plan(graph):
         # The graph supplies its actual top bound, including the optional fee row.
         top = min((node["y"] - node["height"] / 2 for node in graph["nodes"]), default=0)
         shapes[0]["body"]["position"]["y"] = top - 230
-        if incremental:
-            shapes[1]["body"]["position"]["y"] = top - 550
         annotations = graph["layout"].get("annotations", {})
-        note_shapes = [(shapes[0], "legend")] + ([(shapes[1], "run")] if incremental else [])
-        for shape, name in note_shapes:
-            if name in annotations:
-                shape["body"]["position"].update({field: annotations[name][field] for field in ("x", "y")})
+        if "legend" in annotations:
+            shapes[0]["body"]["position"].update({field: annotations["legend"][field] for field in ("x", "y")})
     plan = {"schema_version": 2 if incremental else 1, "run_id": graph["run_id"], "shapes": shapes, "connectors": connectors}
     for key in ("layout", "fee_items", "include_fees", "connector_attachment", "graph_options", "address_convergences"):
         if key in graph:
@@ -125,7 +104,7 @@ def make_plan(graph):
         plan["namespace"] = copy.deepcopy(graph["namespace"])
         plan["run"] = copy.deepcopy(graph.get("run", {}))
     annotations, annotation_catalog = presentation_items.make_items(graph,
-        [_bounds(item["body"], item["key"]) for item in shapes if item["key"] == "legend" or item["key"].startswith("run:")])
+        [_bounds(item["body"], item["key"]) for item in shapes if item["key"] == "legend"])
     shapes.extend(annotations)
     plan["presentation_items"] = annotation_catalog
     plan["context_group_items"] = context_group_miro.catalog(graph)
@@ -616,6 +595,24 @@ def _fee_catalog(plan):
     return catalog
 
 
+def _run_note_removals(state):
+    """Retire only mapped summaries proven by their run and generated intent."""
+    removals = {}
+    for key, record in state["items"].items():
+        if not key.startswith("run:"):
+            continue
+        run_id = key[len("run:"):]
+        data = record["intent"].get("data", {})
+        prefix = "<p>Run: " + html.escape(run_id)
+        content = data.get("content", "")
+        if (not run_id or (run_id not in state["runs"] and run_id != state.get("active_run_id"))
+                or record["endpoint"] != "shapes"
+                or not isinstance(content, str) or not content.startswith((prefix + "<br>", prefix + "</p>"))):
+            raise TraceError("Mapped run summary has no valid generated identity; preserve the mapping before syncing")
+        removals[key] = {"schema_version": 1, "kind": "run_note", "key": key, "run_id": run_id}
+    return removals
+
+
 def _fee_removals(plan, state):
     catalog = _fee_catalog(plan)
     removals = {}
@@ -635,6 +632,7 @@ def _fee_removals(plan, state):
             removals[key] = proof
     removals.update(presentation_items.removals(plan, state))
     removals.update(context_group_miro.removals(plan, state))
+    removals.update(_run_note_removals(state))
     pending = state.get("pending_deletions", {})
     if not isinstance(pending, dict):
         raise TraceError("Malformed pending Miro deletions; restore the sync state")
@@ -650,13 +648,13 @@ def _fee_removals(plan, state):
 def _check_fee_removals(state, remote, removals):
     for key in removals:
         record = state["items"][key]
-        if key not in remote:  # Only an attempted pending DELETE can reach here.
+        if key not in remote:  # An attempted DELETE or an already absent retired run summary.
             continue
         actual = _editable(remote[key], record["endpoint"])
         for path, previous in _fields(record["managed"]):
             if not _same(_get(actual, path), previous, path):
                 raise TraceError("Generated item " + key + " has manual edits. Preserve those notes and restore the generated content before removing this fee or annotation. No board writes made.")
-        if record["endpoint"] == "shapes" and remote[key].get("data", {}).get("shape") != ("rectangle" if key.startswith(presentation_items.PREFIX) else "rhombus"):
+        if record["endpoint"] == "shapes" and remote[key].get("data", {}).get("shape") != ("rectangle" if key.startswith((presentation_items.PREFIX, "run:")) else "rhombus"):
             raise TraceError("Generated shape type was changed; restore it before removing this fee or annotation. No board writes made.")
     for key, record in state["items"].items():
         if record["endpoint"] != "connectors":
@@ -1286,6 +1284,11 @@ def _require_inline_counts(plan):
                          "generate a fresh preview with inline counts before publishing")
 
 
+def _require_no_run_notes(plan):
+    if any(item["key"].startswith("run:") for item in plan["shapes"]):
+        raise TraceError("This saved Miro plan contains retired run summaries; use normal sync or generate a fresh preview before publishing")
+
+
 def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, interval=.02, dry_run=False,
          reorganize=False, progress=None, workers=4):
     """Sync graph objects, leaving export frames for the separate frame action."""
@@ -1381,6 +1384,8 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
     """
     validate_plan(plan)
     _require_inline_counts(plan)
+    if not frames_only:
+        _require_no_run_notes(plan)
     namespace = _namespace(plan)
     if (not isinstance(board_id, str) or not board_id or len(board_id) > 200
             or any(c in board_id for c in "/?#") or any(c.isspace() for c in board_id)):
@@ -1413,8 +1418,9 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
                              "choose Sync and reorganize to apply this layout change. Ordinary sync preserves manual positions and ports.")
         report = {"dry_run": dry_run, "board_url": "https://miro.com/app/board/" + urllib.parse.quote(board_id, safe="") + "/",
                   "run_id": plan["run_id"], "namespace": namespace, "state_path": str(state_path), "max_items": max_items,
-                  "reorganize": reorganize, "frames_only": frames_only, "fee_items_to_remove": sum(not key.startswith(presentation_items.PREFIX) and proof.get("kind") != "context_group_replacement" for key, proof in removals.items()),
+                  "reorganize": reorganize, "frames_only": frames_only, "fee_items_to_remove": sum(not key.startswith((presentation_items.PREFIX, "run:")) and proof.get("kind") != "context_group_replacement" for key, proof in removals.items()),
                   "annotations_to_remove": sum(key.startswith(presentation_items.PREFIX) for key in removals),
+                  "run_notes_to_remove": sum(proof.get("kind") == "run_note" for proof in removals.values()),
                   "frames_to_remove": len(frame_removals),
                   "context_items_to_replace": sum(proof.get("kind") == "context_group_replacement" for proof in removals.values())}
         layout = plan.get("layout", {})
@@ -1490,6 +1496,12 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
 
         status_progress.emit("framing" if frames_only else "layout", 0, 1,
                              "Checking live graph bounds for frames" if frames_only else "Checking connections and preparing the layout")
+        # An acknowledged historical update may have reached Miro before its
+        # response was lost. Reconcile that journal before distinguishing a
+        # manual edit from generated content on a retiring run summary.
+        original_recovered = {key: copy.deepcopy(state["items"][key])
+                              for key in state.get("pending_updates", {})}
+        _recover_updates(state, remote)
         context_removals = {key: proof for key, proof in removals.items()
                             if proof.get("kind") == "context_group_replacement"}
         _check_fee_removals(state, remote, {key: proof for key, proof in removals.items()
@@ -1498,16 +1510,13 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
             from .address_migration import _inventory
             context_group_miro.check_remote(state, remote, context_removals,
                                            _inventory(requests, base, headers))
-        annotation_removals = {state["items"][key]["id"] for key in removals if key.startswith(presentation_items.PREFIX)}
+        annotation_removals = {state["items"][key]["id"] for key in removals if key.startswith((presentation_items.PREFIX, "run:"))}
         if annotation_removals:
             from .address_migration import _inventory
             inventory = _inventory(requests, base, headers)
             if any((item.get(field) or {}).get("id") in annotation_removals for item in inventory.values()
                    for field in ("startItem", "endItem")):
                 raise TraceError("A board connector attaches to a retiring annotation; preserve that attachment before syncing")
-        original_recovered = {key: copy.deepcopy(state["items"][key])
-                              for key in state.get("pending_updates", {})}
-        _recover_updates(state, remote)
         if frames_only:
             # Read every retained shape, including older run notes, at its actual
             # canvas position. No graph placement or annotation resizing runs.
@@ -1797,6 +1806,7 @@ def publish(plan, board_id, state_path, max_items=750, token=None, transport=htt
     """
     validate_plan(plan)
     _require_inline_counts(plan)
+    _require_no_run_notes(plan)
     count = len(plan["shapes"]) + len(plan["connectors"]) + len(plan.get("frames", []))
     if count > max_items:
         raise TraceError(f"Plan has {count} items, above max-items={max_items}; select a smaller trace or explicitly raise the limit")

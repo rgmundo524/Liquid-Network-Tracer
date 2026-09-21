@@ -42,7 +42,7 @@ class GraphCleanupTests(unittest.TestCase):
         before = copy.deepcopy(self.graph)
         plan = make_plan(self.graph); validate_plan(plan)
         self.assertEqual(plan["presentation_items"], {})
-        self.assertEqual(len(plan["shapes"]), len(self.graph["nodes"]) + 2 + len(plan["presentation_items"]))
+        self.assertEqual(len(plan["shapes"]), len(self.graph["nodes"]) + 1 + len(plan["presentation_items"]))
         self.assertFalse(any(s["key"].startswith(("annotation:attribution:", "annotation:convergence:")) for s in plan["shapes"]))
         self.assertFalse(any("★" in s["body"]["data"]["content"] for s in plan["shapes"]))
         for node in self.graph["nodes"]:

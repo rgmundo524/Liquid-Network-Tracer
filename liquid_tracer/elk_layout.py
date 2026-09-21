@@ -548,7 +548,7 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
                         "main_bottom": max((node["y"] + node["height"] / 2 for node in main), default=320),
                         "fee_row_y": -100 if fees else None,
                         "cycle_groups": copy.deepcopy(graph.get("layout", {}).get("cycle_groups", [])),
-                        "annotations": {"legend": {"x": 700, "y": -160 + shift}, "run": {"x": 700, "y": -480 + shift}},
+                        "annotations": {"legend": {"x": 700, "y": -160 + shift}},
                         "routing_exceptions": exceptions, "routing_checks_truncated": routing_checks_truncated,
                         "input_order": input_order_metadata(graph, input_policy),
                         "branch_organization": {"version": BRANCH_LAYOUT_VERSION,
@@ -668,7 +668,7 @@ def fallback_graph(graph, connector_style="straight", reason="size_limit"):
                         "fee_row_y": graph.get("layout", {}).get("fee_row_y", -100 if fee_ids else None),
                         "cycle_groups": copy.deepcopy(graph.get("layout", {}).get("cycle_groups", [])),
                         "annotations": copy.deepcopy(graph.get("layout", {}).get("annotations", {
-                            "legend": {"x": 700, "y": -160 + shift}, "run": {"x": 700, "y": -480 + shift}})),
+                            "legend": {"x": 700, "y": -160 + shift}})),
                         "fallback_reason": reason, "fallback_notice": notice,
                         "placement": "complete_graph_v1",
                         "routing_exceptions": exceptions, "routing_checks_truncated": False,

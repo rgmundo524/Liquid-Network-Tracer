@@ -294,19 +294,16 @@ class GraphPresentationTests(unittest.TestCase):
         self.assertEqual(plan["presentation_version"], PRESENTATION_VERSION)
         self.assertEqual(plan["namespace"], graph["namespace"])
         self.assertEqual({item["key"] for item in plan["shapes"]},
-                         {node["id"] for node in graph["nodes"]} | {"legend", "run:" + graph["run_id"]} | set(plan["presentation_items"]))
+                         {node["id"] for node in graph["nodes"]} | {"legend"} | set(plan["presentation_items"]))
         self.assertEqual({(item["key"], item["source"], item["target"]) for item in plan["connectors"]},
                          {(edge["id"], edge["source"], edge["target"]) for edge in graph["edges"]})
 
-    def test_run_note_summarizes_many_seeds_without_losing_full_plan_metadata(self):
+    def test_many_seeds_remain_in_plan_metadata_without_adding_a_run_note(self):
         graph = build_graph(self.state)
         seeds = [f"{index:064x}:0" for index in range(10)] + [f"{0:064x}:1"]
         graph["run"]["seeds"] = seeds
         plan = make_plan(graph)
-        content = next(item["body"]["data"]["content"] for item in plan["shapes"]
-                       if item["key"].startswith("run:"))
-        self.assertIn("Starting outputs: 11 across 10 transactions", content)
-        self.assertNotIn(seeds[0], content)
+        self.assertFalse(any(item["key"].startswith("run:") for item in plan["shapes"]))
         self.assertEqual(plan["run"]["seeds"], seeds)
 
 

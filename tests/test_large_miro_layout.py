@@ -96,7 +96,7 @@ class LargeMiroLayoutTests(unittest.TestCase):
         before = {key: copy.deepcopy(self.item(key))
                   for key in ("addr:a", "tx:1", "addr:b", "input:1:0")}
         report = self.sync(fallback_graph("two", extended=True))
-        self.assertEqual((report["created"], report["moved"], report["reattached"]), (5, 0, 0))
+        self.assertEqual((report["created"], report["moved"], report["reattached"]), (4, 0, 0))
         self.assertEqual(before, {key: self.item(key) for key in before})
         current_mapping = read_json(self.state_path)["items"]
         self.assertTrue(all(current_mapping[key]["id"] == record["id"]

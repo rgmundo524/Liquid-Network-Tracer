@@ -229,5 +229,4 @@ def arrange(nodes, edges, transactions, fee_items):
     return {"algorithm": "dependency_layers_v1", "direction": "left_to_right",
             "main_top": main_top, "main_bottom": main_bottom,
             "fee_row_y": -100 if shown_fees else None,
-            "annotations": {"legend": {"x": 700, "y": -160 + annotation_shift},
-                            "run": {"x": 700, "y": -480 + annotation_shift}}}
+            "annotations": {"legend": {"x": 700, "y": -160 + annotation_shift}}}

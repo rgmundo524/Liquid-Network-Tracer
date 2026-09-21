@@ -326,7 +326,8 @@ def preflight(requests, base, headers, state, removals, progress=None):
                              and pending.get("proof") == removals.get(key))
             else:
                 attempted = state.get("pending_deletions", {}).get(key, {}).get("attempted")
-            if not (key in removals and attempted):
+            retired_run_note = removals.get(key, {}).get("kind") == "run_note"
+            if not (key in removals and (attempted or retired_run_note)):
                 missing.append(key + " (" + record["id"] + ")")
         elif not 200 <= status < 300:
             raise TraceError("Miro preflight GET returned HTTP " + str(status) + "; no board writes made")

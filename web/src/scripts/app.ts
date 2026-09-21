@@ -119,6 +119,7 @@ type Result = RenderingMetadata & {
   updated_frames?: number;
   frames_to_remove?: number;
   fee_items_to_remove?: number;
+  run_notes_to_remove?: number;
   conflicts_count?: number;
   board_url?: string;
   [key: string]: unknown;
@@ -855,6 +856,7 @@ function resultBanner(action: string, result: Result): string {
         ["New frames", result.new_frames],
         ["Frames to remove", result.frames_to_remove],
         ["Fee items to remove", result.fee_items_to_remove],
+        ["Run summaries to remove", result.run_notes_to_remove],
       ]
     : action === "address-counts" ? [["Fetched", result.fetched], ["Known", result.known], ["Remaining", result.remaining]] : [];
   return `${addressCountWarning(result)}<div class="alert">${icon("check")}<div><strong>${titles[action] || "Action completed"}</strong><p>${action === "trace" ? `The saved run ${esc(result.run_id || "")} is ready to review and export.` : action === "miro-preview" ? "This is an offline plan. Live sync checks the board before making changes." : action === "miro-rebuild" ? "The rebuilt board is linked to this investigation. The previous board and its comments remain available. Create frames separately when the graph is finished." : action === "miro-create" ? "The board is linked to this investigation. Sync a saved run to add the graph." : action === "miro-recover" ? "The board was verified empty and the unconfirmed initial batch was cleared locally. Choose Sync to Miro to resume the recovered snapshot with individual shape requests. Your saved trace is ready to use." : action === "miro-frame-recover" ? `The interrupted frame was reconciled locally. The failed snapshot is selected. ${result.resume_action === "miro-frames" ? "Choose Create / update Miro frames to finish framing the saved graph." : "Finish Sync to Miro for this snapshot, then choose Create / update Miro frames."}` : action === "miro-frames" ? "Frames now reflect the synced graph. Run Create / update Miro frames again after further changes to the graph." : action === "address-merge" ? "Choose Sync to Miro to refresh labels, or Sync and reorganize to apply the shared-address layout. When the graph is finished, choose Create / update Miro frames." : "The result is saved with this investigation."}</p>${

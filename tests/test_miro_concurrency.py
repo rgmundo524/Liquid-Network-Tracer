@@ -281,7 +281,7 @@ class MiroConcurrencyTests(unittest.TestCase):
         state = read_json(self.state_path)
         self.assertEqual(len(attempts), 1)
         self.assertIsNone(state["pending"])
-        self.assertEqual(len(state["items"]), 7)
+        self.assertEqual(len(state["items"]), 6)
         self.assertEqual(state["active_run_id"], "two")
 
     def test_quota_refusal_before_post_keeps_only_acknowledged_creation(self):
@@ -311,7 +311,7 @@ class MiroConcurrencyTests(unittest.TestCase):
         report = sync(self.initial_plan, "board=", state_path, token="test-token",
                       transport=remote, interval=0, workers=4)
         self.assertEqual(report["created"], len(self.initial_plan["connectors"]))
-        self.assertEqual(len(remote.items), 7)
+        self.assertEqual(len(remote.items), 6)
 
 
 if __name__ == "__main__":

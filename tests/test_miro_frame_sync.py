@@ -118,8 +118,7 @@ class MiroFrameSyncTests(unittest.TestCase):
         deleted = [url for method, url, _ in self.remote.calls if method == "DELETE"]
         self.assertEqual(len(deleted), 1)
         self.assertIn("/frames/", deleted[0])
-        self.assertTrue(contains(self.item("frame:graph"), self.item("run:one")))
-        self.assertTrue(contains(self.item("frame:graph"), self.item("run:two")))
+        self.assertTrue(contains(self.item("frame:graph"), self.item("legend")))
         writes = len(self.remote.writes)
         repeated = self.frame(framed_graph("two", merged=True), max_items=0)
         self.assertEqual((repeated["created"], repeated["updated"], repeated["deleted"]), (0, 0, 0))
@@ -278,15 +277,16 @@ class MiroFrameSyncTests(unittest.TestCase):
         self.assertTrue(frame_updates)
         self.assertTrue(all(detach < index for index in frame_updates))
 
-    def test_old_run_note_is_detached_before_continuation_resizes_outer_frame(self):
+    def test_legend_is_detached_before_continuation_resizes_outer_frame(self):
         self.initialize()
-        expected = self.attach("run:one")
+        expected = self.attach("legend")
+        self.item("addr:b:branch3")["position"]["x"] += 30000
         self.sync_graph(framed_graph("two", merged=True))
         self.frame(framed_graph("two", merged=True))
-        note = self.item("run:one")
-        self.assertEqual(note["parent"], {"id": None})
-        self.assertEqual({axis: note["position"][axis] for axis in ("x", "y")}, expected)
-        self.assertTrue(contains(self.item("frame:graph"), note))
+        legend = self.item("legend")
+        self.assertEqual(legend["parent"], {"id": None})
+        self.assertEqual({axis: legend["position"][axis] for axis in ("x", "y")}, expected)
+        self.assertTrue(contains(self.item("frame:graph"), legend))
         for method, url, body in self.remote.calls:
             if method == "POST" and url.endswith(("/shapes", "/bulk")):
                 for item in body if isinstance(body, list) else [body]:
@@ -297,6 +297,7 @@ class MiroFrameSyncTests(unittest.TestCase):
         frame_id = self.item("frame:graph")["id"]
         self.remote.items["manual-note"] = {"id": "manual-note", "type": "text", "parent": {"id": frame_id},
                                              "position": {"x": 50, "y": 50, "relativeTo": "parent_top_left"}}
+        self.item("addr:b:branch3")["position"]["x"] += 30000
         self.sync_graph(framed_graph("two", merged=True))
         before, writes = self.path.read_bytes(), len(self.remote.writes)
         with self.assertRaisesRegex(TraceError, "unmanaged|attached|outside"):

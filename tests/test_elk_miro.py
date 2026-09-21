@@ -135,7 +135,7 @@ class ElkMiroTests(unittest.TestCase):
         old_shapes = {key: copy.deepcopy(self.item(key)) for key in ("addr:a", "tx:1", "addr:b")}
         old_connector = copy.deepcopy(connector)
         report = self.sync(elk_graph("two", True))
-        self.assertEqual(report["created"], 5)
+        self.assertEqual(report["created"], 4)
         self.assertEqual(report["moved"], 0)
         self.assertEqual(report["reattached"], 0)
         self.assertEqual(connector, old_connector)
@@ -247,7 +247,7 @@ class ElkMiroTests(unittest.TestCase):
         self.remote = remote
         self.sync()
         self.assertEqual(self.sync()["created"], 0)
-        self.assertEqual(len(remote.items), 7)
+        self.assertEqual(len(remote.items), 6)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ from .services import confidence_value
 from .attribution_presentation import display_name, attribution_reference
 from .name_colors import apply_name_colors, color_text
 
-PRESENTATION_VERSION = 20
+PRESENTATION_VERSION = 21
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {

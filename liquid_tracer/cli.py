@@ -494,7 +494,7 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
     def topology(value):
         return (
             {(item["key"], item["body"]["data"]["shape"]) for item in value["shapes"]
-             if item["key"] not in value.get("presentation_items", {})},
+             if item["key"] not in value.get("presentation_items", {}) and not item["key"].startswith("run:")},
             {(item["key"], item["source"], item["target"]) for item in value["connectors"]},
         )
 

@@ -133,7 +133,7 @@ class CreationParentTests(unittest.TestCase):
         second = graph("two", True)
         second["activity_frames"] = activity_frames(second)
         report = self.sync(second)
-        self.assertEqual(report["new_shapes"], 3)
+        self.assertEqual(report["new_shapes"], 2)
         state = read_json(self.path)
         self.assertEqual(state["pending_creation_detaches"], {})
         for entry in state["items"].values():
@@ -201,7 +201,7 @@ class CreationParentTests(unittest.TestCase):
         value["edges"] = []
         self.remote.parent_capacity = 20
         self.sync(value)
-        self.assertEqual([len(payload) for _, payload in self.shape_posts()], [20, 20, 19])
+        self.assertEqual([len(payload) for _, payload in self.shape_posts()], [20, 20, 18])
         self.assertEqual(self.remote.max_children, 20)
         self.assertEqual(read_json(self.path)["pending_creation_detaches"], {})
 
