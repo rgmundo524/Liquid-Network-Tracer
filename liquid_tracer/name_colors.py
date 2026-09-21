@@ -175,3 +175,27 @@ def color_text(color):
     linear = [v / 12.92 if v <= .04045 else ((v + .055) / 1.055) ** 2.4 for v in channels]
     luminance = sum(v * w for v, w in zip(linear, (.2126, .7152, .0722)))
     return "#000000" if luminance > .179 else "#ffffff"
+
+
+def apply_attribution_arrow_colors(nodes, edges):
+    """Color adjacent Liquid address links using resolved name assignments.
+
+    Node role colors never become attribution colors: in particular, a seed
+    keeps its seed fill while its arrows can show its assigned name color.
+    The edge's evidential role, identity and underlying input/output stay intact.
+    Resolve before any context grouping replaces displayed address endpoints.
+    """
+    colors = {}
+    for key, node in nodes.items():
+        details = node.get("details", {})
+        if (node.get("kind") != "address" or details.get("network") != "liquid"
+                or details.get("name_color_conflict")):
+            continue
+        assigned = {color_value(value) for value in details.get("name_colors", {}).values()}
+        if len(assigned) == 1:
+            colors[key] = assigned.pop()
+    for edge in edges:
+        assigned = {colors[key] for key in (edge["source"], edge["target"]) if key in colors}
+        if len(assigned) == 1:
+            edge["color"] = assigned.pop()
+            edge["color_source"] = "name"

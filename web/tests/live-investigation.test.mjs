@@ -14,7 +14,7 @@ const source = stripTypeScriptTypes(
     .replace('void initialize().catch(', 'globalThis.startup = initialize().catch('),
   {mode: 'transform'},
 );
-const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, settingsPage, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy};');
+const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy};');
 const txid = 'a'.repeat(64);
 const defaults = {hops: 1, max_transactions: 20, max_outpoints: 100, max_requests: 30,
   max_seconds: 60, max_new_items: 750, layout_attempts: 25, connector_style: 'straight'};
@@ -580,4 +580,50 @@ test('completed rebuild displays both board links and selects the published snap
   assert.match(html, /Open previous board/);
   assert.match(html, /board\/NEW%3D/);
   assert.match(html, /board\/OLD%3D/);
+});
+
+
+test('attribution arrow colors can be enabled and disabled in investigation settings', async () => {
+  const detail = {id: 'arrowcase', name: 'Named arrows', run_defaults: {...defaults, color_attribution_arrows: true}, runs: []};
+  const view = await harness(path => path === '/api/cases/arrowcase' ? detail : undefined);
+  assert.match(view.newCase(), /name="color_attribution_arrows" type="checkbox"\//);
+  view.state.activeCase = detail;
+  view.state.page = 'case-settings';
+  assert.match(view.settingsPage(), /name="color_attribution_arrows" type="checkbox" checked/);
+  assert.match(view.settingsPage(), /Color arrows by attribution/);
+  await view.submitSettings({name: detail.name, color_attribution_arrows_present: '1', color_attribution_arrows: 'on'});
+  assert.equal(view.calls.findLast(call => call.path === '/api/cases/arrowcase/settings').body.settings.color_attribution_arrows, true);
+  await view.submitSettings({name: detail.name, color_attribution_arrows_present: '1'});
+  assert.equal(view.calls.findLast(call => call.path === '/api/cases/arrowcase/settings').body.settings.color_attribution_arrows, false);
+});
+
+test('limited forms preserve attribution arrow settings and explicit unchecked controls disable them', async () => {
+  const view = await harness();
+  const previous = {...defaults, hub_addresses: [], color_attribution_arrows: true};
+  assert.equal(view.readSettings({values: defaults}, previous).color_attribution_arrows, true);
+  assert.equal(view.readSettings({values: defaults}).color_attribution_arrows, false);
+  assert.equal(view.readSettings({values: {...defaults, color_attribution_arrows_present: '1'}}, previous).color_attribution_arrows, false);
+  assert.equal(view.readSettings({values: {...defaults, color_attribution_arrows: 'on'}}).color_attribution_arrows, true);
+});
+
+test('changing attribution arrow colors invalidates Mermaid, ELK and compact previews', async () => {
+  const view = await harness();
+  const settings = {...defaults, include_fees: false, group_context_inputs: false, hub_addresses: [], color_attribution_arrows: false};
+  const artifact = {...settings, downloads: [], preview_url: '/files/artifacts/graph.html', compaction: {unchanged: true}};
+  delete artifact.color_attribution_arrows;
+  const detail = {id: 'case', name: 'Case', run_defaults: settings, miro_board: 'board', runs: [{id: 'run1'}], latest_run: 'run1', artifacts: {run1: {compact: artifact}}};
+  view.state.activeCase = detail;
+  assert.match(view.localGraph(artifact, true, settings), /<iframe/);
+  assert.match(view.elkGraph(artifact, true, settings), /<iframe/);
+  assert.ok(view.currentCompaction());
+  settings.color_attribution_arrows = true;
+  for (const html of [view.localGraph(artifact, true, settings), view.elkGraph(artifact, true, settings), view.compactGraph(artifact, true, detail)]) {
+    assert.match(html, /different graph settings/);
+    assert.doesNotMatch(html, /<iframe/);
+  }
+  assert.equal(view.currentCompaction(), undefined);
+  artifact.color_attribution_arrows = true;
+  assert.match(view.localGraph(artifact, true, settings), /<iframe/);
+  assert.match(view.elkGraph(artifact, true, settings), /<iframe/);
+  assert.ok(view.currentCompaction());
 });

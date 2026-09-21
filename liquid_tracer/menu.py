@@ -360,6 +360,10 @@ def create_app(root=None):
                     yield Checkbox("Include transaction fee flows", value=self.settings["include_fees"], id="include-fees")
                     yield Static("Graph display only. Included fees appear in a chronological row above the graph. "
                                  "Trace evidence always retains fee outputs.", markup=False)
+                    yield Checkbox("Color arrows by attribution", value=self.settings["color_attribution_arrows"],
+                                   id="color-attribution-arrows")
+                    yield Static("Arrows entering or leaving a named address use its assigned name color. "
+                                 "Other arrows keep their default colors.", markup=False)
                     yield Checkbox("Group isolated context inputs", value=self.settings["group_context_inputs"],
                                    id="group-context-inputs")
                     yield Static("Optional summary for inputs used only by one transaction. Every input number and "
@@ -382,6 +386,8 @@ def create_app(root=None):
                     yield Static(text, markup=False)
                     yield Static("Transaction fee flows: " + ("included" if self.settings["include_fees"] else "hidden")
                                  + ". Change this in Investigation settings.", id="fee-status", markup=False)
+                    yield Static("Color arrows by attribution: " + ("on" if self.settings["color_attribution_arrows"] else "off")
+                                 + ". Change this in Investigation settings.", markup=False)
                     yield Static(f"Layout attempts: {self.settings['layout_attempts']}. "
                                  "Change this in Investigation settings.", markup=False)
                     yield Static("Connector appearance: " + self.settings["connector_style"]
@@ -452,6 +458,7 @@ def create_app(root=None):
                 except ValueError:
                     raise TraceError("Layout attempts: enter a whole number from 1 to 1000") from None
                 settings["include_fees"] = self.query_one("#include-fees", Checkbox).value
+                settings["color_attribution_arrows"] = self.query_one("#color-attribution-arrows", Checkbox).value
                 settings["group_context_inputs"] = self.query_one("#group-context-inputs", Checkbox).value
                 settings["hub_addresses"] = [line.strip() for line in self.query_one("#hub-addresses", TextArea).text.splitlines()
                                              if line.strip()]
@@ -1141,6 +1148,7 @@ def create_app(root=None):
                     f"Latest run: {_status(self.case, metadata)}\n"
                     f"Miro board: {'https://miro.com/app/board/' + board + '/' if board else 'not set'}\n"
                     f"Transaction fee flows: {'included' if settings['include_fees'] else 'hidden'}\n"
+                    f"Color arrows by attribution: {'on' if settings['color_attribution_arrows'] else 'off'}\n"
                     f"Isolated context inputs: {'grouped' if settings['group_context_inputs'] else 'separate'}\n"
                     f"Separate branch hubs: {len(settings['hub_addresses'])} selected\n"
                     f"Layout attempts: {settings['layout_attempts']}\nDirectory: {self.case}")

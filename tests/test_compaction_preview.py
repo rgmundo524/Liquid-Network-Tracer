@@ -185,6 +185,19 @@ class CompactionPreviewTests(unittest.TestCase):
                 sync_run(self.case, self.run, reorganize=True, compact_preview=identity)
             sync.assert_called_once()
 
+    def test_arrow_coloring_change_requires_a_fresh_compact_preview(self):
+        identity, _ = self.preview()
+        update_case(self.case, {"run_defaults": {"color_attribution_arrows": True}})
+        with patch("liquid_tracer.cli.sync") as sync, \
+                self.assertRaisesRegex(TraceError, "Attribution arrow coloring changed"):
+            sync_run(self.case, self.run, reorganize=True, compact_preview=identity)
+        sync.assert_not_called()
+        self.assertIsNone(latest_compaction_preview(self.case))
+        updated, _ = self.preview("87654321")
+        _, meta = verified_compaction_preview(self.case, self.run, updated)
+        self.assertTrue(meta["graph_options"]["color_attribution_arrows"])
+        self.assertEqual(self.snapshot, {p.name: p.read_bytes() for p in self.archive.iterdir() if p.is_file()})
+
     def test_detail_files_are_checked_when_present_but_old_manifests_still_work(self):
         identity, directory = self.preview()
         meta = read_json(directory / "compaction.json")

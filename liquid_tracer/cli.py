@@ -446,6 +446,17 @@ def context_input_grouping(metadata, explicit=None):
     return value
 
 
+def attribution_arrow_coloring(metadata):
+    """Resolve the current case's optional attribution arrow colors."""
+    defaults = metadata.get("run_defaults", {})
+    if not isinstance(defaults, dict):
+        raise TraceError("Invalid investigation run defaults; restore case.json")
+    value = defaults.get("color_attribution_arrows", False)
+    if type(value) is not bool:
+        raise TraceError("color_attribution_arrows must be true or false")
+    return value
+
+
 def branch_hubs(metadata):
     defaults = metadata.get("run_defaults", {})
     if not isinstance(defaults, dict):
@@ -464,7 +475,8 @@ def layout_search_attempts(metadata, explicit=None):
 
 def refresh_presentation(plan, trace_path, include_fees=False, connector_style="straight", progress=None,
                          service_settings=None, preview_directory=None, fetch_address_counts=False, count_report=None,
-                         group_context_inputs=False, hub_addresses=None, layout_attempts=None, save_layout=False):
+                         group_context_inputs=False, hub_addresses=None, layout_attempts=None, save_layout=False,
+                         color_attribution_arrows=None):
     """Verify historical topology, then create a current shared-address view."""
     namespace = _namespace(plan)
     state = read_json(trace_path)
@@ -508,7 +520,8 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
     # Layout is a derivative of verified evidence, never a rewrite of the archive.
     from .elk_layout import optimize_graph
     graph = build_graph(state, merge_addresses=True, include_fees=include_fees,
-                        group_context_inputs=group_context_inputs, hub_addresses=hub_addresses)
+                        group_context_inputs=group_context_inputs, hub_addresses=hub_addresses,
+                        color_attribution_arrows=color_attribution_arrows)
     if fetch_address_counts:
         report = ensure_counts(count_case, state, graph=graph, progress=progress)
         if count_report is not None:
@@ -681,6 +694,7 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
                                     service_settings=load_services(case), preview_directory=Path(case) / "previews",
                                     fetch_address_counts=not dry_run, count_report=count_report,
                                     group_context_inputs=context_input_grouping(metadata, group_context_inputs),
+                                    color_attribution_arrows=attribution_arrow_coloring(metadata),
                                     hub_addresses=branch_hubs(metadata),
                                     layout_attempts=layout_search_attempts(metadata, layout_attempts),
                                     save_layout=not dry_run)
@@ -700,6 +714,7 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
               "presentation_version": plan.get("presentation_version", 1),
               "include_fees": plan.get("include_fees", True),
               "group_context_inputs": plan.get("graph_options", {}).get("group_context_inputs", False),
+              "color_attribution_arrows": plan.get("graph_options", {}).get("color_attribution_arrows", False),
               "hub_addresses": plan.get("graph_options", {}).get("hub_addresses", []),
               "reorganize": bool(reorganize),
               "presentation_refreshed": plan["sha256"] != archived_plan_sha256}
@@ -834,7 +849,8 @@ def run_trace(args, progress=None):
                                       "miro_board": args.miro_board or metadata.get("miro_board") or None}
             state["address_mode"] = "merged" if merge_addresses else "outpoint_occurrences"
             state["graph_options"] = {**state.get("graph_options", {}),
-                                      "include_fees": include_fee_flows(metadata, args.include_fees)}
+                                      "include_fees": include_fee_flows(metadata, args.include_fees),
+                                      "color_attribution_arrows": attribution_arrow_coloring(metadata)}
             api.run_id = state["run_id"]
             destination = run_path(args.case, state["run_id"])
             only = {f"{t}:{i}" for t, i in map(parse_outpoint, args.only)} if args.only else None
@@ -901,6 +917,7 @@ def saved_graph(case, run_id="latest", include_fees=None, *, group_context_input
     fees = include_fee_flows(metadata, include_fees)
     graph = build_graph(state, merge_addresses=True, include_fees=fees,
                         group_context_inputs=context_input_grouping(metadata, group_context_inputs),
+                        color_attribution_arrows=attribution_arrow_coloring(metadata),
                         hub_addresses=branch_hubs(metadata))
     return run_id, archive, graph
 
@@ -917,6 +934,7 @@ def mermaid_run(case, run_id="latest", out=None, include_fees=None, open_browser
     result = export_mermaid(graph, destination)
     result["address_counts"] = counts
     result.update({"run_id": run_id, "include_fees": graph["include_fees"],
+                   "color_attribution_arrows": graph.get("graph_options", {}).get("color_attribution_arrows", False),
                    "browser_opened": open_preview(result["html"]) if open_browser else False})
     return result
 
@@ -941,6 +959,7 @@ def layout_preview_run(case, run_id="latest", out=None, include_fees=None,
     result["address_counts"] = counts
     result.update({"run_id": run_id, "include_fees": graph["include_fees"], "connector_style": style,
                    "group_context_inputs": graph.get("graph_options", {}).get("group_context_inputs", False),
+                   "color_attribution_arrows": graph.get("graph_options", {}).get("color_attribution_arrows", False),
                    "hub_addresses": graph.get("graph_options", {}).get("hub_addresses", []),
                    "layout_algorithm": graph["layout"]["algorithm"], "layout_attempts": attempts,
                    "browser_opened": open_preview(result["html"]) if open_browser else False})
@@ -975,6 +994,7 @@ def compact_preview_run(case, run_id="latest", include_fees=None, connector_styl
                                service_sha256=services_before)
     result.update(address_counts=counts, run_id=run_id, include_fees=after["include_fees"], connector_style=style,
                   group_context_inputs=after.get("graph_options", {}).get("group_context_inputs", False),
+                  color_attribution_arrows=after.get("graph_options", {}).get("color_attribution_arrows", False),
                   hub_addresses=after.get("graph_options", {}).get("hub_addresses", []),
                   layout_algorithm=after["layout"]["algorithm"], layout_attempts=attempts,
                   browser_opened=open_preview(result["html"]) if open_browser else False)
@@ -1134,7 +1154,8 @@ def main(argv=None, *, progress=None):
                 state["labels"] = apply_service_labels(state["labels"], service_settings)
                 state["service_controls"] = {key: value for key, value in service_settings.items() if key != "history"}
                 state["graph_options"] = {**state.get("graph_options", {}),
-                                          "include_fees": include_fee_flows(read_case(args.case), args.include_fees)}
+                                          "include_fees": include_fee_flows(read_case(args.case), args.include_fees),
+                                          "color_attribution_arrows": attribution_arrow_coloring(read_case(args.case))}
                 merged = bool(args.merge_addresses)
                 ensure_counts(args.case, state, progress=progress)
                 export_run(store, state, args.out, merged, args.offline_preview)

@@ -24,9 +24,36 @@ assignments. These settings are per investigation, not global.
 | Unspent | Orange, `#fdba74` | `unspent_endpoint` |
 | Events, fees and unspendable outputs | Pink, `#ea94bb` | `event` |
 
-Only fills are configured here. Connector colors, border colors, border widths,
-node shapes, and convergence detection are unchanged. Shared-address highlights
+These palettes configure node fills. The optional **Color arrows by attribution**
+setting also uses imported-name colors for arrows, as described below. Border colors,
+border widths, node shapes, and convergence detection are unchanged. Shared-address highlights
 remain border-only; the removed SHARED ADDRESS node text is not restored.
+
+## Color arrows by attribution
+
+In **Investigation settings**, enable **Color arrows by attribution** and save.
+This option is off by default and is saved separately for each investigation.
+Assign the desired name colors using **Assign name colors**, then regenerate a
+preview or use normal **Sync to Miro**. No new tracing run or graph reorganization
+is required.
+
+Both arrows entering a named Liquid address and arrows leaving it use that
+address's assigned name color. For example, a transaction receiving from a blue
+service and paying a green service has a blue input arrow and a green output
+arrow. Colors apply to the adjacent address connections; they do not spread
+through subsequent transactions or imply an allocation of funds.
+
+Selected seed circles keep their seed color, while their arrows can show the
+assigned attribution color. Arrows without an assigned name color, or with
+conflicting name colors, retain their normal traced/context color. Traced and
+context arrows retain their existing widths. Turning the option off restores
+the normal arrow colors on the next preview or sync. Manually edited Miro
+connector styles remain protected by the usual sync conflict checks.
+
+The setting applies to Miro, Mermaid, basic SVG, and ELK previews. Current previews
+and normal sync use the current setting; archived runs retain their saved
+presentation. Changing it requires a new compact preview before applying a
+reviewed layout. The saved setting key is `run_defaults.color_attribution_arrows`.
 
 ## Priority and imported names
 

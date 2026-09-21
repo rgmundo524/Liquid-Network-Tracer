@@ -20,6 +20,7 @@ DEFAULTS = {
     "max_new_items": 750,
     "layout_attempts": DEFAULT_LAYOUT_ATTEMPTS,
     "include_fees": False,
+    "color_attribution_arrows": False,
     "group_context_inputs": False,
     "hub_addresses": [],
     "connector_style": "straight",
@@ -53,7 +54,7 @@ def validate_settings(settings):
             if not isinstance(value, str) or value not in ("straight", "curved", "elbowed"):
                 raise TraceError("connector_style must be straight, curved, or elbowed")
             continue
-        if key in ("include_fees", "group_context_inputs"):
+        if key in ("include_fees", "color_attribution_arrows", "group_context_inputs"):
             if type(value) is not bool:
                 raise TraceError(f"{key} must be true or false")
             continue

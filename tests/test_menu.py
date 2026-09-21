@@ -898,6 +898,8 @@ finally:
                 app.screen.query_one("#max_requests", Input).value = "12"
                 self.assertFalse(app.screen.query_one("#include-fees", Checkbox).value)
                 app.screen.query_one("#include-fees", Checkbox).value = True
+                self.assertFalse(app.screen.query_one("#color-attribution-arrows", Checkbox).value)
+                app.screen.query_one("#color-attribution-arrows", Checkbox).value = True
                 self.assertFalse(app.screen.query_one("#group-context-inputs", Checkbox).value)
                 app.screen.query_one("#group-context-inputs", Checkbox).value = True
                 self.assertEqual(app.screen.query_one("#hub-addresses", TextArea).text, "")
@@ -909,6 +911,7 @@ finally:
                 self.assertEqual(load_settings(self.root)["hops"], 3)
                 self.assertEqual(load_settings(self.root)["layout_attempts"], 75)
                 self.assertIs(load_settings(self.root)["include_fees"], True)
+                self.assertIs(load_settings(self.root)["color_attribution_arrows"], True)
                 self.assertIs(load_settings(self.root)["group_context_inputs"], True)
                 self.assertEqual(load_settings(self.root)["hub_addresses"], [hub_address])
                 case = await self.new_case(app, pilot)
@@ -916,11 +919,15 @@ finally:
                 self.assertEqual(read_case(case)["run_defaults"]["layout_attempts"], 75)
                 self.assertEqual(read_case(case)["run_defaults"]["connector_style"], "curved")
                 self.assertIs(read_case(case)["run_defaults"]["include_fees"], True)
+                self.assertIs(read_case(case)["run_defaults"]["color_attribution_arrows"], True)
                 self.assertIs(read_case(case)["run_defaults"]["group_context_inputs"], True)
                 self.assertEqual(read_case(case)["run_defaults"]["hub_addresses"], [hub_address])
                 self.assertIn("Transaction fee flows: included", str(app.screen.query_one("#case-summary", Static).render()))
                 self.assertIn("Isolated context inputs: grouped", str(app.screen.query_one("#case-summary", Static).render()))
+                self.assertIn("Color arrows by attribution: on", str(app.screen.query_one("#case-summary", Static).render()))
                 await self.click(app, pilot, "#run")
+                self.assertFalse(app.screen.query("#color-attribution-arrows"))
+                self.assertIs(app.screen.read_limits()["color_attribution_arrows"], True)
                 self.assertIs(app.screen.read_limits()["group_context_inputs"], True)
                 self.assertEqual(app.screen.read_limits()["layout_attempts"], 75)
                 self.assertFalse(app.screen.query("#layout_attempts"))
@@ -929,6 +936,8 @@ finally:
                 await self.click(app, pilot, "#cancel")
                 await self.click(app, pilot, "#case-settings")
                 self.assertTrue(app.screen.query_one("#include-fees", Checkbox).value)
+                self.assertTrue(app.screen.query_one("#color-attribution-arrows", Checkbox).value)
+                app.screen.query_one("#color-attribution-arrows", Checkbox).value = False
                 self.assertTrue(app.screen.query_one("#group-context-inputs", Checkbox).value)
                 app.screen.query_one("#group-context-inputs", Checkbox).value = False
                 self.assertEqual(app.screen.query_one("#hub-addresses", TextArea).text, hub_address)
@@ -950,6 +959,8 @@ finally:
                 self.assertEqual(saved["run_defaults"]["connector_style"], "elbowed")
                 self.assertEqual(load_settings(self.root)["connector_style"], "curved")
                 self.assertIs(saved["run_defaults"]["include_fees"], False)
+                self.assertIs(saved["run_defaults"]["color_attribution_arrows"], False)
+                self.assertIs(load_settings(self.root)["color_attribution_arrows"], True)
                 self.assertIs(saved["run_defaults"]["group_context_inputs"], False)
                 self.assertEqual(saved["run_defaults"]["hub_addresses"], [])
                 self.assertEqual(load_settings(self.root)["hub_addresses"], [hub_address])
@@ -966,6 +977,7 @@ finally:
                 await pilot.pause()
                 await self.click(restarted, pilot, "#case-settings")
                 self.assertFalse(restarted.screen.query_one("#include-fees", Checkbox).value)
+                self.assertFalse(restarted.screen.query_one("#color-attribution-arrows", Checkbox).value)
                 self.assertFalse(restarted.screen.query_one("#group-context-inputs", Checkbox).value)
                 self.assertEqual(restarted.screen.query_one("#connector-style", Select).value, "elbowed")
                 self.assertEqual(restarted.screen.query_one("#layout_attempts", Input).value, "100")

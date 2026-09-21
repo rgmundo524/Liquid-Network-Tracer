@@ -70,7 +70,7 @@ def make_plan(graph):
         connector = {"key": edge["id"], "source": edge["source"], "target": edge["target"], "body": {
             "shape": edge.get("connector_shape", "curved"), "captions": [{"content": html.escape(caption_text(edge)), "position": "50%"}],
             "style": {"startStrokeCap": "none", "endStrokeCap": "stealth", "strokeStyle": "normal",
-                      "strokeColor": edge_color(edge["role"]),
+                      "strokeColor": edge_color(edge),
                       "strokeWidth": str(stroke_width(edge["role"])), "fontSize": str(CAPTION_FONT_SIZE)}}}
         if graph.get("connector_attachment") == "transaction_sides_v1":
             connector["attachment"] = {}

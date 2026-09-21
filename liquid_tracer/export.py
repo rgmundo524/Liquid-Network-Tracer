@@ -14,9 +14,9 @@ from .miro_frames import activity_frames
 from .graph_markers import node_border
 from .services import confidence_value
 from .attribution_presentation import display_name, attribution_reference
-from .name_colors import apply_name_colors, color_text
+from .name_colors import apply_name_colors, apply_attribution_arrow_colors, color_text, color_value
 
-PRESENTATION_VERSION = 21
+PRESENTATION_VERSION = 22
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -42,6 +42,11 @@ def legend_lines(graph=None):
     colors = validate_role_colors((graph or {}).get("service_controls", {}).get("role_colors", {}))
     def name(key):
         return colors.get(key, PALETTE[key][0])
+    arrows = ("Arrows: assigned name colors identify links directly entering or leaving that Liquid address; "
+              "thicker = traced UTXO links, thinner = context only. Other links retain their default colors. "
+              "Colors do not extend through downstream addresses or establish ownership."
+              if (graph or {}).get("graph_options", {}).get("color_attribution_arrows") else
+              f"Arrows: thicker {name('traced_edge').lower()} = traced UTXO links; thinner {name('context_edge').lower()} = context only.")
     return [
         f"Squares: {name('starting_transaction').lower()} = provided starting transactions; {name('transaction').lower()} = subsequent hops. Starting role takes priority.",
         f"{name('event')} diamonds: events. Transaction inputs enter on the left; outputs leave on the right.",
@@ -49,7 +54,7 @@ def legend_lines(graph=None):
         f"Circles: {name('address').lower()} = context. Optional name colors match case-insensitively; confidence never selects a color.",
         f"Color priority: selected seed {name('seed').lower()} > assigned name color > unspent {name('unspent_endpoint').lower()} > candidate {name('candidate').lower()} > context {name('address').lower()}. Shared seed addresses retain the seed color.",
         f"{name('unspent_endpoint')} circles: traced branch ends at a UTXO observed unspent. Unchecked or hop-limited outputs do not qualify.",
-        f"Arrows: thicker {name('traced_edge').lower()} = traced UTXO links; thinner {name('context_edge').lower()} = context only.",
+        arrows,
         "Optional context rectangles summarize isolated input addresses; each input remains a separate arrow. Full members stay in local exports; a summary does not imply common ownership.",
         "Captions: vin/vout number · amount asset. ?? = not publicly available. Known amounts are in base units.",
         "STOP TRACING: an explicit address boundary, independent of confidence. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards.",
@@ -59,8 +64,22 @@ def legend_lines(graph=None):
     ]
 
 
-def edge_color(role):
+def edge_color(edge):
+    """Resolve safe display color while accepting legacy role-only callers."""
+    if isinstance(edge, dict):
+        if edge.get("color") is not None:
+            return color_value(edge["color"])
+        role = edge.get("role", "")
+    else:
+        role = edge
     return COLORS["context_edge" if role.startswith("context") else "traced_edge"]
+
+
+def edge_marker_id(edge):
+    color = edge_color(edge)
+    suffix = ("context" if color == COLORS["context_edge"] else
+              "traced" if color == COLORS["traced_edge"] else color[1:])
+    return "arrow-" + suffix
 
 
 def graph_quantity(output):
@@ -117,7 +136,12 @@ def _unspent_endpoints(state):
                  or (isinstance(item.get("spend_observation_id"), str) and item["spend_observation_id"].strip()))}
 
 
-def build_graph(state, merge_addresses=True, include_fees=False, *, group_context_inputs=False, hub_addresses=None):
+def build_graph(state, merge_addresses=True, include_fees=False, *, group_context_inputs=False, hub_addresses=None,
+                color_attribution_arrows=None):
+    if color_attribution_arrows is None:
+        color_attribution_arrows = state.get("graph_options", {}).get("color_attribution_arrows", False)
+    if type(color_attribution_arrows) is not bool:
+        raise TraceError("Attribution arrow colors must be enabled or disabled")
     nodes, edges, fee_items = {}, [], {}
     occurrence_keys = defaultdict(set)
     unspent_endpoints = _unspent_endpoints(state)
@@ -249,6 +273,8 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
     name_colors = state.get("service_controls", {}).get("name_colors", {})
     apply_name_colors(nodes.values(), name_colors,
                       role_colors=state.get("service_controls", {}).get("role_colors", {}))
+    if color_attribution_arrows:
+        apply_attribution_arrow_colors(nodes, edges)
     for node in nodes.values():
         node["text_color"] = color_text(node["color"])
     layout = arrange(nodes, edges, state["transactions"], fee_items)
@@ -262,7 +288,8 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
             "address_mode": mode,
             "connector_attachment": "transaction_sides_v1",
             "include_fees": bool(include_fees),
-            "graph_options": {"include_fees": bool(include_fees)},
+            "graph_options": {"include_fees": bool(include_fees),
+                              "color_attribution_arrows": color_attribution_arrows},
             "fee_items": fee_items, "layout": layout,
             "notice": "UTXO reachability, not allocation of stolen value. Consult the legend for context and traced roles. "
                       "?? marks amounts or assets not available from public data. "
@@ -412,8 +439,11 @@ def svg_graph(graph):
     header_top = min((y for _, y in bounds), default=160) - max(170, 24 + len(legend) * 18 + 30)
     min_y = min(0, header_top - 30)
     height = max((y for _, y in bounds), default=300) + 50 - min_y
+    markers = {edge_marker_id(edge): edge_color(edge) for edge in graph["edges"]}
+    marker_defs = "".join(f'<marker id="{key}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="{color}"/></marker>'
+                          for key, color in sorted(markers.items()))
     chunks = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{min_x} {min_y} {width} {height}" width="{width}" height="{height}">',
-        '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/></marker></defs>',
+        '<defs>' + marker_defs + '</defs>',
         f'<rect x="{min_x}" y="{min_y}" width="{width}" height="{height}" fill="#fff"/>',
         '<g font-family="Arial, sans-serif">',
         f'<text x="40" y="{header_top}" font-size="24" font-weight="bold">Liquid UTXO trace' + (' · SYNTHETIC DATA' if graph["simulated"] else '') + '</text>']
@@ -421,9 +451,9 @@ def svg_graph(graph):
                   for index, line in enumerate(legend))
     for edge, (path, (label_x, label_y), _) in routes:
         context = edge["role"].startswith("context")
-        color = edge_color(edge["role"])
+        color = edge_color(edge)
         chunks.append(f'<g class="edge {"context" if context else "tracked"}" data-edge-key="{html.escape(edge["id"], quote=True)}"><title>{html.escape(edge["outpoint"] + " | " + edge["quantity"])}</title>'
-            f'<path d="{path}" fill="none" stroke="{color}" stroke-width="{stroke_width(edge["role"])}" marker-end="url(#arrow)"/>'
+            f'<path d="{path}" fill="none" stroke="{color}" stroke-width="{stroke_width(edge["role"])}" marker-end="url(#{edge_marker_id(edge)})"/>'
             f'<text x="{label_x}" y="{label_y-10}" text-anchor="middle" font-size="11" fill="{color}">{html.escape(edge["label"])}</text></g>')
     for node in graph["nodes"]:
         x, y, fill = node["x"], node["y"], node["color"]

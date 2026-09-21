@@ -15,7 +15,7 @@ from .graph_markers import node_border
 from .connector_styles import stroke_width
 from .common import TraceError, save_json
 from .layout_search_reporting import layout_search_warning
-from .export import COLORS, edge_color, legend_lines
+from .export import COLORS, edge_color, edge_marker_id, legend_lines
 from .edge_labels import (FONT_SIZE, LINE_HEIGHT, PADDING_Y, caption_box, caption_text,
                           validate_label_layout)
 
@@ -276,19 +276,20 @@ def _svg(graph, nodes, edges, *, banner=True):
              '.explorer-link:focus-visible > g '
              '{ filter:drop-shadow(0 0 5px #0f766e); }</style>',
              '<defs>']
-    for key, color in (("traced", COLORS["traced_edge"]), ("context", COLORS["context_edge"])):
-        lines.append(f'<marker id="arrow-{key}" markerWidth="9" markerHeight="7" refX="8" refY="3.5" '
+    markers = {edge_marker_id(edge): edge_color(edge) for edge in edges}
+    for key, color in sorted(markers.items()):
+        lines.append(f'<marker id="{key}" markerWidth="9" markerHeight="7" refX="8" refY="3.5" '
                      f'orient="auto" markerUnits="userSpaceOnUse"><path d="M 0 0 L 9 3.5 L 0 7 Z" fill="{color}"/></marker>')
     lines.extend(['</defs>', f'<rect x="{_fmt(x)}" y="{_fmt(y)}" width="{_fmt(width)}" height="{_fmt(height)}" fill="white"/>',
                   *([f'<text x="{_fmt(left)}" y="{_fmt(top - 100)}" font-family="sans-serif" font-size="15" fill="#475569">'
                      + _escape(notice) + '</text>'] if banner else []), '<g id="edges" fill="none">'])
     for index, edge in enumerate(edges):
-        marker = "context" if edge.get("role", "").startswith("context") else "traced"
+        marker = edge_marker_id(edge)
         caption = _text(caption_text(edge))
         lines.append(f'<path id="edge-{index}" data-edge-id="{_escape(edge["id"])}" '
                      f'data-source="{_escape(edge["source"])}" data-target="{_escape(edge["target"])}" '
                      f'data-appearance="{edge["connector_shape"]}" d="{_path(edge["points"], edge["connector_shape"] == "curved")}" '
-                     f'stroke="{edge_color(edge.get("role", ""))}" stroke-width="{stroke_width(edge.get("role", ""))}" marker-end="url(#arrow-{marker})">'
+                     f'stroke="{edge_color(edge)}" stroke-width="{stroke_width(edge.get("role", ""))}" marker-end="url(#{marker})">'
                      f'<title>{_escape(caption)}</title></path>')
     lines.append('</g><g id="nodes" font-family="sans-serif" text-anchor="middle" fill="#172033">')
     for index, node in enumerate(nodes):

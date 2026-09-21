@@ -36,6 +36,7 @@ class WebCompactionTests(unittest.TestCase):
         route, path, run_id = self.traced()
         archive = path / "runs" / run_id
         before = {item.name: item.read_bytes() for item in archive.iterdir() if item.is_file()}
+        update_case(path, {"run_defaults": {"color_attribution_arrows": True}})
         result = self.compact(route, run_id)
         self.assertEqual(result["layout_algorithm"], "elk_layered_v1")
         self.assertRegex(result["preview_id"], "^" + run_id + r"-compact-[0-9a-f]{8}$")
@@ -48,6 +49,7 @@ class WebCompactionTests(unittest.TestCase):
                                  "details.html", "details.json"})
         self.assertFalse(result["group_context_inputs"])
         self.assertEqual(result["hub_addresses"], [])
+        self.assertTrue(result["color_attribution_arrows"])
         for item in result["downloads"]:
             status, data, response = self.request(item["url"])
             self.assertEqual(status, 200)
@@ -65,6 +67,7 @@ class WebCompactionTests(unittest.TestCase):
         self.assertEqual(saved["preview_id"], result["preview_id"])
         self.assertEqual(saved["downloads"], result["downloads"])
         self.assertEqual(saved["compaction"], result["compaction"])
+        self.assertTrue(saved["color_attribution_arrows"])
         self.assertEqual(before, {item.name: item.read_bytes() for item in archive.iterdir() if item.is_file()})
 
     def test_compact_action_fixed_arguments_uses_no_live_credentials(self):
@@ -86,7 +89,8 @@ class WebCompactionTests(unittest.TestCase):
     def test_changed_group_or_hub_selection_blocks_apply_before_live_job(self):
         route, path, run_id = self.traced()
         result = self.compact(route, run_id)
-        for settings in ({"group_context_inputs": True}, {"hub_addresses": ["G" + "a" * 33]}):
+        for settings in ({"group_context_inputs": True}, {"hub_addresses": ["G" + "a" * 33]},
+                         {"color_attribution_arrows": True}):
             with self.subTest(settings=settings):
                 update_case(path, {"miro_board": "SYNTHETIC=", "run_defaults": settings})
                 with patch.object(self.server, "start_job") as start:
@@ -98,10 +102,13 @@ class WebCompactionTests(unittest.TestCase):
 
     def test_public_group_and_hub_options_are_validated_and_canonical(self):
         address = "G" + "a" * 33
-        self.assertEqual(public_graph_options({}), {"group_context_inputs": False, "hub_addresses": []})
-        self.assertEqual(public_graph_options({"group_context_inputs": True, "hub_addresses": [address, " " + address], "private": "hidden"}),
-                         {"group_context_inputs": True, "hub_addresses": [address]})
-        for options in ({"group_context_inputs": "true"}, {"hub_addresses": ["/private"]}, None):
+        self.assertEqual(public_graph_options({}), {"group_context_inputs": False, "hub_addresses": [],
+                                                   "color_attribution_arrows": False})
+        self.assertEqual(public_graph_options({"group_context_inputs": True, "hub_addresses": [address, " " + address],
+                                               "color_attribution_arrows": True, "private": "hidden"}),
+                         {"group_context_inputs": True, "hub_addresses": [address], "color_attribution_arrows": True})
+        for options in ({"group_context_inputs": "true"}, {"hub_addresses": ["/private"]},
+                        {"color_attribution_arrows": "true"}, {"color_attribution_arrows": 1}, None):
             self.assertIsNone(public_graph_options(options))
 
     def test_apply_uses_exact_preview_and_live_handoff_without_default_overrides(self):
@@ -120,6 +127,15 @@ class WebCompactionTests(unittest.TestCase):
             self.success(route + "/actions", {"action": "miro-sync", "run_id": run_id}, 202)
             self.assertNotIn("--compact-preview", start.call_args.args[0])
             self.assertNotIn("--reorganize", start.call_args.args[0])
+
+    def test_job_metadata_preserves_valid_arrow_preference_only(self):
+        for enabled in (False, True):
+            for report in ({"color_attribution_arrows": enabled},
+                           {"graph_options": {"color_attribution_arrows": enabled}}):
+                result = self.server.public_result(report, "miro-sync", None, None)
+                self.assertIs(result["color_attribution_arrows"], enabled)
+        result = self.server.public_result({"color_attribution_arrows": "true"}, "miro-sync", None, None)
+        self.assertNotIn("color_attribution_arrows", result)
 
     def test_invalid_or_wrong_source_previews_rejected_before_live_job(self):
         route, path, run_id = self.traced()

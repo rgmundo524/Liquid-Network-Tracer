@@ -9,7 +9,7 @@ from unittest.mock import patch
 from liquid_tracer.cli import main
 from liquid_tracer.common import TraceError, canonical, digest, read_json, save_json
 from liquid_tracer.connections import FILES, preview_connections, reviewed_connections
-from liquid_tracer.investigations import read_case
+from liquid_tracer.investigations import read_case, update_case
 from liquid_tracer.menu import create_app
 from tests import test_web, test_menu_addresses
 from tests.test_connections import saved_case
@@ -42,11 +42,13 @@ class ConnectionWebTests(unittest.TestCase):
 
     def test_offline_action_returns_files_and_reopens_selected_snapshot(self):
         case, route, state = self.setup_case()
+        update_case(case, {"run_defaults": {"color_attribution_arrows": True}})
         before = (case/"case.json").read_bytes()
         job = self.success(route+"/actions", {"action": "connections", "run_id": state["run_id"], "connection_hops": 2}, status=202)
         result = self.wait(job)
         self.assertEqual(result["connection_count"], 1)
         self.assertEqual(result["max_hops"], 2)
+        self.assertTrue(result["color_attribution_arrows"])
         self.assertEqual(result["address_counts"]["remaining"], 0)
         self.assertGreater(result["address_counts"]["known"], 0)
         self.assertEqual({f["name"] for f in result["downloads"] if f["name"].endswith(".csv")}, {"transactions.csv"})
@@ -62,6 +64,7 @@ class ConnectionWebTests(unittest.TestCase):
             self.assertEqual(self.request(url)[0], 200)
         detail = self.success(route)
         self.assertEqual(detail["artifacts"][state["run_id"]]["connections"]["connection_count"], 1)
+        self.assertTrue(detail["artifacts"][state["run_id"]]["connections"]["color_attribution_arrows"])
         self.assertEqual(detail["artifacts"][state["run_id"]]["connections"]["downloads"], result["downloads"])
         self.assertEqual((case/"case.json").read_bytes(), before)
 

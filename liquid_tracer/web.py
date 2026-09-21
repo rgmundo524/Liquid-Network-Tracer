@@ -56,10 +56,10 @@ def public_graph_options(options):
     if not isinstance(options, dict):
         return None
     try:
-        settings = validate_settings({key: options[key] for key in ("group_context_inputs", "hub_addresses") if key in options})
+        settings = validate_settings({key: options[key] for key in ("group_context_inputs", "hub_addresses", "color_attribution_arrows") if key in options})
     except TraceError:
         return None
-    result = {key: settings[key] for key in ("group_context_inputs", "hub_addresses")}
+    result = {key: settings[key] for key in ("group_context_inputs", "hub_addresses", "color_attribution_arrows")}
     # Old artifacts did not record a search budget. Do not claim the current
     # default was used to calculate those saved coordinates.
     if "layout_attempts" in options:
@@ -474,6 +474,11 @@ class LocalServer(ThreadingHTTPServer):
                     exposed_names = selected_names | LAYOUT_DETAIL_NAMES if kind in ("elk", "compact") else selected_names
                     product = self.artifact_links(case, [folder, directory.name], exposed_names)
                     product["include_fees"] = fees
+                    if kind != "csv":
+                        display_options = public_graph_options(options)
+                        if display_options is None:
+                            continue
+                        product.update(display_options)
                     if kind == "connections":
                         report = info["connections"]
                         product.update(preview_id=directory.name, max_hops=report["max_hops"],
@@ -489,10 +494,6 @@ class LocalServer(ThreadingHTTPServer):
                                 or not isinstance(layout, dict) or layout.get("algorithm") not in LAYOUT_ALGORITHMS):
                             continue
                         product["connector_style"] = style
-                        display_options = public_graph_options(options)
-                        if display_options is None:
-                            continue
-                        product.update(display_options)
                         product.update(public_rendering_metadata({
                             "layout_algorithm": layout.get("algorithm"),
                             "fallback_reason": layout.get("fallback_reason")}))
@@ -762,7 +763,7 @@ class LocalServer(ThreadingHTTPServer):
             value["connector_style"] = result["connector_style"]
         options = result.get("graph_options", {})
         if isinstance(options, dict):
-            options = {**options, **{key: result[key] for key in ("group_context_inputs", "hub_addresses", "layout_attempts") if key in result}}
+            options = {**options, **{key: result[key] for key in ("group_context_inputs", "hub_addresses", "layout_attempts", "color_attribution_arrows") if key in result}}
             display_options = public_graph_options(options)
             if display_options is not None:
                 value.update({key: item for key, item in display_options.items() if key in options})

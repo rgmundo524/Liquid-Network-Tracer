@@ -106,7 +106,7 @@ def mermaid_source(graph):
         caption = edge["label"] + (" · " + edge["quantity"] if edge.get("quantity") else "")
         lines.append(f"  {ids[edge['source']]} -->|{_label(caption)}| {ids[edge['target']]}")
     for index, edge in enumerate(edges):
-        lines.append(f"  linkStyle {index} stroke:{edge_color(edge['role'])},stroke-width:2px,color:#334155")
+        lines.append(f"  linkStyle {index} stroke:{edge_color(edge)},stroke-width:2px,color:#334155")
     return "\n".join(lines) + "\n"
 
 

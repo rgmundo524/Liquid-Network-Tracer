@@ -97,6 +97,23 @@ class InvestigationTests(unittest.TestCase):
         update_case(case, {"run_defaults": {"group_context_inputs": True}})
         self.assertIs(read_case(case)["run_defaults"]["group_context_inputs"], True)
 
+    def test_attribution_arrows_are_opt_in_and_persist_per_investigation(self):
+        case = create_investigation(self.root, "Existing case")
+        metadata = read_case(case)
+        self.assertIs(metadata["run_defaults"].pop("color_attribution_arrows"), False)
+        save_json(case / "case.json", metadata)
+        original = (case / "case.json").read_bytes()
+        save_settings(self.root, {"color_attribution_arrows": True})
+        self.assertIs(validate_settings(read_case(case)["run_defaults"])["color_attribution_arrows"], False)
+        self.assertEqual((case / "case.json").read_bytes(), original)
+        new_case = create_investigation(self.root, "Named arrows", run_defaults=load_settings(self.root))
+        self.assertIs(read_case(new_case)["run_defaults"]["color_attribution_arrows"], True)
+        update_case(case, {"run_defaults": {"color_attribution_arrows": True}})
+        self.assertIs(read_case(case)["run_defaults"]["color_attribution_arrows"], True)
+        update_case(case, {"run_defaults": {"color_attribution_arrows": False}})
+        self.assertIs(read_case(case)["run_defaults"]["color_attribution_arrows"], False)
+        self.assertIs(load_settings(self.root)["color_attribution_arrows"], True)
+
     def test_layout_attempts_default_persist_and_legacy_cases_keep_builtin_default(self):
         self.assertEqual(DEFAULTS["layout_attempts"], 25)
         self.assertEqual(validate_settings({})["layout_attempts"], 25)
@@ -138,6 +155,8 @@ class InvestigationTests(unittest.TestCase):
                        {"include_fees": None}, {"include_fees": []}, {"hops": True},
                        {"group_context_inputs": 0}, {"group_context_inputs": 1},
                        {"group_context_inputs": "false"}, {"group_context_inputs": None},
+                       {"color_attribution_arrows": 0}, {"color_attribution_arrows": 1},
+                       {"color_attribution_arrows": "false"}, {"color_attribution_arrows": None},
                        {"max_seconds": False}):
             with self.subTest(values=values):
                 with self.assertRaises(TraceError):
