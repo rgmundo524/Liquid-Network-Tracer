@@ -684,14 +684,10 @@ def compact_graph(graph, progress=None):
     for edge in edges.values():
         adjacent[edge["source"]].append(edge)
         adjacent[edge["target"]].append(edge)
-    # make_plan uses these fixed note dimensions. They are included in board
-    # extent reporting and stay untouched, so compacting never expands notes.
-    annotations = []
-    for key, position in result["layout"].get("annotations", {}).items():
-        if key == "legend":
-            width, height = 1300, 260
-            annotations.append((position["x"] - width / 2, position["y"] - height / 2,
-                                position["x"] + width / 2, position["y"] + height / 2))
+    # Include the same row-based legend dimensions used by the Miro plan.
+    from .legend_miro import bounds as legend_bounds
+    annotations = [(x - width / 2, y - height / 2, x + width / 2, y + height / 2)
+                   for x, y, width, height in legend_bounds(result)]
     try:
         frame_groups = [tuple(group["shape_keys"]) for group in result.get("activity_frames", {}).get("activities", [])]
         if any(key not in nodes for group in frame_groups for key in group):

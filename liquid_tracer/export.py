@@ -16,7 +16,7 @@ from .services import confidence_value
 from .attribution_presentation import display_name, attribution_reference
 from .name_colors import apply_name_colors, apply_attribution_arrow_colors, color_text, color_value
 
-PRESENTATION_VERSION = 22
+PRESENTATION_VERSION = 23
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -421,6 +421,7 @@ def _svg_edge_route(start, end):
 def svg_graph(graph):
     import textwrap
     from .connector_styles import stroke_width
+    from .legend import legend_rows, legend_notes
 
     lookup = {n["id"]: n for n in graph["nodes"]}
     routes = [(edge, _svg_edge_route(lookup[edge["source"]], lookup[edge["target"]]))
@@ -432,11 +433,23 @@ def svg_graph(graph):
     bounds += [point for _, (_, _, points) in routes for point in points]
     min_x = min(0, min((x for x, _ in bounds), default=0) - 30)
     width = max(1100, max((x for x, _ in bounds), default=500) + 80) - min_x
-    # The legend must fit a small export as well as a full investigation.
-    # Wrapping it cannot alter graph geometry or hide the complete text.
-    legend_chars = max(20, min(140, int((min_x + width - 80) / 8)))
-    legend = [part for line in legend_lines(graph) for part in textwrap.wrap(line, legend_chars)]
-    header_top = min((y for _, y in bounds), default=160) - max(170, 24 + len(legend) * 18 + 30)
+    # Keep a compact, readable key even when the investigation spans miles of
+    # canvas. Wrapping names and definitions never changes evidence geometry.
+    legend_width = min(1060, min_x + width - 80)
+    column_width = legend_width / 2
+    row_chars = max(20, int((column_width - 60) / 8))
+    legend = []
+    column_heights = [0, 0]
+    for index, row in enumerate(legend_rows(graph)):
+        column = index % 2
+        labels = textwrap.wrap(row["label"], row_chars) or [""]
+        definitions = textwrap.wrap(row["description"], row_chars) or [""]
+        legend.append((row, column, column_heights[column], labels, definitions))
+        column_heights[column] += (len(labels) + len(definitions)) * 18 + 14
+    notes = [part for note in legend_notes(graph)
+             for part in textwrap.wrap(note, max(20, int(legend_width / 8)))]
+    notes_top = 42 + max(column_heights) + 8
+    header_top = min((y for _, y in bounds), default=160) - (notes_top + len(notes) * 18 + 40)
     min_y = min(0, header_top - 30)
     height = max((y for _, y in bounds), default=300) + 50 - min_y
     markers = {edge_marker_id(edge): edge_color(edge) for edge in graph["edges"]}
@@ -447,8 +460,16 @@ def svg_graph(graph):
         f'<rect x="{min_x}" y="{min_y}" width="{width}" height="{height}" fill="#fff"/>',
         '<g font-family="Arial, sans-serif">',
         f'<text x="40" y="{header_top}" font-size="24" font-weight="bold">Liquid UTXO trace' + (' · SYNTHETIC DATA' if graph["simulated"] else '') + '</text>']
-    chunks.extend(f'<text x="40" y="{header_top + 24 + index * 18}" font-size="13">{html.escape(line)}</text>'
-                  for index, line in enumerate(legend))
+    for row, column, offset, labels, definitions in legend:
+        x, y = 40 + column * column_width, header_top + 42 + offset
+        chunks.append(f'<g class="legend-row" data-legend-key="{html.escape(row["key"], quote=True)}">'
+                      f'<circle cx="{x + 10}" cy="{y - 5}" r="10" fill="{row["color"]}" stroke="#64748b"/>')
+        for index, line in enumerate(labels + definitions):
+            weight = ' font-weight="bold"' if index < len(labels) else ''
+            chunks.append(f'<text x="{x + 30}" y="{y + index * 18}" font-size="13"{weight}>{html.escape(line)}</text>')
+        chunks.append('</g>')
+    chunks.extend(f'<text class="legend-note" x="40" y="{header_top + notes_top + index * 18}" font-size="13" fill="#475569">{html.escape(line)}</text>'
+                  for index, line in enumerate(notes))
     for edge, (path, (label_x, label_y), _) in routes:
         context = edge["role"].startswith("context")
         color = edge_color(edge)

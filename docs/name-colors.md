@@ -169,7 +169,17 @@ edit a live board.
 Run archives retain their own presentation snapshot. Current previews and normal
 sync use current case settings. Palette changes invalidate a reviewed compact
 preview, so regenerate it before applying. Miro, Mermaid, basic SVG, and ELK SVG
-share the resolved node fills; legends show configured hex values for custom
-roles. Graph JSON retains the settings snapshot, and node CSV includes displayed
+share the resolved node fills. Legends show a colored circle, a short label, and
+a brief definition for each graph role and each assigned attribution name used
+in the displayed graph. The circles use the actual configured colors. Longer
+evidence notes are separate from the color key in local previews.
+
+Normal **Sync to Miro** updates the existing generated legend. If it needs more
+space, it grows upward with clearance from the graph. Manually edited legend
+content, font size, or dimensions are preserved. Large color keys use additional
+legend pages; obsolete generated pages are removed on a later sync. These pages
+do not change tracing or activity groups.
+
+Graph JSON retains the settings snapshot, and node CSV includes displayed
 color and `color_source` (`role_palette` for a role override, `name` for a name
 assignment). Existing tracing roles and evidence remain unchanged.

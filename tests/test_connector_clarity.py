@@ -10,7 +10,8 @@ from liquid_tracer.change_layout import _routes
 from liquid_tracer.common import canonical, digest, read_json
 from liquid_tracer.connector_styles import stroke_width
 from liquid_tracer.elk_layout import attachment_point, fallback_graph
-from liquid_tracer.export import build_graph, legend_lines, svg_graph
+from liquid_tracer.export import build_graph, svg_graph
+from liquid_tracer.legend import legend_notes, legend_rows
 from liquid_tracer.input_order import centered_input_positions, input_orders
 from liquid_tracer.miro import make_plan, sync
 from tests.test_input_order import child_input, input_order_state
@@ -92,13 +93,20 @@ class ConnectorHierarchyTests(unittest.TestCase):
                 self.assertEqual(float(group.find(namespace + "path").get("stroke-width")),
                                  stroke_width(edges[key]["role"]))
 
-    def test_basic_svg_wraps_full_legend_above_the_graph(self):
+    def test_basic_svg_places_swatch_legend_above_the_graph(self):
         value = build_graph(input_order_state())
         svg = ET.fromstring(svg_graph(value))
         namespace = "{http://www.w3.org/2000/svg}"
-        labels = svg.find(namespace + "g").findall(namespace + "text")
-        self.assertEqual(" ".join(text.text or "" for text in labels[1:]), " ".join(legend_lines(value)))
-        self.assertGreater(len(labels) - 1, len(legend_lines(value)))
+        header = svg.find(namespace + "g")
+        rows = [group for group in header.findall(namespace + "g") if group.get("data-legend-key")]
+        self.assertEqual(len(rows), len(legend_rows(value)))
+        for group, row in zip(rows, legend_rows(value)):
+            self.assertEqual(group.find(namespace + "circle").get("fill"), row["color"])
+            self.assertEqual(" ".join(text.text or "" for text in group.findall(namespace + "text")),
+                             row["label"] + " " + row["description"])
+        notes = [text for text in header.findall(namespace + "text") if text.get("class") == "legend-note"]
+        self.assertEqual(" ".join(text.text or "" for text in notes), " ".join(legend_notes(value)))
+        labels = header.findall(namespace + "text") + [text for row in rows for text in row.findall(namespace + "text")]
         bottom = max(float(text.get("y")) + float(text.get("font-size")) for text in labels)
         self.assertLess(bottom, min(node["y"] - node["height"] / 2 for node in value["nodes"]))
 

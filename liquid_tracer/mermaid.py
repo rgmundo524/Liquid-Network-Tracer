@@ -20,6 +20,7 @@ from .name_colors import color_text
 from .graph_markers import node_border
 from .common import TraceError, save_json
 from .export import COLORS, edge_color, legend_lines
+from .legend import LEGEND_CSS, legend_html
 from .attribution_presentation import register_html
 from .processes import defer_cancellation_during_spawn
 from .render_runtime import renderer_failure, renderer_heap_mb
@@ -146,6 +147,7 @@ pre {{ white-space:pre-wrap; overflow-wrap:anywhere; }}
 summary {{ cursor:pointer; }} li {{ margin:6px 0; }}
 .chart {{ overflow:auto; padding:24px; background:white; }}
 .chart img {{ display:block; max-width:none; }}
+{LEGEND_CSS}
 </style></head><body>
 <header><h1>Liquid trace · {title}</h1>
 <p>Run {run_id} · {len(graph['nodes'])} nodes · {len(graph['edges'])} links · Fees {fees}{simulated}</p>
@@ -155,7 +157,8 @@ summary {{ cursor:pointer; }} li {{ margin:6px 0; }}
 <p><a href="graph.mmd" download>Mermaid source</a> · <a href="graph.svg" download>SVG</a> ·
 <a href="graph.json" download>Graph details</a> · <a href="mermaid-node-map.json" download>Node identifiers</a></p>
 {register_html(graph)}
-<details><summary>Legend</summary><ul>{items}</ul></details></header>
+{legend_html(graph)}
+<details><summary>Detailed evidence notes</summary><ul>{items}</ul></details></header>
 <main class="chart"><img alt="Directed Liquid Network transaction graph" src="data:image/svg+xml;base64,{encoded}"></main>
 </body></html>
 """

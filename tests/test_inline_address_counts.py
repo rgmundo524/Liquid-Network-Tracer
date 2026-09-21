@@ -112,7 +112,7 @@ class InlineCountTests(unittest.TestCase):
         plan = make_plan(self.graph)
         validate_plan(plan)
         self.assertEqual(plan['presentation_items'], {})
-        self.assertEqual(len(plan['shapes']), len(self.graph['nodes']) + 2)
+        self.assertEqual(len(plan['shapes']), len(self.graph['nodes']) + 1)  # Color legend only.
         shapes = {s['key']: s['body'] for s in plan['shapes']}
         for node in self.addresses:
             body = shapes[node['id']]

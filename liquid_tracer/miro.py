@@ -14,7 +14,8 @@ from pathlib import Path
 
 from .api import http
 from .common import TraceError, canonical, digest, now
-from .export import COLORS, edge_color, legend_lines
+from .export import edge_color
+from . import legend_miro, miro_legend_updates
 from .edge_labels import FONT_SIZE as CAPTION_FONT_SIZE, caption_text
 from .connector_styles import stroke_width
 from .name_colors import color_text
@@ -34,17 +35,9 @@ from .miro_creation_parents import (normalize_created_shapes, validate_creation_
 
 
 def make_plan(graph):
-    shapes, connectors = [], []
+    legend_shapes, legend_catalog = legend_miro.make_items(graph)
+    shapes, connectors = [legend_shapes[0]], []
     incremental = "namespace" in graph
-    title = ("SYNTHETIC DATA · " if graph["simulated"] else "") + "Liquid UTXO trace"
-    if not incremental:
-        title += " · " + graph["run_id"]
-    shapes.append({"key": "legend", "body": {"data": {"shape": "rectangle", "content":
-        "<p><strong>" + html.escape(title) + "</strong></p><p>"
-        + "<br>".join(html.escape(line) for line in legend_lines(graph))
-        + "</p><p>" + html.escape(graph["notice"]) + "</p>"},
-        "position": {"x": 700, "y": -160, "origin": "center"}, "geometry": {"width": 1300, "height": 260},
-        "style": {"fillColor": COLORS["address"], "fontSize": "14", "textAlign": "left"}}})
     for node in graph["nodes"]:
         # References remain in local registers/exports, not as dangling Miro
         # labels after the on-board cards have been retired.
@@ -85,13 +78,6 @@ def make_plan(graph):
             connector["routing_exception"] = edge.get("routing_exception")
         connector["context_evidence"] = context_group_miro.evidence(edge)
         connectors.append(connector)
-    if graph.get("layout"):
-        # The graph supplies its actual top bound, including the optional fee row.
-        top = min((node["y"] - node["height"] / 2 for node in graph["nodes"]), default=0)
-        shapes[0]["body"]["position"]["y"] = top - 230
-        annotations = graph["layout"].get("annotations", {})
-        if "legend" in annotations:
-            shapes[0]["body"]["position"].update({field: annotations["legend"][field] for field in ("x", "y")})
     plan = {"schema_version": 2 if incremental else 1, "run_id": graph["run_id"], "shapes": shapes, "connectors": connectors}
     for key in ("layout", "fee_items", "include_fees", "connector_attachment", "graph_options", "address_convergences"):
         if key in graph:
@@ -106,7 +92,8 @@ def make_plan(graph):
     annotations, annotation_catalog = presentation_items.make_items(graph,
         [_bounds(item["body"], item["key"]) for item in shapes if item["key"] == "legend"])
     shapes.extend(annotations)
-    plan["presentation_items"] = annotation_catalog
+    shapes.extend(legend_shapes[1:])
+    plan["presentation_items"] = {**annotation_catalog, **legend_catalog}
     plan["context_group_items"] = context_group_miro.catalog(graph)
     if "activity_frames" in graph:
         plan["activity_frames"] = copy.deepcopy(graph["activity_frames"])
@@ -379,6 +366,11 @@ def _recover_updates(state, remote):
             if _same(current, desired, path):
                 _set(record["managed"], path, current)
                 _set(record["intent"], path, desired)
+        if ((key == "legend" or record.get("presentation_proof", {}).get("kind") == "legend")
+                and "geometry" in entry["patch"]
+                and miro_legend_updates.geometry_snapshot(remote[key]) ==
+                    miro_legend_updates.geometry_snapshot(entry["patch"])):
+            miro_legend_updates.remember_geometry(record, remote[key])
 
 
 def _editable(body, endpoint):
@@ -1517,6 +1509,7 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
             if any((item.get(field) or {}).get("id") in annotation_removals for item in inventory.values()
                    for field in ("startItem", "endItem")):
                 raise TraceError("A board connector attaches to a retiring annotation; preserve that attachment before syncing")
+        legend_updates = {}
         if frames_only:
             # Read every retained shape, including older run notes, at its actual
             # canvas position. No graph placement or annotation resizing runs.
@@ -1531,7 +1524,12 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
                     if remote[item["key"]].get(field, {}).get("id") != state["items"][record[logical]]["id"]:
                         raise TraceError("Miro connector endpoints changed; repair the connection before framing. No board writes made.")
         else:
-            positions, shift_x = _placements(plan, state, remote, removals, reorganize)
+            legend_updates = miro_legend_updates.resize_updates(plan, state, remote, removals)
+            placement_remote = {key: {**body, **legend_updates.get(key, {})} for key, body in remote.items()}
+            positions, shift_x = _placements(plan, state, placement_remote, removals, reorganize)
+            if not reorganize:
+                positions.update({key: (change["position"]["x"], change["position"]["y"])
+                                  for key, change in legend_updates.items()})
             frames = []
         if frames_only and _compact_layout(plan):
             _check_compact_frames(plan, frames, positions)
@@ -1552,10 +1550,12 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
                             raise TraceError("Miro connector endpoints were changed for " + key + "; restore or repair this connection before syncing. No board writes made.")
                 patch, managed, intent, item_conflicts = _merge_fields(record, item["body"], remote[key], key)
                 annotation = plan.get("presentation_items", {}).get(key)
-                if (reorganize or annotation) and endpoint == "shapes":
+                if (reorganize or annotation or key in legend_updates) and endpoint == "shapes":
                     x, y = positions[key]
                     if any(float(remote[key]["position"][field]) != value for field, value in (("x", x), ("y", y))):
                         patch["position"] = {"x": x, "y": y, "origin": "center"}
+                if key in legend_updates:
+                    patch["geometry"] = copy.deepcopy(legend_updates[key]["geometry"])
                 if annotation and annotation["kind"] == "attribution":
                     geometry = presentation_items.note_geometry(item["body"], remote[key])
                     if any(float(remote[key]["geometry"][axis]) != geometry[axis] for axis in geometry):
@@ -1696,6 +1696,8 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
                 for path, value in _fields(_editable(patch, record["endpoint"])):
                     _set(intent, path, value)
                     _set(managed, path, _get(actual, path))
+                if key in legend_updates:
+                    miro_legend_updates.remember_geometry(record, response)
                 report["updated"] += 1
                 if record["endpoint"] == "frames":
                     report["updated_frames"] += 1
@@ -1783,6 +1785,8 @@ def _record_pending(pending, item_id, response=None):
     intent = _editable(pending["body"], pending["endpoint"])
     record = {"id": item_id, "endpoint": pending["endpoint"], "intent": intent,
               "managed": _baseline(intent, response or {}, pending["endpoint"])}
+    if pending.get("key") == "legend" or pending.get("presentation_proof", {}).get("kind") == "legend":
+        miro_legend_updates.remember_geometry(record, response or pending["body"])
     if pending["endpoint"] == "connectors":
         record.update({"source": pending["source"], "target": pending["target"]})
         if pending.get("attachments"):

@@ -15,6 +15,7 @@ from liquid_tracer.export import (COLORS, PALETTE, PRESENTATION_VERSION,
                                   build_graph, edge_color, graph_quantity,
                                   short, svg_graph, transaction_date)
 from liquid_tracer.miro import make_plan, validate_plan
+from liquid_tracer.legend import legend_rows
 from liquid_tracer.store import Store
 from liquid_tracer.trace import new_state, trace
 from tests.fixtures import A, B, C, X, fixture
@@ -138,18 +139,21 @@ class GraphPresentationTests(unittest.TestCase):
             self.assertEqual(connectors[edge["id"]]["style"]["strokeColor"], expected_color)
         svg_text = " ".join(svg.itertext())
         legend = shapes["legend"]["data"]["content"]
-        for color_name, _ in PALETTE.values():
-            self.assertIn(color_name.lower(), legend.lower())
-            self.assertIn(color_name.lower(), svg_text.lower())
-        self.assertIn("provided starting transactions", legend)
-        self.assertIn("Starting role takes priority", legend)
-        self.assertIn("selected seed outputs", legend)
-        self.assertIn("amount asset", legend)
+        for row in legend_rows(graph):
+            self.assertIn(row["color"], legend)
+            self.assertIn(row["label"], legend)
+            self.assertIn(row["label"], svg_text)
+            self.assertIn(row["description"], legend)
+        self.assertEqual(legend.count("●"), len(legend_rows(graph)))
+        self.assertIn("Selected seeds keep their seed color", legend)
         self.assertIn("?? = not publicly available", legend)
         # The full legend fits above the existing first row; its extra color
         # descriptions must not cover the graph after this presentation update.
         svg_group = svg.find("{http://www.w3.org/2000/svg}g")
         header_text = svg_group.findall("{http://www.w3.org/2000/svg}text")
+        header_text += [text for group in svg_group.findall("{http://www.w3.org/2000/svg}g")
+                        if group.get("data-legend-key")
+                        for text in group.findall("{http://www.w3.org/2000/svg}text")]
         header_bottom = max(float(text.attrib["y"]) + float(text.attrib["font-size"])
                             for text in header_text)
         first_node_top = min(node["y"] - node["height"] / 2 for node in graph["nodes"])

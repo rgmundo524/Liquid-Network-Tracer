@@ -16,6 +16,7 @@ from .connector_styles import stroke_width
 from .common import TraceError, save_json
 from .layout_search_reporting import layout_search_warning
 from .export import COLORS, edge_color, edge_marker_id, legend_lines
+from .legend import LEGEND_CSS, legend_html
 from .edge_labels import (FONT_SIZE, LINE_HEIGHT, PADDING_Y, caption_box, caption_text,
                           validate_label_layout)
 
@@ -407,6 +408,7 @@ details {{ margin-top:8px; }} summary {{ cursor:pointer; }} li {{ margin:4px 0; 
 .chart {{ overflow:auto; background:white; }} .chart svg {{ display:block; max-width:none; }}
 body:has(#chart:target) header {{ display:none; }}
 #chart:target svg {{ width:100%; height:auto; }}
+{LEGEND_CSS}
 </style></head><body><header><div class="summary"><div><h1>Liquid trace · {_escape(layout_title(graph))}</h1>
 <p>Run {_escape(graph.get('run_id', ''))} · {len(graph['nodes'])} nodes · {len(graph['edges'])} links · Fees {fees}{simulated}</p>
 <p>{_escape(layout_notice(graph))}</p><p>Scroll to explore; use your browser zoom to adjust the scale. Select Explorer on a transaction or address to open Blockstream in a new tab.</p>
@@ -414,7 +416,8 @@ body:has(#chart:target) header {{ display:none; }}
 <a href="layout-report.json" download>Layout report</a>{detail_link}</p></div>{_metrics_table(metrics, layout_title(graph))}</div>
 {register_html(graph)}
 {change_details}
-<details><summary>Legend and evidence notes</summary><p>{_escape(graph.get('notice', ''))}</p>
+{legend_html(graph)}
+<details><summary>Detailed evidence notes</summary><p>{_escape(graph.get('notice', ''))}</p>
 <p>Before uses the saved graph's baseline layout, not live Miro positions. Collision counts exclude label boxes and Miro's automatic curves.
 Counts prefixed with ≥ are lower bounds because the comparison limit was reached.</p><ul>{legend}</ul></details></header>
 <main id="chart" class="chart">{inline_svg}</main>
