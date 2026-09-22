@@ -19,7 +19,7 @@ const esc = (value: unknown): string => String(value ?? '').replace(/[&<>"']/g,
 const off = (disabled: boolean): string => disabled ? ' disabled' : '';
 function emptyDraft(caseId: string) {
   return {caseId, open: false, files: [] as FileDraft[], review: null as Review | null,
-    approved: false, pending: false, version: 0, message: '', offsets: [] as number[]};
+    pending: false, version: 0, message: '', offsets: [] as number[]};
 }
 let draft = emptyDraft('');
 
@@ -27,11 +27,9 @@ export function resetInputImport(caseId: string): void { draft = emptyDraft(case
 export function inputImportPending(): boolean { return draft.pending; }
 
 function invalidate(): void {
-  draft.version += 1; draft.review = null; draft.approved = false; draft.offsets = []; draft.message = '';
+  draft.version += 1; draft.review = null; draft.offsets = []; draft.message = '';
   const apply = document.querySelector<HTMLButtonElement>('#input-import-apply');
   if (apply) apply.disabled = true;
-  const approved = document.querySelector<HTMLInputElement>('#input-import-approved');
-  if (approved) {approved.checked = false; approved.disabled = true;}
   const review = document.querySelector('#input-import-review');
   if (review) review.textContent = 'Files or options changed. Preview again before applying.';
 }
@@ -61,13 +59,7 @@ function detectedKind(text: string): Kind {
 
 export function inputImportInput(element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement): boolean {
   if (!element?.id?.startsWith('input-import-') || element.id === 'input-import-files') return false;
-  if (element.id === 'input-import-approved') {
-    draft.approved = Boolean(draft.review?.valid && draft.review.approval_sha256 && !draft.pending &&
-      (element as HTMLInputElement).checked);
-    const apply = document.querySelector<HTMLButtonElement>('#input-import-apply');
-    if (apply) apply.disabled = !draft.approved || draft.pending;
-    return true;
-  }
+
   const match = /^input-import-(kind|policy)-(\d+)$/.exec(element.id);
   if (!match) return false;
   const file = draft.files[Number(match[2])];
@@ -143,7 +135,7 @@ function reviewRow(file: FileReview, entry: Change): string {
 }
 function reviewFile(file: FileReview, index: number, locked: boolean): string {
   const changes = file.changes || [], offset = draft.offsets[index] || 0;
-  return `<details class="input-import-file-review" open><summary><strong>${esc(file.name)}</strong> · ${esc(LABELS[file.kind] || file.kind)} · ${esc(countsText(file.counts))}</summary>
+  return `<details class="input-import-file-review"><summary><strong>${esc(file.name)}</strong> · ${esc(LABELS[file.kind] || file.kind)} · ${esc(countsText(file.counts))}</summary>
     <p class="address-note">${esc(file.notice)}${file.duplicate_rows ? ` ${esc(file.duplicate_rows)} identical duplicate rows.` : ''}</p>
     <div class="table-wrap"><table><thead><tr><th>Row</th><th>Address / name / transaction</th><th>Action</th><th>Requested</th><th>Existing</th><th>Details</th></tr></thead><tbody>${changes.slice(offset, offset + PAGE_SIZE).map(entry => reviewRow(file, entry)).join('')}</tbody></table></div>
     <div class="form-actions"><span>Rows ${changes.length ? offset + 1 : 0}–${Math.min(offset + PAGE_SIZE, changes.length)} of ${changes.length}</span><button class="btn" data-action="input-import-prev" data-import-index="${index}"${off(locked || offset === 0)}>Previous</button><button class="btn" data-action="input-import-next" data-import-index="${index}"${off(locked || offset + PAGE_SIZE >= changes.length)}>Next</button></div></details>`;
@@ -155,7 +147,7 @@ export function inputImportPanel(caseId: string, busy: boolean): string {
   const locked = busy || draft.pending, review = draft.review;
   return `<section class="panel" id="input-import-panel" aria-labelledby="input-import-title"><div class="panel-head"><div><h2 id="input-import-title" tabindex="-1">Import CSV files</h2><p>Add attributions, name colors, and change outputs together.</p></div><button class="btn" data-action="input-import-close"${off(locked)}>Close</button></div><div class="panel-body">
     <p>Choose one, two, or all three CSV files in the same picker. File types are detected from their columns. New attribution names can receive colors in this same import, in any file order.</p>
-    <label class="field"><span>${draft.files.length ? 'Add or replace CSV files' : 'Choose CSV files'}</span><input type="file" id="input-import-files" accept=".csv,text/csv" multiple${off(locked)}/><small>Up to three files, one per type. Maximum 5,000 rows / 512 KiB each. Selecting a queued filename again updates its contents and keeps its type and conflict policy. Preview and approve it again before saving.</small></label>
+    <label class="field"><span>${draft.files.length ? 'Add or replace CSV files' : 'Choose CSV files'}</span><input type="file" id="input-import-files" accept=".csv,text/csv" multiple${off(locked)}/><small>Up to three files, one per type. Maximum 5,000 rows / 512 KiB each. Selecting a queued filename again updates its contents and keeps its type and conflict policy. Preview it again before saving.</small></label>
     <div class="table-wrap"><table><thead><tr><th>File</th><th>Contents</th><th>Existing entries</th><th></th></tr></thead><tbody>${draft.files.map((file, index) => {
       const detected = review?.files[index]?.kind || detectedKind(file.text);
       return `<tr><td>${esc(file.name)}<small class="muted"><br>${new TextEncoder().encode(file.text).length.toLocaleString()} bytes</small></td><td><select id="input-import-kind-${index}" aria-label="File type for ${esc(file.name)}"${off(locked)}>${(Object.keys(LABELS) as Kind[]).map(kind => `<option value="${kind}"${file.kind === kind ? ' selected' : ''}>${esc(LABELS[kind])}</option>`).join('')}</select><small class="muted"><br>${file.kind === 'auto' ? detected === 'auto' ? 'Choose a type if the columns are ambiguous.' : `Detected: ${esc(LABELS[detected] || detected)}` : `Selected: ${esc(LABELS[file.kind])}`}</small></td><td><select id="input-import-policy-${index}" aria-label="Conflict policy for ${esc(file.name)}"${off(locked)}><option value="keep"${file.policy === 'keep' ? ' selected' : ''}>Keep existing</option><option value="replace"${file.policy === 'replace' ? ' selected' : ''}>Replace conflicts</option></select></td><td><button class="btn" data-action="input-import-remove" data-import-index="${index}" aria-label="Remove ${esc(file.name)}"${off(locked)}>Remove</button></td></tr>`;
@@ -166,9 +158,8 @@ export function inputImportPanel(caseId: string, busy: boolean): string {
     <div id="input-import-review" aria-live="polite">${review ? `<p><strong>Combined review:</strong> ${esc(countsText(review.counts))}.</p><p class="address-note">${esc(review.notice)}</p>
       ${review.errors.length ? `<div class="alert error"><div><strong>Fix these errors before applying. No files have been saved.</strong>${review.errors.map(error => `<p>${esc(error.file)}${error.row ? `, row ${esc(error.row)}` : ''}: ${esc(error.message)}</p>`).join('')}</div></div>` : ''}
       ${review.files.map((file, index) => reviewFile(file, index, locked)).join('')}` : ''}</div>
-    <label class="check-line"><input type="checkbox" id="input-import-approved"${draft.approved ? ' checked' : ''}${off(locked || !review?.valid)}/><span>I reviewed all files, replacements, and tracing-stop settings.</span></label>
-    <div class="form-actions"><button class="btn primary" id="input-import-apply" data-action="input-import-apply"${off(locked || !review?.valid || !draft.approved)}>Apply all reviewed files</button></div>
-    <p class="address-note">All files are saved together after review. This does not start a trace or update Miro.</p>
+    <div class="form-actions"><button class="btn primary" id="input-import-apply" data-action="input-import-apply"${off(locked || !review?.valid)}>Apply all reviewed files</button></div>
+    <p class="address-note">Apply saves the displayed changes from all files together. This does not start a trace or update Miro.</p>
     ${draft.pending ? '<p role="status">Preparing import…</p>' : ''}${draft.message ? `<p role="status">${esc(draft.message)}</p>` : ''}
   </div></section>`;
 }
@@ -198,7 +189,7 @@ export async function inputImportAction(action: string, context: Context, elemen
   }
   if (!['input-import-preview', 'input-import-apply'].includes(action) || !draft.files.length) return true;
   const applying = action === 'input-import-apply';
-  if (applying && (!draft.approved || !draft.review?.valid || !draft.review.approval_sha256)) return true;
+  if (applying && (!draft.review?.valid || !draft.review.approval_sha256)) return true;
   const payload = {files: draft.files.map(file => ({...file})), ...(applying ? {approve_plan: draft.review!.approval_sha256} : {})};
   if (!applying) invalidate();
   const owner = draft, version = draft.version;
@@ -213,7 +204,7 @@ export async function inputImportAction(action: string, context: Context, elemen
       await context.refresh();
     } else {
       const result = await context.post<Review>(path, payload);
-      if (owner === draft && version === draft.version) {draft.review = result; draft.approved = false; draft.offsets = [];}
+      if (owner === draft && version === draft.version) {draft.review = result; draft.offsets = [];}
     }
   } catch (error) {
     if (owner === draft && version === draft.version) {

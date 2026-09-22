@@ -1014,8 +1014,16 @@ class LocalServer(ThreadingHTTPServer):
         if action == "trace":
             if selected != "latest":
                 raise RequestError("Continue from the latest saved run.")
+            if "hops" in body:
+                if "settings" in body:
+                    raise RequestError("Choose a run hop allowance or legacy settings, not both.")
+                settings = validate_settings({**settings, "hops": body["hops"]})
             arguments, live = _trace_arguments(case, metadata, settings)
-            update_case(case, {"run_defaults": settings})
+            # Current UI actions use saved defaults and a one-run hop allowance.
+            # Keep explicit legacy API settings compatible without rewriting
+            # defaults every time an ordinary run is started.
+            if "settings" in body:
+                update_case(case, {"run_defaults": settings})
         elif action == "connections":
             from .connections import validate_hops
             hops = validate_hops(body.get("connection_hops", 10))

@@ -455,6 +455,29 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertEqual(app.screen.case, case)
 
+    async def test_run_settings_shortcut_and_color_editor_preserve_form_edits(self):
+        from textual.widgets import Input
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run") as process:
+            async with app.run_test(size=(110, 55)) as pilot:
+                case = await self.new_case(app, pilot)
+                await self.click(app, pilot, "#run")
+                self.assertFalse(app.screen.query("#max_transactions"))
+                await self.click(app, pilot, "#form-settings")
+                form = app.screen
+                form.query_one("#hops", Input).value = "6"
+                await self.click(app, pilot, "#form-colors")
+                await pilot.press("escape")
+                await pilot.pause()
+                self.assertIs(app.screen, form)
+                self.assertEqual(form.query_one("#hops", Input).value, "6")
+                await self.click(app, pilot, "#submit")
+                self.assertEqual(app.screen.case, case)
+                self.assertEqual(read_case(case)["run_defaults"]["hops"], 6)
+                await self.click(app, pilot, "#run")
+                self.assertEqual(app.screen.query_one("#hops", Input).value, "6")
+                process.assert_not_called()
+
     async def test_arrow_buttons_and_enter_work_without_taking_over_form_controls(self):
         from textual.widgets import Button, Checkbox, Input, Select, TextArea
         app = create_app(self.root)
@@ -492,6 +515,8 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(seeds.cursor_location, (1, 2))
                 self.assertIs(app.focused, seeds)
 
+                await self.click(app, pilot, "#cancel")
+                await self.click(app, pilot, "#settings")
                 connector = app.screen.query_one("#connector-style", Select)
                 connector.focus()
                 await pilot.press("enter", "down", "enter")
@@ -608,7 +633,8 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(restarted.screen.case, case)
                 snapshot = {p.relative_to(case): p.read_bytes() for p in case.rglob("*") if p.is_file()}
                 await self.click(restarted, pilot, "#preview")
-                self.assertEqual(restarted.screen.query_one("#board", Input).value, "DEMO=")
+                self.assertEqual(restarted.screen.metadata["miro_board"], "DEMO=")
+                self.assertFalse(restarted.screen.query("#board"))
                 await self.click(restarted, pilot, "#submit")
                 await self.finish_action(restarted, pilot)
                 self.assertEqual(snapshot, {p.relative_to(case): p.read_bytes() for p in case.rglob("*") if p.is_file()})
@@ -621,7 +647,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 state = read_json(case / "runs" / second / "trace.json")
                 self.assertEqual(state["parent_run"], first)
                 self.assertEqual(state["limits"]["max_hops"], 3)
-                self.assertEqual(read_case(case)["run_defaults"]["hops"], 2)
+                self.assertEqual(read_case(case)["run_defaults"]["hops"], 1)
                 self.assertEqual(original, {p.relative_to(first_path): p.read_bytes() for p in first_path.rglob("*") if p.is_file()})
         self.assertEqual(len(commands), 3)
         self.assertTrue(all(command[command.index("--case") + 1] == str(case) for command in commands))
@@ -997,7 +1023,7 @@ finally:
                 self.assertEqual(restarted.screen.query_one("#layout_attempts", Input).value, "100")
                 process.assert_not_called()
 
-    async def test_new_case_fee_checkbox_and_legacy_settings_ignore_later_global_defaults(self):
+    async def test_new_case_inherits_defaults_and_legacy_settings_ignore_later_changes(self):
         from textual.widgets import Checkbox, Input, Static
         case = create_investigation(self.root, "Legacy defaults")
         metadata = read_case(case)
@@ -1009,9 +1035,10 @@ finally:
         with patch("liquid_tracer.menu.subprocess.run") as process:
             async with app.run_test(size=(110, 55)) as pilot:
                 await self.click(app, pilot, "#new")
-                self.assertTrue(app.screen.query_one("#include-fees", Checkbox).value)
-                self.assertEqual(app.screen.query_one("#hops", Input).value, "9")
-                app.screen.query_one("#include-fees", Checkbox).value = False
+                self.assertTrue(app.screen.settings["include_fees"])
+                self.assertEqual(app.screen.settings["hops"], 9)
+                self.assertFalse(app.screen.query("#include-fees"))
+                self.assertFalse(app.screen.query("#hops"))
                 await self.click(app, pilot, "#cancel")
                 await self.click(app, pilot, "#continue")
                 await pilot.press("enter")
@@ -1058,7 +1085,8 @@ finally:
                 await pilot.pause()
                 self.assertFalse(app.screen.query_one("#layout", Button).disabled)
                 await self.click(app, pilot, "#layout")
-                self.assertEqual(app.screen.query_one("#board", Input).value, "DEMO=")
+                self.assertEqual(app.screen.metadata["miro_board"], "DEMO=")
+                self.assertFalse(app.screen.query("#board"))
                 self.assertEqual(app.focused.id, "cancel")
                 self.assertIn("replaces their current positions", str(app.screen.query_one("#layout-notice", Static).render()))
                 self.assertIn("hidden", str(app.screen.query_one("#fee-status", Static).render()))
@@ -1223,7 +1251,8 @@ finally:
                 self.assertIn("https://miro.com/app/board/CREATED=/",
                               str(restarted.screen.query_one("#case-summary", Static).render()))
                 await self.click(restarted, pilot, "#preview")
-                self.assertEqual(restarted.screen.query_one("#board", Input).value, "CREATED=")
+                self.assertEqual(restarted.screen.metadata["miro_board"], "CREATED=")
+                self.assertFalse(restarted.screen.query("#board"))
                 await pilot.press("enter")
                 await pilot.pause()
                 process.assert_not_called()

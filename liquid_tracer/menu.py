@@ -317,7 +317,7 @@ def create_app(root=None):
                              if case else load_settings(investigation_root))
 
         def compose(self) -> ComposeResult:
-            titles = {"new": "New investigation", "global": "Settings", "case": "Investigation settings",
+            titles = {"new": "New investigation", "global": "Workspace defaults", "case": "Investigation settings",
                       "run": "Continue latest run" if self.metadata.get("latest_run") else "Start first run",
                       "preview": "Preview Miro changes", "sync": "Sync latest to Miro",
                       "layout": "Sync and reorganize Miro graph", "frames": "Create / update Miro frames"}
@@ -339,7 +339,7 @@ def create_app(root=None):
                     yield Static("Replace NUMBER with an actual output number, not the word 'vout'. "
                                  "Separate multiple outputs with spaces, commas or new lines.", markup=False)
                     yield TextArea(id="seeds")
-                if self.mode in ("new", "case", "preview", "sync", "layout", "frames"):
+                if self.mode in ("new", "case"):
                     yield Label("Miro board URL or ID" + (" (optional)" if self.mode in ("new", "case") else ""))
                     yield Input(self.metadata.get("miro_board") or "", id="board")
                 if self.mode == "global":
@@ -352,7 +352,8 @@ def create_app(root=None):
                     if self.metadata.get("latest_run"):
                         yield Static("Adds hops to the saved run's existing ceiling. Use 0 to retry the current frontier.", markup=False)
                     yield Static("Tracing saves a new run. Miro is updated separately.", markup=False)
-                if self.mode in ("new", "global", "case"):
+                if self.mode in ("global", "case"):
+                    yield Label("Graph layout", classes="title")
                     yield Label("Layout attempts")
                     yield Input(str(self.settings["layout_attempts"]), id="layout_attempts", type="integer")
                     yield Static("Compare 1 to 1000 graph arrangements. More attempts can improve the layout but take longer. "
@@ -387,27 +388,14 @@ def create_app(root=None):
                                  value=self.settings["connector_style"], allow_blank=False, id="connector-style")
                     yield Static("Return connections may use elbows. ELK calculates placement; Miro draws its own routes. "
                                  "Mermaid uses its own layout. Large calculations can take time and can be cancelled.", markup=False)
+                if self.mode in ("preview", "sync", "layout", "frames"):
+                    yield Static("Linked Miro board: " + (self.metadata.get("miro_board") or "Not linked"), markup=False)
+                    yield Static(f"New item budget: {self.settings['max_new_items']}. "
+                                 "Edit the board and sync budget in Investigation settings.", markup=False)
                 if self.mode in ("preview", "sync", "layout"):
-                    text = ("Offline preview. This does not change case settings, saved runs or the Miro board."
-                            if self.mode == "preview" else "Updates the existing board and saves its ID with this investigation.")
-                    yield Static(text, markup=False)
-                    yield Static("Transaction fee flows: " + ("included" if self.settings["include_fees"] else "hidden")
-                                 + ". Change this in Investigation settings.", id="fee-status", markup=False)
-                    yield Static("Color arrows by attribution: " + ("on" if self.settings["color_attribution_arrows"] else "off")
-                                 + ". Change this in Investigation settings.", markup=False)
-                    yield Static(f"Layout attempts: {self.settings['layout_attempts']}. "
-                                 "Change this in Investigation settings.", markup=False)
-                    yield Static("Connector appearance: " + self.settings["connector_style"]
-                                 + ". Change this in Investigation settings.", markup=False)
-                    yield Static("Isolated context inputs: " + ("grouped" if self.settings["group_context_inputs"] else "separate")
-                                 + ". Change this in Investigation settings.", markup=False)
-                    yield Static(f"Separate branch hubs: {len(self.settings['hub_addresses'])} selected. "
-                                 "Change this in Investigation settings.", markup=False)
-                    yield Static("Center named group: " + (self.settings["center_name"] or "off")
-                                 + ". Change this in Investigation settings.", markup=False)
-                    if not self.settings["include_fees"]:
-                        yield Static("Sync checks previously generated fee items for manual edits before removing them. "
-                                     "Saved trace evidence is unchanged.", markup=False)
+                    yield Static("Offline change preview." if self.mode == "preview" else "Updates the linked Miro board.", markup=False)
+                    yield Static("Transaction fee flows: " + ("included" if self.settings["include_fees"] else "hidden"),
+                                 id="fee-status", markup=False)
                     if self.mode == "layout":
                         yield Static("Sync this saved run and arrange the graph's managed items from left to right, keeping transaction inputs "
                                      "and outputs nearby using ELK. "
@@ -422,15 +410,31 @@ def create_app(root=None):
                                  "Uses the last synced graph and its current Miro positions. "
                                  "Sync any new run first. This action does not trace, fetch address counts, "
                                  "or calculate a new layout.", id="frames-notice", markup=False)
+                if self.mode in ("global", "case"):
+                    yield Label("Tracing and sync limits", classes="title")
+                if self.mode in ("new", "run"):
+                    yield Static(f"Saved limits: {self.settings['max_transactions']} transactions, "
+                                 f"{self.settings['max_outpoints']} output lookups, {self.settings['max_requests']} API attempts, "
+                                 f"{self.settings['max_seconds']} seconds. Edit these in Investigation settings.", markup=False)
+                if self.mode == "new":
+                    yield Static(f"Starting preferences: {self.settings['hops']} additional hops. "
+                                 "Uses workspace defaults; edit Investigation settings after creating the case.", markup=False)
+                if self.mode == "run":
+                    yield Static("The hop allowance below applies only to this run. Saved defaults stay unchanged.", markup=False)
                 for key, label, converter, _ in LIMIT_FIELDS:
-                    if self.mode in ("preview", "sync", "layout", "frames") and key != "max_new_items":
+                    if self.mode not in ("global", "case") and not (self.mode == "run" and key == "hops"):
                         continue
                     yield Label(label)
                     yield Input(str(self.settings[key]), id=key,
                                 type="number" if converter is float else "integer")
+                if self.mode == "case":
+                    yield Label("Colors", classes="title")
+                    yield Button("Edit graph and name colors", id="form-colors")
                 yield Static("", id="form-error", markup=False)
             with Horizontal(classes="buttons form-actions"):
                 yield Button("Cancel", id="cancel")
+                if self.case and self.mode in ("run", "preview", "sync", "layout", "frames"):
+                    yield Button("Edit investigation settings", id="form-settings")
                 labels = {"new": "Create investigation", "global": "Save defaults", "case": "Save settings",
                           "run": "Run trace", "preview": "Preview (offline)", "sync": "Sync to Miro",
                           "layout": "Sync and reorganize", "frames": "Create / update frames"}
@@ -439,19 +443,18 @@ def create_app(root=None):
 
         def on_mount(self):
             # Run and publication require a deliberate selection; Enter initially cancels.
-            if self.mode in ("run", "sync", "layout", "frames"):
+            if self.mode in ("run", "preview", "sync", "layout", "frames"):
                 self.query_one("#cancel", Button).focus()
             elif self.mode in ("new", "case"):
                 self.query_one("#case-name", Input).focus()
-            elif self.mode == "preview":
-                self.query_one("#board", Input).focus()
             else:
                 self.query_one("#hops", Input).focus()
 
         def read_limits(self):
-            settings = dict(self.settings)
+            settings = (validate_settings(read_case(self.case).get("run_defaults", {}))
+                        if self.case and self.mode not in ("case", "new", "global") else dict(self.settings))
             for key, label, converter, minimum in LIMIT_FIELDS:
-                if self.mode in ("preview", "sync", "layout", "frames") and key != "max_new_items":
+                if self.mode not in ("global", "case") and not (self.mode == "run" and key == "hops"):
                     continue
                 try:
                     value = converter(self.query_one("#" + key, Input).value)
@@ -461,7 +464,7 @@ def create_app(root=None):
                     qualifier = "positive number" if converter is float else f"whole number of at least {minimum}"
                     raise TraceError(label + ": enter a " + qualifier) from None
                 settings[key] = value
-            if self.mode in ("new", "global", "case"):
+            if self.mode in ("global", "case"):
                 try:
                     settings["layout_attempts"] = int(self.query_one("#layout_attempts", Input).value)
                 except ValueError:
@@ -481,6 +484,13 @@ def create_app(root=None):
             if event.button.id == "lookup" and self.mode == "new":
                 self.lookup_outputs()
                 return
+            if event.button.id == "form-colors":
+                from .name_colors_menu import name_color_screen
+                self.app.push_screen(name_color_screen(BaseScreen, Button, self.case))
+                return
+            if event.button.id == "form-settings":
+                self.app.switch_screen(FormScreen("case", self.case))
+                return
             if event.button.id == "cancel":
                 self.dismiss(None)
                 return
@@ -490,7 +500,7 @@ def create_app(root=None):
                 from .cli import board_id
                 settings = self.read_limits()
                 board = None
-                if self.mode in ("new", "case", "preview", "sync", "layout", "frames"):
+                if self.mode in ("new", "case"):
                     value = self.query_one("#board", Input).value.strip()
                     board = board_id(value) if value else None
                 if self.mode in ("new", "case"):
@@ -512,11 +522,13 @@ def create_app(root=None):
                     # Re-read at submission rather than using a stale form snapshot.
                     metadata = read_case(self.case)
                     arguments, live = _trace_arguments(self.case, metadata, settings)
-                    update_case(self.case, {"run_defaults": settings})
                     self.dismiss((arguments, live))
                 else:
+                    board = self.metadata.get("miro_board")
+                    if read_case(self.case).get("miro_board") != board:
+                        raise TraceError("The linked board changed. Reopen this action to use the current board.")
                     if not board:
-                        raise TraceError("Enter the existing Miro board URL or ID.")
+                        raise TraceError("Link a Miro board in Investigation settings first.")
                     _latest(self.case, read_case(self.case), verify=True)
                     arguments = ["miro-frames" if self.mode == "frames" else "miro-sync", "--case", str(self.case), "--run", "latest", "--board", board,
                                  "--max-new-items", str(settings["max_new_items"])]
@@ -1582,7 +1594,7 @@ def create_app(root=None):
                 yield Static("Start a bounded trace or continue saved work.", markup=False)
                 yield Button("New investigation", id="new", variant="primary")
                 yield Button("Continue an investigation", id="continue")
-                yield Button("Settings", id="settings")
+                yield Button("Workspace defaults", id="settings")
                 yield Button("Exit", id="exit")
             yield Footer()
 

@@ -56,9 +56,9 @@ test('three files use one picker, one preview and one exact approved batch in an
   assert.match(html, /type="file"[^>]* multiple/);
   for (const label of ['Detected: Name colors', 'Detected: Address attributions', 'Detected: Change outputs']) assert.ok(html.includes(label));
   await apply(ctx); assert.equal(calls.length, 0);
-  await preview(ctx); await apply(ctx); assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0], {path: '/api/cases/case%20A/input-import', body: {files: samples}});
-  edit('approved', '', true); await apply(ctx);
+  await preview(ctx); assert.equal(calls.length, 1);
+  assert.doesNotMatch(panel('case A', false), /input-import-approved/);
+  assert.deepEqual(calls[0], {path: '/api/cases/case%20A/input-import', body: {files: samples}}); await apply(ctx);
   assert.deepEqual(calls[1].body, {...calls[0].body, approve_plan: 'exact-batch-hash'});
   assert.equal(refreshed, 1);
   assert.match(panel('case A', false), /Saved 3 changes from 3 CSV files/);
@@ -67,11 +67,9 @@ test('three files use one picker, one preview and one exact approved batch in an
 
 test('type overrides and replacement policies invalidate approval and appear in the next preview', async () => {
   const calls = []; const ctx = context(async (_path, body) => {calls.push(body); return makeReview();});
-  await open(ctx); await choose(); await preview(ctx); edit('approved', '', true);
+  await open(ctx); await choose(); await preview(ctx);
   edit('policy-1', 'replace');
   assert.equal(nodes.get('#input-import-apply').disabled, true);
-  assert.equal(nodes.get('#input-import-approved').checked, false);
-  assert.equal(nodes.get('#input-import-approved').disabled, true);
   edit('kind-0', 'name-colors'); await apply(ctx); assert.equal(calls.length, 1);
   await preview(ctx);
   assert.equal(calls[1].files[0].kind, 'name-colors');
@@ -82,7 +80,7 @@ test('type overrides and replacement policies invalidate approval and appear in 
 test('reselecting a filename replaces its queued contents; remove and clear require a new preview', async () => {
   let payload;
   const ctx = context(async (_path, body) => {payload = body; return makeReview();});
-  await open(ctx); await choose(); await preview(ctx); edit('approved', '', true);
+  await open(ctx); await choose(); await preview(ctx);
   await choose([{...samples[1], text: 'Address,Name\nnewaddress,New name\n'}]);
   await apply(ctx);
   assert.equal(payload.files[1].text, samples[1].text);
@@ -106,15 +104,14 @@ test('reloading an applied attribution CSV preserves replacement and type choice
   const initial = {...samples[1], text: samples[1].text.replace('false,3', 'false,2')};
   await open(ctx); await choose([initial]);
   edit('policy-0', 'replace'); edit('kind-0', 'attributions');
-  await preview(ctx); edit('approved', '', true); await apply(ctx);
+  await preview(ctx); await apply(ctx);
 
   const raised = {...initial, text: initial.text.replace('false,2', 'false,4')};
   await choose([raised]);
   await apply(ctx);
   assert.equal(calls.length, 2, 'reloading still requires a new preview and approval');
   await preview(ctx);
-  assert.deepEqual(calls[2].files, [{...raised, kind: 'attributions', policy: 'replace'}]);
-  edit('approved', '', true); await apply(ctx);
+  assert.deepEqual(calls[2].files, [{...raised, kind: 'attributions', policy: 'replace'}]); await apply(ctx);
   assert.deepEqual(calls[3], {...calls[2], approve_plan: 'exact-batch-hash'});
 
   await choose([samples[0]]); await preview(ctx);
@@ -132,7 +129,7 @@ test('ambiguous headers require a type choice and all error/content text is esca
     errors: [{file: unsafe, row: 2, message: '<script>Ambiguous CSV columns</script>'}]}));
   await open(ctx); await choose([{name: unsafe, text: 'Address,Name,Color\na,b,#123456\n'}]);
   assert.match(panel('case A', false), /Choose a type if the columns are ambiguous/);
-  await preview(ctx); edit('approved', '', true);
+  await preview(ctx);
   const html = panel('case A', false);
   assert.match(html, /&lt;script&gt;Ambiguous CSV columns&lt;\/script&gt;/);
   assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;\.csv/);
@@ -186,7 +183,7 @@ test('late apply from another case does not refresh the new case', async () => {
   const response = deferred(); let refreshed = 0;
   const ctx = context(async (_path, body) => body.approve_plan ? response.promise : makeReview());
   ctx.refresh = async () => {refreshed += 1;};
-  await open(ctx); await choose(); await preview(ctx); edit('approved', '', true);
+  await open(ctx); await choose(); await preview(ctx);
   const request = apply(ctx); reset('case B'); response.resolve({changed: 3}); await request;
   assert.equal(refreshed, 0);
 });
@@ -198,7 +195,7 @@ test('busy and pending actions prevent double requests and file selection', asyn
   await files({files: [selected(samples[0])]}, () => {}, true);
   assert.doesNotMatch(panel('case A', false), /colors\.csv/);
   await choose(); await preview({...ctx, busy: true}); assert.equal(calls, 0);
-  await preview(ctx); edit('approved', '', true);
+  await preview(ctx);
   const request = apply(ctx); await apply(ctx); await preview(ctx);
   assert.equal(calls, 2); response.resolve({changed: 3}); await request;
 });
@@ -208,9 +205,8 @@ test('stale server plans clear approval and display the reason', async () => {
     if (body.approve_plan) throw new Error('Settings changed. Preview again.');
     return makeReview();
   });
-  await open(ctx); await choose(); await preview(ctx); edit('approved', '', true); await apply(ctx);
+  await open(ctx); await choose(); await preview(ctx); await apply(ctx);
   assert.match(panel('case A', false), /Settings changed\. Preview again\./);
-  assert.equal(nodes.get('#input-import-approved').checked, false);
 });
 
 test('a failed read preserves the entire existing queue and never saves replacement characters', async () => {

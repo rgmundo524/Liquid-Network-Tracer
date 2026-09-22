@@ -12,7 +12,7 @@ const esc = (value: unknown): string => String(value ?? '').replace(/[&<>"']/g,
   c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]!));
 const safeColor = (value: unknown): value is string => typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value);
 function emptyDraft(caseId: string) {
-  return {caseId, open: false, text: '', filename: '', format: 'auto', policy: 'keep', approved: false,
+  return {caseId, open: false, text: '', filename: '', format: 'auto', policy: 'keep',
     review: null as Review | null, pending: false, message: '', offset: 0, version: 0};
 }
 let draft = emptyDraft('');
@@ -21,23 +21,16 @@ export function resetNameColorImport(caseId: string): void { draft = emptyDraft(
 export function nameColorImportPending(): boolean { return draft.pending; }
 
 export function invalidateNameColorImport(): void {
-  draft.version += 1; draft.review = null; draft.approved = false; draft.message = ''; draft.offset = 0;
+  draft.version += 1; draft.review = null; draft.message = ''; draft.offset = 0;
   const apply = document.querySelector<HTMLButtonElement>('#name-color-import-apply');
   if (apply) apply.disabled = true;
-  const approved = document.querySelector<HTMLInputElement>('#name-color-import-approved');
-  if (approved) { approved.checked = false; approved.disabled = true; }
   const review = document.querySelector('#name-color-import-review');
   if (review) review.textContent = 'Preview again before applying.';
 }
 
 export function nameColorImportInput(element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement): boolean {
   if (!element?.id?.startsWith('name-color-import-') || element.id === 'name-color-import-file') return false;
-  if (element.id === 'name-color-import-approved') {
-    draft.approved = Boolean(draft.review?.valid && (element as HTMLInputElement).checked);
-    const apply = document.querySelector<HTMLButtonElement>('#name-color-import-apply');
-    if (apply) apply.disabled = !draft.approved || draft.pending;
-    return true;
-  }
+
   if (element.id === 'name-color-import-text') { draft.text = element.value; draft.filename = ''; }
   else if (element.id === 'name-color-import-format') draft.format = element.value;
   else if (element.id === 'name-color-import-replace') draft.policy = (element as HTMLInputElement).checked ? 'replace' : 'keep';
@@ -88,8 +81,7 @@ export function nameColorImportPanel(caseId: string, busy: boolean): string {
   ${review.errors.length ? `<div class="alert error"><div><strong>Fix these errors before applying.</strong>${review.errors.map(error => `<p>Row ${error.row}: ${esc(error.message)}</p>`).join('')}</div></div>` : ''}
   <div class="table-wrap"><table><thead><tr><th>Row</th><th>Name</th><th>Addresses</th><th>Existing color</th><th>Requested color</th><th>Action</th></tr></thead><tbody>${review.changes.slice(draft.offset, draft.offset + 100).map(change => `<tr><td>${change.row}</td><td>${esc(change.name)}</td><td>${change.addresses}</td><td>${swatch(change.previous, 'No assignment')}</td><td>${swatch(change.color, 'Clear assignment')}</td><td>${esc(change.action)}</td></tr>`).join('')}</tbody></table></div>
   <div class="form-actions"><span>Rows ${review.changes.length ? draft.offset + 1 : 0}–${Math.min(draft.offset + 100, review.changes.length)} of ${review.changes.length}</span><button class="btn" data-action="name-color-import-prev"${locked || draft.offset === 0 ? ' disabled' : ''}>Previous</button><button class="btn" data-action="name-color-import-next"${locked || draft.offset + 100 >= review.changes.length ? ' disabled' : ''}>Next</button></div>` : ''}</div>
-  <label class="check-line"><input type="checkbox" id="name-color-import-approved"${draft.approved ? ' checked' : ''}${locked || !review?.valid ? ' disabled' : ''}/><span>I reviewed the name colors and any replacements or cleared assignments.</span></label>
-  <div class="form-actions"><button class="btn primary" id="name-color-import-apply" data-action="name-color-import-apply"${locked || !review?.valid || !draft.approved ? ' disabled' : ''}>Apply reviewed name colors</button></div>
+  <div class="form-actions"><button class="btn primary" id="name-color-import-apply" data-action="name-color-import-apply"${locked || !review?.valid ? ' disabled' : ''}>Apply reviewed name colors</button></div>
   <p class="address-note">Saved locally. Regenerate a preview or sync Miro separately to update graph colors.</p>
   ${draft.message ? `<p role="status">${esc(draft.message)}</p>` : ''}</section>`;
 }
@@ -114,7 +106,7 @@ export async function nameColorImportAction(action: string, context: Context): P
   }
   if (!['name-color-import-preview', 'name-color-import-apply'].includes(action)) return true;
   const applying = action === 'name-color-import-apply';
-  if (applying && (!draft.approved || !draft.review?.valid || !draft.review.approval_sha256)) {
+  if (applying && (!draft.review?.valid || !draft.review.approval_sha256)) {
     draft.message = 'Preview and review the import before applying.'; context.render(); return true;
   }
   if (new TextEncoder().encode(draft.text).length > MAX_BYTES) {
@@ -129,7 +121,7 @@ export async function nameColorImportAction(action: string, context: Context): P
     const path = `/api/cases/${encodeURIComponent(context.caseId)}/name-color-import`;
     if (!applying) {
       const review = await context.post<Review>(path, payload);
-      if (owner === draft && version === draft.version) { owner.review = review; owner.approved = false; owner.offset = 0; }
+      if (owner === draft && version === draft.version) { owner.review = review; owner.offset = 0; }
     } else {
       const result = await context.post<{changed: number; revision: number; notice: string}>(path, payload);
       if (owner === draft) {

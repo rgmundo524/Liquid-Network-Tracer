@@ -18,7 +18,7 @@ selectors if a file's headers match more than one format.
    The browser has a policy per file; the terminal and CLI apply one policy
    to all selected files.
 3. Preview the batch and review its file summaries and individual changes.
-4. Check the review box and apply all files once.
+4. Choose **Apply all reviewed files** to save the batch once.
 
 In the browser, selecting the same queued filename again keeps its chosen type
 and conflict policy while loading the new contents. Review and approval are

@@ -97,9 +97,8 @@ class MenuImportTests(unittest.IsolatedAsyncioTestCase):
                 screen.query_one('#import-text', TextArea).text = A + '\n' + B
                 await pilot.pause(); await self.click(app, pilot, '#import-preview')
                 self.assertEqual(screen.query_one('#import-rows', DataTable).row_count, 2)
-                self.assertTrue(screen.query_one('#import-apply', Button).disabled)
+                self.assertFalse(screen.query_one('#import-apply', Button).disabled)
                 self.assertFalse((self.case / 'services.json').exists())
-                screen.query_one('#import-approved', Checkbox).value = True
                 await pilot.pause(); await self.click(app, pilot, '#import-apply')
                 self.assertEqual(len(load_services(self.case)['rules']), 2)
                 self.assertIn('Saved 2', str(screen.query_one('#import-summary', Static).render()))
@@ -113,7 +112,6 @@ class MenuImportTests(unittest.IsolatedAsyncioTestCase):
             screen = await self.open_import(app, pilot)
             screen.query_one('#import-file', Input).value = str(path)
             await pilot.pause(); await self.click(app, pilot, '#import-preview')
-            screen.query_one('#import-approved', Checkbox).value = True
             await pilot.pause(); path.write_text('address,name\n' + B + ',Changed\n')
             await self.click(app, pilot, '#import-apply')
             self.assertIn('changed', str(screen.query_one('#import-error', Static).render()))

@@ -42,11 +42,6 @@ class InputImportMenuTests(unittest.IsolatedAsyncioTestCase):
         screen.query_one("#input-import-paths", TextArea).text = "\n".join(str(path) for path in paths)
         await pilot.pause()
 
-    async def approve(self, screen, pilot):
-        from textual.widgets import Checkbox
-        screen.query_one("#input-import-approved", Checkbox).value = True
-        await pilot.pause()
-
     async def test_one_review_imports_three_types_in_any_order_without_starting_run(self):
         from textual.widgets import Button, DataTable, Static
         paths = self.files()
@@ -59,7 +54,7 @@ class InputImportMenuTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(screen.review["valid"])
                 self.assertEqual(screen.query_one("#input-import-files", DataTable).row_count, 3)
                 self.assertEqual(screen.query_one("#input-import-rows", DataTable).row_count, 3)
-                self.assertTrue(screen.query_one("#input-import-apply", Button).disabled)
+                self.assertFalse(screen.query_one("#input-import-apply", Button).disabled)
                 self.assertFalse((self.case / "services.json").exists())
                 file_table = screen.query_one("#input-import-files", DataTable)
                 file_table.focus()
@@ -73,7 +68,6 @@ class InputImportMenuTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("enter")
                 await pilot.pause()
                 self.assertIn('"hop_limit": 4', str(screen.query_one("#input-import-detail", Static).render()))
-                await self.approve(screen, pilot)
                 await self.click(app, pilot, "#input-import-apply")
                 settings = load_services(self.case)
                 self.assertEqual(settings["rules"][ADDRESS]["hop_limit"], 4)
@@ -95,21 +89,17 @@ class InputImportMenuTests(unittest.IsolatedAsyncioTestCase):
             await self.set_paths(screen, pilot, [path])
             await self.click(app, pilot, "#input-import-preview")
             self.assertEqual(screen.review["counts"]["keep"], 1)
-            await self.approve(screen, pilot)
             screen.query_one("#input-import-replace", Checkbox).value = True
             await pilot.pause()
             self.assertIsNone(screen.review)
-            self.assertFalse(screen.query_one("#input-import-approved", Checkbox).value)
             self.assertTrue(screen.query_one("#input-import-apply", Button).disabled)
             await self.click(app, pilot, "#input-import-preview")
             self.assertEqual(screen.review["counts"]["replace"], 1)
-            await self.approve(screen, pilot)
             screen.query_one("#input-import-kind-0", Select).value = "attributions"
             await pilot.pause()
             self.assertIsNone(screen.review)
             self.assertTrue(screen.query_one("#input-import-apply", Button).disabled)
             await self.click(app, pilot, "#input-import-preview")
-            await self.approve(screen, pilot)
             await self.click(app, pilot, "#input-import-apply")
             self.assertEqual(load_services(self.case)["rules"][ADDRESS]["hop_limit"], 4)
 
@@ -121,16 +111,13 @@ class InputImportMenuTests(unittest.IsolatedAsyncioTestCase):
             screen = await self.open_import(app, pilot)
             await self.set_paths(screen, pilot, paths)
             await self.click(app, pilot, "#input-import-preview")
-            await self.approve(screen, pilot)
             paths[0].write_text("Name,Color\nNew service,#abcdef\n")
             await self.click(app, pilot, "#input-import-apply")
             self.assertIn("changed", str(screen.query_one("#input-import-error", Static).render()))
             self.assertFalse((self.case / "services.json").exists())
             await self.click(app, pilot, "#input-import-preview")
-            await self.approve(screen, pilot)
             await self.set_paths(screen, pilot, paths[:2])
             self.assertIsNone(screen.review)
-            self.assertFalse(screen.query_one("#input-import-approved", Checkbox).value)
             self.assertTrue(screen.query_one("#input-import-apply", Button).disabled)
 
     async def test_invalid_second_file_prevents_apply_and_identifies_source(self):
@@ -144,7 +131,6 @@ class InputImportMenuTests(unittest.IsolatedAsyncioTestCase):
             await self.click(app, pilot, "#input-import-preview")
             self.assertFalse(screen.review["valid"])
             self.assertIn("colors.csv", str(screen.query_one("#input-import-error", Static).render()))
-            await self.approve(screen, pilot)
             self.assertTrue(screen.query_one("#input-import-apply", Button).disabled)
             self.assertFalse((self.case / "services.json").exists())
 
@@ -156,7 +142,6 @@ class InputImportMenuTests(unittest.IsolatedAsyncioTestCase):
                     screen = await self.open_import(app, pilot, parent=parent)
                     await self.set_paths(screen, pilot, self.files())
                     await self.click(app, pilot, "#input-import-preview")
-                    await self.approve(screen, pilot)
                     await self.click(app, pilot, "#input-import-apply")
                     await self.click(app, pilot, "#input-import-back")
                     self.assertEqual(app.screen.report["revision"], load_services(self.case)["revision"])

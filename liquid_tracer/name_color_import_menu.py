@@ -42,8 +42,6 @@ def name_color_import_screen(base, button, case):
                 table.styles.height = 10
                 yield table
                 yield Static("", id="name-color-import-detail", markup=False)
-                yield Checkbox("I reviewed these name-color assignments and clear requests",
-                               id="name-color-import-approved")
                 yield Static("", id="name-color-import-error", markup=False)
             with Horizontal(classes="buttons form-actions"):
                 yield button("Back", id="name-color-import-back")
@@ -57,7 +55,6 @@ def name_color_import_screen(base, button, case):
 
         def invalidate(self):
             self.review = None
-            self.query_one("#name-color-import-approved", Checkbox).value = False
             self.query_one("#name-color-import-apply", button).disabled = True
             self.query_one("#name-color-import-rows", DataTable).clear()
             self.query_one("#name-color-import-detail", Static).update("")
@@ -79,9 +76,6 @@ def name_color_import_screen(base, button, case):
         def on_checkbox_changed(self, event: Checkbox.Changed):
             if event.checkbox.id == "name-color-import-replace" and self.is_mounted:
                 self.invalidate()
-            elif event.checkbox.id == "name-color-import-approved":
-                self.query_one("#name-color-import-apply", button).disabled = not (
-                    event.value and self.review and self.review["valid"])
 
         def inputs(self):
             path = self.query_one("#name-color-import-file", Input).value.strip()
@@ -129,9 +123,10 @@ def name_color_import_screen(base, button, case):
                         f"{counts['keep']} conflicts kept, {counts['unchanged']} unchanged, "
                         f"{self.review['duplicate_rows']} identical duplicates.\n" + self.review["notice"])
                     error.update("\n".join(f"Row {item['row']}: {item['message']}" for item in self.review["errors"]))
+                    self.query_one("#name-color-import-apply", button).disabled = not self.review["valid"]
                 elif action == "name-color-import-apply":
-                    if not self.review or not self.review["valid"] or not self.query_one("#name-color-import-approved", Checkbox).value:
-                        raise TraceError("Preview and approve the import before saving")
+                    if not self.review or not self.review["valid"]:
+                        raise TraceError("Preview the import before saving")
                     # Re-read local files so edits since preview cannot silently pass approval.
                     text, format, policy = self.inputs()
                     result = apply_import(case, text, approval_sha256=self.review["approval_sha256"], format=format, policy=policy)

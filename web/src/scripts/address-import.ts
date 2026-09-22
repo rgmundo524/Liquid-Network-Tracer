@@ -7,33 +7,26 @@ type Context = { caseId: string; busy: boolean; render: () => void;
   post: <T>(path: string, body: unknown) => Promise<T>; refresh: () => Promise<void> };
 const MAX_BYTES = 512 * 1024;
 const TEMPLATE = 'Address,Name,confidence,stop_tracing,hop_limit,source,notes\nREPLACE_WITH_LIQUID_ADDRESS_1,Example Exchange,suspected,true,,Investigator research,Explain the evidence\nREPLACE_WITH_LIQUID_ADDRESS_2,Client wallet,confirmed,false,,Client records,Continue tracing\nREPLACE_WITH_LIQUID_ADDRESS_3,Service deposit,suspected,false,1,Research,Include consolidation then stop\n';
-let draft = { caseId: '', text: '', filename: '', format: 'auto', policy: 'keep', approved: false,
+let draft = { caseId: '', text: '', filename: '', format: 'auto', policy: 'keep',
   review: null as Review | null, pending: false, message: '', offset: 0 };
 const esc = (value: unknown): string => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]!));
 
 export function resetAddressImport(caseId: string): void {
-  draft = { caseId, text: '', filename: '', format: 'auto', policy: 'keep', approved: false,
+  draft = { caseId, text: '', filename: '', format: 'auto', policy: 'keep',
     review: null, pending: false, message: '', offset: 0 };
 }
 
 function invalidate(): void {
-  draft.review = null; draft.approved = false; draft.message = ''; draft.offset = 0;
+  draft.review = null; draft.message = ''; draft.offset = 0;
   const button = document.querySelector<HTMLButtonElement>('#attribution-apply');
   if (button) button.disabled = true;
-  const checkbox = document.querySelector<HTMLInputElement>('#attribution-approved');
-  if (checkbox) checkbox.checked = false;
   const preview = document.querySelector('#attribution-review');
   if (preview) preview.textContent = 'Input changed. Preview again before applying.';
 }
 
 export function addressImportInput(element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement): boolean {
   if (!element.id.startsWith('attribution-') || element.id === 'attribution-file') return false;
-  if (element.id === 'attribution-approved') {
-    draft.approved = (element as HTMLInputElement).checked;
-    const button = document.querySelector<HTMLButtonElement>('#attribution-apply');
-    if (button) button.disabled = !draft.review?.valid || !draft.approved || draft.pending;
-    return true;
-  }
+
   if (element.id === 'attribution-text') { draft.text = element.value; draft.filename = ''; }
   if (element.id === 'attribution-format') draft.format = element.value;
   if (element.id === 'attribution-replace') draft.policy = (element as HTMLInputElement).checked ? 'replace' : 'keep';
@@ -67,8 +60,7 @@ export function addressImportPanel(caseId: string, busy: boolean): string {
   ${review.errors.length ? `<div class="alert error"><div><strong>Nothing can be saved until these errors are fixed.</strong>${review.errors.map(error => `<p>Row ${error.row}: ${esc(error.message)}</p>`).join('')}</div></div>` : ''}
   <div class="table-wrap"><table><thead><tr><th>Row</th><th>Address</th><th>Action</th><th>Name</th><th>Confidence</th><th>Stop</th><th>hop_limit</th><th>Evidence / previous entry</th></tr></thead><tbody>${review.changes.slice(draft.offset, draft.offset + 100).map(entry => `<tr><td>${entry.row}</td><td class="mono">${esc(entry.rule.address)}</td><td>${esc(entry.action)}</td><td>${esc(entry.rule.name)}</td><td>${esc(entry.rule.confidence)}</td><td>${entry.rule.enabled && entry.rule.stop_tracing ? 'Yes' : 'No'}</td><td>${esc(entry.rule.hop_limit)}</td><td><details><summary>Review fields</summary><pre>${esc(JSON.stringify({incoming: entry.rule, existing: entry.previous}, null, 2))}</pre></details></td></tr>`).join('')}</tbody></table></div>
   <div class="form-actions"><span>Rows ${review.changes.length ? draft.offset + 1 : 0}–${Math.min(draft.offset + 100, review.changes.length)} of ${review.changes.length}</span><button class="btn" data-action="attribution-prev"${locked || draft.offset === 0 ? ' disabled' : ''}>Previous</button><button class="btn" data-action="attribution-next"${locked || draft.offset + 100 >= review.changes.length ? ' disabled' : ''}>Next</button></div>` : ''}</div>
-  <label class="check-line"><input type="checkbox" id="attribution-approved"${draft.approved ? ' checked' : ''}${locked || !review?.valid ? ' disabled' : ''}/><span>I reviewed the address attributions and tracing-stop settings.</span></label>
-  <div class="form-actions"><button class="btn primary" id="attribution-apply" data-action="attribution-apply"${locked || !review?.valid || !draft.approved ? ' disabled' : ''}>Apply reviewed import</button></div>
+  <div class="form-actions"><button class="btn primary" id="attribution-apply" data-action="attribution-apply"${locked || !review?.valid ? ' disabled' : ''}>Apply reviewed import</button></div>
   ${draft.message ? `<p role="status">${esc(draft.message)}</p>` : ''}
   <div class="form-actions"><button class="btn" data-action="name-colors-open"${disabled}>Assign name colors</button></div></div></section>`;
 }
@@ -87,7 +79,7 @@ export async function addressImportAction(action: string, context: Context): Pro
   }
   if (!['attribution-preview', 'attribution-apply'].includes(action)) return true;
   if (new TextEncoder().encode(draft.text).length > MAX_BYTES) throw new Error('Address import exceeds 512 KiB.');
-  if (action === 'attribution-apply' && (!draft.approved || !draft.review?.valid)) throw new Error('Preview and approve the import before saving.');
+  if (action === 'attribution-apply' && (!draft.review?.valid || !draft.review.approval_sha256)) throw new Error('Preview the import before applying it.');
   const payload = { text: draft.text, format: draft.format, policy: draft.policy,
     ...(action === 'attribution-apply' ? { approve_plan: draft.review!.approval_sha256 } : {}) };
   const owner = draft;
@@ -96,7 +88,7 @@ export async function addressImportAction(action: string, context: Context): Pro
     const path = `/api/cases/${encodeURIComponent(context.caseId)}/address-import`;
     if (action === 'attribution-preview') {
       const reviewed = await context.post<Review>(path, payload);
-      if (owner === draft) { draft.review = reviewed; draft.approved = false; draft.offset = 0; }
+      if (owner === draft) { draft.review = reviewed; draft.offset = 0; }
     } else {
       const result = await context.post<{ changed: number }>(path, payload);
       if (owner === draft) {

@@ -1102,3 +1102,55 @@ dialog::backdrop {
 #name-colors-panel input[type="color"] { width: 46px; height: 36px; padding: 2px; vertical-align: middle; }
 #name-colors-panel input[id^="name-colors-hex-"] { width: 110px; margin-left: 8px; font-family: monospace; }
 #name-colors-panel td { vertical-align: middle; }
+
+/* Keep common actions visible and separate tools by task. */
+.case-navigation, .settings-navigation {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 22px;
+  padding: 6px;
+  background: #eaf1ef;
+  border: 1px solid #dce7e2;
+  border-radius: 10px;
+}
+.case-nav, .settings-navigation a {
+  border: 0;
+  background: transparent;
+  padding: 11px 16px;
+  border-radius: 7px;
+  color: #49645e;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+}
+.case-nav.active, .case-nav:hover, .settings-navigation a:hover {
+  background: #fff;
+  color: #20594a;
+}
+.case-nav.active { box-shadow: 0 1px 4px #173e2514; }
+.case-nav:focus-visible, .settings-navigation a:focus-visible, .tool-details summary:focus-visible {
+  outline: 2px solid #28816a;
+  outline-offset: 2px;
+}
+.workspace-grid { margin-top: 22px; }
+.task-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+.settings-summary { color: #647d75; font-size: 12px; line-height: 1.9; margin: 12px 0 18px; }
+.tool-details { border: 1px solid #dce7e2; border-radius: 9px; background: #fff; }
+.tool-details > summary { padding: 15px; cursor: pointer; font-weight: 600; font-size: 12px; color: #426358; }
+.tool-details > .panel { margin: 0; border: 0; }
+.workspace-aside .tool-details { margin-top: 16px; }
+.action-buttons > p, .action-buttons > .tool-details { grid-column: 1 / -1; }
+.workspace-aside .tool-details > :not(summary) { margin: 10px 14px; }
+.settings-layout { max-width: 1000px; }
+.settings-layout .check-line { margin: 18px 0; }
+.settings-layout [id^="settings-"] { scroll-margin-top: 24px; }
+.settings-save { position: sticky; bottom: 12px; padding: 16px 20px; background: #fff; border: 1px solid #dce7e2; border-radius: 10px; box-shadow: 0 5px 25px #183f261a; z-index: 2; }
+.input-import-file-review { margin-top: 14px; padding: 12px; border: 1px solid #dce7e2; border-radius: 8px; }
+.input-import-file-review summary { cursor: pointer; font-size: 12px; line-height: 1.7; }
+@media (max-width: 650px) {
+  .case-navigation, .settings-navigation { gap: 3px; }
+  .case-nav, .settings-navigation a { padding: 10px; }
+  .settings-save { position: static; }
+}
