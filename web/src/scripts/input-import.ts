@@ -102,7 +102,10 @@ export async function inputImportFiles(input: HTMLInputElement, render: () => vo
     }));
     if (owner !== draft || version !== draft.version) return;
     const files = new Map(owner.files.map(file => [file.name, file]));
-    loaded.forEach(file => files.set(file.name, file));
+    loaded.forEach(file => {
+      const previous = files.get(file.name);
+      files.set(file.name, previous ? {...file, kind: previous.kind, policy: previous.policy} : file);
+    });
     owner.files = [...files.values()];
   } catch (error) {
     if (owner === draft && version === draft.version) owner.message = error instanceof Error ? error.message : 'Could not read the selected files.';
@@ -152,7 +155,7 @@ export function inputImportPanel(caseId: string, busy: boolean): string {
   const locked = busy || draft.pending, review = draft.review;
   return `<section class="panel" id="input-import-panel" aria-labelledby="input-import-title"><div class="panel-head"><div><h2 id="input-import-title" tabindex="-1">Import CSV files</h2><p>Add attributions, name colors, and change outputs together.</p></div><button class="btn" data-action="input-import-close"${off(locked)}>Close</button></div><div class="panel-body">
     <p>Choose one, two, or all three CSV files in the same picker. File types are detected from their columns. New attribution names can receive colors in this same import, in any file order.</p>
-    <label class="field"><span>${draft.files.length ? 'Add or replace CSV files' : 'Choose CSV files'}</span><input type="file" id="input-import-files" accept=".csv,text/csv" multiple${off(locked)}/><small>Up to three files, one per type. Maximum 5,000 rows / 512 KiB each. Selecting a queued filename again replaces that queued file.</small></label>
+    <label class="field"><span>${draft.files.length ? 'Add or replace CSV files' : 'Choose CSV files'}</span><input type="file" id="input-import-files" accept=".csv,text/csv" multiple${off(locked)}/><small>Up to three files, one per type. Maximum 5,000 rows / 512 KiB each. Selecting a queued filename again updates its contents and keeps its type and conflict policy. Preview and approve it again before saving.</small></label>
     <div class="table-wrap"><table><thead><tr><th>File</th><th>Contents</th><th>Existing entries</th><th></th></tr></thead><tbody>${draft.files.map((file, index) => {
       const detected = review?.files[index]?.kind || detectedKind(file.text);
       return `<tr><td>${esc(file.name)}<small class="muted"><br>${new TextEncoder().encode(file.text).length.toLocaleString()} bytes</small></td><td><select id="input-import-kind-${index}" aria-label="File type for ${esc(file.name)}"${off(locked)}>${(Object.keys(LABELS) as Kind[]).map(kind => `<option value="${kind}"${file.kind === kind ? ' selected' : ''}>${esc(LABELS[kind])}</option>`).join('')}</select><small class="muted"><br>${file.kind === 'auto' ? detected === 'auto' ? 'Choose a type if the columns are ambiguous.' : `Detected: ${esc(LABELS[detected] || detected)}` : `Selected: ${esc(LABELS[file.kind])}`}</small></td><td><select id="input-import-policy-${index}" aria-label="Conflict policy for ${esc(file.name)}"${off(locked)}><option value="keep"${file.policy === 'keep' ? ' selected' : ''}>Keep existing</option><option value="replace"${file.policy === 'replace' ? ' selected' : ''}>Replace conflicts</option></select></td><td><button class="btn" data-action="input-import-remove" data-import-index="${index}" aria-label="Remove ${esc(file.name)}"${off(locked)}>Remove</button></td></tr>`;

@@ -38,6 +38,15 @@ full graph remains the saved evidence view; the starter-connections view applies
 the current cap separately to each source starter. It does not claim common
 ownership or carry a service's attribution onto all descendants.
 
+Increasing a saved limit reopens the stopped branch on the next continuation,
+even if other branches have advanced in the meantime. For example, a service
+reached at overall hop 2 with a local limit of 1 stops at hop 3. Raising its local
+limit to 2 allows that branch to fetch hop 4, subject to the run's overall ceiling
+and request, transaction, and time budgets. It does not skip directly to the
+furthest hop reached elsewhere. Use **Replace** when importing the changed CSV;
+**Keep existing** leaves the previous limit in effect. A continuation with zero
+additional hops can fill newly permitted paths inside the existing ceiling.
+
 The CLI accepts `service-set --hop-limit 1`; `--hop-limit ''` clears it. Omitting
 the option when changing another assessment field preserves an existing limit.
 
