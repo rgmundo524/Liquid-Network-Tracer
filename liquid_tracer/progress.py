@@ -11,6 +11,8 @@ from .layout_search_reporting import layout_search_warning, public_search_counts
 
 
 MESSAGES = {
+    "pegout_search": "Tracing toward peg-out requests within the selected hop range",
+    "pegout_paths": "Preparing the matching peg-out paths",
     "address_counts": "Fetching address transaction counts",
     "address_counts_ready": "Address transaction counts are ready",
     "address_counts_incomplete": "Some address counts are unavailable; see the lookup summary",
@@ -193,6 +195,7 @@ class ProgressReporter:
             elapsed = f"; {value['elapsed_seconds']:g}s elapsed" if "elapsed_seconds" in value else ""
             try:
                 prefix = ("Counts: " if value["phase"].startswith("address_counts") else
+                          "Peg-outs: " if value["phase"].startswith("pegout_") else
                           "ELK: " if value["phase"] in ("optimizing", "compacting") else "Miro: ")
                 print(prefix + value["message"] + counts + wait + elapsed, file=sys.stderr, flush=True)
             except (OSError, ValueError):

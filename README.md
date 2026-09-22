@@ -123,6 +123,21 @@ Live actions retrieve credentials through the existing SecretSpec/Proton Pass se
 
 Astro supplies the local interface; Python serves it and runs the existing tracer commands. The built interface and ELK/Mermaid previews need no CDN or hosted frontend. Use the local previews to review layouts and Miro for online editing and collaboration. See [local browser development](docs/development.md#local-astro-interface) for build and test commands.
 
+## Find peg-outs within a hop range
+
+The **Trace to peg-outs** panel and terminal menu search forward from any Liquid
+transaction. Enter an inclusive minimum and maximum hop count, then choose
+**Trace and plot peg-outs**. The origin is hop 0; each spending transaction adds
+one hop. The search fetches missing transactions within the investigation's saved
+budgets and respects its stop rules and attribution hop limits. Only paths
+reaching matching peg-out requests are plotted.
+
+Paused searches can resume from their saved progress. Search history and previews
+are separate from the full investigation, with reviewed publication to a separate
+Miro board. A request is not confirmation of its Bitcoin payout. See the
+[peg-out search guide](docs/pegout-search.md) for range examples, recovery, and CLI
+commands.
+
 ## Where investigations and runs are saved
 
 The menu uses `LIQUID_INVESTIGATIONS_DIR`, configured by devenv as the repository's `cases/` directory. To select another location explicitly, use:

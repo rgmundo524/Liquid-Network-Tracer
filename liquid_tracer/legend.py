@@ -74,7 +74,7 @@ def legend_rows(graph=None):
 def legend_notes(graph=None):
     """Short interpretation notes, separate from the scan-friendly color key."""
     arrows = (graph or {}).get("graph_options", {}).get("color_attribution_arrows", False)
-    return [
+    notes = [
         "Squares = transactions; circles = addresses; diamonds = events.",
         "Selected seeds keep their seed color. Assigned name colors override other address colors.",
         ("Named arrows color only links directly entering or leaving that address; other arrows use the defaults."
@@ -82,6 +82,25 @@ def legend_notes(graph=None):
         "Thick red borders mark branch convergence. Colors and links do not prove ownership or allocate value.",
         "?? = not publicly available. STOP TRACING = an explicit address boundary.",
     ]
+    if (graph or {}).get("graph_options", {}).get("view") == "pegout_paths":
+        from .common import TraceError
+        from .pegout_paths import validate_query
+
+        report = graph.get("pegouts", {})
+        query = report.get("query") if isinstance(report, dict) else None
+        if not isinstance(query, dict):
+            raise TraceError("Peg-out legend requires its reviewed search query")
+        query = validate_query(query.get("txid"), query.get("min_hops"), query.get("max_hops"))
+        coverage = ("Coverage: bounded search completed. " if report.get("source_run_status") == "bounded_complete"
+                    else "Coverage: partial search. ")
+        notes.extend([
+            "Peg-out search origin: " + query["txid"],
+            f"Range: {query['min_hops']} to {query['max_hops']} transaction hops, inclusive. The origin is hop 0.",
+            "Only qualifying paths are plotted. Their combined edges can also form routes outside the selected range.",
+            "Peg-out diamonds are Liquid requests, not confirmation of Bitcoin payouts.",
+            coverage + "Stopped, unconfirmed or unsearched branches may contain undiscovered peg-outs; no result does not prove absence.",
+        ])
+    return notes
 
 
 def legend_html(graph=None):

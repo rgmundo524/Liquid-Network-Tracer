@@ -14,7 +14,7 @@ const source = stripTypeScriptTypes(
     .replace('void initialize().catch(', 'globalThis.startup = initialize().catch('),
   {mode: 'transform'},
 );
-const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy};');
+const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy, pegoutsGraph, pegoutInput, currentPegoutSearch};');
 const txid = 'a'.repeat(64);
 const defaults = {hops: 1, max_transactions: 20, max_outpoints: 100, max_requests: 30,
   max_seconds: 60, max_new_items: 750, layout_attempts: 25, connector_style: 'straight'};
@@ -648,4 +648,114 @@ test('one CSV import entry is available before the first trace and opens from re
   view.state.job = {id: 'running', action: 'trace', caseId: 'csvcase'};
   await view.dispatch('input-import-open');
   assert.equal(view.importActions.length, 1, 'running jobs keep importing disabled');
+});
+
+const pegoutSearch = (overrides = {}) => ({id: '1'.repeat(16), txid, min_hops: 2, max_hops: 4,
+  status: 'paused', stop_reason: 'request_limit', match_count: 1,
+  artifact: {preview_id: '1'.repeat(16) + '-pegouts-12345678', downloads: [],
+    preview_url: '/files/case1/previews/pegouts/graph.html'}, ...overrides});
+const pegoutCase = (searches = [], overrides = {}) => ({id: 'case1', name: 'Peg-out investigation',
+  run_defaults: defaults, runs: [], seeds: [], pegout_searches: searches, ...overrides});
+const pegoutEdit = (view, id, value, checked = false) => view.pegoutInput({id: 'pegouts-' + id, value, checked});
+
+test('peg-out search is available before a full run, validates range, and starts a real bounded search', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'pegjob', status: 'running'} : undefined);
+  view.state.activeCase = pegoutCase();
+  assert.match(view.pegoutsGraph(view.state.activeCase), /data-action="pegouts-start"[^>]*>/);
+  assert.match(view.pegoutsGraph(view.state.activeCase), /Hop 0 is that transaction/);
+  pegoutEdit(view, 'txid', txid.toUpperCase()); pegoutEdit(view, 'min', '2'); pegoutEdit(view, 'max', '4');
+  await view.dispatch('pegouts-start');
+  assert.deepEqual(view.calls.at(-1), {path: '/api/cases/case1/actions', body: {action: 'pegouts', txid, min_hops: 2, max_hops: 4}});
+  assert.equal(view.state.job.live, true);
+  assert.equal(view.state.job.action, 'pegouts');
+});
+
+test('peg-out invalid IDs and inverted or noninteger ranges never start jobs', async () => {
+  for (const [id, low, high] of [['bad', '0', '4'], [txid, '5', '4'], [txid, '-1', '4'],
+    [txid, '0', '2.5'], [txid, '', '4'], [txid, '0', '2147483648']]) {
+    const view = await harness(); view.state.activeCase = pegoutCase();
+    pegoutEdit(view, 'txid', id); pegoutEdit(view, 'min', low); pegoutEdit(view, 'max', high);
+    await assert.rejects(view.dispatch('pegouts-start'), /transaction ID|hop limits/);
+    assert.equal(view.calls.length, 1);
+  }
+});
+
+test('peg-out hop zero is inclusive and fixture searches stay offline', async () => {
+  const view = await harness(); view.state.activeCase = pegoutCase([], {fixture: true});
+  pegoutEdit(view, 'txid', txid); pegoutEdit(view, 'min', '0'); pegoutEdit(view, 'max', '0');
+  await view.dispatch('pegouts-start');
+  assert.equal(view.state.job.live, false);
+  assert.deepEqual(view.calls.at(-1).body, {action: 'pegouts', txid, min_hops: 0, max_hops: 0});
+});
+
+test('peg-out resume and preview target the independent search rather than the main run', async () => {
+  for (const [action, field, live] of [['pegouts-resume', 'resume', true], ['pegouts-preview', 'search_id', false]]) {
+    const view = await harness(); const search = pegoutSearch();
+    view.state.activeCase = pegoutCase([search], {latest_run: 'main-run'});
+    view.state.selectedRun = 'main-run';
+    await view.dispatch(action);
+    assert.deepEqual(view.calls.at(-1).body, {action: action === 'pegouts-resume' ? 'pegouts' : action, [field]: search.id});
+    assert.equal(view.state.selectedRun, 'main-run');
+    assert.equal(view.state.job.live, live);
+  }
+});
+
+test('peg-out partial and empty results describe coverage and retain recovery controls', async () => {
+  const view = await harness(); view.state.activeCase = pegoutCase([pegoutSearch({match_count: 0, recoverable: true})]);
+  const html = view.pegoutsGraph(view.state.activeCase);
+  assert.match(html, /Additional peg-outs may remain undiscovered/);
+  assert.match(html, /No matching peg-out found in the searched data/);
+  assert.match(html, /Recover and resume search/);
+  assert.doesNotMatch(html, /data-action="miro-pegouts"/);
+  assert.doesNotMatch(html, /title="Peg-out paths"/);
+});
+
+test('peg-out publication requires approval for the exact selected preview and board', async () => {
+  const view = await harness(); const one = pegoutSearch(), two = pegoutSearch({id: '2'.repeat(16),
+    artifact: {preview_id: '2'.repeat(16) + '-pegouts-87654321', downloads: []}});
+  view.state.activeCase = pegoutCase([one, two]);
+  await assert.rejects(view.dispatch('miro-pegouts'), /confirm publication/);
+  pegoutEdit(view, 'board', 'board-url'); pegoutEdit(view, 'confirm', '', true);
+  pegoutEdit(view, 'history', two.id);
+  await assert.rejects(view.dispatch('miro-pegouts'), /confirm publication/);
+  pegoutEdit(view, 'board', 'board-url'); pegoutEdit(view, 'confirm', '', true);
+  pegoutEdit(view, 'board', 'other-board');
+  await assert.rejects(view.dispatch('miro-pegouts'), /confirm publication/);
+  pegoutEdit(view, 'confirm', '', true);
+  await view.dispatch('miro-pegouts');
+  assert.deepEqual(view.calls.at(-1).body, {action: 'miro-pegouts', preview_id: two.artifact.preview_id,
+    board: 'other-board', confirm_pegouts: true});
+  assert.equal(view.state.job.live, true);
+});
+
+test('peg-out completion selects its search and preserves the full-trace run selection', async () => {
+  const search = pegoutSearch();
+  const view = await harness(path => path === '/api/jobs/pegjob' ? {status: 'succeeded', result: {search_id: search.id, status: 'paused'}}
+    : path === '/api/cases/case1' ? pegoutCase([search], {latest_run: 'main-run'}) : undefined);
+  view.state.activeCase = pegoutCase([], {latest_run: 'main-run'}); view.state.selectedRun = 'older-main-run';
+  view.state.job = {id: 'pegjob', action: 'pegouts', caseId: 'case1', live: true};
+  await view.pollJob();
+  assert.equal(view.state.selectedRun, 'older-main-run');
+  assert.equal(view.currentPegoutSearch(view.state.activeCase).id, search.id);
+  assert.match(view.notifications.join(' '), /search paused/);
+});
+
+for (const status of ['failed', 'canceled']) {
+  test(`peg-out ${status} job reloads the saved checkpoint for recovery`, async () => {
+    const search = pegoutSearch({recoverable: true});
+    const view = await harness(path => path === '/api/jobs/pegjob' ? {status, message: 'Stopped'}
+      : path === '/api/cases/case1' ? pegoutCase([search]) : undefined);
+    view.state.activeCase = pegoutCase(); view.state.job = {id: 'pegjob', action: 'pegouts', caseId: 'case1', live: true};
+    await view.pollJob();
+    assert.equal(view.currentPegoutSearch(view.state.activeCase).id, search.id);
+    assert.equal(view.calls.some(call => call.path === '/api/cases/case1'), true);
+  });
+}
+
+test('peg-out preview URLs and transaction text are rendered safely', async () => {
+  const view = await harness(); view.state.activeCase = pegoutCase([pegoutSearch({txid: '<script>private</script>',
+    artifact: {preview_id: 'safe', downloads: [], preview_url: 'javascript:alert(1)'}})]);
+  const html = view.pegoutsGraph(view.state.activeCase);
+  assert.doesNotMatch(html, /<script>|javascript:|<iframe/);
+  assert.match(html, /&lt;script&gt;/);
 });
