@@ -103,12 +103,14 @@ class WebCompactionTests(unittest.TestCase):
     def test_public_group_and_hub_options_are_validated_and_canonical(self):
         address = "G" + "a" * 33
         self.assertEqual(public_graph_options({}), {"group_context_inputs": False, "hub_addresses": [],
-                                                   "color_attribution_arrows": False})
+                                                   "center_name": "", "color_attribution_arrows": False})
         self.assertEqual(public_graph_options({"group_context_inputs": True, "hub_addresses": [address, " " + address],
                                                "color_attribution_arrows": True, "private": "hidden"}),
-                         {"group_context_inputs": True, "hub_addresses": [address], "color_attribution_arrows": True})
+                         {"group_context_inputs": True, "hub_addresses": [address], "center_name": "", "color_attribution_arrows": True})
+        self.assertEqual(public_graph_options({"center_name": "  Treasury Group  "})["center_name"], "Treasury Group")
         for options in ({"group_context_inputs": "true"}, {"hub_addresses": ["/private"]},
-                        {"color_attribution_arrows": "true"}, {"color_attribution_arrows": 1}, None):
+                        {"color_attribution_arrows": "true"}, {"color_attribution_arrows": 1},
+                        {"center_name": True}, {"center_name": "a\x00b"}, None):
             self.assertIsNone(public_graph_options(options))
 
     def test_apply_uses_exact_preview_and_live_handoff_without_default_overrides(self):

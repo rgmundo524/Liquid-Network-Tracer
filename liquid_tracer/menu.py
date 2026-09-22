@@ -370,6 +370,13 @@ def create_app(root=None):
                                  "output reference is retained in the details. Shared or traced addresses stay separate.", markup=False)
                     yield Static("Use Sync and reorganize to change grouping on an existing board. "
                                  "This replaces generated context objects; preserve their Miro comments first.", markup=False)
+                    yield Label("Center named group")
+                    yield Input(self.settings["center_name"], id="center-name", max_length=120,
+                                placeholder="Attribution name, or blank to disable")
+                    yield Static("Align this group's addresses and connecting transactions near the center, "
+                                 "with other activity branching around them. Name matching ignores capitalization. "
+                                 "Layout only: tracing and all connections stay the same. "
+                                 "Use Sync and reorganize to apply this to an existing board.", markup=False)
                     yield Label("Separate branch hubs")
                     yield TextArea("\n".join(self.settings["hub_addresses"]), id="hub-addresses")
                     yield Static("Enter one full Liquid address per line. Choose high-activity or shared addresses "
@@ -396,6 +403,8 @@ def create_app(root=None):
                                  + ". Change this in Investigation settings.", markup=False)
                     yield Static(f"Separate branch hubs: {len(self.settings['hub_addresses'])} selected. "
                                  "Change this in Investigation settings.", markup=False)
+                    yield Static("Center named group: " + (self.settings["center_name"] or "off")
+                                 + ". Change this in Investigation settings.", markup=False)
                     if not self.settings["include_fees"]:
                         yield Static("Sync checks previously generated fee items for manual edits before removing them. "
                                      "Saved trace evidence is unchanged.", markup=False)
@@ -460,6 +469,7 @@ def create_app(root=None):
                 settings["include_fees"] = self.query_one("#include-fees", Checkbox).value
                 settings["color_attribution_arrows"] = self.query_one("#color-attribution-arrows", Checkbox).value
                 settings["group_context_inputs"] = self.query_one("#group-context-inputs", Checkbox).value
+                settings["center_name"] = self.query_one("#center-name", Input).value
                 settings["hub_addresses"] = [line.strip() for line in self.query_one("#hub-addresses", TextArea).text.splitlines()
                                              if line.strip()]
                 settings["connector_style"] = self.query_one("#connector-style", Select).value
@@ -1152,6 +1162,7 @@ def create_app(root=None):
                     f"Color arrows by attribution: {'on' if settings['color_attribution_arrows'] else 'off'}\n"
                     f"Isolated context inputs: {'grouped' if settings['group_context_inputs'] else 'separate'}\n"
                     f"Separate branch hubs: {len(settings['hub_addresses'])} selected\n"
+                    f"Center named group: {settings['center_name'] or 'off'}\n"
                     f"Layout attempts: {settings['layout_attempts']}\nDirectory: {self.case}")
                 self.query_one("#run", Button).label = "Continue latest run" if metadata.get("latest_run") else "Start first run"
                 self.query_one("#create-board", Button).disabled = self.app.busy or bool(board)

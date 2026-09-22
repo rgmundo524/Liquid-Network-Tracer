@@ -23,6 +23,7 @@ DEFAULTS = {
     "color_attribution_arrows": False,
     "group_context_inputs": False,
     "hub_addresses": [],
+    "center_name": "",
     "connector_style": "straight",
 }
 
@@ -49,6 +50,14 @@ def validate_settings(settings):
                            for address in value)):
                 raise TraceError("hub_addresses must be a list of full Liquid addresses, using 14 to 200 letters or numbers each")
             result[key] = sorted({address.strip() for address in value})
+            continue
+        if key == "center_name":
+            if not isinstance(value, str):
+                raise TraceError("Center named group must be an attribution name, or blank to disable")
+            value = value.strip()
+            if len(value) > 120 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+                raise TraceError("Center named group must contain at most 120 characters and no control characters")
+            result[key] = value
             continue
         if key == "connector_style":
             if not isinstance(value, str) or value not in ("straight", "curved", "elbowed"):

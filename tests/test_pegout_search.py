@@ -184,6 +184,23 @@ class PegoutSearchTests(unittest.TestCase):
         self.assertEqual(refreshed["match_count"], 0)
         self.assertEqual(len(self.state(result)["transactions"]), 4)
 
+    def test_center_group_changes_preview_without_refetching_and_invalidates_review(self):
+        original = self.search()
+        previous, _ = reviewed_pegouts(self.case, original["preview_id"])
+        archive = self.case / "pegouts" / original["search_id"]
+        snapshot = {p.name: p.read_bytes() for p in archive.iterdir() if p.is_file()}
+        update_case(self.case, {"run_defaults": {"center_name": "Example Exchange"}})
+        with self.assertRaisesRegex(TraceError, "changed"):
+            reviewed_pegouts(self.case, original["preview_id"])
+        with patch.object(Esplora, "get", side_effect=AssertionError("preview fetched")):
+            result = preview_pegouts(self.case, original["search_id"])
+        graph, _ = reviewed_pegouts(self.case, result["preview_id"])
+        self.assertEqual(result["center_name"], "Example Exchange")
+        self.assertEqual(graph["graph_options"]["center_name"], "Example Exchange")
+        self.assertEqual(graph["edges"], previous["edges"])
+        self.assertEqual(graph["pegouts"], previous["pegouts"])
+        self.assertEqual(snapshot, {p.name: p.read_bytes() for p in archive.iterdir() if p.is_file()})
+
     def test_larger_attribution_hop_budget_resumes_old_search_frontier(self):
         set_service(self.case, "SYNTHETIC-branch-A", name="Service", hop_limit=0, stop_tracing=False)
         first = self.search()

@@ -257,7 +257,7 @@ def _summary(state, query):
 
 def preview_pegouts(case, search_id, *, open_browser=False, progress=None):
     from .address_counts import apply_saved_counts
-    from .cli import attribution_arrow_coloring, connector_appearance, layout_search_attempts, open_preview
+    from .cli import attribution_arrow_coloring, centered_name_group, connector_appearance, layout_search_attempts, open_preview
     from .elk_layout import optimize_graph
     from .layout_preview import export_layout
     from .mermaid import mermaid_source
@@ -271,7 +271,8 @@ def preview_pegouts(case, search_id, *, open_browser=False, progress=None):
         state["service_controls"] = {k: v for k, v in controls.items() if k != "history"}
         apply_saved_counts(case, state)
         _progress(progress, "pegout_paths")
-        graph = pegout_graph(state, query, color_attribution_arrows=attribution_arrow_coloring(metadata))
+        graph = pegout_graph(state, query, color_attribution_arrows=attribution_arrow_coloring(metadata),
+                              center_name=centered_name_group(metadata))
         if graph["nodes"]:
             graph = optimize_graph(graph, connector_style=connector_appearance(metadata), progress=progress,
                                    layout_attempts=layout_search_attempts(metadata))
@@ -305,11 +306,12 @@ def preview_pegouts(case, search_id, *, open_browser=False, progress=None):
         return {**_summary(state, query), **result, "match_count": report["match_count"],
                 "transaction_count": report["transaction_count"], "notice": graph["notice"],
                 "preview_id": destination.name, "directory": str(destination.resolve()),
+                "center_name": graph["graph_options"]["center_name"],
                 "browser_opened": open_preview(result["html"]) if open_browser else False}
 
 
 def reviewed_pegouts(case, preview_id):
-    from .cli import attribution_arrow_coloring
+    from .cli import attribution_arrow_coloring, centered_name_group
     from .miro import validate_plan
     case = _ordinary(Path(case))
     if not isinstance(preview_id, str) or not PREVIEW_ID.fullmatch(preview_id):
@@ -328,8 +330,9 @@ def reviewed_pegouts(case, preview_id):
         raise TraceError("Peg-out preview does not match this investigation or query")
     if (report.get("archive_sha256") != digest((_search_path(case, state["run_id"]) / "SHA256SUMS").read_bytes())
             or report.get("service_sha256") != digest(canonical({k: v for k, v in controls.items() if k != "history"}))
-            or graph["graph_options"].get("color_attribution_arrows", False) is not attribution_arrow_coloring(metadata)):
-        raise TraceError("Evidence, colors or trace controls changed; regenerate the peg-out preview")
+            or graph["graph_options"].get("color_attribution_arrows", False) is not attribution_arrow_coloring(metadata)
+            or graph["graph_options"].get("center_name", "") != centered_name_group(metadata)):
+        raise TraceError("Evidence, colors, layout settings or trace controls changed; regenerate the peg-out preview")
     validate_plan(plan)
     if _plan(graph) != plan or read_json(directory / "pegouts.json") != report:
         raise TraceError("Peg-out preview and publication plan disagree")

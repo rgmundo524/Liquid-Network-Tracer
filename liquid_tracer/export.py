@@ -137,7 +137,11 @@ def _unspent_endpoints(state):
 
 
 def build_graph(state, merge_addresses=True, include_fees=False, *, group_context_inputs=False, hub_addresses=None,
-                color_attribution_arrows=None):
+                color_attribution_arrows=None, center_name=None):
+    from .investigations import validate_settings
+    if center_name is None:
+        center_name = state.get("graph_options", {}).get("center_name", "")
+    center_name = validate_settings({"center_name": center_name})["center_name"]
     if color_attribution_arrows is None:
         color_attribution_arrows = state.get("graph_options", {}).get("color_attribution_arrows", False)
     if type(color_attribution_arrows) is not bool:
@@ -289,7 +293,8 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
             "connector_attachment": "transaction_sides_v1",
             "include_fees": bool(include_fees),
             "graph_options": {"include_fees": bool(include_fees),
-                              "color_attribution_arrows": color_attribution_arrows},
+                              "color_attribution_arrows": color_attribution_arrows,
+                              "center_name": center_name},
             "fee_items": fee_items, "layout": layout,
             "notice": "UTXO reachability, not allocation of stolen value. Consult the legend for context and traced roles. "
                       "?? marks amounts or assets not available from public data. "
@@ -312,7 +317,6 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
     annotate(graph, state)
     from .change_layout import annotate_changes
     annotate_changes(graph, state)
-    from .investigations import validate_settings
     selected_hubs = validate_settings({"hub_addresses": [] if hub_addresses is None else hub_addresses})["hub_addresses"]
     if selected_hubs:
         graph["graph_options"]["hub_addresses"] = selected_hubs

@@ -562,10 +562,15 @@ def _components(nodes, edges, fee_ids):
     return groups, group_edges, fixed
 
 
-def _pack_components(nodes, edges, points, fee_ids, bounds, budget, notify, frame_groups):
+def _pack_components(nodes, edges, points, fee_ids, bounds, budget, notify, frame_groups, preserved_nodes=()):
     groups, group_edges, fixed = _components(nodes, edges, fee_ids)
+    fee_components = len(fixed)
+    # Named members may share a central row across disconnected components.
+    # Translating those components independently would undo that organization.
+    preserved_nodes = set(preserved_nodes)
+    fixed.update(owner for owner, keys in groups.items() if preserved_nodes.intersection(keys))
     if len(groups) < 2 or bounds is None:
-        return 0, 0, len(fixed)
+        return 0, 0, fee_components
     geometry_boxes = {owner: _footprint((nodes[key] for key in keys), (edges[key] for key in group_edges[owner]), points)
                       for owner, keys in groups.items()}
     frame_for_member = {}
@@ -656,7 +661,7 @@ def _pack_components(nodes, edges, points, fee_ids, bounds, budget, notify, fram
             index.add(owner, box)
             moved += 1
         corners.extend(((box[2] + COMPONENT_SPACING, box[1]), (box[0], box[3] + COMPONENT_SPACING)))
-    return moved, skipped, len(fixed)
+    return moved, skipped, fee_components
 
 
 def compact_graph(graph, progress=None):
@@ -713,9 +718,13 @@ def compact_graph(graph, progress=None):
     # may still translate, but a local address move must not pull the hub back
     # into the branch it was explicitly separated from.
     locked_nodes.update(key for key, node in nodes.items() if node.get("layout_hub") is True)
+    from .named_group_layout import center_metrics, group_structure
+    centered_nodes = group_structure(result)["core"]
+    locked_nodes.update(centered_nodes)
     moved_addresses, skipped_addresses = _compact_addresses(nodes, edges, points, adjacent, fee_ids, bounds, budget, notify, locked_nodes)
     _, current_bounds = _measure(nodes, edges, points, fee_ids, adjacent, annotations, frame_groups)
-    moved_components, skipped_components, fee_components = _pack_components(nodes, edges, points, fee_ids, current_bounds, budget, notify, frame_groups)
+    moved_components, skipped_components, fee_components = _pack_components(
+        nodes, edges, points, fee_ids, current_bounds, budget, notify, frame_groups, centered_nodes)
     after, _ = _measure(nodes, edges, points, fee_ids, adjacent, annotations, frame_groups)
     main = [node for key, node in nodes.items() if key not in fee_ids]
     result["layout"]["main_top"] = min((node["y"] - node["height"] / 2 for node in main), default=160)
@@ -726,6 +735,8 @@ def compact_graph(graph, progress=None):
                                    "estimated": True, "miro_routes_exact": False,
                                    "method": "compaction_comparison", "acceptance_uses_metrics": False}
     result["layout"]["metrics"].update(public_search_counts(result["layout"].get("search")))
+    if result.get("graph_options", {}).get("center_name"):
+        result["layout"]["named_group"] = center_metrics(result)
     result["layout"]["compaction"] = {
         "algorithm": ALGORITHM_COMPACTION, "version": 1, "before": before, "after": after,
         "moved_addresses": moved_addresses, "moved_components": moved_components,

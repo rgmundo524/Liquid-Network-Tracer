@@ -138,7 +138,7 @@ def connecting_outpoints(state, max_hops=10):
             "status": "connections_found" if retained else "no_connection_found"}
 
 
-def connection_graph(state, max_hops=10, *, color_attribution_arrows=None):
+def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, center_name=None):
     """Generate only connecting transaction/UTXO nodes; keep the archive intact."""
     from .export import build_graph
     from .layout import arrange
@@ -155,7 +155,7 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None):
     # A separate circle per outpoint avoids visual cross-spends between different
     # UTXOs at a reused address. The ordinary merged-address graph is unchanged.
     graph = build_graph(reduced, merge_addresses=False, include_fees=False,
-                        color_attribution_arrows=color_attribution_arrows)
+                        color_attribution_arrows=color_attribution_arrows, center_name=center_name)
     edge_ids = {"out:" + key for key in outpoints}
     edge_ids.update(f"in:{state['links'][key]['spending_txid']}:{state['links'][key]['vin']}" for key in outpoints)
     graph["edges"] = [e for e in graph["edges"] if e["id"] in edge_ids]
@@ -188,7 +188,7 @@ def connection_plan(graph):
 
 
 def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=False, progress=None):
-    from .cli import (attribution_arrow_coloring, resolve_latest, run_path, verify_export,
+    from .cli import (attribution_arrow_coloring, centered_name_group, resolve_latest, run_path, verify_export,
                       connector_appearance, layout_search_attempts, open_preview)
     from .investigations import read_case
     from .services import apply_service_labels, load_services
@@ -212,7 +212,8 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
     state["service_controls"] = {k: v for k, v in settings.items() if k != "history"}
     from .address_counts import apply_saved_counts, ensure_counts
     apply_saved_counts(case, state)
-    graph = connection_graph(state, max_hops, color_attribution_arrows=attribution_arrow_coloring(metadata))
+    graph = connection_graph(state, max_hops, color_attribution_arrows=attribution_arrow_coloring(metadata),
+                              center_name=centered_name_group(metadata))
     counts = ensure_counts(case, state, graph=graph, progress=progress) if graph["nodes"] else None
     if graph["nodes"]:
         graph = optimize_graph(graph, connector_style=connector_appearance(metadata), progress=progress,
@@ -250,6 +251,7 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
     return {**result, "address_counts": counts, "directory": str(destination.resolve()), "preview_id": destination.name,
             "run_id": run_id, "include_fees": False, "max_hops": max_hops,
             "color_attribution_arrows": graph["graph_options"]["color_attribution_arrows"],
+            "center_name": graph["graph_options"]["center_name"],
             "connection_count": report["connection_count"], "transaction_count": report["transaction_count"],
             "status": report["status"], "notice": graph["notice"],
             "browser_opened": open_preview(result["html"]) if open_browser else False}
@@ -286,7 +288,7 @@ def reviewed_connections(case, preview_id):
             or graph.get("graph_options", {}).get("view") != "starter_connections"
             or plan.get("schema_version") != 1):
         raise TraceError("Connection preview does not match this investigation")
-    from .cli import attribution_arrow_coloring, run_path, verify_export
+    from .cli import attribution_arrow_coloring, centered_name_group, run_path, verify_export
     from .services import load_services
     from .miro import make_plan
     archive = run_path(case, graph["run_id"])
@@ -295,8 +297,9 @@ def reviewed_connections(case, preview_id):
     report = graph.get("connections", {})
     if (report.get("archive_sha256") != digest((archive / "SHA256SUMS").read_bytes())
             or report.get("service_sha256") != digest(canonical({k: v for k, v in settings.items() if k != "history"}))
-            or graph["graph_options"].get("color_attribution_arrows", False) is not attribution_arrow_coloring(metadata)):
-        raise TraceError("Source evidence, colors or stop rules changed; regenerate the connection preview")
+            or graph["graph_options"].get("color_attribution_arrows", False) is not attribution_arrow_coloring(metadata)
+            or graph["graph_options"].get("center_name", "") != centered_name_group(metadata)):
+        raise TraceError("Source evidence, colors, layout settings or stop rules changed; regenerate the connection preview")
     validate_plan(plan)
     if connection_plan(graph) != plan or read_json(directory / "connections.json") != report:
         raise TraceError("Connection preview and its publication plan disagree")

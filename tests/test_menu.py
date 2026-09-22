@@ -907,6 +907,8 @@ finally:
                 app.screen.query_one("#group-context-inputs", Checkbox).value = True
                 self.assertEqual(app.screen.query_one("#hub-addresses", TextArea).text, "")
                 app.screen.query_one("#hub-addresses", TextArea).text = f" {hub_address}\n{hub_address} "
+                self.assertEqual(app.screen.query_one("#center-name", Input).value, "")
+                app.screen.query_one("#center-name", Input).value = "  Treasury Group  "
                 self.assertEqual(app.screen.query_one("#connector-style", Select).value, "straight")
                 app.screen.query_one("#connector-style", Select).value = "curved"
                 await self.click(app, pilot, "#submit")
@@ -917,6 +919,7 @@ finally:
                 self.assertIs(load_settings(self.root)["color_attribution_arrows"], True)
                 self.assertIs(load_settings(self.root)["group_context_inputs"], True)
                 self.assertEqual(load_settings(self.root)["hub_addresses"], [hub_address])
+                self.assertEqual(load_settings(self.root)["center_name"], "Treasury Group")
                 case = await self.new_case(app, pilot)
                 self.assertEqual(read_case(case)["run_defaults"]["max_requests"], 12)
                 self.assertEqual(read_case(case)["run_defaults"]["layout_attempts"], 75)
@@ -925,6 +928,8 @@ finally:
                 self.assertIs(read_case(case)["run_defaults"]["color_attribution_arrows"], True)
                 self.assertIs(read_case(case)["run_defaults"]["group_context_inputs"], True)
                 self.assertEqual(read_case(case)["run_defaults"]["hub_addresses"], [hub_address])
+                self.assertEqual(read_case(case)["run_defaults"]["center_name"], "Treasury Group")
+                self.assertIn("Center named group: Treasury Group", str(app.screen.query_one("#case-summary", Static).render()))
                 self.assertIn("Transaction fee flows: included", str(app.screen.query_one("#case-summary", Static).render()))
                 self.assertIn("Isolated context inputs: grouped", str(app.screen.query_one("#case-summary", Static).render()))
                 self.assertIn("Color arrows by attribution: on", str(app.screen.query_one("#case-summary", Static).render()))
@@ -936,6 +941,8 @@ finally:
                 self.assertFalse(app.screen.query("#layout_attempts"))
                 self.assertEqual(app.screen.read_limits()["hub_addresses"], [hub_address])
                 self.assertFalse(app.screen.query("#hub-addresses"))
+                self.assertFalse(app.screen.query("#center-name"))
+                self.assertEqual(app.screen.read_limits()["center_name"], "Treasury Group")
                 await self.click(app, pilot, "#cancel")
                 await self.click(app, pilot, "#case-settings")
                 self.assertTrue(app.screen.query_one("#include-fees", Checkbox).value)
@@ -945,6 +952,8 @@ finally:
                 app.screen.query_one("#group-context-inputs", Checkbox).value = False
                 self.assertEqual(app.screen.query_one("#hub-addresses", TextArea).text, hub_address)
                 app.screen.query_one("#hub-addresses", TextArea).text = ""
+                self.assertEqual(app.screen.query_one("#center-name", Input).value, "Treasury Group")
+                app.screen.query_one("#center-name", Input).value = ""
                 self.assertEqual(app.screen.query_one("#connector-style", Select).value, "curved")
                 app.screen.query_one("#connector-style", Select).value = "elbowed"
                 app.screen.query_one("#include-fees", Checkbox).value = False
@@ -966,6 +975,8 @@ finally:
                 self.assertIs(load_settings(self.root)["color_attribution_arrows"], True)
                 self.assertIs(saved["run_defaults"]["group_context_inputs"], False)
                 self.assertEqual(saved["run_defaults"]["hub_addresses"], [])
+                self.assertEqual(saved["run_defaults"]["center_name"], "")
+                self.assertEqual(load_settings(self.root)["center_name"], "Treasury Group")
                 self.assertEqual(load_settings(self.root)["hub_addresses"], [hub_address])
                 self.assertIs(load_settings(self.root)["group_context_inputs"], True)
                 self.assertIn("Transaction fee flows: hidden", str(app.screen.query_one("#case-summary", Static).render()))
