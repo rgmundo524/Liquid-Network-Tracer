@@ -112,7 +112,7 @@ color names, and CSS expressions are rejected.
 2. Existing assignments are kept by default. Choose the replacement policy
    and preview again to overwrite them. A blank CSV color or JSON `null` clears
    an existing assignment only with this replacement policy.
-3. Review the preview, check the review checkbox, and apply the import.
+3. Review the preview, then choose **Apply reviewed name colors**.
 4. Regenerate a preview or choose **Sync to Miro** to update the graph.
 
 Names must exist in the attribution list, saved color assignments, or the

@@ -14,7 +14,7 @@ const source = stripTypeScriptTypes(
     .replace('void initialize().catch(', 'globalThis.startup = initialize().catch('),
   {mode: 'transform'},
 );
-const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy, pegoutsGraph, pegoutInput, currentPegoutSearch, suggestCenterNames};');
+const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy, pegoutsGraph, pegoutInput, currentPegoutSearch, suggestCenterNames, render, navigate};');
 const txid = 'a'.repeat(64);
 const defaults = {hops: 1, max_transactions: 20, max_outpoints: 100, max_requests: 30,
   max_seconds: 60, max_new_items: 750, layout_attempts: 25, connector_style: 'straight'};
@@ -38,7 +38,7 @@ async function harness(respond = () => undefined) {
     },
     changeOutputsPending() {return false;}, changeOutputsPanel() {return "";},
     changeOutputsAction() {return false;}, changeOutputsLookupComplete() {return false;},
-    nameColorsAction() {return false;}, addressImportAction() {return false;},
+    nameColorsPanel() {return "";}, nameColorsAction() {return false;}, addressImportAction() {return false;},
     document: {
       querySelector(selector) {
         if (selector === '#app') return app;
@@ -163,6 +163,7 @@ test('saved fixture investigations retain synthetic provenance and offline trace
 
 test('input CSV download is available before and after tracing, including while busy', async () => {
   const view = await harness();
+  view.state.caseView = 'data';
   const caseId = 'case \'"><script>name</script>';
   const detail = {id: caseId, name: 'My investigation', run_defaults: defaults, runs: []};
   view.state.activeCase = detail;
@@ -281,11 +282,11 @@ test('canceling or navigating away invalidates the frame review and ignores its 
 test('context input grouping defaults off and survives new-case and trace form submission', async () => {
   const detail = {id: 'groupcase', name: 'Grouped case', run_defaults: {...defaults, include_fees: false, group_context_inputs: true}, runs: [], seeds: [`${txid}:0`]};
   const view = await harness(path => path === '/api/cases' || path === '/api/cases/groupcase' ? detail : undefined);
-  assert.match(view.newCase(), /name="group_context_inputs" type="checkbox"\//);
+  assert.doesNotMatch(view.newCase(), /name="group_context_inputs"/);
   await view.submit({name: detail.name, txids: txid, seeds: `${txid}:0`, group_context_inputs: 'on'});
   assert.equal(view.calls.find(call => call.path === '/api/cases').body.settings.group_context_inputs, true);
   view.openActionDialog('trace');
-  assert.match(view.dialog.innerHTML, /name="group_context_inputs" type="checkbox" checked/);
+  assert.doesNotMatch(view.dialog.innerHTML, /name="group_context_inputs"/);
   const settings = view.readSettings({values: {...defaults, group_context_inputs: 'on'}});
   assert.equal(settings.group_context_inputs, true);
   assert.equal(view.readSettings({values: defaults}).group_context_inputs, false);
@@ -351,14 +352,16 @@ test('separate branch hubs are normalized at creation and preserved by the trace
   const detail = {id: 'hubcase', name: 'Hub case', run_defaults: {...defaults, include_fees: false, group_context_inputs: false, hub_addresses: [first, second]}, runs: [], seeds: [`${txid}:0`]};
   const view = await harness(path => path === '/api/cases' || path === '/api/cases/hubcase' ? detail
     : path === '/api/cases/hubcase/actions' ? {id: 'trace1', status: 'running'} : undefined);
-  assert.match(view.newCase(), /Separate branch hubs/);
+  assert.doesNotMatch(view.newCase(), /name="hub_addresses"/);
   await view.submit({name: detail.name, txids: txid, seeds: `${txid}:0`, hub_addresses: ` ${second}\n${first}\n\n${second} `});
   assert.deepEqual(view.calls.find(call => call.path === '/api/cases').body.settings.hub_addresses, [first, second]);
   view.openActionDialog('trace');
   assert.doesNotMatch(view.dialog.innerHTML, /name="hub_addresses"/);
   await view.submitDialog(defaults);
   const trace = view.calls.find(call => call.path === '/api/cases/hubcase/actions');
-  assert.deepEqual(trace.body.settings.hub_addresses, [first, second]);
+  assert.equal(trace.body.hops, defaults.hops);
+  assert.equal(trace.body.settings, undefined);
+  assert.deepEqual(view.state.activeCase.run_defaults.hub_addresses, [first, second]);
 });
 
 test('hub selection changes invalidate previews while duplicate and reordered lists remain equivalent', async () => {
@@ -383,12 +386,12 @@ test('hub selection changes invalidate previews while duplicate and reordered li
 test('layout attempts default to 25 and new-investigation forms send the chosen search size', async () => {
   const detail = {id: 'layoutcase', name: 'Layout case', run_defaults: {...defaults, layout_attempts: 80}, runs: [], seeds: [`${txid}:0`]};
   const view = await harness(path => path === '/api/cases' || path === '/api/cases/layoutcase' ? detail : undefined);
-  assert.match(view.newCase(), /Layout attempts/);
-  assert.match(view.newCase(), /name="layout_attempts" type="number" min="1" max="1000" step="1" required value="25"/);
-  assert.match(view.newCase(), /Independent of trace hops/);
+  assert.match(view.newCase(), /Uses workspace defaults/);
+  assert.doesNotMatch(view.newCase(), /name="layout_attempts"/);
   await view.submit({name: detail.name, txids: txid, seeds: `${txid}:0`, layout_attempts: '80'});
   assert.equal(view.calls.find(call => call.path === '/api/cases').body.settings.layout_attempts, 80);
-  assert.match(view.workspace(), /<dt>Layout attempts<\/dt><dd>80<\/dd>/);
+  await view.dispatch("case-settings");
+  assert.match(view.settingsPage(), /name="layout_attempts"[^>]*value="80"/);
 });
 
 test('workspace and investigation settings submit layout attempts independently', async () => {
@@ -593,7 +596,7 @@ test('completed rebuild displays both board links and selects the published snap
 test('attribution arrow colors can be enabled and disabled in investigation settings', async () => {
   const detail = {id: 'arrowcase', name: 'Named arrows', run_defaults: {...defaults, color_attribution_arrows: true}, runs: []};
   const view = await harness(path => path === '/api/cases/arrowcase' ? detail : undefined);
-  assert.match(view.newCase(), /name="color_attribution_arrows" type="checkbox"\//);
+  assert.doesNotMatch(view.newCase(), /name="color_attribution_arrows"/);
   view.state.activeCase = detail;
   view.state.page = 'case-settings';
   assert.match(view.settingsPage(), /name="color_attribution_arrows" type="checkbox" checked/);
@@ -639,7 +642,8 @@ test('changing attribution arrow colors invalidates Mermaid, ELK and compact pre
 test('one CSV import entry is available before the first trace and opens from review pages', async () => {
   const view = await harness();
   view.state.activeCase = {id: 'csvcase', name: 'CSV investigation', run_defaults: defaults, runs: [], seeds: [`${txid}:0`]};
-  assert.match(view.workspace(), /data-action="input-import-open"[^>]*>Import CSV files/);
+  await view.dispatch("view-data");
+  assert.match(view.workspace(), /data-action="input-import-open"/);
   assert.doesNotMatch(view.workspace(), /data-action="address-import-open"/);
   view.state.page = 'addresses';
   await view.dispatch('input-import-open');
@@ -764,7 +768,7 @@ test('peg-out preview URLs and transaction text are rendered safely', async () =
 test('named-group layout is opt-in, saved per case, and retained by trace-only forms', async () => {
   const detail = {id: 'centeredcase', name: 'Treasury layout', run_defaults: {...defaults, center_name: 'Treasury Group'}, runs: []};
   const view = await harness(path => path === '/api/cases/centeredcase' ? detail : undefined);
-  assert.match(view.newCase(), /name="center_name" maxlength="120" value=""/);
+  assert.doesNotMatch(view.newCase(), /name="center_name"/);
   await view.dispatch('open-case', {dataset: {id: detail.id}});
   await view.dispatch('case-settings');
   assert.match(view.settingsPage(), /name="center_name" maxlength="120" value="Treasury Group"/);
@@ -814,4 +818,45 @@ test('named-group suggestions use local active attribution names and escape opti
   assert.doesNotMatch(list.innerHTML, /Inactive/);
   assert.match(list.innerHTML, /Group &quot;&lt;test&gt;/);
   assert.doesNotMatch(list.innerHTML, /<test>/);
+});
+
+test('investigation tool views isolate panels and preserve the selected snapshot', async () => {
+  const view = await harness();
+  view.state.activeCase = {id: 'case', name: 'Case', run_defaults: defaults, latest_run: 'latest-id', runs: [{id: 'old-id'}, {id: 'latest-id'}]};
+  view.state.selectedRun = 'old-id';
+  assert.match(view.workspace(), /id="elk-layout-panel"/);
+  assert.doesNotMatch(view.workspace(), /id="pegouts-txid"|id="connection-hops"/);
+  await view.dispatch('view-paths');
+  assert.match(view.workspace(), /id="connection-hops"/);
+  assert.doesNotMatch(view.workspace(), /id="elk-layout-panel"/);
+  await view.dispatch('view-exports');
+  assert.match(view.workspace(), /CSV downloads/);
+  assert.doesNotMatch(view.workspace(), /id="connection-hops"/);
+  assert.equal(view.state.selectedRun, 'old-id');
+  assert.equal(view.calls.length, 1, 'navigation performs no fetches or writes');
+});
+
+test('compact trace form submits only its hop allowance and retains all saved preferences', async () => {
+  const settings = {...defaults, hops: 2, include_fees: true, group_context_inputs: true, color_attribution_arrows: true, center_name: 'Treasury', connector_style: 'curved'};
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'job1', status: 'running'} : undefined);
+  view.state.activeCase = {id: 'case', name: 'Case', run_defaults: settings, runs: []};
+  view.openActionDialog('trace');
+  assert.match(view.dialog.innerHTML, /name="hops"/);
+  assert.doesNotMatch(view.dialog.innerHTML, /name="(?:include_fees|layout_attempts|max_transactions|max_new_items|connector_style)"/);
+  await view.submitDialog({hops: '5'});
+  assert.deepEqual(view.calls.at(-1).body, {action: 'trace', run_id: 'latest', hops: 5});
+  assert.equal(view.state.activeCase.run_defaults.hops, 2);
+  assert.equal(view.state.activeCase.run_defaults.group_context_inputs, true);
+});
+
+test('partial settings forms preserve absent values and unchecked rendered controls clear flags', async () => {
+  const view = await harness();
+  const prior = {...defaults, hub_addresses: ['Ga'.repeat(17)], include_fees: true, group_context_inputs: true,
+    center_name: 'Treasury', connector_style: 'curved', color_attribution_arrows: true};
+  const partial = view.readSettings({values: {hops: '4'}}, prior);
+  assert.equal(partial.hops, 4);
+  for (const key of Object.keys(prior).filter(key => key !== 'hops')) assert.deepEqual(JSON.parse(JSON.stringify(partial[key])), prior[key]);
+  const cleared = view.readSettings({values: {include_fees_present: '1', group_context_inputs_present: '1'}}, prior);
+  assert.equal(cleared.include_fees, false); assert.equal(cleared.group_context_inputs, false);
+  assert.equal(cleared.color_attribution_arrows, true);
 });

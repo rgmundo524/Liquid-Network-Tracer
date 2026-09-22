@@ -42,9 +42,8 @@ class NameColorImportMenuTests(unittest.IsolatedAsyncioTestCase):
                 await self.click(app, pilot, "#name-color-import-preview")
                 self.assertEqual(screen.query_one("#name-color-import-rows", DataTable).row_count, 1)
                 self.assertEqual(screen.review["changes"][0]["addresses"], 2)
-                self.assertTrue(screen.query_one("#name-color-import-apply", Button).disabled)
+                self.assertFalse(screen.query_one("#name-color-import-apply", Button).disabled)
                 self.assertEqual((self.case / "services.json").read_bytes(), before)
-                screen.query_one("#name-color-import-approved", Checkbox).value = True
                 await pilot.pause()
                 await self.click(app, pilot, "#name-color-import-apply")
                 self.assertEqual(load_services(self.case)["name_colors"], {"btse": "#93c5fd"})
@@ -78,12 +77,10 @@ class NameColorImportMenuTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             await self.click(app, pilot, "#name-color-import-preview")
             self.assertEqual(screen.review["changes"][0]["action"], "keep")
-            screen.query_one("#name-color-import-approved", Checkbox).value = True
             await pilot.pause()
             screen.query_one("#name-color-import-replace", Checkbox).value = True
             await pilot.pause()
             self.assertIsNone(screen.review)
-            self.assertFalse(screen.query_one("#name-color-import-approved", Checkbox).value)
             self.assertTrue(screen.query_one("#name-color-import-apply", Button).disabled)
             self.assertEqual(screen.query_one("#name-color-import-rows", DataTable).row_count, 0)
             await self.click(app, pilot, "#name-color-import-preview")
@@ -93,7 +90,6 @@ class NameColorImportMenuTests(unittest.IsolatedAsyncioTestCase):
                 ("#name-color-import-text", TextArea, "Name,Color\nBtSe,\n"),
                 ("#name-color-import-file", Input, str(self.root / "colors.csv")),
             ):
-                screen.query_one("#name-color-import-approved", Checkbox).value = True
                 await pilot.pause()
                 target = screen.query_one(selector, widget)
                 if widget is TextArea:
@@ -102,13 +98,11 @@ class NameColorImportMenuTests(unittest.IsolatedAsyncioTestCase):
                     target.value = value
                 await pilot.pause()
                 self.assertIsNone(screen.review)
-                self.assertFalse(screen.query_one("#name-color-import-approved", Checkbox).value)
                 self.assertTrue(screen.query_one("#name-color-import-apply", Button).disabled)
                 if widget is Input:
                     target.value = ""
                     await pilot.pause()
                 await self.click(app, pilot, "#name-color-import-preview")
-            screen.query_one("#name-color-import-approved", Checkbox).value = True
             await pilot.pause()
             await self.click(app, pilot, "#name-color-import-apply")
             self.assertEqual(load_services(self.case)["name_colors"], {})
@@ -127,7 +121,6 @@ class NameColorImportMenuTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             await self.click(app, pilot, "#name-color-import-preview")
             self.assertTrue(screen.review["valid"])
-            screen.query_one("#name-color-import-approved", Checkbox).value = True
             await pilot.pause()
             path.write_text("Name,Color\nBTSE,#654321\n")
             await self.click(app, pilot, "#name-color-import-apply")
@@ -150,7 +143,6 @@ class NameColorImportMenuTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(screen.review["valid"])
             self.assertTrue(screen.review["errors"])
             self.assertIn("Row", str(screen.query_one("#name-color-import-error", Static).render()))
-            screen.query_one("#name-color-import-approved", Checkbox).value = True
             await pilot.pause()
             self.assertTrue(screen.query_one("#name-color-import-apply", Button).disabled)
             self.assertEqual((self.case / "services.json").read_bytes(), before)

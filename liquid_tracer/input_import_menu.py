@@ -66,7 +66,7 @@ def input_import_screen(base, button, case):
                     yield button("Preview files", id="input-import-preview", variant="primary")
                     yield button("Export saved CSVs", id="input-import-export")
                 yield Static("", id="input-import-export-status", markup=False)
-                yield Static("Preview each file, then approve the complete import.", id="input-import-summary", markup=False)
+                yield Static("Preview each file, then apply the complete import.", id="input-import-summary", markup=False)
                 files = DataTable(id="input-import-files", cursor_type="row")
                 files.styles.height = 6
                 yield files
@@ -75,7 +75,6 @@ def input_import_screen(base, button, case):
                 yield rows
                 yield Static("Select a file or row with Enter to inspect its details and previous values.", markup=False)
                 yield Static("", id="input-import-detail", markup=False)
-                yield Checkbox("I reviewed all files, tracing settings and clear requests", id="input-import-approved")
                 yield Static("", id="input-import-error", markup=False)
                 yield Label("Advanced: paste text or JSON using a single-type importer")
                 with Horizontal(classes="buttons"):
@@ -95,7 +94,6 @@ def input_import_screen(base, button, case):
         def invalidate(self):
             self.review = None
             self.rows = []
-            self.query_one("#input-import-approved", Checkbox).value = False
             self.query_one("#input-import-apply", button).disabled = True
             self.query_one("#input-import-files", DataTable).clear()
             self.query_one("#input-import-rows", DataTable).clear()
@@ -114,9 +112,6 @@ def input_import_screen(base, button, case):
         def on_checkbox_changed(self, event: Checkbox.Changed):
             if event.checkbox.id == "input-import-replace" and self.is_mounted:
                 self.invalidate()
-            elif event.checkbox.id == "input-import-approved":
-                self.query_one("#input-import-apply", button).disabled = not (
-                    event.value and self.review and self.review["valid"])
 
         def inputs(self):
             paths = [line.strip() for line in self.query_one("#input-import-paths", TextArea).text.splitlines()
@@ -189,9 +184,10 @@ def input_import_screen(base, button, case):
                     self.invalidate()
                     self.review = preview_import(case, files)
                     self.show_review()
+                    self.query_one("#input-import-apply", button).disabled = not self.review["valid"]
                 elif action == "input-import-apply":
-                    if not self.review or not self.review["valid"] or not self.query_one("#input-import-approved", Checkbox).value:
-                        raise TraceError("Preview and approve all files before saving")
+                    if not self.review or not self.review["valid"]:
+                        raise TraceError("Preview all files before saving")
                     result = apply_import(case, self.inputs(), approval_sha256=self.review["approval_sha256"])
                     self.invalidate()
                     self.query_one("#input-import-summary", Static).update(

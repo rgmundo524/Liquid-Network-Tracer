@@ -157,17 +157,14 @@ class ChangeOutputMenuTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 await self.click(app, pilot, "#change-import-preview")
                 self.assertTrue(screen.review["valid"])
-                self.assertTrue(screen.query_one("#change-import-apply", Button).disabled)
+                self.assertFalse(screen.query_one("#change-import-apply", Button).disabled)
                 self.assertEqual(screen.query_one("#change-import-rows", DataTable).row_count, 1)
-                screen.query_one("#change-import-approved", Checkbox).value = True
                 await pilot.pause()
                 screen.query_one("#change-import-format", Select).value = "csv"
                 await pilot.pause()
                 self.assertIsNone(screen.review)
-                self.assertFalse(screen.query_one("#change-import-approved", Checkbox).value)
                 self.assertTrue(screen.query_one("#change-import-apply", Button).disabled)
                 await self.click(app, pilot, "#change-import-preview")
-                screen.query_one("#change-import-approved", Checkbox).value = True
                 await pilot.pause()
                 await self.click(app, pilot, "#change-import-apply")
                 self.assertEqual(load_services(self.case)["change_outputs"][A]["vout"], 0)
@@ -190,7 +187,6 @@ class ChangeOutputMenuTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             await self.click(app, pilot, "#change-import-preview")
             self.assertEqual(screen.review["changes"][0]["action"], "keep")
-            screen.query_one("#change-import-approved", Checkbox).value = True
             await pilot.pause()
             screen.query_one("#change-import-replace", Checkbox).value = True
             await pilot.pause()
@@ -198,7 +194,6 @@ class ChangeOutputMenuTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(screen.query_one("#change-import-apply", Button).disabled)
             await self.click(app, pilot, "#change-import-preview")
             self.assertEqual(screen.review["changes"][0]["action"], "clear")
-            screen.query_one("#change-import-approved", Checkbox).value = True
             await pilot.pause()
             path.write_text(f"Txid,ChangeVout\n{A},0\n")
             await self.click(app, pilot, "#change-import-apply")
@@ -207,7 +202,6 @@ class ChangeOutputMenuTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(screen.review)
             path.write_text(f"Txid,ChangeVout\n{A},\n")
             await self.click(app, pilot, "#change-import-preview")
-            screen.query_one("#change-import-approved", Checkbox).value = True
             await pilot.pause()
             await self.click(app, pilot, "#change-import-apply")
             self.assertEqual(load_services(self.case)["change_outputs"], {})
@@ -222,7 +216,6 @@ class ChangeOutputMenuTests(unittest.IsolatedAsyncioTestCase):
             await self.click(app, pilot, "#change-import-preview")
             self.assertFalse(screen.review["valid"])
             self.assertIn("Row", str(screen.query_one("#change-import-error", Static).render()))
-            screen.query_one("#change-import-approved", Checkbox).value = True
             await pilot.pause()
             self.assertTrue(screen.query_one("#change-import-apply", Button).disabled)
             self.assertEqual(load_services(self.case).get("change_outputs", {}), {})

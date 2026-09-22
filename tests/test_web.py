@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from liquid_tracer.cli import verify_export
 from liquid_tracer.common import read_json, save_json
-from liquid_tracer.investigations import create_investigation
+from liquid_tracer.investigations import create_investigation, update_case
 from liquid_tracer.web import LocalServer, worker_command
 
 
@@ -115,6 +115,29 @@ class LocalWebTests(unittest.TestCase):
         self.assertEqual(self.request("/api/settings", raw="{")[0], 400)
         self.assertFalse(self.server.root.exists())
         self.assertIn(b"Synthetic UI", self.success("/"))
+
+    def test_run_hop_allowance_preserves_saved_defaults(self):
+        _, case = self.create()
+        path, metadata = self.server.case(case["id"])
+        settings = {**metadata["run_defaults"], "hops": 4, "max_transactions": 83,
+                    "include_fees": True, "group_context_inputs": True, "center_name": "Treasury"}
+        update_case(path, {"run_defaults": settings})
+        before = (path / "case.json").read_bytes()
+        route = "/api/cases/" + case["id"] + "/actions"
+        with patch.object(self.server, "start_job", return_value={"id": "synthetic"}) as start:
+            self.success(route, {"action": "trace", "hops": 2}, 202)
+            arguments = start.call_args.args[0]
+            self.assertEqual(arguments[arguments.index("--hops") + 1], "2")
+            self.assertEqual(arguments[arguments.index("--max-transactions") + 1], "83")
+            self.assertFalse(start.call_args.kwargs["live"])
+            self.assertEqual((path / "case.json").read_bytes(), before)
+            start.reset_mock()
+            for hops in (True, None, -1, 1.5, "2"):
+                with self.subTest(hops=hops):
+                    self.assertEqual(self.request(route, {"action": "trace", "hops": hops})[0], 400)
+            self.assertEqual(self.request(route, {"action": "trace", "hops": 2, "settings": {}})[0], 400)
+            start.assert_not_called()
+        self.assertEqual((path / "case.json").read_bytes(), before)
 
     def test_new_lookups_and_cases_default_to_live_without_fixture_paths(self):
         txid = synthetic_txid()
