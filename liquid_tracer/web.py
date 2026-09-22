@@ -36,7 +36,7 @@ CASE_ID = re.compile(r"[0-9a-f]{32}")
 RUN_ID = re.compile(r"[a-zA-Z0-9]{16}")
 FRAME_REVIEW_ID = re.compile(r"[0-9a-f]{64}")
 MIRO_ITEM_ID = re.compile(r"[a-zA-Z0-9_][a-zA-Z0-9_-]{0,199}")
-ARTIFACT_DIR = re.compile(r"[a-zA-Z0-9]{16}-(?:csv|mermaid|elk|compact|connections)-[0-9a-f]{8}")
+ARTIFACT_DIR = re.compile(r"[a-zA-Z0-9]{16}-(?:csv|mermaid|elk|compact|connections|pegouts)-[0-9a-f]{8}")
 COMPACTION_DIR = re.compile(r"[a-zA-Z0-9]{16}-compact-[0-9a-f]{8}")
 LEGACY_EXPORT_NAMES = {"nodes.csv", "edges.csv", "inputs.csv", "outputs.csv", "spends.csv",
                        "events.csv", "frontier.csv", "export.json", "SHA256SUMS"}
@@ -49,7 +49,39 @@ COMPACTION_NAMES = LAYOUT_NAMES | {"before.html", "before.svg", "before.json", "
 LAYOUT_ALGORITHMS = ("elk_layered_v1", "dependency_layers_v1")
 FALLBACK_REASONS = ("size_limit", "timeout", "mermaid_size_limit", "mermaid_timeout")
 from .connections import FILES as CONNECTION_NAMES, LEGACY_FILES as LEGACY_CONNECTION_NAMES, preview_files
-CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact", "connections"}
+CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact", "connections", "pegouts", "pegouts-preview"}
+
+
+def public_pegout_search(summary):
+    """Expose the saved query and outcome, never archive paths or API errors."""
+    from .pegouts import SEARCH_ID
+
+    identity = summary.get("search_id", summary.get("id"))
+    if not isinstance(identity, str) or not SEARCH_ID.fullmatch(identity):
+        raise TraceError("Invalid peg-out search identifier")
+    query = summary.get("query", summary)
+    txid, lower, upper = query.get("txid"), query.get("min_hops"), query.get("max_hops")
+    if (not isinstance(txid, str) or not re.fullmatch(r"[0-9a-f]{64}", txid)
+            or type(lower) is not int or type(upper) is not int
+            or not 0 <= lower <= upper <= 2147483647):
+        raise TraceError("Invalid saved peg-out query")
+    value = {"id": identity, "search_id": identity, "txid": txid,
+             "min_hops": lower, "max_hops": upper}
+    for key in ("status", "stop_reason"):
+        field = summary.get(key)
+        if field is None or isinstance(field, str) and re.fullmatch(r"[a-z_]{1,64}", field):
+            value[key] = field
+    for key in ("match_count", "transaction_count"):
+        field = summary.get(key)
+        if type(field) is int and 0 <= field <= 2 ** 53 - 1:
+            value[key] = field
+    for key in ("resumable", "recoverable", "complete", "partial"):
+        if type(summary.get(key)) is bool:
+            value[key] = summary[key]
+    created = summary.get("created_at")
+    if isinstance(created, str) and re.fullmatch(r"[0-9TtZz:+. -]{10,40}", created):
+        value["created_at"] = created
+    return value
 
 
 def public_graph_options(options):
@@ -393,6 +425,7 @@ class LocalServer(ThreadingHTTPServer):
 
             summary["runs"] = sorted(runs, key=lambda run: (run.get("created_at") or "", run["id"]), reverse=True)
             summary["artifacts"] = self.saved_artifacts(case, metadata, {run["id"] for run in runs})
+            summary["pegout_searches"] = self.pegout_searches(case)
             summary["miro_recovery"] = miro_recovery_status(case)
             try:
                 rebuild = rebuild_status(case)
@@ -404,6 +437,45 @@ class LocalServer(ThreadingHTTPServer):
                     if key in {"status", "previous_board_id", "board_id", "run_id", "name", "notice"}
                     and isinstance(value, str)}
         return summary
+
+    def pegout_artifact(self, case, preview_id):
+        from .pegouts import reviewed_pegouts, preview_files as pegout_files
+
+        graph, _ = reviewed_pegouts(case, preview_id)
+        directory = safe_path(case, ["previews", preview_id])
+        identity = read_case(case)["case_id"]
+        product = {"preview_id": preview_id, "downloads": []}
+        for name in sorted(pegout_files(directory)):
+            path = safe_path(case, ["previews", preview_id, name])
+            if not path.is_file():
+                continue
+            url = "/files/" + identity + "/previews/" + quote(preview_id) + "/" + quote(name)
+            product["downloads"].append({"name": name, "url": url})
+            if name == "graph.html":
+                product["preview_url"] = url
+        product.update(public_graph_options(graph.get("graph_options", {})) or {})
+        layout = graph.get("layout", {})
+        metrics = public_layout_metrics(layout.get("metrics")) if isinstance(layout, dict) else None
+        if metrics is not None:
+            product["layout_metrics"] = metrics
+        return product
+
+    def pegout_searches(self, case):
+        from .pegouts import list_pegout_searches
+
+        searches = []
+        for summary in list_pegout_searches(case):
+            try:
+                item = public_pegout_search(summary)
+            except (TraceError, ValueError, TypeError, AttributeError):
+                continue
+            if summary.get("preview_id"):
+                try:
+                    item["artifact"] = self.pegout_artifact(case, summary["preview_id"])
+                except (TraceError, RequestError, OSError, ValueError, TypeError, KeyError):
+                    pass  # Search evidence remains resumable when a preview is stale.
+            searches.append(item)
+        return searches
 
     def saved_artifacts(self, case, metadata, runs):
         """Rediscover complete local products without relying on browser memory.
@@ -675,6 +747,11 @@ class LocalServer(ThreadingHTTPServer):
             pass
 
     def public_result(self, result, action, case, txids):
+        if action in ("pegouts", "pegouts-preview"):
+            value = public_pegout_search(result)
+            if result.get("preview_id"):
+                value["artifact"] = self.pegout_artifact(case, result["preview_id"])
+            return value
         if action in ("miro-frame-review", "miro-frame-recover"):
             from .cli import board_id
 
@@ -810,6 +887,14 @@ class LocalServer(ThreadingHTTPServer):
         kind = parts[1].split("-")[1]
         if (parts[0] == "exports") != (kind == "csv"):
             raise RequestError("File not found", 404)
+        if kind == "pegouts":
+            from .pegouts import reviewed_pegouts, preview_files as pegout_files
+
+            directory = safe_path(case, parts[:2])
+            if parts[2] not in pegout_files(directory):
+                raise RequestError("File not found", 404)
+            reviewed_pegouts(case, parts[1])
+            return safe_path(case, parts)
         expected = {"mermaid": PREVIEW_NAMES, "csv": EXPORT_NAMES | LEGACY_EXPORT_NAMES, "elk": LAYOUT_NAMES,
                     "compact": COMPACTION_NAMES, "connections": CONNECTION_NAMES | LEGACY_CONNECTION_NAMES}[kind]
         if kind in ("elk", "compact", "connections"):
@@ -832,6 +917,54 @@ class LocalServer(ThreadingHTTPServer):
         from .cli import miro_recovery_status, resolve_latest, run_path, verify_export
 
         action = body.get("action")
+        if action in ("pegouts", "pegouts-preview", "miro-pegouts"):
+            from .pegouts import SEARCH_ID, reviewed_pegouts
+            from .cli import board_id
+
+            live = action == "pegouts" and not bool(metadata.get("fixture"))
+            if action == "pegouts":
+                arguments = ["pegouts", "--case", str(case)]
+                if "resume" in body:
+                    if set(body) != {"action", "resume"}:
+                        raise RequestError("Resume uses the saved peg-out origin and hop range.")
+                    identity = body.get("resume")
+                    if not isinstance(identity, str) or not SEARCH_ID.fullmatch(identity):
+                        raise RequestError("Choose a saved peg-out search to resume.")
+                    if not safe_path(case, ["pegouts", identity]).is_dir():
+                        raise RequestError("Peg-out search not found.")
+                    arguments.extend(["--resume", identity])
+                else:
+                    if set(body) != {"action", "txid", "min_hops", "max_hops"}:
+                        raise RequestError("Peg-out searches accept one transaction and an inclusive hop range.")
+                    txid = body.get("txid")
+                    if not isinstance(txid, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", txid.strip()):
+                        raise RequestError("Enter one transaction hash containing 64 hexadecimal characters.")
+                    lower, upper = body.get("min_hops"), body.get("max_hops")
+                    if (type(lower) is not int or type(upper) is not int
+                            or not 0 <= lower <= upper <= 2147483647):
+                        raise RequestError("Enter whole-number hops from 0 to 2147483647, with minimum no greater than maximum.")
+                    arguments.extend(["--txid", txid.strip().lower(), "--min-hops", str(lower), "--max-hops", str(upper)])
+            elif action == "pegouts-preview":
+                identity = body.get("search_id")
+                if set(body) != {"action", "search_id"} or not isinstance(identity, str) or not SEARCH_ID.fullmatch(identity):
+                    raise RequestError("Choose a saved peg-out search to preview.")
+                if not safe_path(case, ["pegouts", identity]).is_dir():
+                    raise RequestError("Peg-out search not found.")
+                arguments = ["pegouts-preview", "--case", str(case), "--search", identity]
+            else:
+                if set(body) != {"action", "preview_id", "board", "confirm_pegouts"} or body.get("confirm_pegouts") is not True:
+                    raise RequestError("Review the peg-out snapshot and confirm publication to a separate Miro board.")
+                graph, _ = reviewed_pegouts(case, body.get("preview_id"))
+                if not graph.get("nodes"):
+                    raise RequestError("This peg-out snapshot has no matching paths to publish.")
+                target = board_id(body.get("board"))
+                if metadata.get("miro_board") and target == board_id(metadata["miro_board"]):
+                    raise RequestError("Choose a separate Miro board; the full-trace board is protected.")
+                settings = validate_settings(metadata.get("run_defaults", {}))
+                arguments = ["pegouts-publish", "--case", str(case), "--preview", body["preview_id"],
+                             "--board", target, "--max-items", str(settings["max_new_items"])]
+                live = True
+            return self.start_job(arguments, action=action, live=live, case=case)
         if action in ("miro-frame-review", "miro-frame-recover"):
             if action == "miro-frame-review":
                 if set(body) != {"action"}:
@@ -1156,7 +1289,7 @@ class Handler(BaseHTTPRequestHandler):
             content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             self.send(200, path.read_bytes(), content_type, preview=path.suffix in (".html", ".svg"),
                       download=None if path.suffix == ".html" else path.name,
-                      explorer_links=parts[3].split("-")[1] in ("elk", "compact", "connections") and path.suffix in (".html", ".svg"))
+                      explorer_links=parts[3].split("-")[1] in ("elk", "compact", "connections", "pegouts") and path.suffix in (".html", ".svg"))
         else:
             path = safe_path(self.server.assets, ["index.html"] if parts == [""] else parts)
             if not path.is_file():

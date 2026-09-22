@@ -62,6 +62,11 @@ type Artifact = RenderingMetadata & {
   compaction?: CompactionReport;
 };
 type RunArtifacts = { mermaid?: Artifact; csv?: Artifact; elk?: Artifact; compact?: Artifact; connections?: Artifact };
+type PegoutSearch = {
+  id: string; search_id?: string; txid: string; min_hops: number; max_hops: number;
+  status: string; stop_reason?: string | null; created_at?: string; match_count?: number;
+  resumable?: boolean; recoverable?: boolean; artifact?: Artifact;
+};
 type JobProgress = {
   phase: string;
   completed: number;
@@ -85,6 +90,7 @@ type Case = {
   created_at?: string;
   runs?: Run[];
   artifacts?: Record<string, RunArtifacts>;
+  pegout_searches?: PegoutSearch[];
 };
 type Output = {
   vout: number;
@@ -221,6 +227,7 @@ let dialogPreviewId = "";
 let dialogRebuild: { caseId: string; sourceBoard: string; runId: string } | null = null;
 let submitting = false;
 let pageGeneration = 0;
+let pegoutDraft = {caseId: "", txid: "", minHops: "0", maxHops: "10", selected: "", board: "", approved: ""};
 
 const esc = (value: unknown): string =>
   String(value ?? "").replace(
@@ -598,6 +605,91 @@ function connectionsGraph(artifact: Artifact | undefined, saved: boolean): strin
   ${preview && count ? `${layoutSearchWarning(artifact?.layout_metrics)}<iframe loading="lazy" class="graph-preview" src="${esc(preview)}#chart" title="Starter connection graph" sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe>` : ""}</section>`;
 }
 
+function currentPegoutSearch(detail: Case): PegoutSearch | undefined {
+  if (pegoutDraft.caseId !== detail.id) {
+    pegoutDraft = {caseId: detail.id, txid: detail.seeds?.[0]?.split(":")[0] || "", minHops: "0",
+      maxHops: "10", selected: "", board: "", approved: ""};
+  }
+  return detail.pegout_searches?.find(search => search.id === pegoutDraft.selected) || detail.pegout_searches?.[0];
+}
+
+function pegoutsGraph(detail: Case): string {
+  const search = currentPegoutSearch(detail), artifact = search?.artifact;
+  const preview = safeLocalUrl(artifact?.preview_url), busy = isBusy();
+  const settings = {...defaults, ...detail.run_defaults};
+  const count = search?.match_count;
+  const partial = search && search.status !== "bounded_complete";
+  const pending = search?.recoverable === true || search?.status === "running";
+  return `<section class="panel" id="pegouts-panel"><div class="panel-head"><div><h2>Trace to peg-outs</h2><p>Find downstream peg-out requests within a transaction hop range.</p></div></div>
+  <div class="panel-body"><p>Start from all outputs of a Liquid transaction. Hop 0 is that transaction; each forward spend adds one hop. Both range limits are included. Only paths reaching a matching peg-out are plotted.</p>
+  <label class="field"><span>Starting transaction ID</span><input id="pegouts-txid" class="mono" maxlength="64" value="${esc(pegoutDraft.txid)}" autocomplete="off"${disabled(busy)}/></label>
+  <div class="form-grid"><label class="field"><span>Minimum hops</span><input id="pegouts-min" type="number" min="0" max="2147483647" step="1" value="${esc(pegoutDraft.minHops)}"${disabled(busy)}/></label>
+  <label class="field"><span>Maximum hops</span><input id="pegouts-max" type="number" min="0" max="2147483647" step="1" value="${esc(pegoutDraft.maxHops)}"${disabled(busy)}/></label></div>
+  <p class="small muted">${detail.fixture ? "Uses saved synthetic data." : "Uses your Blockstream API credits. Credentials are retrieved through the launching terminal."} Each search or continuation allows ${settings.max_transactions} new transactions, ${settings.max_outpoints} output lookups, ${settings.max_requests} API attempts and ${settings.max_seconds} seconds. Change these in investigation settings. Saved stop rules and attribution hop limits apply.</p>
+  ${button("Trace and plot peg-outs", "pegouts-start", "graph", "primary", busy)}
+  ${search ? `<hr/><label class="field"><span>Saved peg-out search</span><select id="pegouts-history"${disabled(busy)}>${(detail.pegout_searches || []).map(item => `<option value="${esc(item.id)}"${item.id === search.id ? " selected" : ""}>${esc(short(item.txid))} · hops ${item.min_hops}–${item.max_hops} · ${esc(human(item.status))} · ${esc(short(item.id, 8))}</option>`).join("")}</select></label>
+  <p class="mono">${esc(search.txid)}</p><p>Hop range ${search.min_hops}–${search.max_hops}. ${esc(human(search.status))}${search.stop_reason ? `: ${esc(human(search.stop_reason))}` : ""}.</p>
+  ${partial ? `<p class="artifact-note">${pending ? "This search was interrupted." : "This search is incomplete."} Resume to continue from its saved progress. Additional peg-outs may remain undiscovered.</p>` : '<p class="small muted">Search reached its current boundary. Unspent outputs, confirmation requirements and stop rules can limit what is discoverable.</p>'}
+  <p>${count === undefined ? "Generate a preview to see the matches found so far." : count === 0 ? "No matching peg-out found in the searched data." : `${count} matching peg-out request${count === 1 ? "" : "s"} found.`}</p>
+  ${button(pending ? "Recover and resume search" : "Resume search", "pegouts-resume", "play", "", busy)}
+  ${button("Refresh peg-out preview", "pegouts-preview", "refresh", "", busy || pending)}
+  <div class="artifact-actions">${downloadLink(artifact?.downloads.find(item => item.name === "graph.svg"), "SVG")}${downloadLink(artifact?.downloads.find(item => item.name === "pegouts.json"), "Peg-out report")}${downloadLink(artifact?.downloads.find(item => item.name === "transactions.csv"), "Transaction CSV")}${preview ? `<a class="btn small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">Open full view</a>` : ""}${detailPagesLink(artifact?.downloads)}</div>
+  ${artifact?.preview_id && count ? `<details><summary>Publish this reviewed snapshot to Miro</summary><p>Choose a separate Miro board for this peg-out snapshot.</p>
+  <label class="field"><span>Separate board URL or ID</span><input id="pegouts-board" maxlength="512" value="${esc(pegoutDraft.board)}"${disabled(busy)}/></label>
+  <label class="check-line"><input id="pegouts-confirm" type="checkbox"${pegoutDraft.approved === artifact.preview_id ? " checked" : ""}${disabled(busy)}/><span>I reviewed this snapshot and authorize publishing it to the board above.</span></label>
+  ${button("Publish peg-out snapshot", "miro-pegouts", "board", "", busy)}</details>` : ""}` : ""}
+  <p class="small muted">A peg-out request does not confirm the separate Bitcoin payout. Paths establish UTXO reachability, without assigning ownership or confidential amounts.</p></div>
+  ${preview && count ? `${layoutSearchWarning(artifact?.layout_metrics)}<iframe loading="lazy" class="graph-preview" src="${esc(preview)}#chart" title="Peg-out paths" sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe>` : ""}</section>`;
+}
+
+function pegoutInput(element: HTMLInputElement | HTMLSelectElement): boolean {
+  if (!element.id?.startsWith("pegouts-") || !state.activeCase || isBusy()) return false;
+  const search = currentPegoutSearch(state.activeCase);
+  if (element.id === "pegouts-txid") pegoutDraft.txid = element.value;
+  else if (element.id === "pegouts-min") pegoutDraft.minHops = element.value;
+  else if (element.id === "pegouts-max") pegoutDraft.maxHops = element.value;
+  else if (element.id === "pegouts-history") {
+    pegoutDraft.selected = element.value; pegoutDraft.approved = ""; pegoutDraft.board = ""; render();
+  } else if (element.id === "pegouts-board") {
+    pegoutDraft.board = element.value; pegoutDraft.approved = "";
+    const confirmation = document.querySelector<HTMLInputElement>("#pegouts-confirm");
+    if (confirmation) confirmation.checked = false;
+  } else if (element.id === "pegouts-confirm") pegoutDraft.approved = (element as HTMLInputElement).checked ? search?.artifact?.preview_id || "" : "";
+  return true;
+}
+
+async function pegoutAction(action: string): Promise<boolean> {
+  if (!["pegouts-start", "pegouts-resume", "pegouts-preview", "miro-pegouts"].includes(action)) return false;
+  const detail = state.activeCase;
+  if (!detail || isBusy()) return true;
+  const search = currentPegoutSearch(detail);
+  const operation = action === "pegouts-start" || action === "pegouts-resume" ? "pegouts" : action;
+  const body: Record<string, unknown> = {action: operation};
+  if (action === "pegouts-start") {
+    const txid = pegoutDraft.txid.trim().toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(txid)) throw new Error("Enter one 64-character Liquid transaction ID.");
+    const values = [pegoutDraft.minHops.trim(), pegoutDraft.maxHops.trim()];
+    if (values.some(value => !/^\d+$/.test(value) || Number(value) > 2147483647) || Number(values[0]) > Number(values[1])) {
+      throw new Error("Enter whole-number hop limits from 0 to 2147483647, with minimum no greater than maximum.");
+    }
+    Object.assign(body, {txid, min_hops: Number(values[0]), max_hops: Number(values[1])});
+  } else {
+    if (!search) throw new Error("Choose a saved peg-out search first.");
+    if (action === "pegouts-resume") body.resume = search.id;
+    else if (action === "pegouts-preview") body.search_id = search.id;
+    else {
+      const previewId = search.artifact?.preview_id;
+      if (!previewId || !search.match_count) throw new Error("Generate and review a peg-out preview first.");
+      if (pegoutDraft.approved !== previewId) throw new Error("Review the peg-out snapshot and confirm publication first.");
+      if (!pegoutDraft.board.trim()) throw new Error("Enter a separate Miro board URL or ID.");
+      Object.assign(body, {preview_id: previewId, board: pegoutDraft.board.trim(), confirm_pegouts: true});
+    }
+  }
+  await startJob(`/api/cases/${encodeURIComponent(detail.id)}/actions`, body, operation,
+    action === "miro-pegouts" || operation === "pegouts" && !detail.fixture, detail.id);
+  return true;
+}
+
 function layoutSearchWarning(metrics: LayoutMetrics | undefined): string {
   if (!metrics) return "";
   const {attempt_count: requested, attempted_count: attempted, successful_count: successful, failed_count: failed} = metrics;
@@ -707,7 +799,7 @@ function workspace(): string {
         `<option value="${esc(item.id)}"${(state.selectedRun === "latest" ? detail.latest_run : state.selectedRun) === item.id ? " selected" : ""}>${esc(item.id)}${item.id === detail.latest_run ? " · Latest" : ""}</option>`,
     )
     .join("");
-  return `<div class="page-heading case-heading"><div><div class="eyebrow">Investigation workspace</div><h1 id="page-title" tabindex="-1">${esc(detail.name)}</h1><div class="workspace-meta"><span class="badge ${detail.fixture ? "purple" : ""}">${detail.fixture ? "Synthetic data" : "Live Liquid"}</span><span class="badge gray">${(detail.runs || []).length} saved run${detail.runs?.length === 1 ? "" : "s"}</span><span class="mono">${esc(short(detail.id, 8))}</span></div></div><div class="heading-actions">${button("Address review", "addresses", "search", "", isBusy())}${button("Import CSV files", "input-import-open", "", "", isBusy())}${button("Change outputs", "change-outputs-open", "graph", "", isBusy())}<a class="btn" href="/api/cases/${esc(encodeURIComponent(detail.id))}/input-exports/all" download>${icon("download")}Export input CSVs</a>${button("Settings", "case-settings", "settings", "", isBusy())}${button(saved ? "Continue investigation" : "Start first run", "trace-dialog", "play", "primary", isBusy())}</div></div><p class="small muted">Export input CSVs downloads a ZIP with all saved attributions, name colors, and change outputs across every page. Unsaved edits are excluded. Empty lists include column headers; large lists are split into CSV parts.</p>${inputImportPanel(detail.id, isBusy())}${changeOutputsPanel(detail.id, isBusy())}${last ? resultBanner(last.action, last.result) : ""}<div class="workspace-grid"><div class="workspace-main"><section class="panel"><div class="panel-head"><div><h2>${saved ? "Saved run" : "Ready to trace"}</h2><p>${saved ? "Select a snapshot to review, render, or export." : "Your starting outputs and limits are saved."}</p></div>${saved ? `<label class="run-picker">Snapshot<select class="input" id="run-picker" aria-label="Saved run snapshot">${runOptions}</select></label>` : '<span class="badge gray">No runs yet</span>'}</div>${saved ? `<div class="run-summary"><div><span>Tracked transactions</span><strong>${esc(run?.transaction_count ?? "—")}</strong></div><div><span>Unfinished branches</span><strong>${esc(run?.frontier_count ?? "—")}</strong></div><div><span>Run status</span><strong class="text-value">${esc(human(run?.status || "saved"))}</strong></div></div><div class="run-note">${icon("clock")}<span>${esc(formatDate(run?.created_at))}${run?.stop_reason ? ` · ${esc(human(run.stop_reason))}` : ""}</span></div>` : `<div class="empty-state" style="padding:31px 24px"><div class="empty-icon">${icon("graph")}</div><h2>${detail.seed_count ?? detail.seeds?.length ?? "Your"} starting output${(detail.seed_count ?? detail.seeds?.length) === 1 ? "" : "s"} selected</h2><p>Run the first trace to record exact output spends and build your investigation graph.</p>${button("Review run limits", "trace-dialog", "play", "primary", isBusy())}</div>`}</section>${connectionsGraph(artifacts.connections, saved)}${elkGraph(artifacts.elk, saved, settings)}${compactGraph(artifacts.compact, saved, detail)}${localGraph(artifacts.mermaid, saved, settings)}${csvDownloads(artifacts.csv, saved, settings.include_fees)}<section class="panel"><div class="panel-head"><div><h2>Run history</h2><p>Every continuation preserves the preceding snapshot.</p></div><span class="badge gray">${(detail.runs || []).length} runs</span></div>${detail.runs?.length ? `<div class="table-wrap"><table class="run-list"><thead><tr><th>Run</th><th>Recorded</th><th>Status</th><th>Transactions</th></tr></thead><tbody>${detail.runs.map((item) => `<tr class="${item.id === run?.id ? "selected" : ""}"><td><button data-run="${esc(item.id)}">${esc(short(item.id, 8))}</button>${item.id === detail.latest_run ? '<div class="muted">Latest</div>' : ""}</td><td><span class="muted">${esc(formatDate(item.created_at))}</span></td><td><span class="badge ${item.status === "error" ? "red" : "gray"}">${esc(human(item.status))}</span></td><td>${esc(item.transaction_count ?? "—")}</td></tr>`).join("")}</tbody></table></div>` : '<div class="panel-body small muted">Your first completed or bounded run will appear here.</div>'}</section></div><aside class="workspace-aside"><section class="panel"><div class="panel-body"><div class="action-card-head"><span class="action-icon">${icon("board")}</span><div><h3>Miro board</h3><p>Your editable investigation graph</p></div></div><p class="action-description">Preview changes locally, then sync the selected snapshot to your board.</p>${detail.miro_board ? `<a class="board-link" href="${esc(boardUrl(detail.miro_board))}" target="_blank" rel="noopener noreferrer">Open linked board ${icon("external")}</a>` : '<p class="board-empty">No board linked yet. Create one or add its URL in settings.</p>'}${miroRecoveryNotice(detail)}<div class="action-buttons">${button("Preview changes", "miro-preview", "search", "wide", !saved || !detail.miro_board || isBusy())}${button("Sync to Miro", "miro-sync-dialog", "refresh", "", !saved || !detail.miro_board || Boolean(detail.miro_recovery?.pending_count) || isBusy())}${button("Merge duplicate addresses", "address-merge-dialog", "graph", "", isBusy() || !saved)}${button("Sync and reorganize", "miro-organize-dialog", "graph", "wide", !saved || !detail.miro_board || Boolean(detail.miro_recovery?.pending_count) || isBusy())}${button("Create / update Miro frames", "miro-frames-dialog", "layers", "wide", !saved || !detail.miro_board || Boolean(detail.miro_recovery?.pending_count) || isBusy())}<p class="small muted">When the graph is finished, create its frames separately. Run this again after further syncing or rearranging to update the frames.</p>${detail.miro_recovery?.can_recover_frame ? button("Recover interrupted frame", "miro-frame-review", "refresh", "wide", !detail.miro_board || isBusy()) : ""}${detail.miro_recovery?.can_confirm_empty ? button("Recover empty-board sync", "miro-recover-dialog", "refresh", "wide", !detail.miro_board || isBusy()) : ""}${detail.miro_board ? rebuildAction(detail, saved) : button("Create Miro board", "miro-create-dialog", "plus", "wide", isBusy())}</div></div></section><section class="panel"><div class="panel-body local-tools"><div class="action-card-head"><span class="action-icon teal">${icon("download")}</span><div><h3>Local outputs</h3><p>From the selected snapshot</p></div></div>${button("ELK layout preview <span>Layout</span>", "layout", "layers", "", !saved || isBusy())}${button("Compact graph <span>Compare</span>", "compact", "layers", "", !saved || isBusy())}${button("Mermaid chart <span>Graph</span>", "mermaid", "graph", "", !saved || isBusy())}${button("Fetch address transaction counts <span>API lookup</span>", "address-counts", "refresh", "", !saved || isBusy())}<p class="small muted">Missing counts are fetched automatically when tracing or generating a chart, within the saved API/time limits. This lookup can retry missing counts separately.</p>${button("Create CSV export <span>Transaction I/O</span>", "csv", "table", "", !saved || isBusy())}<p class="small muted" style="margin-top:13px;font-size:10px">New exports are saved with the investigation. Archived evidence stays intact.</p></div></section><section class="panel"><div class="panel-body"><div class="action-card-head"><span class="action-icon blue">${icon("shield")}</span><div><h3>Bounded by design</h3><p>Saved defaults for this investigation</p></div></div><dl class="saved-settings"><div><dt>Additional hops</dt><dd>${settings.hops}</dd></div><div><dt>Transactions</dt><dd>${settings.max_transactions}</dd></div><div><dt>API attempts</dt><dd>${settings.max_requests}</dd></div><div><dt>Time limit</dt><dd>${settings.max_seconds}s</dd></div><div><dt>Fee flows</dt><dd>${settings.include_fees ? "Included" : "Hidden"}</dd></div><div><dt>Connectors</dt><dd>${esc(human(settings.connector_style))}</dd></div><div><dt>Attribution arrows</dt><dd>${settings.color_attribution_arrows ? "Name colors" : "Default colors"}</dd></div><div><dt>Context inputs</dt><dd>${settings.group_context_inputs ? "Grouped when isolated" : "Separate"}</dd></div><div><dt>Separate branch hubs</dt><dd>${settings.hub_addresses.length} selected</dd></div><div><dt>Layout attempts</dt><dd>${settings.layout_attempts}</dd></div><div><dt>New Miro items</dt><dd>${settings.max_new_items}</dd></div></dl><div class="settings-divider"></div><p class="small muted" style="font-size:10px;line-height:1.75">Graph paths show UTXO reachability. They do not determine ownership or allocate a hidden value.</p></div></section></aside></div>`;
+  return `<div class="page-heading case-heading"><div><div class="eyebrow">Investigation workspace</div><h1 id="page-title" tabindex="-1">${esc(detail.name)}</h1><div class="workspace-meta"><span class="badge ${detail.fixture ? "purple" : ""}">${detail.fixture ? "Synthetic data" : "Live Liquid"}</span><span class="badge gray">${(detail.runs || []).length} saved run${detail.runs?.length === 1 ? "" : "s"}</span><span class="mono">${esc(short(detail.id, 8))}</span></div></div><div class="heading-actions">${button("Address review", "addresses", "search", "", isBusy())}${button("Import CSV files", "input-import-open", "", "", isBusy())}${button("Change outputs", "change-outputs-open", "graph", "", isBusy())}<a class="btn" href="/api/cases/${esc(encodeURIComponent(detail.id))}/input-exports/all" download>${icon("download")}Export input CSVs</a>${button("Settings", "case-settings", "settings", "", isBusy())}${button(saved ? "Continue investigation" : "Start first run", "trace-dialog", "play", "primary", isBusy())}</div></div><p class="small muted">Export input CSVs downloads a ZIP with all saved attributions, name colors, and change outputs across every page. Unsaved edits are excluded. Empty lists include column headers; large lists are split into CSV parts.</p>${inputImportPanel(detail.id, isBusy())}${changeOutputsPanel(detail.id, isBusy())}${last ? resultBanner(last.action, last.result) : ""}<div class="workspace-grid"><div class="workspace-main"><section class="panel"><div class="panel-head"><div><h2>${saved ? "Saved run" : "Ready to trace"}</h2><p>${saved ? "Select a snapshot to review, render, or export." : "Your starting outputs and limits are saved."}</p></div>${saved ? `<label class="run-picker">Snapshot<select class="input" id="run-picker" aria-label="Saved run snapshot">${runOptions}</select></label>` : '<span class="badge gray">No runs yet</span>'}</div>${saved ? `<div class="run-summary"><div><span>Tracked transactions</span><strong>${esc(run?.transaction_count ?? "—")}</strong></div><div><span>Unfinished branches</span><strong>${esc(run?.frontier_count ?? "—")}</strong></div><div><span>Run status</span><strong class="text-value">${esc(human(run?.status || "saved"))}</strong></div></div><div class="run-note">${icon("clock")}<span>${esc(formatDate(run?.created_at))}${run?.stop_reason ? ` · ${esc(human(run.stop_reason))}` : ""}</span></div>` : `<div class="empty-state" style="padding:31px 24px"><div class="empty-icon">${icon("graph")}</div><h2>${detail.seed_count ?? detail.seeds?.length ?? "Your"} starting output${(detail.seed_count ?? detail.seeds?.length) === 1 ? "" : "s"} selected</h2><p>Run the first trace to record exact output spends and build your investigation graph.</p>${button("Review run limits", "trace-dialog", "play", "primary", isBusy())}</div>`}</section>${pegoutsGraph(detail)}${connectionsGraph(artifacts.connections, saved)}${elkGraph(artifacts.elk, saved, settings)}${compactGraph(artifacts.compact, saved, detail)}${localGraph(artifacts.mermaid, saved, settings)}${csvDownloads(artifacts.csv, saved, settings.include_fees)}<section class="panel"><div class="panel-head"><div><h2>Run history</h2><p>Every continuation preserves the preceding snapshot.</p></div><span class="badge gray">${(detail.runs || []).length} runs</span></div>${detail.runs?.length ? `<div class="table-wrap"><table class="run-list"><thead><tr><th>Run</th><th>Recorded</th><th>Status</th><th>Transactions</th></tr></thead><tbody>${detail.runs.map((item) => `<tr class="${item.id === run?.id ? "selected" : ""}"><td><button data-run="${esc(item.id)}">${esc(short(item.id, 8))}</button>${item.id === detail.latest_run ? '<div class="muted">Latest</div>' : ""}</td><td><span class="muted">${esc(formatDate(item.created_at))}</span></td><td><span class="badge ${item.status === "error" ? "red" : "gray"}">${esc(human(item.status))}</span></td><td>${esc(item.transaction_count ?? "—")}</td></tr>`).join("")}</tbody></table></div>` : '<div class="panel-body small muted">Your first completed or bounded run will appear here.</div>'}</section></div><aside class="workspace-aside"><section class="panel"><div class="panel-body"><div class="action-card-head"><span class="action-icon">${icon("board")}</span><div><h3>Miro board</h3><p>Your editable investigation graph</p></div></div><p class="action-description">Preview changes locally, then sync the selected snapshot to your board.</p>${detail.miro_board ? `<a class="board-link" href="${esc(boardUrl(detail.miro_board))}" target="_blank" rel="noopener noreferrer">Open linked board ${icon("external")}</a>` : '<p class="board-empty">No board linked yet. Create one or add its URL in settings.</p>'}${miroRecoveryNotice(detail)}<div class="action-buttons">${button("Preview changes", "miro-preview", "search", "wide", !saved || !detail.miro_board || isBusy())}${button("Sync to Miro", "miro-sync-dialog", "refresh", "", !saved || !detail.miro_board || Boolean(detail.miro_recovery?.pending_count) || isBusy())}${button("Merge duplicate addresses", "address-merge-dialog", "graph", "", isBusy() || !saved)}${button("Sync and reorganize", "miro-organize-dialog", "graph", "wide", !saved || !detail.miro_board || Boolean(detail.miro_recovery?.pending_count) || isBusy())}${button("Create / update Miro frames", "miro-frames-dialog", "layers", "wide", !saved || !detail.miro_board || Boolean(detail.miro_recovery?.pending_count) || isBusy())}<p class="small muted">When the graph is finished, create its frames separately. Run this again after further syncing or rearranging to update the frames.</p>${detail.miro_recovery?.can_recover_frame ? button("Recover interrupted frame", "miro-frame-review", "refresh", "wide", !detail.miro_board || isBusy()) : ""}${detail.miro_recovery?.can_confirm_empty ? button("Recover empty-board sync", "miro-recover-dialog", "refresh", "wide", !detail.miro_board || isBusy()) : ""}${detail.miro_board ? rebuildAction(detail, saved) : button("Create Miro board", "miro-create-dialog", "plus", "wide", isBusy())}</div></div></section><section class="panel"><div class="panel-body local-tools"><div class="action-card-head"><span class="action-icon teal">${icon("download")}</span><div><h3>Local outputs</h3><p>From the selected snapshot</p></div></div>${button("ELK layout preview <span>Layout</span>", "layout", "layers", "", !saved || isBusy())}${button("Compact graph <span>Compare</span>", "compact", "layers", "", !saved || isBusy())}${button("Mermaid chart <span>Graph</span>", "mermaid", "graph", "", !saved || isBusy())}${button("Fetch address transaction counts <span>API lookup</span>", "address-counts", "refresh", "", !saved || isBusy())}<p class="small muted">Missing counts are fetched automatically when tracing or generating a chart, within the saved API/time limits. This lookup can retry missing counts separately.</p>${button("Create CSV export <span>Transaction I/O</span>", "csv", "table", "", !saved || isBusy())}<p class="small muted" style="margin-top:13px;font-size:10px">New exports are saved with the investigation. Archived evidence stays intact.</p></div></section><section class="panel"><div class="panel-body"><div class="action-card-head"><span class="action-icon blue">${icon("shield")}</span><div><h3>Bounded by design</h3><p>Saved defaults for this investigation</p></div></div><dl class="saved-settings"><div><dt>Additional hops</dt><dd>${settings.hops}</dd></div><div><dt>Transactions</dt><dd>${settings.max_transactions}</dd></div><div><dt>API attempts</dt><dd>${settings.max_requests}</dd></div><div><dt>Time limit</dt><dd>${settings.max_seconds}s</dd></div><div><dt>Fee flows</dt><dd>${settings.include_fees ? "Included" : "Hidden"}</dd></div><div><dt>Connectors</dt><dd>${esc(human(settings.connector_style))}</dd></div><div><dt>Attribution arrows</dt><dd>${settings.color_attribution_arrows ? "Name colors" : "Default colors"}</dd></div><div><dt>Context inputs</dt><dd>${settings.group_context_inputs ? "Grouped when isolated" : "Separate"}</dd></div><div><dt>Separate branch hubs</dt><dd>${settings.hub_addresses.length} selected</dd></div><div><dt>Layout attempts</dt><dd>${settings.layout_attempts}</dd></div><div><dt>New Miro items</dt><dd>${settings.max_new_items}</dd></div></dl><div class="settings-divider"></div><p class="small muted" style="font-size:10px;line-height:1.75">Graph paths show UTXO reachability. They do not determine ownership or allocate a hidden value.</p></div></section></aside></div>`;
 }
 
 function saveAddressDraft(): void {
@@ -1058,6 +1150,9 @@ async function pollJob(): Promise<void> {
       if (active.action === "change-output-lookup" && active.caseId) changeOutputsLookupComplete(active.caseId, active.id, undefined, job.message || "Transaction lookup canceled.");
       state.error = "";
       toast(job.message || "Calculation canceled. Saved investigation runs are unchanged.");
+      if (["pegouts", "pegouts-preview"].includes(active.action) && active.caseId && state.activeCase?.id === active.caseId) {
+        state.activeCase = await api<Case>(`/api/cases/${encodeURIComponent(active.caseId)}`);
+      }
     } else if (job.status === "failed") {
       if (active.action.startsWith("miro-frame-")) resetFrameRecovery();
       const progress = job.progress || active.progress;
@@ -1072,7 +1167,7 @@ async function pollJob(): Promise<void> {
         (job.message || "The action did not complete. Check the launching terminal.") + lastStage;
       toast(state.error, true);
       if (active.action === "change-output-lookup" && active.caseId) changeOutputsLookupComplete(active.caseId, active.id, undefined, state.error);
-      if (active.action.startsWith("miro-") && active.caseId && state.activeCase?.id === active.caseId) {
+      if ((active.action.startsWith("miro-") || ["pegouts", "pegouts-preview"].includes(active.action)) && active.caseId && state.activeCase?.id === active.caseId) {
         state.activeCase = await api<Case>(`/api/cases/${encodeURIComponent(active.caseId)}`);
       }
     } else {
@@ -1113,6 +1208,11 @@ async function pollJob(): Promise<void> {
         if (state.activeCase?.id === active.caseId) {
           state.activeCase = detail;
           if (active.action === "trace") state.selectedRun = "latest";
+          if (["pegouts", "pegouts-preview"].includes(active.action)) {
+            currentPegoutSearch(detail);
+            pegoutDraft.selected = String(result.search_id || result.run_id || "");
+            pegoutDraft.approved = "";
+          }
           if (["miro-recover", "miro-frame-recover", "miro-rebuild"].includes(active.action) && result.run_id && detail.runs?.some(run => run.id === result.run_id)) {
             state.selectedRun = result.run_id;
           }
@@ -1160,6 +1260,9 @@ async function pollJob(): Promise<void> {
               layout: result.layout_algorithm === "dependency_layers_v1" ? "Dependency layout fallback is ready. " + fallbackNotice(result) : "ELK layout preview is ready.",
               compact: "Compaction comparison is ready. Review it before applying the layout to Miro.",
               "miro-compact": "The saved compact layout was applied to Miro.",
+              pegouts: result.status === "paused" ? "Peg-out search paused. Review matches so far or resume the saved search." : result.status === "error" ? "Peg-out search saved with an error. Check the launching terminal, then resume." : "Peg-out search saved. Review its coverage and matching paths.",
+              "pegouts-preview": "Peg-out preview is ready.",
+              "miro-pegouts": "Peg-out snapshot publication finished.",
               connections: result.connection_count ? "Starter connection chart is ready." : "No connection found in the saved searched data. Nothing plotted.",
               "miro-connections": "Connection snapshot publication finished. Full trace board unchanged.",
               csv: "CSV export is ready to download.",
@@ -1305,6 +1408,7 @@ async function caseAction(action: string): Promise<void> {
 }
 
 async function dispatch(action: string, element?: HTMLElement): Promise<void> {
+  if (await pegoutAction(action)) return;
   if (action === "address-import-open") action = "input-import-open";
   if (action === "input-import-open" && state.activeCase && !isBusy()) {
     saveAddressDraft(); state.page = "case";
@@ -1496,6 +1600,7 @@ app.addEventListener("click", (event) => {
 
 app.addEventListener("change", (event) => {
   const element = event.target as HTMLInputElement | HTMLSelectElement;
+  if (pegoutInput(element)) return;
   if (element.id === "input-import-files") {
     void inputImportFiles(element as HTMLInputElement, render, isBusy()).catch(handleError);
     return;
@@ -1545,6 +1650,7 @@ app.addEventListener("change", (event) => {
 // Keep an in-memory draft while a lookup runs so its completion does not
 // discard names, notes, or limit edits typed in the meantime.
 app.addEventListener("input", (event) => {
+  if (pegoutInput(event.target as HTMLInputElement | HTMLSelectElement)) return;
   if (inputImportInput(event.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement)) return;
   if (changeOutputsInput(event.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement)) return;
   if (nameColorsInput(event.target as HTMLInputElement)) return;

@@ -1106,6 +1106,7 @@ def create_app(root=None):
                     yield Button("Publish starter connections to Miro", id="connections-publish")
                     yield Button("Mermaid chart", id="mermaid")
                     yield Button("Export CSV", id="csv")
+                yield Button("Trace to peg-outs", id="pegouts")
                 with Horizontal(classes="buttons"):
                     yield Button("ELK layout preview", id="elk-preview")
                     yield Button("Address review", id="addresses-review")
@@ -1220,6 +1221,9 @@ def create_app(root=None):
                     from .connections_menu import connection_screen
                     self.app.push_screen(connection_screen(BaseScreen, Button, self.case,
                                          publish=action == "connections-publish"), self.perform)
+                elif action == "pegouts":
+                    from .pegouts_menu import pegout_screen
+                    self.app.push_screen(pegout_screen(BaseScreen, Button, self.case), self.perform)
                 elif action == "mermaid":
                     _latest(self.case, read_case(self.case), verify=True)
                     self.perform((["mermaid", "--case", str(self.case), "--run", "latest", "--open"], False))
@@ -1296,7 +1300,7 @@ def create_app(root=None):
                     return
             self.reorganizing = "--reorganize" in arguments
             self.applying_compaction = "--compact-preview" in arguments
-            if not live and self.current_action in ("layout-preview", "compact-preview", "mermaid", "connections"):
+            if not live and self.current_action in ("layout-preview", "compact-preview", "mermaid", "connections", "pegouts", "pegouts-preview"):
                 self.app.active_calculation = _OfflineCalculation()
                 self.calculation_started = time.monotonic()
             self.set_busy(True)
@@ -1367,6 +1371,24 @@ def create_app(root=None):
                         message += "Full Miro graph unchanged. " + str(result.get("html", ""))
                     except (ValueError, AttributeError):
                         pass
+            elif getattr(self, "current_action", None) in ("pegouts", "pegouts-preview"):
+                message = (("Peg-out search saved. Reopen Trace to peg-outs to review its status and saved preview. "
+                            if status == 0 else
+                            "Peg-out search stopped. Reopen Trace to peg-outs to resume saved work or rebuild its preview. ")
+                           + "The full investigation is unchanged.")
+                if status == 0:
+                    try:
+                        result = json.loads(output)
+                        message = (f"Peg-out chart saved: {result.get('match_count', 0)} matching request(s). "
+                                   f"Search status: {result.get('status', 'saved')}. ")
+                        if result.get("stop_reason"):
+                            message += f"Stopped: {result['stop_reason']}. Resume if more coverage is needed. "
+                        message += "Full investigation unchanged. " + str(result.get("html", ""))
+                    except (ValueError, AttributeError):
+                        pass
+            elif getattr(self, "current_action", None) == "pegouts-publish":
+                message = ("Peg-out snapshot published. The full-trace board is unchanged." if status == 0 else
+                           "Peg-out publication stopped. Repeat the same reviewed publication to reuse acknowledged items.")
             elif getattr(self, "current_action", None) == "mermaid":
                 message = ("Mermaid chart saved. Preview paths are listed below." if status == 0
                            else "Mermaid chart did not complete. Check the result below; saved evidence remains available.")

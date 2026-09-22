@@ -222,6 +222,26 @@ def parser():
     connection_publish.add_argument("--preview", required=True)
     connection_publish.add_argument("--board", required=True)
     connection_publish.add_argument("--max-items", type=int, default=750)
+    pegouts = commands.add_parser("pegouts", help="Trace forward from a transaction and plot peg-out requests in an inclusive hop range")
+    pegouts.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    origin = pegouts.add_mutually_exclusive_group(required=True)
+    origin.add_argument("--txid", help="Origin Liquid transaction hash; this transaction is hop 0")
+    origin.add_argument("--resume", help="Resume a saved peg-out search with the same origin and hop range")
+    pegouts.add_argument("--min-hops", type=int, default=0, help="Minimum transaction distance to a peg-out, inclusive")
+    pegouts.add_argument("--max-hops", type=int, default=10, help="Maximum transaction distance to a peg-out, inclusive")
+    for limit in ("transactions", "outpoints", "requests"):
+        pegouts.add_argument("--max-" + limit, type=int, help="Per-search budget; defaults to investigation settings")
+    pegouts.add_argument("--max-seconds", type=float, help="Per-search time budget; defaults to investigation settings")
+    pegouts.add_argument("--open", dest="open_browser", action="store_true")
+    pegout_preview = commands.add_parser("pegouts-preview", help="Rebuild a peg-out search chart from saved search evidence")
+    pegout_preview.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    pegout_preview.add_argument("--search", required=True)
+    pegout_preview.add_argument("--open", dest="open_browser", action="store_true")
+    pegout_publish = commands.add_parser("pegouts-publish", help="Publish a reviewed peg-out snapshot to a separate Miro board")
+    pegout_publish.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    pegout_publish.add_argument("--preview", required=True)
+    pegout_publish.add_argument("--board", required=True)
+    pegout_publish.add_argument("--max-items", type=int, default=750)
     compact = commands.add_parser("compact-preview", help="Compact an ELK layout locally and save a before/after comparison for review")
     compact.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     compact.add_argument("--run", default="latest")
@@ -1194,6 +1214,21 @@ def main(argv=None, *, progress=None):
         elif args.command == "connections-publish":
             from .connections import publish_connections
             print(json.dumps(publish_connections(args.case, args.preview, args.board, max_items=args.max_items), indent=2))
+        elif args.command == "pegouts":
+            from .pegouts import search_pegouts
+            result = search_pegouts(args.case, args.txid, args.min_hops, args.max_hops,
+                resume=args.resume, max_transactions=args.max_transactions, max_outpoints=args.max_outpoints,
+                max_requests=args.max_requests, max_seconds=args.max_seconds,
+                open_browser=args.open_browser, progress=progress)
+            print(json.dumps(result, indent=2))
+            return 1 if result.get("status") == "error" else 0
+        elif args.command == "pegouts-preview":
+            from .pegouts import preview_pegouts
+            print(json.dumps(preview_pegouts(args.case, args.search,
+                open_browser=args.open_browser, progress=progress), indent=2))
+        elif args.command == "pegouts-publish":
+            from .pegouts import publish_pegouts
+            print(json.dumps(publish_pegouts(args.case, args.preview, args.board, max_items=args.max_items), indent=2))
         elif args.command == "compact-preview":
             print(json.dumps(compact_preview_run(args.case, args.run, args.include_fees,
                                                  args.connector_style, args.open_browser, progress,
