@@ -30,6 +30,15 @@ removes objects or connections from the graph. If every attempt fails, no new
 preview is produced. Setup errors, invalid input, malformed results and
 cancellation remain fatal and cannot produce a partial search preview.
 
+One seed attempt can compare two layouts: ELK's initial geometry and an optional
+rerun that places traced inputs first. If the rerun cannot preserve the requested
+attachment order, the initial geometry remains eligible after full validation.
+The rejected rerun is also validated, so an ordering mismatch cannot hide malformed
+output. This recovery works with **one layout attempt** and does not require another
+seed. Progress reports the rejected ordering; a selected initial layout records a
+notice in its preview. Dense graphs can still have coincident attachment positions
+or crossing connectors. An ordering rejection is not a reported memory failure.
+
 This reuses layout geometry, not previously published Miro objects. Normal sync
 still validates the destination mapping and preserves manual positions and edits.
 It does not upload the SVG as one image or rewrite tracing archives. A full-graph

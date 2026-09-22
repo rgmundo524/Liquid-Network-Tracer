@@ -77,9 +77,55 @@ class WorkerDiagnosticTests(unittest.TestCase):
         diagnostic, _ = self.run_worker(MUTATING_ELK, request={"graph": graph, "seeds": [19]})
         self.assertEqual(diagnostic, {"version": 1, "stage": "validate_request", "code": "elk_invalid_request"})
 
-    def test_input_order_failure_is_distinguished_from_engine_failure(self):
-        engine = MUTATING_ELK.replace("const fixed = node.layoutOptions['elk.portConstraints'] === 'FIXED_ORDER';", "const fixed = false;")
+    def test_malformed_ordered_rerun_remains_fatal(self):
+        for corruption in (
+            "graph.children = [];",
+            "node.ports = node.ports.filter(port => port.id !== 'w1');",
+            "node.ports.find(port => port.id === 'w1').y = NaN;",
+            "node.ports.find(port => port.id === 'w1').y = Infinity;",
+            "node.ports.find(port => port.id === 'w1').id = 'w0';",
+        ):
+            with self.subTest(corruption=corruption):
+                engine = MUTATING_ELK.replace("return graph;", "if (fixed) {" + corruption + "}\nreturn graph;")
+                diagnostic, _ = self.run_worker(engine)
+                self.assertEqual(diagnostic["code"], "elk_input_order")
+                self.assertEqual(diagnostic["stage"], "validate_input_order")
+
+    def test_west_order_mismatch_cannot_mask_malformed_east_ports(self):
+        engine = MUTATING_ELK.replace(
+            "return graph;",
+            "if (fixed) {node.ports.filter(port => port.id.startsWith('w'))"
+            ".forEach(port => {port.y = 50;});"
+            "node.ports.find(port => port.id === 'e0').y = NaN;}\nreturn graph;")
         diagnostic, _ = self.run_worker(engine)
+        self.assertEqual(diagnostic["code"], "elk_input_order")
+        self.assertEqual(diagnostic["stage"], "validate_input_order")
+
+    def test_order_mismatch_cannot_hide_unserializable_rerun_edges(self):
+        engine = MUTATING_ELK.replace(
+            "return graph;",
+            "if (fixed) {node.ports.filter(port => port.id.startsWith('w'))"
+            ".forEach(port => {port.y = 50;});graph.edges = null;}\nreturn graph;")
+        diagnostic, _ = self.run_worker(engine)
+        self.assertEqual(diagnostic["code"], "elk_invalid_output")
+        self.assertEqual(diagnostic["stage"], "validate_input_order")
+
+    def test_order_mismatch_cannot_mask_missing_later_constrained_node(self):
+        graph = request_graph()
+        graph["children"].append({
+            "id": "later_transaction", "x": 500, "y": 0, "width": 160, "height": 160,
+            "layoutOptions": {},
+            "ports": [{"id": "later_w0", "x": 0, "y": 20,
+                       "layoutOptions": {"elk.port.side": "WEST"}},
+                      {"id": "later_w1", "x": 0, "y": 40,
+                       "layoutOptions": {"elk.port.side": "WEST"}}],
+        })
+        graph["inputPortOrders"]["later_transaction"] = ["later_w0", "later_w1"]
+        engine = MUTATING_ELK.replace(
+            "return graph;",
+            "if (fixed) {node.ports.filter(port => port.id.startsWith('w'))"
+            ".forEach(port => {port.y = 50;});graph.children.pop();}\nreturn graph;")
+        diagnostic, _ = self.run_worker(engine, request={"graph": graph, "seeds": [19]})
         self.assertEqual(diagnostic["code"], "elk_input_order")
         self.assertEqual(diagnostic["stage"], "validate_input_order")
 
