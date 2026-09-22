@@ -73,13 +73,17 @@ function constrainInputOrder(graph, orders) {
 
 function validateInputOrder(graph, orders) {
   const nodes = new Map(graph.children.map(node => [node.id, node]));
+  let preserved = true;
   for (const [id, {west, east}] of orders) {
     const node = nodes.get(id);
-    if (!node || !sameOrder(orderedPorts(node, west, 'WEST'), west)
-        || !sameOrder(orderedPorts(node, east, 'EAST'), east)) {
-      throw new Error('ELK did not preserve input port order');
-    }
+    if (!node) throw new Error('Missing ordered layout node');
+    // Inspect every node and both sides even after an order mismatch. Missing
+    // or malformed ports are fatal; a rejected optional ordering is not.
+    const inputs = orderedPorts(node, west, 'WEST');
+    const outputs = orderedPorts(node, east, 'EAST');
+    if (!sameOrder(inputs, west) || !sameOrder(outputs, east)) preserved = false;
   }
+  return preserved;
 }
 
 function layoutCandidate(result, seed, branchProfile, inputOrderPolicy, branchBoundary) {
@@ -228,8 +232,18 @@ try {
       Object.assign(diagnostic, {input_order_policy: 'traced_first', stage: 'traced_first_layout'});
       result = await elk.layout(result);
       diagnostic.stage = 'validate_input_order';
-      validateInputOrder(result, constraints);
-      candidates.push(layoutCandidate(result, seed, branchProfile, 'traced_first', boundaryOrdering));
+      const ordered = validateInputOrder(result, constraints);
+      const secondCandidate = layoutCandidate(result, seed, branchProfile, 'traced_first', boundaryOrdering);
+      if (!ordered) {
+        // The first snapshot retains ELK's crossing-aware geometry and will
+        // still undergo the Python adapter's complete layout validation.
+        // Do not let an optional port-order preference discard that layout.
+        firstCandidate.inputOrderFallback = 'traced_first_order_not_preserved';
+        // Return the rejected alternative for full adapter validation too.
+        // An ordering mismatch must not hide unrelated malformed geometry.
+        secondCandidate.inputOrderRejected = 'traced_first_order_not_preserved';
+      }
+      candidates.push(secondCandidate);
     } else {
       // Identical policies need only one candidate; retain the preferred order.
       firstCandidate.inputOrderPolicy = 'traced_first';

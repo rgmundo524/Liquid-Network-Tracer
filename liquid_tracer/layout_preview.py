@@ -55,6 +55,10 @@ def layout_notice(graph):
         return (str(layout.get("fallback_notice") or "Dependency layout; ELK optimization was not applied.")
                 + " Miro routes may differ. Crossing counts are estimates.")
     notice = LAYOUT_NOTICE
+    input_order = layout.get("input_order", {})
+    if (isinstance(input_order, dict) and input_order.get("policy") == "geometry"
+            and input_order.get("fallback_reason") == "traced_first_order_not_preserved"):
+        notice += " Preferred connector ordering was unavailable; valid ELK geometry was retained."
     search_warning = (layout_search_warning(layout.get("metrics"))
                       or layout_search_warning(layout.get("search")))
     if search_warning:

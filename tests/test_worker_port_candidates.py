@@ -52,14 +52,14 @@ def request_graph(west=("w1", "w0")):
 
 @unittest.skipUnless(NODE, "Node is not installed")
 class WorkerPortCandidateTests(unittest.TestCase):
-    def run_worker(self, graph, seeds):
+    def run_worker(self, graph, seeds, *, engine=MUTATING_ELK):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             worker = root / "run.mjs"
             shutil.copyfile(ROOT / "layout" / "run.mjs", worker)
             module = root / "node_modules" / "elkjs" / "lib" / "elk.bundled.js"
             module.parent.mkdir(parents=True)
-            module.write_text(MUTATING_ELK)
+            module.write_text(engine)
             result = subprocess.run([NODE, str(worker)],
                                     input=json.dumps({"graph": graph, "seeds": seeds}),
                                     text=True, capture_output=True, timeout=15, check=True)
@@ -97,3 +97,58 @@ class WorkerPortCandidateTests(unittest.TestCase):
                          ["balanced"] * 2 + ["flow_weighted"] * 4)
         self.assertEqual([candidate["nodes"][0]["x"] for candidate in candidates],
                          [100, 200, 300, 400, 500, 600])
+
+    def test_unsatisfied_optional_order_keeps_unmutated_geometry_for_single_attempt(self):
+        for failure in ("reversed_west", "coincident_west", "changed_east"):
+            with self.subTest(failure=failure):
+                graph = request_graph()
+                if failure == "changed_east":
+                    graph["children"][0]["ports"].append(
+                        {"id": "e1", "layoutOptions": {"elk.port.side": "EAST"}})
+                    # The synthetic engine's clockwise fixed indices reverse
+                    # the two EAST ports while putting WEST in requested order.
+                    engine = MUTATING_ELK
+                else:
+                    update = ("port.y = 20 + 20 * index;" if failure == "reversed_west"
+                              else "port.y = 50;")
+                    engine = MUTATING_ELK.replace(
+                        "return graph;",
+                        "if (fixed) node.ports.filter(port => port.id.startsWith('w'))"
+                        ".forEach((port, index) => {" + update + "});\nreturn graph;")
+                candidates = self.run_worker(graph, [1], engine=engine)
+                self.assertEqual(len(candidates), 2)
+                candidate, rejected = candidates
+                self.assertEqual(candidate["seed"], 1)
+                self.assertEqual(candidate["inputOrderPolicy"], "geometry")
+                self.assertEqual(candidate["inputOrderFallback"], "traced_first_order_not_preserved")
+                self.assertNotIn("inputOrderRejected", candidate)
+                self.assertEqual(rejected["seed"], 1)
+                self.assertEqual(rejected["inputOrderPolicy"], "traced_first")
+                self.assertEqual(rejected["inputOrderRejected"], "traced_first_order_not_preserved")
+                self.assertNotIn("inputOrderFallback", rejected)
+                self.assertEqual(rejected["nodes"][0]["x"], 200)
+                self.assertEqual(candidate["nodes"][0]["x"], 100)
+                self.assertEqual([port["y"] for port in candidate["nodes"][0]["ports"]],
+                                 [20 + 20 * index for index in range(len(graph["children"][0]["ports"]))])
+                self.assertEqual(candidate["edges"][0]["sections"][0]["startPoint"]["x"], 100)
+                self.assertEqual(candidate["edges"][0]["sections"][0]["bendPoints"][0]["x"], 104)
+                self.assertEqual(candidate["edges"][0]["labels"][0]["x"], 100)
+                self.assertNotIn("private", candidate["nodes"][0])
+                self.assertNotIn("text", candidate["edges"][0]["labels"][0])
+
+    def test_rejected_order_for_first_seed_does_not_discard_later_batched_candidates(self):
+        engine = MUTATING_ELK.replace(
+            "return graph;",
+            "if (fixed && this.calls === 2) node.ports.filter(port => port.id.startsWith('w'))"
+            ".forEach(port => {port.y = 50;});\nreturn graph;")
+        candidates = self.run_worker(request_graph(), [1, 7], engine=engine)
+        self.assertEqual([candidate["seed"] for candidate in candidates], [1, 1, 7, 7])
+        self.assertEqual([candidate["inputOrderPolicy"] for candidate in candidates],
+                         ["geometry", "traced_first", "geometry", "traced_first"])
+        self.assertEqual([candidate["nodes"][0]["x"] for candidate in candidates], [100, 200, 300, 400])
+        self.assertEqual([candidate["branchProfile"] for candidate in candidates],
+                         ["balanced"] * 2 + ["flow_weighted"] * 2)
+        self.assertEqual(candidates[0]["inputOrderFallback"], "traced_first_order_not_preserved")
+        self.assertEqual(candidates[1]["inputOrderRejected"], "traced_first_order_not_preserved")
+        self.assertTrue(all("inputOrderFallback" not in candidate for candidate in candidates[1:]))
+        self.assertTrue(all("inputOrderRejected" not in candidates[index] for index in (0, 2, 3)))

@@ -37,6 +37,7 @@ ELK_STAGES = {
     "measuring_input": "Measuring the input layout before ELK",
     "calculating": "Calculating the graph layout with ELK",
     "applying": "Validating ELK coordinates and connector routes",
+    "input_order_fallback": "Preferred connector ordering unavailable; retaining ELK geometry for validation",
     "measuring_output": "Measuring the completed ELK layout",
     "memory_measured": "ELK worker memory measurement completed",
     "ready": "ELK layout completed",

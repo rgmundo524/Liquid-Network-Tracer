@@ -339,6 +339,11 @@ def _worker(graph, seeds, progress=None, *, heap_mb=None, cancel_event=None):
                or candidate.get("branchBoundary", False) != expected_boundary
                for candidate in result["candidates"]):
             raise ValueError("invalid branch boundary ordering result")
+        if any(candidate.get("inputOrderPolicy") == "geometry"
+               and candidate.get("inputOrderFallback") == "traced_first_order_not_preserved"
+               for candidate in result["candidates"]):
+            _report_progress(progress, "Preferred connector ordering unavailable; retaining ELK geometry for validation",
+                             stage="input_order_fallback")
         peak_rss_mb = renderer_peak_rss_mb(errors)
         if peak_rss_mb is not None:
             _report_progress(progress, f"Measured ELK worker peak RAM: {peak_rss_mb:,} MiB",
@@ -428,6 +433,14 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
     input_policy = candidate.get("inputOrderPolicy", "traced_first")
     if input_policy not in ("traced_first", "geometry"):
         raise TraceError("ELK returned an invalid input ordering policy")
+    input_fallback = candidate.get("inputOrderFallback")
+    if "inputOrderFallback" in candidate and (
+            input_policy != "geometry" or input_fallback != "traced_first_order_not_preserved"):
+        raise TraceError("ELK returned an invalid input ordering fallback")
+    if "inputOrderRejected" in candidate and (
+            "inputOrderFallback" in candidate or candidate.get("inputOrderPolicy") != "traced_first"
+            or candidate["inputOrderRejected"] != "traced_first_order_not_preserved"):
+        raise TraceError("ELK returned an invalid rejected input ordering alternative")
     boundary_ordering = candidate.get("branchBoundary", False)
     if type(boundary_ordering) is not bool:
         raise TraceError("ELK returned an invalid branch boundary ordering policy")
@@ -560,6 +573,8 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
                         "edge_labels": {"version": LABEL_LAYOUT_VERSION, "estimated": True,
                                         "font_size": FONT_SIZE, "placement": "center_above",
                                         "reserved_count": len(label_map), "miro_positions_exact": False}}
+    if input_fallback is not None:
+        result["layout"]["input_order"]["fallback_reason"] = input_fallback
     result.setdefault("graph_options", {})["connector_style"] = connector_style
     result["connector_attachment"] = "transaction_ports_v2"
     result["presentation_version"] = max(6, graph.get("presentation_version", 0))
@@ -682,6 +697,20 @@ def fallback_graph(graph, connector_style="straight", reason="size_limit"):
     return result
 
 
+def _validate_rejected_pairs(candidates):
+    # Keep temporary pairing references scoped here so raw worker geometry can
+    # be released as the caller consumes each candidate.
+    for candidate in candidates:
+        if "inputOrderRejected" not in candidate:
+            continue
+        same_seed = [other for other in candidates if other.get("seed") == candidate.get("seed")]
+        partners = [other for other in same_seed if "inputOrderRejected" not in other
+                    and other.get("inputOrderPolicy") == "geometry"
+                    and other.get("inputOrderFallback") == "traced_first_order_not_preserved"]
+        if len(same_seed) != 2 or len(partners) != 1:
+            raise TraceError("ELK returned an unpaired rejected input ordering alternative")
+
+
 def optimize_graph(graph, connector_style="straight", progress=None, *, layout_attempts=None):
     """Compare bounded parallel ELK attempts without graph size or time ceilings.
 
@@ -721,7 +750,9 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
                              stage="attempt_failed", attempted_count=index, successful_count=successful_count,
                              failed_count=len(failed_attempts), failure_code=candidates.failure_code)
             continue
-        candidate_count += len(candidates)
+        # A rejected optional rerun must travel with its same-seed geometry
+        # fallback. Validate both layouts below before retaining either result.
+        _validate_rejected_pairs(candidates)
         while candidates:
             candidate = candidates.pop(0)
             _report_progress(report, "Validating ELK coordinates and routes", stage="applying")
@@ -733,6 +764,10 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
                 align_near_horizontal_endpoints(result)
             except (KeyError, TypeError, ValueError, OverflowError) as exc:
                 raise TraceError("ELK returned an invalid layout; no Miro changes were made") from exc
+            if "inputOrderRejected" in candidate:
+                del candidate, result
+                continue
+            candidate_count += 1
             _report_progress(report, "Measuring completed ELK layout", stage="measuring_output")
             metrics = layout_metrics(result)
             main = {"nodes": [node for node in result["nodes"] if node["id"] not in fee_ids],
