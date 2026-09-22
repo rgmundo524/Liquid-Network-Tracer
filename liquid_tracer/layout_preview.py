@@ -49,7 +49,7 @@ def layout_title(graph):
     return "ELK layout"
 
 
-def layout_notice(graph):
+def layout_notice(graph, *, include_named_group=True):
     layout = graph.get("layout", {})
     if layout.get("algorithm") == "dependency_layers_v1":
         return (str(layout.get("fallback_notice") or "Dependency layout; ELK optimization was not applied.")
@@ -66,6 +66,17 @@ def layout_notice(graph):
     changes = layout.get("change_outputs")
     if changes:
         notice += f" Change rows: {len(changes.get('applied', []))} aligned; {len(changes.get('skipped', []))} skipped."
+    group = layout.get("named_group")
+    name = graph.get("graph_options", {}).get("center_name", "")
+    if include_named_group and isinstance(group, dict) and name:
+        count = group.get("matched_addresses", 0)
+        if count:
+            notice += (f" Center named group '{name}': {count} address objects and "
+                       f"{group.get('connecting_transactions', 0)} connecting transactions prioritized for alignment.")
+        else:
+            notice += f" Center named group '{name}': no eligible address objects in this graph."
+        if group.get("excluded_hubs"):
+            notice += f" {group['excluded_hubs']} selected branch hubs retain their separate placement."
     return notice
 
 
@@ -268,7 +279,7 @@ def drawing_bounds(nodes, edges):
 
 def _svg(graph, nodes, edges, *, banner=True):
     notice = ("Dependency layout fallback · Full graph retained; crossing optimization skipped."
-              if graph.get("layout", {}).get("fallback_reason") else layout_notice(graph))
+              if graph.get("layout", {}).get("fallback_reason") else layout_notice(graph, include_named_group=False))
     left, top, right, bottom = drawing_bounds(nodes, edges)
     margin = 180
     x, y = left - margin, top - margin

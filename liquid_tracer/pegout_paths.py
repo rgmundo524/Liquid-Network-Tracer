@@ -150,7 +150,7 @@ def _paths(state, query):
         raise TraceError("Peg-out search needs complete, consistent saved spend evidence") from exc
 
 
-def pegout_graph(state, query, *, color_attribution_arrows=None):
+def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=None):
     """Filter a copied graph to the union of all qualifying bounded paths."""
     from .export import build_graph
     from .layout import arrange
@@ -176,7 +176,7 @@ def pegout_graph(state, query, *, color_attribution_arrows=None):
     reduced["links"] = {key: value for key, value in reduced["links"].items() if key in outpoints}
     reduced["seeds"] = sorted(key for key in outpoints | endpoints if key.startswith(query["txid"] + ":"))
     graph = build_graph(reduced, merge_addresses=False, include_fees=False,
-                        color_attribution_arrows=color_attribution_arrows)
+                        color_attribution_arrows=color_attribution_arrows, center_name=center_name)
     edge_ids = {"out:" + key for key in outpoints | endpoints}
     edge_ids.update(f"in:{state['links'][key]['spending_txid']}:{state['links'][key]['vin']}" for key in outpoints)
     graph["edges"] = [edge for edge in graph["edges"] if edge["id"] in edge_ids]

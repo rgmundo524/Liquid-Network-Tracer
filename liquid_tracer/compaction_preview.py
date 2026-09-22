@@ -25,7 +25,7 @@ OPTIONAL_FILES = frozenset({"details.html", "details.json"})
 def _selection(options):
     if not isinstance(options, dict):
         raise TraceError("Invalid compact-preview graph options; create the preview again")
-    fields = ("group_context_inputs", "hub_addresses", "color_attribution_arrows")
+    fields = ("group_context_inputs", "hub_addresses", "color_attribution_arrows", "center_name")
     settings = validate_settings({key: options[key] for key in fields if key in options})
     return {key: settings[key] for key in fields}
 
@@ -47,6 +47,8 @@ def _check_selection(case, meta):
     if saved != current:
         if saved["color_attribution_arrows"] != current["color_attribution_arrows"]:
             raise TraceError("Attribution arrow coloring changed since this preview; create a new compact preview before applying it")
+        if saved["center_name"] != current["center_name"]:
+            raise TraceError("Centered name group changed since this preview; create a new compact preview before applying it")
         raise TraceError("Context grouping or branch hubs changed since this preview; create a new compact preview before applying it")
 
 

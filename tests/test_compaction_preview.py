@@ -198,6 +198,18 @@ class CompactionPreviewTests(unittest.TestCase):
         self.assertTrue(meta["graph_options"]["color_attribution_arrows"])
         self.assertEqual(self.snapshot, {p.name: p.read_bytes() for p in self.archive.iterdir() if p.is_file()})
 
+    def test_center_group_change_rejects_review_before_miro_writes(self):
+        identity, _ = self.preview()
+        update_case(self.case, {"run_defaults": {"center_name": "Example Exchange"}})
+        with patch("liquid_tracer.cli.sync") as sync, \
+                self.assertRaisesRegex(TraceError, "Centered name group changed"):
+            sync_run(self.case, self.run, reorganize=True, compact_preview=identity)
+        sync.assert_not_called()
+        self.assertIsNone(latest_compaction_preview(self.case))
+        fresh, _ = self.preview("abcdef12")
+        _, meta = verified_compaction_preview(self.case, self.run, fresh)
+        self.assertEqual(meta["graph_options"]["center_name"], "Example Exchange")
+
     def test_detail_files_are_checked_when_present_but_old_manifests_still_work(self):
         identity, directory = self.preview()
         meta = read_json(directory / "compaction.json")

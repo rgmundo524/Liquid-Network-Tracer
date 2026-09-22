@@ -132,6 +132,38 @@ class InvestigationTests(unittest.TestCase):
             update_case(case, {"run_defaults": {"layout_attempts": attempts}})
             self.assertEqual(read_case(case)["run_defaults"]["layout_attempts"], attempts)
 
+    def test_center_name_is_opt_in_and_preserves_display_spelling_per_case(self):
+        case = create_investigation(self.root, "Existing case")
+        metadata = read_case(case)
+        self.assertEqual(metadata["run_defaults"].pop("center_name"), "")
+        save_json(case / "case.json", metadata)
+        original = (case / "case.json").read_bytes()
+        save_settings(self.root, {"center_name": "  Treasury Group  "})
+        self.assertEqual(load_settings(self.root)["center_name"], "Treasury Group")
+        self.assertEqual(validate_settings(read_case(case)["run_defaults"])["center_name"], "")
+        self.assertEqual((case / "case.json").read_bytes(), original)
+        new_case = create_investigation(self.root, "Centered case", run_defaults=load_settings(self.root))
+        self.assertEqual(read_case(new_case)["run_defaults"]["center_name"], "Treasury Group")
+        update_case(case, {"run_defaults": {"center_name": "  Other Group "}})
+        self.assertEqual(read_case(case)["run_defaults"]["center_name"], "Other Group")
+        update_case(case, {"run_defaults": {"center_name": "  "}})
+        self.assertEqual(read_case(case)["run_defaults"]["center_name"], "")
+        self.assertEqual(load_settings(self.root)["center_name"], "Treasury Group")
+
+    def test_invalid_center_names_do_not_change_settings_or_case(self):
+        case = create_investigation(self.root, "Case")
+        save_settings(self.root, {"center_name": "Treasury"})
+        settings_before = (self.root / "settings.json").read_bytes()
+        case_before = (case / "case.json").read_bytes()
+        for value in (None, False, 5, [], {}, "a" * 121, "Treasury\nGroup", "Group\x00", "a\x7fb"):
+            with self.subTest(value=value):
+                with self.assertRaises(TraceError):
+                    save_settings(self.root, {"center_name": value})
+                with self.assertRaises(TraceError):
+                    update_case(case, {"run_defaults": {"center_name": value}})
+        self.assertEqual((self.root / "settings.json").read_bytes(), settings_before)
+        self.assertEqual((case / "case.json").read_bytes(), case_before)
+
     def test_invalid_layout_attempts_do_not_change_saved_settings(self):
         case = create_investigation(self.root, "Strict layout")
         save_settings(self.root, {})

@@ -33,6 +33,7 @@ from .layout_search import LAYOUT_SEARCH_VERSION, layout_seeds, normalize_layout
 from .branch_layout import (BRANCH_LAYOUT_VERSION, edge_priorities, organization_metrics,
                             compact_context_inputs, hub_nodes)
 from .branch_boundaries import branch_order, boundary_metrics
+from .named_group_layout import (CORE_STRAIGHTNESS, center_order, center_metrics, group_structure)
 
 
 ALGORITHM = "elk_layered_v1"
@@ -380,6 +381,9 @@ def _request_graph(graph):
                                            "elk.portConstraints": "FIXED_SIDE"}}
     edge_values = []
     priorities = edge_priorities(graph)
+    centered = group_structure(graph)
+    for key in centered["edges"]:
+        priorities[key] = max(priorities[key], CORE_STRAIGHTNESS)
     main_edges = sorted((edge for edge in graph["edges"] if edge["source"] in main and edge["target"] in main),
                         key=lambda edge: edge["id"])
     for index, edge in enumerate(main_edges):
@@ -408,6 +412,8 @@ def _request_graph(graph):
                                "layoutOptions": {"elk.edgeLabels.placement": "CENTER"}}]
         edge_values.append(item)
     ordered_nodes = branch_order(graph)
+    centered_order = center_order(graph, ordered_nodes, centered)
+    center_metadata = {"centerNodeOrder": centered_order} if centered_order is not None else {}
     boundary_order = ({"branchNodeOrder": [key for key in ordered_nodes if key in main]}
                       if ordered_nodes is not None else {})
     return {"id": "liquid-layout", "layoutOptions": {
@@ -425,6 +431,7 @@ def _request_graph(graph):
         "children": list(children.values()), "edges": edge_values,
         "branchOrganization": BRANCH_LAYOUT_VERSION,
         **boundary_order,
+        **center_metadata,
         "inputPortOrders": {key: [port_map[edge_id][1] for edge_id in order]
                             for key, order in input_orders(graph).items()}}, port_map, fee_ids
 
@@ -779,6 +786,9 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
             result["layout"]["branch_organization"]["travel"] = organization
             boundaries = boundary_metrics(result)
             result["layout"]["branch_organization"]["boundaries"] = boundaries
+            centered = center_metrics(result)
+            if graph.get("graph_options", {}).get("center_name"):
+                result["layout"]["named_group"] = centered
             # Compare native ELK routes with a simple board-routing estimate. A
             # forced semantic slot order must not win merely because ELK can draw
             # bends that Miro cannot receive. Branch separation follows every
@@ -787,6 +797,7 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
                      miro_estimate["node_intersections"], score_metrics["crossings"], miro_estimate["crossings"],
                      endpoint_metrics["endpoint_order_inversions"], endpoint_metrics["coincident_ports"],
                      score_metrics["connector_overlaps"], miro_estimate["connector_overlaps"],
+                     centered["alignment_deviation"], centered["center_offset"],
                      boundaries["interleavings"], boundaries["boundary_depth"], boundaries["interbranch_travel"],
                      result["layout"]["input_order"]["policy"] != "traced_first",
                      organization["weighted_vertical_travel"] + score_metrics["edge_length"], score_metrics["edge_length"])
@@ -823,6 +834,7 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
         compacted_estimate = layout_metrics(compacted, midpoint_elbows=True)
         original_ports, compacted_ports = attachment_order_metrics(result), attachment_order_metrics(compacted)
         original_boundaries, compacted_boundaries = boundary_metrics(result), boundary_metrics(compacted)
+        original_center, compacted_center = center_metrics(result), center_metrics(compacted)
         def routing_quality(value):
             return (value["node_intersections"], value["crossings"], value["connector_overlaps"])
         safe_boundaries = all(compacted_boundaries[key] <= original_boundaries[key]
@@ -831,6 +843,8 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
                 and routing_quality(compacted_estimate) <= routing_quality(original_estimate)
                 and compacted_ports["endpoint_order_inversions"] <= original_ports["endpoint_order_inversions"]
                 and compacted_ports["coincident_ports"] <= original_ports["coincident_ports"]
+                and all(compacted_center[key] <= original_center[key]
+                        for key in ("alignment_deviation", "center_offset"))
                 and safe_boundaries)
         if safe:
             result = compacted
@@ -840,6 +854,8 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
     else:
         result = compacted
     result["layout"]["branch_organization"]["boundaries"] = boundary_metrics(result)
+    if graph.get("graph_options", {}).get("center_name"):
+        result["layout"]["named_group"] = center_metrics(result)
     after = layout_metrics(result)
     result["layout"]["metrics"] = {"before": before, "after": after, "estimated": True,
                                     "attempt_count": attempts, "candidate_count": candidate_count, "selected_seed": seed,

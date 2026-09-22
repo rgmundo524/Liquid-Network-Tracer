@@ -70,6 +70,38 @@ class GraphHubTests(unittest.TestCase):
         self.assertEqual(graph, build_graph(state, hub_addresses=[]))
 
 
+class CenterNameGraphTests(unittest.TestCase):
+    def test_name_selection_preserves_nodes_edges_and_original_evidence(self):
+        from tests.test_attribution_convergence import annotation, graph_state
+        state = graph_state((("a:0", "c"), ("c:0", "b")),
+                            labels=[annotation(stop=False), annotation(address="SYNTHETIC-c-address", stop=False)])
+        state["graph_options"] = {"center_name": "Example Exchange"}
+        original = copy.deepcopy(state)
+        baseline = build_graph(state, center_name="")
+        graph = build_graph(state)
+        self.assertEqual(graph["graph_options"]["center_name"], "Example Exchange")
+        self.assertEqual(graph["nodes"], baseline["nodes"])
+        self.assertEqual(graph["edges"], baseline["edges"])
+        self.assertEqual(graph["run"], baseline["run"])
+        self.assertEqual(state, original)
+        self.assertEqual(build_graph(state, center_name="  Another group  ")["graph_options"]["center_name"],
+                         "Another group")
+        self.assertEqual(build_graph(state, center_name="")["graph_options"]["center_name"], "")
+
+    def test_selected_named_context_addresses_remain_individual(self):
+        from tests.test_attribution_convergence import annotation
+        state = input_order_state(5, continuing=(4,))
+        inputs = state["transactions"][txid("input-order-child")]["data"]["vin"]
+        named = [inputs[index]["prevout"]["scriptpubkey_address"] for index in (0, 1)]
+        state["labels"] = [annotation(address=address, name="Example Exchange", stop=False) for address in named]
+        graph = build_graph(state, group_context_inputs=True, center_name="Example Exchange")
+        visible = {node["details"].get("address") for node in graph["nodes"] if node["kind"] == "address"}
+        self.assertTrue(set(named) <= visible)
+        hidden = {node["details"]["address"] for group in summaries(graph) for node in group["details"]["members"]}
+        self.assertFalse(set(named) & hidden)
+        self.assertTrue(summaries(graph))
+
+
 class SavedGraphOptionsTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -189,6 +221,44 @@ class SavedGraphOptionsTests(unittest.TestCase):
             self.assertEqual(arrow.get("color"), "#123abc" if enabled else None)
             verify_export(archive)
         self.assertEqual(self.snapshot(self.archive), original)
+
+    def test_current_center_group_reaches_preview_and_sync_without_retracing(self):
+        original = self.snapshot(self.archive)
+        baseline = saved_graph(self.case)[2]
+        for name in ("Example service", ""):
+            update_case(self.case, {"run_defaults": {"center_name": name}})
+            with patch("liquid_tracer.cli.Esplora", side_effect=AssertionError("Must not retrace")):
+                graph = saved_graph(self.case)[2]
+                with patch("liquid_tracer.elk_layout.optimize_graph", side_effect=lambda graph, **kw: graph), \
+                        patch("liquid_tracer.cli.sync", return_value={"dry_run": True}) as sync:
+                    result = sync_run(self.case, "latest", board="SYNTHETIC-board", dry_run=True)
+            self.assertEqual(graph["graph_options"]["center_name"], name)
+            self.assertEqual(result["center_name"], name)
+            self.assertEqual(sync.call_args.args[0]["graph_options"]["center_name"], name)
+            self.assertEqual(graph["nodes"], baseline["nodes"])
+            self.assertEqual(graph["edges"], baseline["edges"])
+        self.assertEqual(self.snapshot(self.archive), original)
+        verify_export(self.archive)
+
+    def test_continuation_and_export_snapshot_current_center_group(self):
+        original = self.snapshot(self.archive)
+        update_case(self.case, {"run_defaults": {"center_name": "Example service"}})
+        result = self.invoke(["trace", "--case", str(self.case), "--fixture", str(self.fixture),
+                              "--resume", "latest", "--additional-hops", "0"])
+        archive = Path(result["directory"])
+        for file in ("trace.json", "graph.json"):
+            self.assertEqual(read_json(archive / file)["graph_options"]["center_name"], "Example service")
+        update_case(self.case, {"run_defaults": {"center_name": ""}})
+        destination = self.root / "refreshed-export"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(main(["export", "--case", str(self.case), "--run", result["run_id"],
+                                   "--out", str(destination)]), 0)
+        self.assertEqual(read_json(destination / "graph.json")["graph_options"]["center_name"], "")
+        self.assertEqual(read_json(archive / "graph.json")["graph_options"]["center_name"], "Example service")
+        self.assertEqual(self.snapshot(self.archive), original)
+        verify_export(archive)
+        verify_export(destination)
 
     def test_csv_export_keeps_all_individual_inputs_when_grouping_is_enabled(self):
         self.configure(True)

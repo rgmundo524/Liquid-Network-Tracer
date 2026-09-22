@@ -14,7 +14,7 @@ const source = stripTypeScriptTypes(
     .replace('void initialize().catch(', 'globalThis.startup = initialize().catch('),
   {mode: 'transform'},
 );
-const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy, pegoutsGraph, pegoutInput, currentPegoutSearch};');
+const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy, pegoutsGraph, pegoutInput, currentPegoutSearch, suggestCenterNames};');
 const txid = 'a'.repeat(64);
 const defaults = {hops: 1, max_transactions: 20, max_outpoints: 100, max_requests: 30,
   max_seconds: 60, max_new_items: 750, layout_attempts: 25, connector_style: 'straight'};
@@ -22,6 +22,7 @@ const defaults = {hops: 1, max_transactions: 20, max_outpoints: 100, max_request
 async function harness(respond = () => undefined) {
   frameRecovery.resetFrameRecovery();
   const calls = [], listeners = {}, dialogListeners = {}, notifications = [], importActions = [];
+  const elements = new Map();
   let currentForm = null;
   const app = {innerHTML: '', addEventListener(name, callback) {listeners[name] = callback;}};
   const dialog = {innerHTML: '', open: false, addEventListener(name, callback) {dialogListeners[name] = callback;},
@@ -44,7 +45,7 @@ async function harness(respond = () => undefined) {
         if (selector === '#action-dialog') return dialog;
         if (selector === '#new-case-form') return currentForm;
         if (selector === '#notifications') return {append(node) {notifications.push(node.textContent);}};
-        return null;
+        return elements.get(selector) ?? null;
       },
       addEventListener() {},
       createElement() {return {remove() {}};},
@@ -69,7 +70,7 @@ async function harness(respond = () => undefined) {
   script.runInContext(context);
   await context.startup;
   return {
-    ...context.appTest, app, dialog, calls, notifications, importActions,
+    ...context.appTest, app, dialog, calls, notifications, importActions, elements,
     async submitDialog(values = {}) {
       dialogListeners.submit({target: {values, reportValidity: () => true}, preventDefault() {}});
       await new Promise(setImmediate);
@@ -758,4 +759,59 @@ test('peg-out preview URLs and transaction text are rendered safely', async () =
   const html = view.pegoutsGraph(view.state.activeCase);
   assert.doesNotMatch(html, /<script>|javascript:|<iframe/);
   assert.match(html, /&lt;script&gt;/);
+});
+
+test('named-group layout is opt-in, saved per case, and retained by trace-only forms', async () => {
+  const detail = {id: 'centeredcase', name: 'Treasury layout', run_defaults: {...defaults, center_name: 'Treasury Group'}, runs: []};
+  const view = await harness(path => path === '/api/cases/centeredcase' ? detail : undefined);
+  assert.match(view.newCase(), /name="center_name" maxlength="120" value=""/);
+  await view.dispatch('open-case', {dataset: {id: detail.id}});
+  await view.dispatch('case-settings');
+  assert.match(view.settingsPage(), /name="center_name" maxlength="120" value="Treasury Group"/);
+  assert.match(view.settingsPage(), /Layout only: tracing and all connections stay the same/);
+  assert.match(view.settingsPage(), /Use Sync and reorganize/);
+  await view.submitSettings({name: detail.name, center_name: '  Treasury  '});
+  assert.equal(view.calls.findLast(call => call.path === '/api/cases/centeredcase/settings').body.settings.center_name, 'Treasury');
+  const previous = {...defaults, hub_addresses: [], center_name: 'Treasury Group'};
+  assert.equal(view.readSettings({values: defaults}, previous).center_name, 'Treasury Group');
+  assert.equal(view.readSettings({values: {...defaults, center_name: ''}}, previous).center_name, '');
+  assert.equal(view.readSettings({values: defaults}).center_name, '');
+  await view.submitSettings({name: detail.name, center_name: ''});
+  assert.equal(view.calls.findLast(call => call.path === '/api/cases/centeredcase/settings').body.settings.center_name, '');
+});
+
+test('changing the centered group makes saved ELK and compact previews stale', async () => {
+  const view = await harness();
+  const settings = {...defaults, include_fees: false, group_context_inputs: false, hub_addresses: [], center_name: ''};
+  const artifact = {include_fees: false, connector_style: 'straight', layout_attempts: 25, downloads: [], preview_id: 'preview1',
+    preview_url: '/files/artifacts/graph.html', compaction: {unchanged: true}};
+  view.state.activeCase = {id: 'centeredcase', name: 'Treasury layout', run_defaults: settings, runs: [{id: 'run1'}], latest_run: 'run1', artifacts: {run1: {compact: artifact}}};
+  assert.match(view.elkGraph(artifact, true, settings), /<iframe/);
+  assert.ok(view.currentCompaction());
+  settings.center_name = 'Treasury Group';
+  assert.doesNotMatch(view.elkGraph(artifact, true, settings), /<iframe/);
+  assert.equal(view.currentCompaction(), undefined);
+  artifact.center_name = 'Treasury Group';
+  assert.match(view.elkGraph(artifact, true, settings), /<iframe/);
+  assert.ok(view.currentCompaction());
+  settings.center_name = 'Other Group';
+  assert.doesNotMatch(view.elkGraph(artifact, true, settings), /<iframe/);
+});
+
+test('named-group suggestions use local active attribution names and escape option text', async () => {
+  const view = await harness(path => path === '/api/cases/centeredcase/name-colors' ? {rows: [
+    {name: 'Treasury Group', enabled_addresses: 4}, {name: 'Inactive', enabled_addresses: 0},
+    {name: 'Group "<test>', enabled_addresses: 2},
+  ]} : undefined);
+  view.state.activeCase = {id: 'centeredcase', name: 'Case', run_defaults: defaults, runs: []};
+  view.state.page = 'case-settings';
+  const list = {innerHTML: ''};
+  view.elements.set('#settings-form input[name="center_name"]', {value: ' Treasury '});
+  view.elements.set('#center-name-options', list);
+  await view.suggestCenterNames();
+  assert.deepEqual(view.calls.findLast(call => call.path.endsWith('/name-colors')).body, {query: 'Treasury', offset: 0, limit: 100});
+  assert.match(list.innerHTML, /value="Treasury Group"/);
+  assert.doesNotMatch(list.innerHTML, /Inactive/);
+  assert.match(list.innerHTML, /Group &quot;&lt;test&gt;/);
+  assert.doesNotMatch(list.innerHTML, /<test>/);
 });

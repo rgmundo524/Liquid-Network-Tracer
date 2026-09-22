@@ -154,8 +154,10 @@ try {
   delete request.graph.branchProfile;
   const boundaryOrdering = request.graph.boundaryOrdering === undefined ? false : request.graph.boundaryOrdering;
   const branchNodeOrder = request.graph.branchNodeOrder;
+  const centerNodeOrder = request.graph.centerNodeOrder;
   delete request.graph.boundaryOrdering;
   delete request.graph.branchNodeOrder;
+  delete request.graph.centerNodeOrder;
   if (typeof boundaryOrdering !== 'boolean') throw new Error('Invalid branch boundary ordering');
   if (branchNodeOrder !== undefined) {
     const childIds = new Set(request.graph.children.map(node => node.id));
@@ -166,6 +168,14 @@ try {
     }
   }
   if (boundaryOrdering && !branchNodeOrder) throw new Error('Missing branch boundary node order');
+  if (centerNodeOrder !== undefined) {
+    const childIds = new Set(request.graph.children.map(node => node.id));
+    if (!Array.isArray(centerNodeOrder) || centerNodeOrder.length !== childIds.size
+        || new Set(centerNodeOrder).size !== childIds.size
+        || centerNodeOrder.some(id => typeof id !== 'string' || !childIds.has(id))) {
+      throw new Error('Invalid named group node order');
+    }
+  }
   const orders = inputPortOrders(request.graph);
   const organizeBranches = [1, 2].includes(request.graph.branchOrganization);
   delete request.graph.branchOrganization;
@@ -182,9 +192,9 @@ try {
     // second complete copy throughout ELK's calculation.
     let graph = request.seeds.length === 1 ? request.graph : structuredClone(request.graph);
     if (request.seeds.length === 1) request.graph = null;
-    if (boundaryOrdering) {
+    if (boundaryOrdering || centerNodeOrder) {
       const children = new Map(graph.children.map(node => [node.id, node]));
-      graph.children = branchNodeOrder.map(id => children.get(id));
+      graph.children = (centerNodeOrder || branchNodeOrder).map(id => children.get(id));
       const ranks = new Map();
       graph.children.forEach((child, index) => {
         ranks.set(child.id, index);
@@ -196,11 +206,14 @@ try {
       // edges. Only vertical node order is constrained for this alternative.
       graph.layoutOptions['elk.layered.considerModelOrder.strategy'] = 'NODES_AND_EDGES';
       graph.layoutOptions['elk.layered.crossingMinimization.forceNodeModelOrder'] = 'true';
+      // Keep disconnected members in the same central band instead of packing
+      // their components into unrelated rectangles after the layout.
+      if (centerNodeOrder) graph.layoutOptions['elk.separateConnectedComponents'] = 'false';
     }
     graph.layoutOptions['elk.randomSeed'] = String(seed);
     // Explicit metadata preserves the placement profile when seeds are sent
     // separately. Keep the historical defaults for direct batched callers.
-    const branchProfile = requestedProfile ?? (organizeBranches && (request.seeds.length === 1 || seedIndex > 0)
+    const branchProfile = centerNodeOrder ? 'flow_weighted' : requestedProfile ?? (organizeBranches && (request.seeds.length === 1 || seedIndex > 0)
       ? 'flow_weighted' : 'balanced');
     Object.assign(diagnostic, {seed, branch_profile: branchProfile,
       input_order_policy: 'geometry', stage: 'geometry_layout'});

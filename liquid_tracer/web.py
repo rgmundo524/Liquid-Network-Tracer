@@ -88,10 +88,10 @@ def public_graph_options(options):
     if not isinstance(options, dict):
         return None
     try:
-        settings = validate_settings({key: options[key] for key in ("group_context_inputs", "hub_addresses", "color_attribution_arrows") if key in options})
+        settings = validate_settings({key: options[key] for key in ("group_context_inputs", "hub_addresses", "center_name", "color_attribution_arrows") if key in options})
     except TraceError:
         return None
-    result = {key: settings[key] for key in ("group_context_inputs", "hub_addresses", "color_attribution_arrows")}
+    result = {key: settings[key] for key in ("group_context_inputs", "hub_addresses", "center_name", "color_attribution_arrows")}
     # Old artifacts did not record a search budget. Do not claim the current
     # default was used to calculate those saved coordinates.
     if "layout_attempts" in options:
@@ -840,7 +840,7 @@ class LocalServer(ThreadingHTTPServer):
             value["connector_style"] = result["connector_style"]
         options = result.get("graph_options", {})
         if isinstance(options, dict):
-            options = {**options, **{key: result[key] for key in ("group_context_inputs", "hub_addresses", "layout_attempts", "color_attribution_arrows") if key in result}}
+            options = {**options, **{key: result[key] for key in ("group_context_inputs", "hub_addresses", "center_name", "layout_attempts", "color_attribution_arrows") if key in result}}
             display_options = public_graph_options(options)
             if display_options is not None:
                 value.update({key: item for key, item in display_options.items() if key in options})
