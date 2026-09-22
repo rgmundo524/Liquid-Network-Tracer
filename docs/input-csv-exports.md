@@ -20,6 +20,11 @@ selectors if a file's headers match more than one format.
 3. Preview the batch and review its file summaries and individual changes.
 4. Check the review box and apply all files once.
 
+In the browser, selecting the same queued filename again keeps its chosen type
+and conflict policy while loading the new contents. Review and approval are
+required again. New filenames and other investigations still default to **Keep
+existing**.
+
 All files save together. An invalid row in any file blocks the whole batch,
 and changing a file, import options, saved settings, or relevant saved evidence
 requires a new preview. Imports do not start a trace or sync the Miro board.

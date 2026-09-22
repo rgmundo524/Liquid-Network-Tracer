@@ -97,6 +97,34 @@ test('reselecting a filename replaces its queued contents; remove and clear requ
   assert.match(html, /data-action="input-import-preview" disabled/);
 });
 
+test('reloading an applied attribution CSV preserves replacement and type choices for a raised hop limit', async () => {
+  const calls = [];
+  const ctx = context(async (_path, body) => {
+    calls.push(body);
+    return body.approve_plan ? {changed: 1} : makeReview();
+  });
+  const initial = {...samples[1], text: samples[1].text.replace('false,3', 'false,2')};
+  await open(ctx); await choose([initial]);
+  edit('policy-0', 'replace'); edit('kind-0', 'attributions');
+  await preview(ctx); edit('approved', '', true); await apply(ctx);
+
+  const raised = {...initial, text: initial.text.replace('false,2', 'false,4')};
+  await choose([raised]);
+  await apply(ctx);
+  assert.equal(calls.length, 2, 'reloading still requires a new preview and approval');
+  await preview(ctx);
+  assert.deepEqual(calls[2].files, [{...raised, kind: 'attributions', policy: 'replace'}]);
+  edit('approved', '', true); await apply(ctx);
+  assert.deepEqual(calls[3], {...calls[2], approve_plan: 'exact-batch-hash'});
+
+  await choose([samples[0]]); await preview(ctx);
+  assert.equal(calls.at(-1).files[1].policy, 'keep', 'a new filename still defaults to keep');
+  reset('case B');
+  await open({...ctx, caseId: 'case B'}); await choose([raised]);
+  await preview({...ctx, caseId: 'case B'});
+  assert.equal(calls.at(-1).files[0].policy, 'keep', 'replacement never carries into another case');
+});
+
 test('ambiguous headers require a type choice and all error/content text is escaped', async () => {
   const unsafe = '<img src=x onerror=alert(1)>.csv';
   const ctx = context(async () => makeReview({valid: false, approval_sha256: null,
