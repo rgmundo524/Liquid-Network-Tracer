@@ -31,7 +31,7 @@ class ProgressReportTests(unittest.TestCase):
         self.assertNotIn(SENTINEL, json.dumps(result))
 
     def test_only_known_progress_fields_reach_the_browser_or_terminal(self):
-        for phase in ("optimizing", "preflight", "layout", "updating", "removing", "creating", "waiting", "complete"):
+        for phase in ("optimizing", "exporting_plot", "preflight", "layout", "updating", "removing", "creating", "waiting", "complete"):
             with self.subTest(phase=phase):
                 result = public_progress({"phase": phase, "completed": 2, "total": 4,
                                           "message": SENTINEL, "token": SENTINEL,

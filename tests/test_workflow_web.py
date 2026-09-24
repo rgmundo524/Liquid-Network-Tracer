@@ -1,6 +1,7 @@
 """Real HTTP contracts for one saved collection and multiple plotted boards."""
 
 import contextlib
+import csv
 import io
 import json
 import unittest
@@ -15,6 +16,7 @@ from tests import test_web
 from tests.test_attribution_convergence import graph_state
 from tests.test_connections import saved_case
 from tests.test_pegout_paths import add_pegout
+from tests.test_input_order import input_order_state
 
 
 class WorkflowWebTests(unittest.TestCase):
@@ -159,3 +161,26 @@ class WorkflowWebTests(unittest.TestCase):
         self.assertTrue(result["reviewable"])
         self.assertIn(b"svg", self.success(result["artifact"]["preview_url"]).lower())
         self.assertEqual(self.success(route)["plots"][0]["preview_id"], result["preview_id"])
+
+    def test_full_plot_with_grouped_context_completes_real_elk_and_csv_export(self):
+        case, route, _ = self.collected()
+        state = input_order_state(12, continuing=(11,))
+        state["ancestor_runs"] = []
+        state, archive = saved_case(case, state)
+        update_case(case, {"run_defaults": {"group_context_inputs": True, "layout_attempts": 1}})
+        before = {path.name: path.read_bytes() for path in archive.iterdir() if path.is_file()}
+        result = self.wait(self.success(route + "/actions", {"action": "plot", "goal": "full",
+            "run_id": state["run_id"], "min_hops": 0, "max_hops": 10}, 202))
+        downloads = {item["name"]: item["url"] for item in result["artifact"]["downloads"]}
+        graph = self.success(downloads["graph.json"])
+        self.assertEqual(graph["context_groups"]["group_count"], 1)
+        self.assertEqual(graph["context_groups"]["input_count"], 11)
+        self.assertIn(b"svg", self.success(downloads["graph.svg"]).lower())
+        rows = list(csv.DictReader(io.StringIO(self.success(downloads["transactions.csv"]).decode())))
+        self.assertEqual(len(rows), len(graph["edges"]))
+        child = next(node["details"]["transaction_id"] for node in graph["nodes"] if node["kind"] == "context_group")[3:]
+        inputs = [row for row in rows if row["Direction"] == "IN" and row["Transaction Hash"] == child]
+        self.assertEqual([int(row["Number of I/O"]) for row in inputs], list(range(12)))
+        self.assertEqual([row["Address Hash"] for row in inputs], [f"SYNTHETIC-input-order-{index}" for index in range(12)])
+        self.assertTrue(self.success(route)["plots"][0]["reviewable"])
+        self.assertEqual({path.name: path.read_bytes() for path in archive.iterdir() if path.is_file()}, before)

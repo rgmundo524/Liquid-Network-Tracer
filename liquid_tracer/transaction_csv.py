@@ -74,6 +74,61 @@ def _text(value):
     return value
 
 
+def _context_endpoints(nodes, edges):
+    """Resolve summary inputs to their original address evidence, never a union.
+
+    A summary is only a display replacement. Its complete membership and input
+    incidence must agree before any hidden member can be an export endpoint.
+    Dimensions, text and port positions play no part in this evidence check.
+    """
+    summaries = {key: node for key, node in nodes.items() if node["kind"] == "context_group"}
+    if not summaries:
+        return {}
+    incident = defaultdict(list)
+    for edge in edges:
+        for key in {edge["source"], edge["target"]} & summaries.keys():
+            incident[key].append(edge)
+    result, used = {}, set()
+    for key, node in summaries.items():
+        details = node["details"]
+        target = details["transaction_id"]
+        if (not isinstance(target, str) or not target.startswith("tx:")
+                or key != "context-group:" + target[3:]
+                or nodes.get(target, {}).get("kind") != "transaction"
+                or not isinstance(details.get("members"), list)):
+            raise TraceError("Transaction CSV requires a complete context-summary membership")
+        members = {}
+        for member in details["members"]:
+            identity, info = member["id"], member["details"]
+            if (not isinstance(identity, str) or not identity or identity in nodes
+                    or identity in members or identity in used or member.get("kind") != "address"
+                    or info.get("network") != "liquid"
+                    or not isinstance(info.get("address"), str) or not info["address"]):
+                raise TraceError("Transaction CSV context summary contains an invalid address member")
+            members[identity] = member
+        addresses = {member["details"]["address"] for member in members.values()}
+        inputs = details.get("input_edge_ids")
+        if (len(addresses) < 2 or type(details.get("address_count")) is not int
+                or details["address_count"] != len(addresses)
+                or not isinstance(inputs, list) or any(not isinstance(item, str) for item in inputs)
+                or len(inputs) != len(set(inputs)) or not inputs
+                or type(details.get("input_count")) is not int or details["input_count"] != len(inputs)
+                or len(incident[key]) != len(inputs) or {edge["id"] for edge in incident[key]} != set(inputs)):
+            raise TraceError("Transaction CSV context-summary input membership disagrees with its arrows")
+        sources = set()
+        for edge in incident[key]:
+            if (edge["source"] != key or edge["target"] != target
+                    or edge.get("role") != "context_input" or not edge["id"].startswith("in:" + target[3:] + ":")
+                    or edge.get("original_source") not in members):
+                raise TraceError("Transaction CSV context-summary arrow has no matching original address")
+            sources.add(edge["original_source"])
+        if sources != set(members):
+            raise TraceError("Transaction CSV context-summary members disagree with its input arrows")
+        result[key] = members
+        used.update(members)
+    return result
+
+
 def transaction_csv_rows(graph, state):
     """Return only displayed I/O occurrences, in UTC transaction / IN / OUT order.
 
@@ -101,6 +156,9 @@ def transaction_csv_rows(graph, state):
             if key != "tx:" + txid or canonical(transaction) != canonical(archived):
                 raise TraceError("Transaction CSV graph disagrees with saved transaction evidence")
             transactions[txid] = archived
+        context_endpoints = _context_endpoints(nodes, graph["edges"])
+        endpoint_nodes = {**nodes, **{key: node for members in context_endpoints.values()
+                                      for key, node in members.items()}}
         labels = state.get("labels", [])
         index = defaultdict(list)
         for label in labels:
@@ -115,7 +173,7 @@ def transaction_csv_rows(graph, state):
         # Do not aggregate at the merged-address level or regenerate old rules.
         occurrence_labels = defaultdict(dict)
         endpoint_outpoints = {}
-        for key, node in nodes.items():
+        for key, node in endpoint_nodes.items():
             if node["kind"] != "address":
                 continue
             endpoint_outpoints[key] = set()
@@ -138,12 +196,17 @@ def transaction_csv_rows(graph, state):
             if edge["target" if direction == "in" else "source"] != tx_key:
                 raise TraceError("Transaction CSV arrow direction disagrees with its transaction")
             other = nodes[edge["source" if direction == "in" else "target"]]
+            grouped = other["kind"] == "context_group"
+            if grouped:
+                other = context_endpoints[other["id"]][edge["original_source"]]
             if other["kind"] not in ("address", "event"):
                 raise TraceError("Transaction CSV arrow must join a transaction and an I/O endpoint")
             flags = []
             if direction == "in":
                 vin = transaction["vin"][io_index]
                 coinbase, pegin = bool(vin.get("is_coinbase")), bool(vin.get("is_pegin"))
+                if grouped and (coinbase or pegin):
+                    raise TraceError("Transaction CSV context summary cannot contain coinbase or peg-in inputs")
                 output = {} if coinbase else (vin.get("prevout") or {})
                 outpoint = f"{vin.get('txid', txid)}:{vin.get('vout', io_index)}"
                 if coinbase:
