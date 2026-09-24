@@ -127,14 +127,16 @@ Astro supplies the local interface; Python serves it and runs the existing trace
 
 ## Find peg-outs within a hop range
 
-The **Trace to peg-outs** panel and terminal menu search forward from any Liquid
-transaction. Enter an inclusive minimum and maximum hop count, then choose
-**Trace and plot peg-outs**. The origin is hop 0; each spending transaction adds
+The **Trace to peg-outs** panel and terminal menu default to all the investigation's
+originally selected seed UTXOs. Enter an inclusive minimum and maximum hop count,
+then choose **Trace and plot peg-outs**. Each starting transaction is hop 0; each spending transaction adds
 one hop. The search fetches missing transactions within the investigation's saved
 budgets and respects its stop rules and attribution hop limits. Only paths
-reaching matching peg-out requests are plotted.
+reaching matching peg-out requests are plotted. Unselected sibling outputs at
+the start are excluded. Enable **Use a different starting transaction** to search
+all outputs of another transaction instead.
 
-Paused searches can resume from their saved progress. Search history and previews
+Paused searches resume with their saved starting points and hop range. Search history and previews
 are separate from the full investigation, with reviewed publication to a separate
 Miro board. A request is not confirmation of its Bitcoin payout. See the
 [peg-out search guide](docs/pegout-search.md) for range examples, recovery, and CLI

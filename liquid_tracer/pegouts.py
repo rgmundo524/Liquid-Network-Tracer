@@ -101,12 +101,14 @@ def _read_search(case, search_id, *, checkpoint=False):
     elif not checkpoint:
         raise TraceError("Peg-out search was interrupted before archiving; resume it first")
     state, query = read_json(directory / "trace.json"), read_json(directory / "query.json")
-    if (not isinstance(query, dict) or set(query) != {"txid", "min_hops", "max_hops"}
+    if (not isinstance(query, dict) or set(query) not in (
+                {"txid", "min_hops", "max_hops"}, {"seeds", "min_hops", "max_hops"})
             or validate_query(**query) != query or not isinstance(state, dict)
             or state.get("case_id") != read_case(case)["case_id"] or state.get("run_id") != search_id
             or state.get("pegout_query") != query
             or not isinstance(state.get("transactions"), dict) or not isinstance(state.get("outputs"), dict)
             or not isinstance(state.get("links"), dict) or not isinstance(state.get("seeds"), list)
+            or ("seeds" in query and state["seeds"] != query["seeds"])
             or state.get("limits", {}).get("max_hops") != query["max_hops"]):
         raise TraceError("Peg-out search does not match this investigation or query")
     return state, query, sealed
@@ -175,10 +177,12 @@ def search_pegouts(case, txid=None, min_hops=0, max_hops=10, *, resume=None,
         parent, sealed = None, True
         if resume is not None:
             if txid is not None or min_hops != 0 or max_hops != 10:
-                raise TraceError("Resume uses the saved transaction and hop range; omit new query fields")
+                raise TraceError("Resume uses the saved origin and hop range; omit new query fields")
             parent, query, sealed = _read_search(case, resume, checkpoint=True)
         else:
-            query = validate_query(txid, min_hops, max_hops)
+            query = (validate_query(min_hops=min_hops, max_hops=max_hops,
+                                    seeds=metadata.get("seeds", [])) if txid is None
+                     else validate_query(txid, min_hops, max_hops))
         latest = _saved_state(case) if parent is None else None
         baseline = parent if parent is not None else latest
         options = _lookup_options(case, baseline)
@@ -194,7 +198,15 @@ def search_pegouts(case, txid=None, min_hops=0, max_hops=10, *, resume=None,
                 _verify_checkpoint(store, parent)
             api = Esplora(store, "pending", limits, base=options["base_url"],
                            auth=options["auth"], fixture=options["fixture"])
-            state = new_state([], api.base, limits, labels, parent, case_id=metadata["case_id"])
+            state = new_state(query.get("seeds", []), api.base, limits, labels, parent,
+                              case_id=metadata["case_id"])
+            if parent is not None and "seeds" in query:
+                # Recover interruptions before or during initial seed queuing,
+                # preserving any seed statuses already backed by saved evidence.
+                for key in query["seeds"]:
+                    state["outputs"].setdefault(key, {"outpoint": key, "txid": key.rpartition(":")[0],
+                        "vout": int(key.rpartition(":")[2]), "depth": 0,
+                        "origin": "analyst_seed", "status": "pending"})
             state["pegout_query"] = query
             state["service_controls"] = {k: v for k, v in controls.items() if k != "history"}
             state["include_unconfirmed"] = bool(baseline and baseline.get("include_unconfirmed", False))
@@ -207,7 +219,7 @@ def search_pegouts(case, txid=None, min_hops=0, max_hops=10, *, resume=None,
             save_json(directory / "trace.json", state)
             _progress(progress, "pegout_search")
             try:
-                if not state["seeds"]:
+                if "txid" in query and not state["seeds"]:
                     transaction, _ = api.get("/tx/" + query["txid"])
                     validate_transaction(transaction, query["txid"])
                     if not transaction["vout"]:

@@ -7,10 +7,11 @@ import unittest
 from unittest.mock import patch
 
 from liquid_tracer.cli import main
-from liquid_tracer.common import read_json
+from liquid_tracer.common import TraceError, read_json, save_json
 from liquid_tracer.investigations import read_case, update_case
 from liquid_tracer.menu import create_app
 from liquid_tracer.pegouts import search_pegouts
+from liquid_tracer.web import public_pegout_search
 from tests import test_web, test_menu_addresses
 from tests.test_elk_layout import HAS_ELK
 
@@ -73,6 +74,8 @@ class PegoutWebTests(unittest.TestCase):
             ("min_hops", -1), ("max_hops", "3"), ("max_hops", 1.5), ("max_hops", 2147483648))]
         invalid += [{**valid, "min_hops": 4}, {**valid, "fixture": "/tmp/data.json"},
                     {**valid, "settings": {"max_requests": 99999}},
+                    {"action": "pegouts", "seeds": [ORIGIN + ":1"], "min_hops": 0, "max_hops": 3},
+                    {"action": "pegouts", "txid": None, "min_hops": 0, "max_hops": 3},
                     {"action": "pegouts", "resume": "../runs/latest"},
                     {"action": "pegouts", "resume": "a" * 16, "txid": ORIGIN},
                     {"action": "pegouts-preview", "search_id": "a" * 16},
@@ -84,6 +87,57 @@ class PegoutWebTests(unittest.TestCase):
             self.assertEqual(self.request(route + "/actions", valid, headers={"X-Liquid-CSRF": "wrong"})[0], 403)
             worker.assert_not_called()
         self.assertEqual((case / "case.json").read_bytes(), original)
+
+    @unittest.skipUnless(HAS_ELK, "Install the pinned local ELK engine")
+    def test_default_search_uses_saved_outputs_and_exposes_seed_history(self):
+        case, route = self.setup_case()
+        metadata = read_case(case)
+        # This fixture's selected origin reaches its peg-out at hop 3.
+        original = (case / "case.json").read_bytes()
+        job = self.success(route + "/actions", {"action": "pegouts", "min_hops": 1,
+            "max_hops": 3}, status=202)
+        result = self.wait(job)
+        self.assertEqual(result["seeds"], metadata["seeds"])
+        self.assertNotIn("txid", result)
+        self.assertEqual(result["match_count"], 1)
+        self.assertEqual((case / "case.json").read_bytes(), original)
+        detail = self.success(route)
+        self.assertIsNone(detail["latest_run"])
+        self.assertEqual(detail["pegout_searches"][0]["seeds"], metadata["seeds"])
+        graph_link = next(row["url"] for row in result["artifact"]["downloads"] if row["name"] == "graph.json")
+        graph = self.success(graph_link)
+        self.assertEqual(graph["pegouts"]["query"]["seeds"], metadata["seeds"])
+        with patch.object(self.server, "start_job", return_value={"id": "fake"}) as worker:
+            self.success(route + "/actions", {"action": "pegouts", "resume": result["search_id"]}, status=202)
+            self.assertEqual(worker.call_args.args[0], ["pegouts", "--case", str(case), "--resume", result["search_id"]])
+
+    def test_default_arguments_omit_origin_and_no_seeds_requires_override(self):
+        case, route = self.setup_case()
+        body = {"action": "pegouts", "min_hops": 2, "max_hops": 4}
+        with patch.object(self.server, "start_job", return_value={"id": "fake"}) as worker:
+            self.success(route + "/actions", body, status=202)
+            self.assertEqual(worker.call_args.args[0], ["pegouts", "--case", str(case),
+                             "--min-hops", "2", "--max-hops", "4"])
+            self.assertFalse(worker.call_args.kwargs["live"])
+            worker.reset_mock()
+            metadata = read_case(case)
+            save_json(case / "case.json", {**metadata, "seeds": []})
+            status, error, _ = self.request(route + "/actions", body)
+            self.assertEqual(status, 400)
+            self.assertIn("no saved seed UTXOs", error["error"])
+            worker.assert_not_called()
+            self.success(route + "/actions", {**body, "txid": ORIGIN}, status=202)
+            self.assertIn("--txid", worker.call_args.args[0])
+
+    def test_public_history_validates_selected_seeds_and_keeps_legacy_queries(self):
+        base = {"search_id": "a" * 16, "min_hops": 0, "max_hops": 3}
+        seeds = [ORIGIN + ":0", ORIGIN + ":2"]
+        self.assertEqual(public_pegout_search({**base, "seeds": seeds})["seeds"], seeds)
+        self.assertEqual(public_pegout_search({**base, "txid": ORIGIN})["txid"], ORIGIN)
+        for origin in ({}, {"seeds": []}, {"seeds": ["../case.json"]}, {"seeds": seeds[::-1]},
+                       {"seeds": seeds, "txid": ORIGIN}, {"txid": ORIGIN.upper()}):
+            with self.subTest(origin=origin), self.assertRaises(TraceError):
+                public_pegout_search({**base, **origin})
 
     def test_live_source_uses_credentials_and_fixed_arguments(self):
         case, route = self.setup_case()
@@ -165,7 +219,7 @@ class PegoutMenuTests(unittest.IsolatedAsyncioTestCase):
     click = test_menu_addresses.AddressMenuTests.click
 
     async def test_terminal_origin_and_range_work_before_first_full_run(self):
-        from textual.widgets import Input
+        from textual.widgets import Checkbox, Input
         app = create_app(self.root)
         with patch.object(app, "suspend", side_effect=contextlib.nullcontext), \
                 patch("liquid_tracer.menu.subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as worker:
@@ -173,6 +227,8 @@ class PegoutMenuTests(unittest.IsolatedAsyncioTestCase):
                 app.created(self.case)
                 await pilot.pause()
                 await self.click(app, pilot, "#pegouts")
+                app.screen.query_one("#pegout-custom", Checkbox).value = True
+                await pilot.pause()
                 app.screen.query_one("#pegout-txid", Input).value = ORIGIN
                 app.screen.query_one("#pegout-min-hops", Input).value = "2"
                 app.screen.query_one("#pegout-max-hops", Input).value = "4"
@@ -184,6 +240,44 @@ class PegoutMenuTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(ORIGIN, args)
                 self.assertEqual(args[args.index("--min-hops") + 1], "2")
                 self.assertEqual(args[args.index("--max-hops") + 1], "4")
+
+    async def test_terminal_defaults_to_saved_selected_seeds_without_transaction_input(self):
+        from textual.widgets import Checkbox, Input
+        app = create_app(self.root)
+        with patch.object(app, "suspend", side_effect=contextlib.nullcontext), \
+                patch("liquid_tracer.menu.subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as worker:
+            async with app.run_test(size=(120, 70)) as pilot:
+                app.created(self.case)
+                await pilot.pause()
+                await self.click(app, pilot, "#pegouts")
+                self.assertFalse(app.screen.query_one("#pegout-custom", Checkbox).value)
+                app.screen.query_one("#pegout-min-hops", Input).value = "1"
+                app.screen.query_one("#pegout-max-hops", Input).value = "4"
+                await self.click(app, pilot, "#pegout-search")
+                await pilot.pause()
+                args = worker.call_args.args[0]
+                self.assertIn("pegouts", args)
+                self.assertNotIn("--txid", args)
+                self.assertEqual(args[args.index("--min-hops") + 1], "1")
+                self.assertEqual(args[args.index("--max-hops") + 1], "4")
+
+    async def test_terminal_no_saved_seeds_reports_how_to_choose_custom_origin(self):
+        from textual.widgets import Button, Checkbox, Static
+        metadata = read_case(self.case)
+        save_json(self.case / "case.json", {**metadata, "seeds": []})
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run") as worker:
+            async with app.run_test(size=(120, 70)) as pilot:
+                app.created(self.case)
+                await pilot.pause()
+                await self.click(app, pilot, "#pegouts")
+                self.assertTrue(app.screen.query_one("#pegout-search", Button).disabled)
+                self.assertIn("no selected seed UTXOs", " ".join(str(item.render())
+                    for item in app.screen.query(Static)))
+                app.screen.query_one("#pegout-custom", Checkbox).value = True
+                await pilot.pause()
+                self.assertFalse(app.screen.query_one("#pegout-search", Button).disabled)
+                worker.assert_not_called()
 
     async def test_terminal_rejects_reversed_range_before_start(self):
         from textual.widgets import Input, Static

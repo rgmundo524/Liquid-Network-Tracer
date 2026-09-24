@@ -65,7 +65,7 @@ type Artifact = RenderingMetadata & {
 };
 type RunArtifacts = { mermaid?: Artifact; csv?: Artifact; elk?: Artifact; compact?: Artifact; connections?: Artifact };
 type PegoutSearch = {
-  id: string; search_id?: string; txid: string; min_hops: number; max_hops: number;
+  id: string; search_id?: string; txid?: string; seeds?: string[]; min_hops: number; max_hops: number;
   status: string; stop_reason?: string | null; created_at?: string; match_count?: number;
   resumable?: boolean; recoverable?: boolean; artifact?: Artifact;
 };
@@ -233,7 +233,7 @@ let dialogPreviewId = "";
 let dialogRebuild: { caseId: string; sourceBoard: string; runId: string } | null = null;
 let submitting = false;
 let pageGeneration = 0;
-let pegoutDraft = {caseId: "", txid: "", minHops: "0", maxHops: "10", selected: "", board: "", approved: ""};
+let pegoutDraft = {caseId: "", custom: false, txid: "", minHops: "0", maxHops: "10", selected: "", board: "", approved: ""};
 
 const esc = (value: unknown): string =>
   String(value ?? "").replace(
@@ -643,10 +643,19 @@ function connectionsGraph(artifact: Artifact | undefined, saved: boolean): strin
 
 function currentPegoutSearch(detail: Case): PegoutSearch | undefined {
   if (pegoutDraft.caseId !== detail.id) {
-    pegoutDraft = {caseId: detail.id, txid: detail.seeds?.[0]?.split(":")[0] || "", minHops: "0",
+    pegoutDraft = {caseId: detail.id, custom: false, txid: "", minHops: "0",
       maxHops: "10", selected: "", board: "", approved: ""};
   }
   return detail.pegout_searches?.find(search => search.id === pegoutDraft.selected) || detail.pegout_searches?.[0];
+}
+
+function pegoutSeedScope(seeds: string[]): string {
+  const outputs = new Set(seeds), transactions = new Set(seeds.map(seed => seed.split(":")[0]));
+  return `${outputs.size} selected seed UTXO${outputs.size === 1 ? "" : "s"} from ${transactions.size} starting transaction${transactions.size === 1 ? "" : "s"}`;
+}
+
+function pegoutSearchScope(search: PegoutSearch): string {
+  return search.seeds ? pegoutSeedScope(search.seeds) : `All outputs of ${short(search.txid || "unknown transaction")}`;
 }
 
 function pegoutsGraph(detail: Case): string {
@@ -656,15 +665,18 @@ function pegoutsGraph(detail: Case): string {
   const count = search?.match_count;
   const partial = search && search.status !== "bounded_complete";
   const pending = search?.recoverable === true || search?.status === "running";
+  const seeds = detail.seeds || [];
   return `<section class="panel" id="pegouts-panel"><div class="panel-head"><div><h2>Trace to peg-outs</h2><p>Find downstream peg-out requests within a transaction hop range.</p></div></div>
-  <div class="panel-body"><p>Start from all outputs of a Liquid transaction. Hop 0 is that transaction; each forward spend adds one hop. Both range limits are included. Only paths reaching a matching peg-out are plotted.</p>
-  <label class="field"><span>Starting transaction ID</span><input id="pegouts-txid" class="mono" maxlength="64" value="${esc(pegoutDraft.txid)}" autocomplete="off"${disabled(busy)}/></label>
+  <div class="panel-body"><p>Use the investigation's selected seed UTXOs. Each starting transaction is hop 0; each forward spend adds one hop. Unselected sibling outputs at the start are excluded. Both range limits are included. Only paths reaching a matching peg-out are plotted.</p>
+  ${seeds.length ? `<p>Investigation seeds: ${esc(pegoutSeedScope(seeds))}.</p>` : `<p class="artifact-note">This investigation has no selected seed UTXOs. Enable “Use a different starting transaction” to run a custom search.</p>`}
+  <label class="check-line"><input id="pegouts-custom" type="checkbox"${pegoutDraft.custom ? " checked" : ""}${disabled(busy)}/><span>Use a different starting transaction</span></label>
+  ${pegoutDraft.custom ? `<label class="field"><span>Starting transaction ID</span><input id="pegouts-txid" class="mono" maxlength="64" value="${esc(pegoutDraft.txid)}" autocomplete="off"${disabled(busy)}/></label><p class="small muted">This custom search considers all outputs of the entered transaction, which is hop 0.</p>` : ""}
   <div class="form-grid"><label class="field"><span>Minimum hops</span><input id="pegouts-min" type="number" min="0" max="2147483647" step="1" value="${esc(pegoutDraft.minHops)}"${disabled(busy)}/></label>
   <label class="field"><span>Maximum hops</span><input id="pegouts-max" type="number" min="0" max="2147483647" step="1" value="${esc(pegoutDraft.maxHops)}"${disabled(busy)}/></label></div>
   <p class="small muted">${detail.fixture ? "Uses saved synthetic data." : "Uses your Blockstream API credits. Credentials are retrieved through the launching terminal."} Each search or continuation allows ${settings.max_transactions} new transactions, ${settings.max_outpoints} output lookups, ${settings.max_requests} API attempts and ${settings.max_seconds} seconds. Change these in investigation settings. Saved stop rules and attribution hop limits apply.</p>
-  ${button("Trace and plot peg-outs", "pegouts-start", "graph", "primary", busy)}
-  ${search ? `<hr/><label class="field"><span>Saved peg-out search</span><select id="pegouts-history"${disabled(busy)}>${(detail.pegout_searches || []).map(item => `<option value="${esc(item.id)}"${item.id === search.id ? " selected" : ""}>${esc(short(item.txid))} · hops ${item.min_hops}–${item.max_hops} · ${esc(human(item.status))} · ${esc(short(item.id, 8))}</option>`).join("")}</select></label>
-  <p class="mono">${esc(search.txid)}</p><p>Hop range ${search.min_hops}–${search.max_hops}. ${esc(human(search.status))}${search.stop_reason ? `: ${esc(human(search.stop_reason))}` : ""}.</p>
+  ${button("Trace and plot peg-outs", "pegouts-start", "graph", "primary", busy || (!pegoutDraft.custom && !seeds.length))}
+  ${search ? `<hr/><label class="field"><span>Saved peg-out search</span><select id="pegouts-history"${disabled(busy)}>${(detail.pegout_searches || []).map(item => `<option value="${esc(item.id)}"${item.id === search.id ? " selected" : ""}>${esc(pegoutSearchScope(item))} · hops ${item.min_hops}–${item.max_hops} · ${esc(human(item.status))} · ${esc(short(item.id, 8))}</option>`).join("")}</select></label>
+  <p>Saved scope: ${esc(pegoutSearchScope(search))}.</p>${search.txid ? `<p class="mono">${esc(search.txid)}</p>` : ""}<p>Hop range ${search.min_hops}–${search.max_hops}. ${esc(human(search.status))}${search.stop_reason ? `: ${esc(human(search.stop_reason))}` : ""}.</p>
   ${partial ? `<p class="artifact-note">${pending ? "This search was interrupted." : "This search is incomplete."} Resume to continue from its saved progress. Additional peg-outs may remain undiscovered.</p>` : '<p class="small muted">Search reached its current boundary. Unspent outputs, confirmation requirements and stop rules can limit what is discoverable.</p>'}
   <p>${count === undefined ? "Generate a preview to see the matches found so far." : count === 0 ? "No matching peg-out found in the searched data." : `${count} matching peg-out request${count === 1 ? "" : "s"} found.`}</p>
   ${button(pending ? "Recover and resume search" : "Resume search", "pegouts-resume", "play", "", busy)}
@@ -681,7 +693,8 @@ function pegoutsGraph(detail: Case): string {
 function pegoutInput(element: HTMLInputElement | HTMLSelectElement): boolean {
   if (!element.id?.startsWith("pegouts-") || !state.activeCase || isBusy()) return false;
   const search = currentPegoutSearch(state.activeCase);
-  if (element.id === "pegouts-txid") pegoutDraft.txid = element.value;
+  if (element.id === "pegouts-custom") { pegoutDraft.custom = (element as HTMLInputElement).checked; render(); }
+  else if (element.id === "pegouts-txid") pegoutDraft.txid = element.value;
   else if (element.id === "pegouts-min") pegoutDraft.minHops = element.value;
   else if (element.id === "pegouts-max") pegoutDraft.maxHops = element.value;
   else if (element.id === "pegouts-history") {
@@ -702,13 +715,18 @@ async function pegoutAction(action: string): Promise<boolean> {
   const operation = action === "pegouts-start" || action === "pegouts-resume" ? "pegouts" : action;
   const body: Record<string, unknown> = {action: operation};
   if (action === "pegouts-start") {
-    const txid = pegoutDraft.txid.trim().toLowerCase();
-    if (!/^[a-f0-9]{64}$/.test(txid)) throw new Error("Enter one 64-character Liquid transaction ID.");
+    if (pegoutDraft.custom) {
+      const txid = pegoutDraft.txid.trim().toLowerCase();
+      if (!/^[a-f0-9]{64}$/.test(txid)) throw new Error("Enter one 64-character Liquid transaction ID.");
+      body.txid = txid;
+    } else if (!detail.seeds?.length) {
+      throw new Error("This investigation has no selected seed UTXOs. Enable ‘Use a different starting transaction’ to run a custom search.");
+    }
     const values = [pegoutDraft.minHops.trim(), pegoutDraft.maxHops.trim()];
     if (values.some(value => !/^\d+$/.test(value) || Number(value) > 2147483647) || Number(values[0]) > Number(values[1])) {
       throw new Error("Enter whole-number hop limits from 0 to 2147483647, with minimum no greater than maximum.");
     }
-    Object.assign(body, {txid, min_hops: Number(values[0]), max_hops: Number(values[1])});
+    Object.assign(body, {min_hops: Number(values[0]), max_hops: Number(values[1])});
   } else {
     if (!search) throw new Error("Choose a saved peg-out search first.");
     if (action === "pegouts-resume") body.resume = search.id;

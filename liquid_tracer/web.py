@@ -55,18 +55,19 @@ CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact", "connections", "pegouts",
 def public_pegout_search(summary):
     """Expose the saved query and outcome, never archive paths or API errors."""
     from .pegouts import SEARCH_ID
+    from .pegout_paths import validate_query
 
     identity = summary.get("search_id", summary.get("id"))
     if not isinstance(identity, str) or not SEARCH_ID.fullmatch(identity):
         raise TraceError("Invalid peg-out search identifier")
     query = summary.get("query", summary)
-    txid, lower, upper = query.get("txid"), query.get("min_hops"), query.get("max_hops")
-    if (not isinstance(txid, str) or not re.fullmatch(r"[0-9a-f]{64}", txid)
-            or type(lower) is not int or type(upper) is not int
-            or not 0 <= lower <= upper <= 2147483647):
+    if not isinstance(query, dict) or ("txid" in query) == ("seeds" in query):
         raise TraceError("Invalid saved peg-out query")
-    value = {"id": identity, "search_id": identity, "txid": txid,
-             "min_hops": lower, "max_hops": upper}
+    origin = "seeds" if "seeds" in query else "txid"
+    fields = {key: query.get(key) for key in (origin, "min_hops", "max_hops")}
+    if validate_query(**fields) != fields:
+        raise TraceError("Invalid saved peg-out query")
+    value = {"id": identity, "search_id": identity, **fields}
     for key in ("status", "stop_reason"):
         field = summary.get(key)
         if field is None or isinstance(field, str) and re.fullmatch(r"[a-z_]{1,64}", field):
@@ -934,16 +935,24 @@ class LocalServer(ThreadingHTTPServer):
                         raise RequestError("Peg-out search not found.")
                     arguments.extend(["--resume", identity])
                 else:
-                    if set(body) != {"action", "txid", "min_hops", "max_hops"}:
-                        raise RequestError("Peg-out searches accept one transaction and an inclusive hop range.")
-                    txid = body.get("txid")
-                    if not isinstance(txid, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", txid.strip()):
-                        raise RequestError("Enter one transaction hash containing 64 hexadecimal characters.")
+                    if set(body) not in ({"action", "min_hops", "max_hops"},
+                                         {"action", "txid", "min_hops", "max_hops"}):
+                        raise RequestError("Choose a hop range and, optionally, a different starting transaction.")
+                    if "txid" in body:
+                        txid = body["txid"]
+                        if not isinstance(txid, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", txid.strip()):
+                            raise RequestError("Enter one transaction hash containing 64 hexadecimal characters.")
+                        arguments.extend(["--txid", txid.strip().lower()])
+                    else:
+                        from .pegout_paths import validate_query
+                        if not metadata.get("seeds"):
+                            raise RequestError("This investigation has no saved seed UTXOs. Select seed outputs or use a different starting transaction.")
+                        validate_query(seeds=metadata.get("seeds"))
                     lower, upper = body.get("min_hops"), body.get("max_hops")
                     if (type(lower) is not int or type(upper) is not int
                             or not 0 <= lower <= upper <= 2147483647):
                         raise RequestError("Enter whole-number hops from 0 to 2147483647, with minimum no greater than maximum.")
-                    arguments.extend(["--txid", txid.strip().lower(), "--min-hops", str(lower), "--max-hops", str(upper)])
+                    arguments.extend(["--min-hops", str(lower), "--max-hops", str(upper)])
             elif action == "pegouts-preview":
                 identity = body.get("search_id")
                 if set(body) != {"action", "search_id"} or not isinstance(identity, str) or not SEARCH_ID.fullmatch(identity):

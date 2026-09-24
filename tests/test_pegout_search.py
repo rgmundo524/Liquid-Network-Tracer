@@ -38,6 +38,162 @@ class PegoutSearchTests(unittest.TestCase):
     def state(self, result):
         return read_json(self.case / "pegouts" / result["search_id"] / "trace.json")
 
+    def seed_search(self, **options):
+        return search_pegouts(self.case, **{"max_hops": 3, "max_transactions": 20,
+            "max_requests": 100, "max_outpoints": 100, **options})
+
+    def save_seeds(self, seeds):
+        metadata = read_case(self.case)
+        metadata["seeds"] = seeds
+        save_json(self.case / "case.json", metadata)
+
+    def test_saved_seeds_work_before_first_main_run_and_exclude_siblings(self):
+        before = (self.case / "case.json").read_bytes()
+        result = self.seed_search()
+        state = self.state(result)
+        self.assertEqual(result["query"], {"seeds": [B + ":0"], "min_hops": 0, "max_hops": 3})
+        self.assertEqual(state["seeds"], [B + ":0"])
+        self.assertEqual(set(state["transactions"]), {B, C, D})
+        self.assertNotIn(B + ":1", state["outputs"])
+        self.assertNotIn(B + ":2", state["outputs"])
+        graph, _ = reviewed_pegouts(self.case, result["preview_id"])
+        self.assertEqual(graph["pegouts"]["matches"][0]["hops"], [2])
+        self.assertFalse(any(edge["outpoint"] in {B + ":1", B + ":2"} for edge in graph["edges"]))
+        self.assertEqual((self.case / "case.json").read_bytes(), before)
+        self.assertFalse((self.case / "runs").exists())
+        self.assertFalse((self.case / "miro").exists())
+
+    def test_all_selected_seeds_from_multiple_transactions_are_searched(self):
+        data = read_json(self.fixture)
+        data["/tx/" + A]["vout"][1] = dict(data["/tx/" + D]["vout"][0])
+        save_json(self.fixture, data)
+        self.save_seeds([B + ":0", A.upper() + ":1", B + ":0"])
+        result = self.seed_search(max_hops=2)
+        selected = sorted([A + ":1", B + ":0"])
+        self.assertEqual(result["query"]["seeds"], selected)
+        self.assertEqual(self.state(result)["seeds"], selected)
+        self.assertNotIn(A + ":0", self.state(result)["outputs"])
+        self.assertNotIn(B + ":1", self.state(result)["outputs"])
+        graph, _ = reviewed_pegouts(self.case, result["preview_id"])
+        self.assertEqual({row["outpoint"]: row["hops"] for row in graph["pegouts"]["matches"]},
+                         {A + ":1": [0], D + ":0": [2]})
+
+    def test_seed_resume_retains_archived_seeds_after_case_seeds_change(self):
+        first = self.seed_search(max_transactions=1)
+        directory = self.case / "pegouts" / first["search_id"]
+        snapshot = {str(p.relative_to(directory)): p.read_bytes() for p in directory.rglob("*") if p.is_file()}
+        self.save_seeds([A + ":1"])
+        resumed = search_pegouts(self.case, resume=first["search_id"], max_transactions=20,
+                                max_requests=100, max_outpoints=100)
+        self.assertEqual(resumed["query"], first["query"])
+        self.assertEqual(self.state(resumed)["seeds"], [B + ":0"])
+        self.assertEqual(resumed["match_count"], 1)
+        self.assertEqual(snapshot, {str(p.relative_to(directory)): p.read_bytes()
+                                  for p in directory.rglob("*") if p.is_file()})
+        fresh = self.seed_search()
+        self.assertEqual(fresh["seeds"], [A + ":1"])
+        self.assertEqual(fresh["match_count"], 0)
+
+    def test_seed_search_interruption_before_first_fetch_remains_resumable(self):
+        with patch.object(Esplora, "get", side_effect=StopRun("time_limit")):
+            first = self.seed_search()
+        self.assertEqual(first["status"], "paused")
+        self.assertEqual(self.state(first)["seeds"], [B + ":0"])
+        self.assertEqual(set(self.state(first)["outputs"]), {B + ":0"})
+        self.assertEqual(self.state(first)["transactions"], {})
+        resumed = search_pegouts(self.case, resume=first["search_id"], max_transactions=20,
+                                max_requests=100, max_outpoints=100)
+        self.assertEqual(resumed["match_count"], 1)
+
+    def test_seed_checkpoint_saved_before_trace_recovers_its_frontier(self):
+        with patch("liquid_tracer.pegouts.trace", side_effect=RuntimeError("before trace")):
+            with self.assertRaisesRegex(RuntimeError, "before trace"):
+                self.seed_search()
+        search_id = next((self.case / "pegouts").iterdir()).name
+        self.assertTrue(list_pegout_searches(self.case)[0]["recoverable"])
+        resumed = search_pegouts(self.case, resume=search_id, max_transactions=20,
+                                max_requests=100, max_outpoints=100)
+        self.assertEqual(resumed["match_count"], 1)
+
+    def test_interrupted_seed_initialization_resumes_every_frozen_seed(self):
+        from liquid_tracer.common import parse_outpoint
+        data = read_json(self.fixture)
+        data["/tx/" + A]["vout"][1] = dict(data["/tx/" + D]["vout"][0])
+        save_json(self.fixture, data)
+        selected = sorted([A + ":1", B + ":0"])
+        self.save_seeds(selected)
+        calls = 0
+
+        def interrupted_parse(value):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise KeyboardInterrupt()
+            return parse_outpoint(value)
+
+        with patch("liquid_tracer.trace.parse_outpoint", side_effect=interrupted_parse):
+            first = self.seed_search(max_hops=2)
+        self.assertEqual(first["status"], "paused")
+        self.assertEqual(self.state(first)["seeds"], selected)
+        self.assertEqual(set(self.state(first)["outputs"]), {selected[0]})
+        self.assertEqual(self.state(first)["transactions"], {})
+        resumed = search_pegouts(self.case, resume=first["search_id"], max_transactions=20,
+                                max_requests=100, max_outpoints=100)
+        graph, _ = reviewed_pegouts(self.case, resumed["preview_id"])
+        self.assertEqual({row["outpoint"]: row["hops"] for row in graph["pegouts"]["matches"]},
+                         {A + ":1": [0], D + ":0": [2]})
+
+    def test_seed_query_and_checkpoint_seeds_must_agree(self):
+        first = self.seed_search(max_transactions=1)
+        directory = self.case / "pegouts" / first["search_id"]
+        (directory / "SHA256SUMS").unlink()
+        state = self.state(first)
+        state["seeds"] = [B + ":1"]
+        save_json(directory / "trace.json", state)
+        with self.assertRaisesRegex(TraceError, "does not match"):
+            search_pegouts(self.case, resume=first["search_id"])
+
+    def test_saved_seed_frontier_honors_active_controls_and_resumes_after_expansion(self):
+        # Any active stop rule changes frontier initialization, even off-path.
+        set_service(self.case, "SYNTHETIC-other-service", name="Other", stop_tracing=True)
+        self.assertEqual(self.seed_search()["match_count"], 1)
+        set_service(self.case, "SYNTHETIC-branch-A", name="Service", hop_limit=0, stop_tracing=False)
+        first = self.seed_search()
+        self.assertEqual(first["match_count"], 0)
+        self.assertEqual(set(self.state(first)["transactions"]), {B})
+        set_service(self.case, "SYNTHETIC-branch-A", name="Service", hop_limit=2, stop_tracing=False)
+        resumed = search_pegouts(self.case, resume=first["search_id"], max_transactions=20,
+                                max_requests=100, max_outpoints=100)
+        self.assertEqual(resumed["match_count"], 1)
+
+    def test_missing_saved_seeds_fail_before_fetch_and_custom_origin_still_works(self):
+        self.save_seeds([])
+        with patch.object(Esplora, "get", side_effect=AssertionError("must not fetch")):
+            with self.assertRaisesRegex(TraceError, "seed"):
+                self.seed_search()
+        self.assertFalse((self.case / "pegouts").exists())
+        self.assertEqual(self.search()["match_count"], 1)
+
+    def test_seed_search_does_not_replace_existing_main_run(self):
+        from tests.test_connections import saved_case
+        initial = self.search()
+        _, archive = saved_case(self.case, self.state(initial))
+        before = (self.case / "case.json").read_bytes()
+        archived = {p.name: p.read_bytes() for p in archive.iterdir()}
+        result = self.seed_search()
+        self.assertEqual(self.state(result)["seeds"], [B + ":0"])
+        self.assertEqual((self.case / "case.json").read_bytes(), before)
+        self.assertEqual(archived, {p.name: p.read_bytes() for p in archive.iterdir()})
+
+    def test_cli_defaults_to_saved_seeds_and_keeps_override_exclusive(self):
+        from liquid_tracer.cli import parser
+        args = parser().parse_args(["pegouts", "--case", str(self.case), "--max-hops", "4"])
+        self.assertIsNone(args.txid)
+        self.assertIsNone(args.resume)
+        self.assertEqual(args.max_hops, 4)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser().parse_args(["pegouts", "--case", str(self.case), "--txid", A, "--resume", "a" * 16])
+
     def test_fetches_all_origin_outputs_and_plots_only_pegout_paths(self):
         before = (self.case / "case.json").read_bytes()
         result = self.search()
