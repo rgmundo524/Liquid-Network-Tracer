@@ -33,6 +33,22 @@ class PegoutWebTests(unittest.TestCase):
                                           "max_requests": 100, "max_seconds": 30, "layout_attempts": 1}})
         return case, "/api/cases/" + summary["id"]
 
+    def test_case_detail_includes_selected_seed_outputs_for_button_availability(self):
+        case, route = self.setup_case()
+        metadata = read_case(case)
+        seeds = sorted(set(metadata["seeds"] + [ORIGIN + ":1", ORIGIN + ":2"]))
+        save_json(case / "case.json", {**metadata, "seeds": seeds})
+        detail = self.success(route)
+        self.assertEqual(detail.get("seeds"), seeds)
+        self.assertEqual(detail["seed_count"], len(seeds))
+        self.assertIsNone(detail["latest_run"])
+        # Dashboard cards stay small; the opened investigation carries its scope.
+        self.assertNotIn("seeds", self.success("/api/session")["cases"][0])
+        save_json(case / "case.json", {**metadata, "seeds": []})
+        empty = self.success(route)
+        self.assertEqual(empty.get("seeds"), [])
+        self.assertEqual(empty["seed_count"], 0)
+
     @unittest.skipUnless(HAS_ELK, "Install the pinned local ELK engine")
     def test_live_search_workflow_uses_fixture_without_changing_full_investigation(self):
         case, route = self.setup_case()

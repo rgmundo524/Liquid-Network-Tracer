@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
 import {readFileSync} from 'node:fs';
 import {stripTypeScriptTypes} from 'node:module';
 import {test} from 'node:test';
@@ -662,6 +663,41 @@ const pegoutSearch = (overrides = {}) => ({id: '1'.repeat(16), txid, min_hops: 2
 const pegoutCase = (searches = [], overrides = {}) => ({id: 'case1', name: 'Peg-out investigation',
   run_defaults: defaults, runs: [], seeds: [], pegout_searches: searches, ...overrides});
 const pegoutEdit = (view, id, value, checked = false) => view.pegoutInput({id: 'pegouts-' + id, value, checked});
+
+test('real case-detail responses enable the saved-seed peg-out button and preserve empty and busy guards', async () => {
+  // Synthetic browser fixtures previously included seeds the real API omitted.
+  // Exercise the HTTP serializer instead of recreating its response by hand.
+  const details = JSON.parse(execFileSync('python3', ['-m', 'web.tests.case_detail_fixture'], {
+    cwd: new URL('../../', import.meta.url), encoding: 'utf8', timeout: 15000,
+  }));
+  const seeded = details.seeded;
+  const view = await harness(path => path === `/api/cases/${seeded.id}` ? seeded
+    : path === `/api/cases/${details.empty.id}` ? details.empty
+    : path.endsWith('/actions') ? {id: 'pegjob', status: 'running'} : undefined);
+  await view.dispatch('open-case', {dataset: {id: seeded.id}});
+  const html = view.pegoutsGraph(view.state.activeCase);
+  assert.match(html, /3 selected seed UTXOs from 2 starting transactions/);
+  assert.match(html, /data-action="pegouts-start"/);
+  assert.doesNotMatch(html, /data-action="pegouts-start"[^>]* disabled/);
+  assert.doesNotMatch(html, /id="pegouts-txid"/);
+  pegoutEdit(view, 'min', '2'); pegoutEdit(view, 'max', '4');
+  await view.dispatch('pegouts-start');
+  assert.deepEqual(view.calls.at(-1), {path: `/api/cases/${seeded.id}/actions`,
+    body: {action: 'pegouts', min_hops: 2, max_hops: 4}});
+
+  assert.match(view.pegoutsGraph(view.state.activeCase), /data-action="pegouts-start"[^>]* disabled/);
+  const busyCalls = view.calls.length;
+  await view.dispatch('pegouts-start');
+  assert.equal(view.calls.length, busyCalls, 'a running job blocks duplicate submission');
+  view.state.job = null;
+  assert.doesNotMatch(view.pegoutsGraph(view.state.activeCase), /data-action="pegouts-start"[^>]* disabled/);
+
+  await view.dispatch('open-case', {dataset: {id: details.empty.id}});
+  assert.match(view.pegoutsGraph(view.state.activeCase), /data-action="pegouts-start"[^>]* disabled/);
+  const emptyCalls = view.calls.length;
+  await assert.rejects(view.dispatch('pegouts-start'), /no selected seed UTXOs/);
+  assert.equal(view.calls.length, emptyCalls, 'an empty investigation never starts a default search');
+});
 
 test('peg-out search defaults to all saved selected seeds before the first full run', async () => {
   const view = await harness(path => path.endsWith('/actions') ? {id: 'pegjob', status: 'running'} : undefined);
