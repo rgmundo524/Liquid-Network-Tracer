@@ -19,7 +19,7 @@ from . import legend_miro, miro_legend_updates
 from .edge_labels import FONT_SIZE as CAPTION_FONT_SIZE, caption_text
 from .connector_styles import stroke_width
 from .name_colors import color_text
-from . import presentation_items, context_group_miro
+from . import presentation_items, context_group_miro, plot_miro
 from .address_counts import caption as count_caption
 from .graph_markers import node_border
 from .miro_http import MiroHTTP
@@ -150,6 +150,7 @@ def validate_plan(plan):
     _validate_attachments(plan)
     _fee_catalog(plan)
     context_group_miro.validate(plan)
+    plot_miro.validate(plan)
     if "activity_frames" in plan:
         seeds = plan.get("run", {}).get("seeds")
         starts = ({"tx:" + seed.rpartition(":")[0] for seed in seeds
@@ -375,6 +376,7 @@ def _recover_updates(state, remote):
             miro_legend_updates.remember_geometry(record, remote[key])
         if key.startswith(context_group_miro.PREFIX) and "geometry" in entry["patch"]:
             context_group_miro.acknowledge_resize(record, remote[key], entry["patch"]["geometry"])
+        plot_miro.acknowledge(record, remote[key], entry["patch"])
 
 
 def _editable(body, endpoint):
@@ -611,7 +613,9 @@ def _run_note_removals(state):
 
 def _fee_removals(plan, state):
     catalog = _fee_catalog(plan)
-    removals = {}
+    removals = plot_miro.removals(plan, state)
+    retained_state = {**state, "items": {key: record for key, record in state["items"].items()
+                                       if key not in removals}}
     if catalog and not plan["include_fees"]:
         for key, proof in catalog.items():
             record = state["items"].get(key)
@@ -626,9 +630,9 @@ def _fee_removals(plan, state):
                                                                record["intent"].get("data", {}).get("content", "")):
                 raise TraceError("Mapped event was not generated as a fee; refusing to remove a non-fee item")
             removals[key] = proof
-    removals.update(presentation_items.removals(plan, state))
-    removals.update(context_group_miro.removals(plan, state))
-    removals.update(_run_note_removals(state))
+    removals.update(presentation_items.removals(plan, retained_state))
+    removals.update(context_group_miro.removals(plan, retained_state))
+    removals.update(_run_note_removals(retained_state))
     pending = state.get("pending_deletions", {})
     if not isinstance(pending, dict):
         raise TraceError("Malformed pending Miro deletions; restore the sync state")
@@ -1148,6 +1152,9 @@ def _create_items(plan, state, journal, requests, base, headers, positions, mapp
             body.update(_connection_body(item, state["items"][item["source"]]["id"],
                                          state["items"][item["target"]]["id"]))
         pending = {"key": key, "endpoint": endpoint, "body": body, "run_id": plan["run_id"]}
+        projection_proof = plot_miro.creation_proof(plan, endpoint, body)
+        if projection_proof is not None:
+            pending["projection_proof"] = projection_proof
         if key in plan.get("presentation_items", {}):
             pending["presentation_proof"] = copy.deepcopy(plan["presentation_items"][key])
         if key in plan.get("fee_items", {}):
@@ -1500,8 +1507,14 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
         _recover_updates(state, remote)
         context_removals = {key: proof for key, proof in removals.items()
                             if proof.get("kind") == "context_group_replacement"}
+        projection_removals = {key: proof for key, proof in removals.items()
+                               if proof.get("kind") == "board_projection"}
         _check_fee_removals(state, remote, {key: proof for key, proof in removals.items()
-                                         if key not in context_removals})
+                                         if key not in context_removals and key not in projection_removals})
+        if projection_removals:
+            from .address_migration import _inventory
+            plot_miro.check_remote(state, remote, projection_removals,
+                                   _inventory(requests, base, headers))
         if context_removals:
             from .address_migration import _inventory
             context_group_miro.check_remote(state, remote, context_removals,
@@ -1709,6 +1722,7 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
                     miro_legend_updates.remember_geometry(record, response)
                 if key in context_resizes and not context_group_miro.acknowledge_resize(record, response, patch["geometry"]):
                     raise TraceError("Miro did not acknowledge context-summary dimensions; rerun sync to reconcile the saved update journal")
+                plot_miro.acknowledge(record, response, patch)
                 report["updated"] += 1
                 if record["endpoint"] == "frames":
                     report["updated_frames"] += 1
@@ -1810,6 +1824,9 @@ def _record_pending(pending, item_id, response=None):
         record["frame_proof"] = copy.deepcopy(pending["frame_proof"])
     if "context_group_proof" in pending:
         record["context_group_proof"] = copy.deepcopy(pending["context_group_proof"])
+    if "projection_proof" in pending:
+        record["projection_proof"] = copy.deepcopy(pending["projection_proof"])
+        plot_miro.acknowledge(record, response or pending["body"])
     return record
 
 

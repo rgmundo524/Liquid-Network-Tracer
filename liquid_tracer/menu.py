@@ -1118,18 +1118,27 @@ def create_app(root=None):
             yield Header()
             with VerticalScroll(classes="panel"):
                 yield Static("", id="case-summary", markup=False)
+                yield Label("1. Collect transaction data", classes="title")
+                yield Static("Save transaction evidence once, then use it for multiple plotting goals and Miro boards. "
+                             "Continuing collection adds the selected number of hops to the saved ceiling.", markup=False)
                 with Horizontal(classes="buttons"):
-                    yield Button("Run / continue", id="run", variant="primary")
+                    yield Button("Collect data", id="run", variant="primary")
                     yield Button("Review saved runs", id="review")
+                yield Label("2. Plot saved data", classes="title")
+                yield Static("Full investigation, starter connections, or paths to peg-outs. Uses saved data only.", markup=False)
+                yield Button("Choose plotting goal", id="workflow-plot", variant="primary")
+                yield Label("3. Miro boards", classes="title")
+                yield Button("View / create / sync boards", id="workflow-boards", variant="primary")
+                yield Label("Existing full-graph tools", classes="title")
                 with Horizontal(classes="buttons"):
                     yield Button("Preview Miro", id="preview")
                     yield Button("Sync to Miro", id="sync")
                 with Horizontal(classes="buttons"):
-                    yield Button("Starter connections", id="connections")
-                    yield Button("Publish starter connections to Miro", id="connections-publish")
+                    yield Button("Legacy connections", id="connections")
+                    yield Button("Publish legacy snapshot", id="connections-publish")
                     yield Button("Mermaid chart", id="mermaid")
                     yield Button("Export CSV", id="csv")
-                yield Button("Trace to peg-outs", id="pegouts")
+                yield Button("Legacy peg-out search history / custom search", id="pegouts")
                 with Horizontal(classes="buttons"):
                     yield Button("ELK layout preview", id="elk-preview")
                     yield Button("Address review", id="addresses-review")
@@ -1177,7 +1186,8 @@ def create_app(root=None):
                     f"Separate branch hubs: {len(settings['hub_addresses'])} selected\n"
                     f"Center named group: {settings['center_name'] or 'off'}\n"
                     f"Layout attempts: {settings['layout_attempts']}\nDirectory: {self.case}")
-                self.query_one("#run", Button).label = "Continue latest run" if metadata.get("latest_run") else "Start first run"
+                self.query_one("#run", Button).label = "Collect more data" if metadata.get("latest_run") else "Collect transaction data"
+                self.query_one("#workflow-plot", Button).disabled = self.app.busy or not metadata.get("latest_run")
                 self.query_one("#create-board", Button).disabled = self.app.busy or bool(board)
                 rebuild = _rebuild_status(self.case)
                 rebuilding = bool(rebuild and rebuild.get("status") != "complete")
@@ -1241,6 +1251,12 @@ def create_app(root=None):
                     self.app.push_screen(CreateBoardScreen(self.case), self.perform)
                 elif action == "rebuild-board":
                     self.app.push_screen(RebuildBoardScreen(self.case), self.perform)
+                elif action == "workflow-plot":
+                    from .workflow_menu import plot_screen
+                    self.app.push_screen(plot_screen(BaseScreen, Button, self.case), self.perform)
+                elif action == "workflow-boards":
+                    from .workflow_menu import boards_screen
+                    self.app.push_screen(boards_screen(BaseScreen, Button, self.case), self.perform)
                 elif action in ("connections", "connections-publish"):
                     from .connections_menu import connection_screen
                     self.app.push_screen(connection_screen(BaseScreen, Button, self.case,
@@ -1324,7 +1340,7 @@ def create_app(root=None):
                     return
             self.reorganizing = "--reorganize" in arguments
             self.applying_compaction = "--compact-preview" in arguments
-            if not live and self.current_action in ("layout-preview", "compact-preview", "mermaid", "connections", "pegouts", "pegouts-preview"):
+            if not live and self.current_action in ("layout-preview", "compact-preview", "mermaid", "connections", "pegouts", "pegouts-preview", "plot"):
                 self.app.active_calculation = _OfflineCalculation()
                 self.calculation_started = time.monotonic()
             self.set_busy(True)
@@ -1370,6 +1386,15 @@ def create_app(root=None):
             self.query_one("#action-log", RichLog).write(output)
             if cancelled:
                 message = "Calculation cancelled. Saved investigation evidence remains available."
+            elif getattr(self, "current_action", None) == "plot":
+                message = ("Saved-data plot ready. Review the opened preview, then choose Miro boards to publish it."
+                           if status == 0 else "Plot did not complete. Saved collection data remains available.")
+            elif getattr(self, "current_action", None) in ("investigation-board-create", "investigation-board-link"):
+                message = ("Board saved. Open Miro boards to choose a saved plot and sync it."
+                           if status == 0 else "Board setup did not complete. Open Miro boards to check its saved status before retrying.")
+            elif getattr(self, "current_action", None) == "investigation-board-sync":
+                message = ("Selected board synced" + (" and reorganized." if self.reorganizing else ".")
+                           if status == 0 else "Board sync stopped. Check its saved status and terminal result before retrying.")
             elif getattr(self, "current_action", None) == "miro-merge-addresses":
                 message = ("Address objects merged. Sync to Miro to refresh labels; "
                            "Sync and reorganize applies a fresh layout." if status == 0 else

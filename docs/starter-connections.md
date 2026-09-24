@@ -1,5 +1,10 @@
 # Starter connections: plot only paths between starting transactions
 
+This guide describes the older connection-preview and fixed-snapshot publication
+commands. For the shared **Collect data → Plot views → Miro boards** workflow,
+use [the investigation workflow guide](investigation-workflow.md). Its plots are
+fully offline, and its boards can be updated with later plots.
+
 The **Starter connections** option builds a separate, connection-only graph from
 an existing saved run. The ordinary full graph and original trace archives stay
 unchanged. Path selection uses saved evidence and does not retrace transactions.

@@ -36,7 +36,7 @@ CASE_ID = re.compile(r"[0-9a-f]{32}")
 RUN_ID = re.compile(r"[a-zA-Z0-9]{16}")
 FRAME_REVIEW_ID = re.compile(r"[0-9a-f]{64}")
 MIRO_ITEM_ID = re.compile(r"[a-zA-Z0-9_][a-zA-Z0-9_-]{0,199}")
-ARTIFACT_DIR = re.compile(r"[a-zA-Z0-9]{16}-(?:csv|mermaid|elk|compact|connections|pegouts)-[0-9a-f]{8}")
+ARTIFACT_DIR = re.compile(r"[a-zA-Z0-9]{16}-(?:csv|mermaid|elk|compact|connections|pegouts|plots)-[0-9a-f]{8}")
 COMPACTION_DIR = re.compile(r"[a-zA-Z0-9]{16}-compact-[0-9a-f]{8}")
 LEGACY_EXPORT_NAMES = {"nodes.csv", "edges.csv", "inputs.csv", "outputs.csv", "spends.csv",
                        "events.csv", "frontier.csv", "export.json", "SHA256SUMS"}
@@ -49,7 +49,7 @@ COMPACTION_NAMES = LAYOUT_NAMES | {"before.html", "before.svg", "before.json", "
 LAYOUT_ALGORITHMS = ("elk_layered_v1", "dependency_layers_v1")
 FALLBACK_REASONS = ("size_limit", "timeout", "mermaid_size_limit", "mermaid_timeout")
 from .connections import FILES as CONNECTION_NAMES, LEGACY_FILES as LEGACY_CONNECTION_NAMES, preview_files
-CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact", "connections", "pegouts", "pegouts-preview"}
+CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact", "connections", "pegouts", "pegouts-preview", "plot"}
 
 
 def public_pegout_search(summary):
@@ -412,6 +412,9 @@ class LocalServer(ThreadingHTTPServer):
                            "stop_reason": state.get("stop_reason"), "created_at": state.get("started_at"),
                            "transaction_count": stats.get("transactions_cumulative", len(state.get("transactions", {}))),
                            "frontier_count": stats.get("frontier_count", 0)}
+                    limits = state.get("limits", {})
+                    if isinstance(limits, dict) and type(limits.get("max_hops")) is int:
+                        run["max_hops"] = limits["max_hops"]
                     runs.append(run)
                     if path.name == summary["latest_run"]:
                         summary["status"] = run["status"]
@@ -428,6 +431,8 @@ class LocalServer(ThreadingHTTPServer):
             summary["runs"] = sorted(runs, key=lambda run: (run.get("created_at") or "", run["id"]), reverse=True)
             summary["artifacts"] = self.saved_artifacts(case, metadata, {run["id"] for run in runs})
             summary["pegout_searches"] = self.pegout_searches(case)
+            from .workflow_api import case_workflow
+            summary.update(case_workflow(case))
             summary["miro_recovery"] = miro_recovery_status(case)
             try:
                 rebuild = rebuild_status(case)
@@ -629,7 +634,8 @@ class LocalServer(ThreadingHTTPServer):
                                "started_at": time.time(),
                                "cancellable": action in CANCELLABLE_ACTIONS,
                                "message": ("Working. Check the launching terminal if Proton Pass needs to unlock."
-                                           if live else "Preparing the graph and checking missing address counts…"
+                                           if live else "Plotting saved collection data…" if action == "plot"
+                                           else "Preparing the graph and checking missing address counts…"
                                            if action in CANCELLABLE_ACTIONS else "Working with saved local evidence…")}
         self.active_job = identity
         # Keep a bounded history for tabs that remain open. Evidence persists in
@@ -749,6 +755,9 @@ class LocalServer(ThreadingHTTPServer):
             pass
 
     def public_result(self, result, action, case, txids):
+        if action in ("plot", "board-create", "board-link", "board-sync"):
+            from .workflow_api import workflow_result
+            return workflow_result(case, result, action)
         if action in ("pegouts", "pegouts-preview"):
             value = public_pegout_search(result)
             if result.get("preview_id"):
@@ -889,13 +898,16 @@ class LocalServer(ThreadingHTTPServer):
         kind = parts[1].split("-")[1]
         if (parts[0] == "exports") != (kind == "csv"):
             raise RequestError("File not found", 404)
-        if kind == "pegouts":
-            from .pegouts import reviewed_pegouts, preview_files as pegout_files
+        if kind in ("pegouts", "plots"):
+            if kind == "plots":
+                from .plots import reviewed_plot as review, plot_files as files
+            else:
+                from .pegouts import reviewed_pegouts as review, preview_files as files
 
             directory = safe_path(case, parts[:2])
-            if parts[2] not in pegout_files(directory):
+            if parts[2] not in files(directory):
                 raise RequestError("File not found", 404)
-            reviewed_pegouts(case, parts[1])
+            review(case, parts[1])
             return safe_path(case, parts)
         expected = {"mermaid": PREVIEW_NAMES, "csv": EXPORT_NAMES | LEGACY_EXPORT_NAMES, "elk": LAYOUT_NAMES,
                     "compact": COMPACTION_NAMES, "connections": CONNECTION_NAMES | LEGACY_CONNECTION_NAMES}[kind]
@@ -919,6 +931,9 @@ class LocalServer(ThreadingHTTPServer):
         from .cli import miro_recovery_status, resolve_latest, run_path, verify_export
 
         action = body.get("action")
+        if action in ("plot", "board-create", "board-link", "board-sync"):
+            from .workflow_api import workflow_action
+            return workflow_action(self, case, metadata, body)
         if action in ("pegouts", "pegouts-preview", "miro-pegouts"):
             from .pegouts import SEARCH_ID, reviewed_pegouts
             from .cli import board_id
@@ -1307,7 +1322,7 @@ class Handler(BaseHTTPRequestHandler):
             content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             self.send(200, path.read_bytes(), content_type, preview=path.suffix in (".html", ".svg"),
                       download=None if path.suffix == ".html" else path.name,
-                      explorer_links=parts[3].split("-")[1] in ("elk", "compact", "connections", "pegouts") and path.suffix in (".html", ".svg"))
+                      explorer_links=parts[3].split("-")[1] in ("elk", "compact", "connections", "pegouts", "plots") and path.suffix in (".html", ".svg"))
         else:
             path = safe_path(self.server.assets, ["index.html"] if parts == [""] else parts)
             if not path.is_file():

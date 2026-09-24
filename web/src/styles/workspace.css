@@ -1154,3 +1154,16 @@ dialog::backdrop {
   .case-nav, .settings-navigation a { padding: 10px; }
   .settings-save { position: static; }
 }
+
+.workspace-content { display: grid; gap: 22px; margin-top: 22px; min-width: 0; }
+.plot-goals { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 24px; }
+.plot-goal, .board-choice { text-align: left; background: #fff; border: 1px solid #d9e5df; border-radius: 9px; color: #36584d; padding: 17px; cursor: pointer; }
+.plot-goal strong, .board-choice strong { display: block; font-size: 13px; margin-bottom: 7px; }
+.plot-goal span, .board-choice span { display: block; font-size: 11px; color: #6f877e; line-height: 1.7; }
+.plot-goal.selected, .board-choice.selected { border-color: #28816a; background: #edf7f2; box-shadow: inset 0 0 0 1px #28816a; }
+.plot-goal:focus-visible, .board-choice:focus-visible { outline: 2px solid #28816a; outline-offset: 3px; }
+.board-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.board-management { padding-top: 20px; border-top: 1px solid #e0e9e4; }
+.board-management h3 { margin-bottom: 12px; }
+.workspace-content .panel-body > p { line-height: 1.8; margin-bottom: 16px; }
+@media (max-width: 760px) { .plot-goals { grid-template-columns: 1fr; } }

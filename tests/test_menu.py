@@ -542,18 +542,24 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         with patch("liquid_tracer.menu.subprocess.run") as process:
             async with app.run_test(size=(80, 24)) as pilot:
                 case = await self.new_case(app, pilot, board="")
-                for selector in ("#mermaid", "#csv", "#elk-preview", "#layout"):
+                for selector in ("#mermaid", "#csv", "#elk-preview", "#layout", "#workflow-plot"):
                     self.assertTrue(app.screen.query_one(selector, Button).disabled)
                 run = app.screen.query_one("#run", Button)
                 run.focus()
                 await pilot.press("right")
                 self.assertEqual(app.focused.id, "review")
                 await pilot.press("left", "down")
+                self.assertEqual(app.focused.id, "workflow-boards")
+                await pilot.press("down")
                 self.assertEqual(app.focused.id, "preview")
                 await pilot.press("down")
                 self.assertEqual(app.focused.id, "pegouts")
                 self.assertFalse(app.focused.disabled)
                 await pilot.press("down")
+                self.assertEqual(app.focused.id, "addresses-review")
+                await pilot.press("down")
+                self.assertEqual(app.focused.id, "name-colors")
+                await pilot.press("left")
                 self.assertEqual(app.focused.id, "addresses-import")
                 await pilot.press("down")
                 self.assertEqual(app.focused.id, "change-outputs")
