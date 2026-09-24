@@ -878,6 +878,11 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
                 "transaction_neighborhood_quality" if not safe_neighbors else "attachment_routing_estimate")
     else:
         result = compacted
+    # Clearance repair is allowed to use extra space. A distance-reduction or
+    # footprint gate here would keep context shapes trapped on existing lines.
+    from .context_clearance import repair_context_clearance
+    _report_progress(report, "Clearing connector space around context inputs", stage="applying")
+    repair_context_clearance(result)
     result["layout"]["branch_organization"]["boundaries"] = boundary_metrics(result)
     result["layout"]["branch_organization"]["neighborhoods"] = neighborhood_metrics(result)
     if graph.get("graph_options", {}).get("center_name"):

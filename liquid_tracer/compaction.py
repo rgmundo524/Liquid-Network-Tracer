@@ -221,6 +221,20 @@ def _footprint(nodes, edges, point_map):
                       *(box for edge in edges for box in _edge_boxes(edge, point_map[edge["id"]]))])
 
 
+def _context_nodes(nodes, edges):
+    return {key for key, node in nodes.items() if node.get("kind") == "context_group"} | {
+        edge["source"] for edge in edges.values() if edge.get("role") == "context_input"
+        and nodes[edge["source"]].get("kind") in ("address", "context_group")}
+
+
+def _route_variants(edge, nodes, points):
+    from .routing_estimates import route_variants
+
+    # Geometry proposals have not yet replaced the stored route. Estimate from
+    # current attachments while retaining precisely the proposed saved bends.
+    return route_variants({**edge, "route": [{"x": x, "y": y} for x, y in points]}, nodes)
+
+
 def _dimensions(box):
     if box is None:
         return {"width": 0.0, "height": 0.0, "area": 0.0}
@@ -302,6 +316,9 @@ class _Geometry:
         self.budget = budget
         self.node_index, self.segment_index, self.caption_index = (_Index(budget) for _ in range(3))
         self.segment_keys = {}
+        self.context_nodes = _context_nodes(nodes, edges)
+        self.estimated_segment_index = _Index(budget)
+        self.estimated_routes, self.estimated_segment_keys = {}, {}
         for key, node in nodes.items():
             self.node_index.add(key, _box(node))
         for key in edges:
@@ -318,6 +335,57 @@ class _Geometry:
         self.caption_index.remove(key)
         if caption:
             self.caption_index.add(key, caption)
+        if self.context_nodes:
+            for segment in self.estimated_segment_keys.get(key, []):
+                self.estimated_segment_index.remove(segment)
+            variants = _route_variants(self.edges[key], self.nodes, route)
+            self.estimated_routes[key] = variants
+            self.estimated_segment_keys[key] = []
+            for variant, points in enumerate(variants):
+                for i, (a, b) in enumerate(zip(points, points[1:])):
+                    segment = (key, variant, i)
+                    self.estimated_segment_keys[key].append(segment)
+                    self.estimated_segment_index.add(segment, _segment_box(a, b))
+
+    def _context_routes_safe(self, key, proposed):
+        """Keep context objects clear of Miro estimates as well as saved bends.
+
+        A local move must not undo the context clearance pass. Estimates only
+        add checks involving context objects; unrelated compaction continues
+        to use its established native-route checks.
+        """
+        if not self.context_nodes:
+            return True
+        moving_context = key in self.context_nodes
+        if moving_context:
+            clearance = _expand(_box(self.nodes[key]), EDGE_NODE_SPACING)
+            candidates = self.estimated_segment_index.query(clearance)
+            if candidates is None:
+                return False
+            for edge_id, variant, i in candidates:
+                if (edge_id not in proposed
+                        and _hits_box(*self.estimated_routes[edge_id][variant][i:i + 2], clearance)):
+                    return False
+        for edge_id, route in proposed.items():
+            edge = self.edges[edge_id]
+            endpoints = {edge["source"], edge["target"]}
+            for variant in _route_variants(edge, self.nodes, route):
+                for a, b in zip(variant, variant[1:]):
+                    if not self.budget.spend():
+                        return False
+                    candidates = self.node_index.query(_expand(_segment_box(a, b), EDGE_NODE_SPACING))
+                    if candidates is None:
+                        return False
+                    for other in candidates:
+                        if (other not in endpoints and (moving_context or other in self.context_nodes)
+                                and _hits_box(a, b, _expand(self.node_index.boxes[other], EDGE_NODE_SPACING))):
+                            return False
+                    for endpoint in endpoints:
+                        if ((moving_context or endpoint in self.context_nodes)
+                                and segment_hits_node({"x": a[0], "y": a[1]}, {"x": b[0], "y": b[1]},
+                                                      self.nodes[endpoint])):
+                            return False
+        return True
 
     def safe(self, key, proposed, bounds):
         node = self.nodes[key]
@@ -420,7 +488,7 @@ class _Geometry:
                         return False
             if one in new_captions and two in new_captions and _touch(new_captions[one], new_captions[two]):
                 return False
-        return True
+        return self._context_routes_safe(key, proposed)
 
 
 def _eligible(node, incident, nodes, fee_ids):
@@ -586,6 +654,17 @@ def _pack_components(nodes, edges, points, fee_ids, bounds, budget, notify, fram
         return 0, 0, fee_components
     geometry_boxes = {owner: _footprint((nodes[key] for key in keys), (edges[key] for key in group_edges[owner]), points)
                       for owner, keys in groups.items()}
+    has_context = bool(_context_nodes(nodes, edges))
+    if has_context:
+        # A same-side return can extend beyond its ELK component envelope.
+        # Reserve that estimated corridor before bringing a context component
+        # alongside it. The original native footprint remains the growth cap.
+        for owner in groups:
+            geometry_boxes[owner] = _envelope([
+                geometry_boxes[owner],
+                *(_segment_box(a, b) for key in group_edges[owner]
+                  for route in _route_variants(edges[key], nodes, points[key])
+                  for a, b in zip(route, route[1:]))])
     frame_for_member = {}
     for members in frame_groups:
         frame = _padded(_envelope(_box(nodes[key]) for key in members)) if members else None
@@ -605,7 +684,12 @@ def _pack_components(nodes, edges, points, fee_ids, bounds, budget, notify, fram
     obstacle_index = _Index(budget)
     for edge in edges.values():
         if edge["source"] in fee_ids or edge["target"] in fee_ids:
-            for i, box in enumerate(_edge_boxes(edge, points[edge["id"]])):
+            boxes_for_edge = _edge_boxes(edge, points[edge["id"]])
+            if has_context:
+                boxes_for_edge.extend(_segment_box(a, b)
+                                      for route in _route_variants(edge, nodes, points[edge["id"]])
+                                      for a, b in zip(route, route[1:]))
+            for i, box in enumerate(boxes_for_edge):
                 obstacle_index.add((edge["id"], i), box)
     anchor_x, anchor_y = packing_bounds[:2]
     corners = [(anchor_x, anchor_y)]
