@@ -16,6 +16,8 @@ import uuid
 from .common import TraceError, canonical, digest, now, read_json, save_json
 
 GOALS = frozenset({"full", "connections", "pegouts"})
+LAYOUT_SETTINGS = frozenset({"include_fees", "group_context_inputs", "hub_addresses",
+                             "color_attribution_arrows", "center_name", "connector_style", "layout_attempts"})
 PREVIEW_ID = re.compile(r"[0-9a-f]{16}-plots-[0-9a-f]{8}\Z")
 FILES = frozenset({"graph.html", "graph.svg", "graph.json", "layout-report.json", "graph.mmd",
                    "transactions.csv", "plot.json", "miro-plan.json", "details.html", "details.json",
@@ -59,6 +61,53 @@ def _settings(metadata):
             "connector_style": connector_appearance(metadata),
             "layout_attempts": layout_search_attempts(metadata),
             "presentation_version": PRESENTATION_VERSION}
+
+
+def validate_layout_settings(value):
+    """Return a canonical settings snapshot; never accept extra or coerced fields."""
+    from .investigations import validate_settings
+
+    if (not isinstance(value, dict) or set(value) != LAYOUT_SETTINGS | {"presentation_version"}
+            or type(value.get("presentation_version")) is not int or value["presentation_version"] < 1):
+        raise TraceError("Invalid saved layout settings; regenerate the plot")
+    normalized = validate_settings({key: value[key] for key in LAYOUT_SETTINGS})
+    result = {key: normalized[key] for key in LAYOUT_SETTINGS}
+    result["presentation_version"] = value["presentation_version"]
+    if canonical(result) != canonical(value):
+        raise TraceError("Saved layout settings are not canonical; regenerate the plot")
+    return deepcopy(result)
+
+
+def _effective_settings(settings, goal):
+    result = validate_layout_settings(settings)
+    if goal != "full":
+        # Filtered goals retain exact qualifying I/O only. Full-trace display
+        # preferences must not add context addresses, fees, or hub branches.
+        result.update(include_fees=False, group_context_inputs=False, hub_addresses=[])
+    return result
+
+
+def _snapshot_settings(graph):
+    report = graph["plot"]
+    if "layout_settings" not in report:
+        return None  # Older snapshots retain their original strict review.
+    settings = validate_layout_settings(report["layout_settings"])
+    if (report.get("settings_sha256") != digest(canonical(settings))
+            or _effective_settings(settings, report["goal"]) != settings
+            or graph.get("presentation_version") != settings["presentation_version"]):
+        raise TraceError("Saved layout settings disagree with their snapshot; regenerate the plot")
+    options = graph.get("graph_options", {})
+    if (not isinstance(options, dict) or any(key not in options or canonical(options[key]) != canonical(settings[key])
+                                            for key in LAYOUT_SETTINGS)):
+        raise TraceError("Saved layout settings disagree with the graph; regenerate the plot")
+    layout = graph.get("layout", {})
+    if not isinstance(layout, dict):
+        raise TraceError("Saved layout metadata is malformed; regenerate the plot")
+    search = layout.get("search", {})
+    if (not isinstance(search, dict) or ("attempt_count" in search
+            and canonical(search["attempt_count"]) != canonical(settings["layout_attempts"]))):
+        raise TraceError("Saved layout settings disagree with the layout search; regenerate the plot")
+    return settings
 
 
 def _source(case, run_id):
@@ -178,7 +227,9 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, open_b
     with _locked(case):
         state, settings, fingerprints = _source(case, run_id)
         query = _query(goal, state, min_hops, max_hops)
+        settings = _effective_settings(settings, goal)
         graph = _graph(state, goal, query, settings)
+        graph["graph_options"].update({key: deepcopy(settings[key]) for key in LAYOUT_SETTINGS})
         if graph["nodes"]:
             graph = optimize_graph(graph, connector_style=settings["connector_style"],
                                    layout_attempts=settings["layout_attempts"], progress=progress)
@@ -186,6 +237,7 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, open_b
         graph["notice"] = coverage["coverage_notice"] + " " + graph["notice"]
         report = {"schema_version": 1, "case_id": state["case_id"], "run_id": state["run_id"],
                   "goal": goal, "query": query, "created_at": now(), **coverage, **fingerprints,
+                  "layout_settings": deepcopy(settings), "settings_sha256": digest(canonical(settings)),
                   "min_hops": query.get("min_hops", 0), "max_hops": query.get("max_hops"),
                   "node_count": len(graph["nodes"]), "edge_count": len(graph["edges"]),
                   "transaction_count": sum(node["kind"] == "transaction" for node in graph["nodes"]),
@@ -258,6 +310,7 @@ def _snapshot(case, preview_id):
     validate_plan(plan)
     if plot_plan(graph) != plan:
         raise TraceError("Saved plot and its Miro plan disagree")
+    _snapshot_settings(graph)
     return graph, plan
 
 
@@ -275,13 +328,19 @@ def _review_source(case, graph, source_cache=None):
             source_cache[run_id] = state, fingerprints
     query = report.get("query", {})
     expected = _query(report["goal"], state, query.get("min_hops", 0), query.get("max_hops", 10))
-    if (any(report.get(key) != value for key, value in fingerprints.items())
+    settings = _snapshot_settings(graph)
+    if settings is not None:
+        from .export import PRESENTATION_VERSION
+        if settings["presentation_version"] != PRESENTATION_VERSION:
+            raise TraceError("Saved layout uses a different presentation version; regenerate the plot")
+    if (any(report.get(key) != value for key, value in fingerprints.items()
+            if settings is None or key != "settings_sha256")
             or query != expected or graph["namespace"].get("source") != state["source"]):
         raise TraceError("Evidence, address counts, trace controls or plot settings changed; regenerate the plot")
 
 
 def reviewed_plot(case, preview_id):
-    """Verify archived bytes, current controls/settings and the publication plan."""
+    """Verify archived bytes, current evidence controls and frozen layout settings."""
     case = _ordinary(case)
     with _locked(case):
         graph, plan = _snapshot(case, preview_id)
@@ -290,7 +349,7 @@ def reviewed_plot(case, preview_id):
 
 
 def list_plots(case):
-    """List recent intact snapshots, keeping stale settings visible for refresh."""
+    """List recent intact layouts, keeping stale evidence visible for refresh."""
     case = _ordinary(case)
     recent = heapq.nlargest(100, (path for path in (case / "previews").glob("*-plots-*")
         if PREVIEW_ID.fullmatch(path.name) and not path.is_symlink()), key=lambda path: path.stat().st_mtime_ns)

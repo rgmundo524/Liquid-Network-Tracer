@@ -28,6 +28,10 @@ DEFAULTS = {
 }
 
 
+PLOT_SETTING_KEYS = frozenset({"layout_attempts", "connector_style", "include_fees",
+                              "color_attribution_arrows", "group_context_inputs", "center_name", "hub_addresses"})
+
+
 def validate_blockchain(value):
     """Validate the chain identity independently of live or fixture data sources."""
     if not isinstance(value, str) or value != "liquid":
@@ -133,6 +137,30 @@ def update_case(case, updates):
         metadata = {**read_case(case), **changes}
         save_json(case / "case.json", metadata)
     return metadata
+
+
+def save_plot_settings(case, settings):
+    """Merge display settings into the latest investigation metadata atomically."""
+    if not isinstance(settings, dict) or set(settings) - PLOT_SETTING_KEYS:
+        raise TraceError("Plot settings accept layout attempts, connectors, fees, attribution arrows, context grouping, center name, and branch hubs only")
+    validated = validate_settings(settings)
+    changes = {key: validated[key] for key in settings}
+    case = Path(case)
+    with (case / "trace.lock").open("a") as trace_lock, (case / "case.lock").open("a") as case_lock:
+        try:
+            # The same lock order as plotting/publication avoids waiting on a
+            # shared preview lock while holding another operation's lock.
+            fcntl.flock(trace_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            fcntl.flock(case_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise TraceError("An investigation operation is active; save plot settings after it finishes") from None
+        metadata = read_case(case)
+        defaults = validate_settings(metadata.get("run_defaults", {}))
+        defaults = validate_settings({**defaults, **changes})
+        if changes and defaults != metadata.get("run_defaults"):
+            metadata = {**metadata, "run_defaults": defaults}
+            save_json(case / "case.json", metadata)
+        return metadata
 
 
 def _name(value):

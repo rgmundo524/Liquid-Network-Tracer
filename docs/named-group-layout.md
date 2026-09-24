@@ -1,8 +1,8 @@
 # Center a named address group
 
-Open **Investigation settings**, enter an attribution name in **Center named group**, and save. The browser suggests matching active names from the investigation as you type. Name matching ignores capitalization. The same field is available in terminal settings. Workspace settings set the default for new investigations only.
+In the browser, open **Plot Layouts** and enter an attribution name in **Center named group**. The browser suggests matching active names from the investigation as you type. Name matching ignores capitalization. Choose **Save layout settings**, or generate a layout to save the preferences and plot together. These preferences belong to the investigation and survive restarts. The terminal retains this field in its investigation settings; terminal workspace settings set the default for new investigations only.
 
-Generate an **ELK layout preview** to inspect the arrangement, then use **Sync and reorganize** to apply it to an existing Miro board. Leave the field blank to return to the normal layout. Changing this setting makes previous ELK and compact previews stale, so regenerate them before applying a layout.
+Generate a layout to inspect the arrangement, then choose **Sync with Miro** and **Sync and reorganize** to apply it to an existing board. Leave the field blank to generate the normal layout. Previously saved Plot Layouts keep their captured appearance when this preference changes. To use a new preference, generate and sync a new layout. Older ELK previews and plots without captured settings may need regeneration; changed evidence or attribution inputs still require a fresh layout.
 
 This option favors a central arrangement of the selected group's individual addresses and transactions between them, with other activity branching around that structure. Transaction direction, address identities, connections, tracing limits, and fetched evidence remain unchanged. It does not start a trace or fetch additional transactions. Mermaid uses its own arrangement.
 

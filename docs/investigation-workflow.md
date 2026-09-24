@@ -1,10 +1,15 @@
-# Collect data, plot views, download or sync
+# Collect data, create plot layouts, download or sync
 
 An investigation owns one set of saved collection runs and can have several Miro
 boards. Each board has a name and a plotting goal. Use the same collected data
 to make a full investigation chart, starter-connection chart, and peg-out chart.
-In the browser, the usual sequence is **Collect data → Plot views → Download ELK
+In the browser, the usual sequence is **Collect data → Plot Layouts → Download ELK
 SVG or sync with Miro**. Generate one plot, then choose its output destination.
+
+Create a new investigation with its name, blockchain, and selected starting
+outputs. **Liquid Network** is currently the only supported blockchain. The
+browser's creation form has no Miro board field or starting-preferences panel;
+create or link boards later in **Miro boards**.
 
 ## 1. Collect data
 
@@ -19,9 +24,12 @@ attribution hop limits, and the confirmation policy still apply. For a chart
 covering up to 10 hops, collect enough data to cover that depth before plotting.
 Choosing 10 in a plotting form does not fetch missing transactions.
 
-## 2. Plot views from saved data
+The **Collect data** tab contains collection actions. Use the **Plot Layouts**
+tab for the next step and the investigation heading to open settings.
 
-In the browser, open **Plot views** and select the saved run. In the terminal,
+## 2. Create Plot Layouts from saved data
+
+In the browser, open **Plot Layouts** and select the saved run. In the terminal,
 choose **Choose plotting goal** under **Plot saved data**. The available goals
 are shown together:
 
@@ -36,6 +44,18 @@ statistics, creates a separate local preview, and makes no Blockstream or Miro
 requests. Missing address statistics stay unavailable until collected separately.
 Changing the plotting goal does not alter seeds or collected evidence.
 
+Set layout attempts, connector appearance, attribution arrow coloring, and
+named-group centering here. **Full trace** also supports **Separate branch hubs**,
+**Group isolated context inputs**, and **Include transaction fee flows**. These
+three controls are disabled for filtered goals, which retain their saved values
+for the next full trace.
+
+**Save layout settings** persists the preferences with this investigation, even
+before collection. **Generate** saves pending layout edits before generating the
+plot. Unsaved edits survive tab navigation within the browser session; saved
+settings survive closing the browser or restarting the server. A failed save
+keeps the edits and does not start plotting.
+
 Every plot records its source run, goal, and coverage. Review the preview before
 downloading or syncing. A plot with no matching paths does not prove that no connection or
 peg-out exists outside the saved coverage. A peg-out request does not establish
@@ -43,6 +63,11 @@ which Bitcoin transaction paid it.
 
 A plot with no matching activity remains available to review, but its Miro sync
 is disabled. It does not clear an existing board.
+
+Each newly generated layout captures its display settings. Changing preferences
+later leaves that saved layout available for download and sync with its original
+appearance. Changed evidence or attribution inputs require regeneration. Older
+plots without captured settings may need to be regenerated once.
 
 ## 3. Download the plot or sync with Miro
 
@@ -85,7 +110,7 @@ must be reconciled through the existing recovery flow.
 
 ## Settings, history, and downloads
 
-The browser has four task tabs: **Collect data**, **Plot views**, **Miro boards**,
+The browser has four task tabs: **Collect data**, **Plot Layouts**, **Miro boards**,
 and **History & downloads**. The last tab combines saved-run history with SVGs,
 tables, reports, and other saved files.
 
@@ -94,6 +119,11 @@ addresses, manage change outputs, and export saved input CSVs. Colors are also
 in Investigation settings. Imports retain their **Preview → Apply** flow, and
 color edits save through their own controls. **Save settings** saves the
 investigation preferences.
+
+Both **Investigation settings** and **Workspace defaults** persist across
+sessions. Investigation settings apply to the current case. Workspace defaults
+set collection limits and the Miro sync budget for future cases, without
+changing existing investigations. Layout preferences live in **Plot Layouts**.
 
 ## Existing investigations and older searches
 
@@ -108,7 +138,7 @@ are not silently replaced.
 
 In the browser, older standalone search controls are under **History & downloads**. In the
 terminal, they remain explicitly labeled below the primary collection, plotting,
-and board steps. Use the main **Plot views** workflow for a new view of collected
+and board steps. Use the main **Plot Layouts** workflow for a new view of collected
 investigation data.
 
 ## CLI

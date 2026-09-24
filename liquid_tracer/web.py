@@ -25,7 +25,7 @@ from urllib.parse import quote, unquote, urlsplit
 from .common import TraceError, read_json
 from .inspection import parse_transaction_hashes
 from .investigations import (create_investigation, default_root, load_settings,
-                             read_case, save_settings, update_case, validate_blockchain, validate_settings)
+                             read_case, save_plot_settings, save_settings, update_case, validate_blockchain, validate_settings)
 from .menu import _command, _environment, _lookup_reports, _project, _seed_values, _trace_arguments
 from .progress import public_progress
 from .layout_search import MAX_LAYOUT_ATTEMPTS, normalize_layout_attempts
@@ -1445,6 +1445,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.server.address_merge_preview(case), 200
             if parts[3] in ("addresses", "address", "services"):
                 return self.address_request(parts[3], case, body), 200
+            if parts[3] == "plot-settings":
+                if set(body) != {"settings"}:
+                    raise RequestError("Saving plot settings requires only a settings object.")
+                try:
+                    updated = save_plot_settings(case, body["settings"])
+                except TraceError as error:
+                    raise RequestError(str(error)) from None
+                return self.server.case_summary(case, updated, detail=True), 200
             if parts[3] == "settings":
                 updates = {"name": body.get("name", metadata.get("name")),
                            "miro_board": body.get("board", metadata.get("miro_board")) or None,

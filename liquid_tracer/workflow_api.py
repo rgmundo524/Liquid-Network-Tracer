@@ -31,6 +31,12 @@ def public_board(value):
 
 def public_plot(value):
     result = _fields(value, PLOT_FIELDS)
+    if "layout_settings" in value:
+        from .plots import validate_layout_settings
+        try:
+            result["layout_settings"] = validate_layout_settings(value["layout_settings"])
+        except TraceError:
+            pass
     if value.get("review_error"):
         # The detailed verification error can include local paths.
         result["review_error"] = result["reason"] = "Saved plot no longer matches the investigation. Generate it again."

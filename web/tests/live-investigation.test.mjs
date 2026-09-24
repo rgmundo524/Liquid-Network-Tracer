@@ -77,9 +77,24 @@ async function harness(respond = () => undefined) {
       await new Promise(setImmediate);
     },
     async submitSettings(values) {
-      const form = {id: 'settings-form', values: {...defaults, ...values}, reportValidity: () => true};
+      const form = {id: 'settings-form', values, reportValidity: () => true};
       listeners.submit({target: form, preventDefault() {}});
       await new Promise(setImmediate);
+    },
+    plotForm(values, valid = true) {
+      const form = {id: 'plot-layout-form', values, reportValidity: () => valid};
+      elements.set('#plot-layout-form', form);
+      return form;
+    },
+    async submitPlotSettings(values, valid = true) {
+      const form = this.plotForm(values, valid);
+      listeners.submit({target: form, preventDefault() {}});
+      await new Promise(setImmediate);
+    },
+    editPlotSettings(values) {
+      const form = this.plotForm(values);
+      listeners.input({target: {name: Object.keys(values)[0], id: '', form,
+        closest: selector => selector === '#plot-layout-form' ? form : null}});
     },
     async submit(values) {
       currentForm = {id: 'new-case-form', values: {...defaults, ...values}, reportValidity: () => true};
@@ -99,6 +114,7 @@ test('startup offers an empty live investigation without fetching bundled sample
   assert.match(view.newCase(), /This lookup uses your Blockstream credits/);
   assert.match(view.newCase(), /<select name="blockchain" required><option value="liquid" selected>Liquid Network<\/option><\/select>/);
   assert.doesNotMatch(view.newCase(), /name="board"|Miro board URL or ID/);
+  assert.doesNotMatch(view.newCase(), /Starting preferences/);
   view.state.draft.txids = txid;
   await view.dispatch('lookup');
   assert.deepEqual(view.calls[1], {path: '/api/lookup', body: {source: 'live', blockchain: 'liquid', txids: txid}});
@@ -395,29 +411,40 @@ test('hub selection changes invalidate previews while duplicate and reordered li
 });
 
 
-test('layout attempts default to 25 and new-investigation forms send the chosen search size', async () => {
+test('inherited layout attempts are available in Plot Layouts after creating an investigation', async () => {
   const detail = {id: 'layoutcase', name: 'Layout case', run_defaults: {...defaults, layout_attempts: 80}, runs: [], seeds: [`${txid}:0`]};
   const view = await harness(path => path === '/api/cases' || path === '/api/cases/layoutcase' ? detail : undefined);
-  assert.match(view.newCase(), /Uses workspace defaults/);
+  assert.doesNotMatch(view.newCase(), /Starting preferences|Uses workspace defaults/);
   assert.doesNotMatch(view.newCase(), /name="layout_attempts"/);
   await view.submit({name: detail.name, txids: txid, seeds: `${txid}:0`, layout_attempts: '80'});
   assert.equal(view.calls.find(call => call.path === '/api/cases').body.settings.layout_attempts, 80);
-  await view.dispatch("case-settings");
-  assert.match(view.settingsPage(), /name="layout_attempts"[^>]*value="80"/);
+  await view.dispatch('view-plots');
+  assert.match(view.workspace(), /name="layout_attempts"[^>]*value="80"/);
 });
 
-test('workspace and investigation settings submit layout attempts independently', async () => {
-  const detail = {id: 'layoutcase', name: 'Layout case', run_defaults: {...defaults, layout_attempts: 70}, runs: []};
+test('workspace and investigation settings preserve layout preferences without exposing duplicate controls', async () => {
+  const inherited = {...defaults, layout_attempts: 70, connector_style: 'curved', include_fees: true,
+    group_context_inputs: true, color_attribution_arrows: true, center_name: 'Treasury', hub_addresses: ['G' + 'a'.repeat(33)]};
+  const detail = {id: 'layoutcase', name: 'Layout case', run_defaults: inherited, runs: []};
   const view = await harness(path => path === '/api/cases/layoutcase' ? detail : undefined);
   view.state.page = 'settings';
-  assert.match(view.settingsPage(), /name="layout_attempts"[^>]+value="25"/);
-  await view.submitSettings({layout_attempts: '100'});
-  assert.equal(view.calls.find(call => call.path === '/api/settings').body.settings.layout_attempts, 100);
+  view.state.settings = inherited;
+  assert.doesNotMatch(view.settingsPage(), /name="(?:layout_attempts|connector_style|include_fees|group_context_inputs|color_attribution_arrows|center_name|hub_addresses)"/);
+  await view.submitSettings({hops: '4'});
+  const workspace = view.calls.find(call => call.path === '/api/settings').body.settings;
+  assert.equal(workspace.hops, 4);
+  for (const key of ['layout_attempts', 'connector_style', 'include_fees', 'group_context_inputs', 'color_attribution_arrows', 'center_name', 'hub_addresses']) {
+    assert.deepEqual(workspace[key], inherited[key]);
+  }
   view.state.activeCase = detail;
   view.state.page = 'case-settings';
-  assert.match(view.settingsPage(), /name="layout_attempts"[^>]+value="70"/);
-  await view.submitSettings({name: detail.name, board: '', layout_attempts: '90'});
-  assert.equal(view.calls.find(call => call.path === '/api/cases/layoutcase/settings').body.settings.layout_attempts, 90);
+  assert.doesNotMatch(view.settingsPage(), /name="(?:layout_attempts|connector_style|include_fees|group_context_inputs|color_attribution_arrows|center_name|hub_addresses)"/);
+  await view.submitSettings({name: detail.name, hops: '6'});
+  const investigation = view.calls.find(call => call.path === '/api/cases/layoutcase/settings').body.settings;
+  assert.equal(investigation.hops, 6);
+  for (const key of ['layout_attempts', 'connector_style', 'include_fees', 'group_context_inputs', 'color_attribution_arrows', 'center_name', 'hub_addresses']) {
+    assert.deepEqual(investigation[key], inherited[key]);
+  }
 });
 
 test('a limited form preserves the prior layout-attempt count when the input is absent', async () => {
@@ -613,18 +640,25 @@ test('completed rebuild displays both board links and selects the published snap
 });
 
 
-test('attribution arrow colors can be enabled and disabled in investigation settings', async () => {
+test('attribution arrow colors can be enabled and disabled in Plot Layouts before collection', async () => {
   const detail = {id: 'arrowcase', name: 'Named arrows', run_defaults: {...defaults, color_attribution_arrows: true}, runs: []};
-  const view = await harness(path => path === '/api/cases/arrowcase' ? detail : undefined);
+  const view = await harness((path, body) => {
+    if (path === '/api/cases/arrowcase/plot-settings') {
+      Object.assign(detail.run_defaults, body.settings);
+      return detail;
+    }
+    if (path === '/api/cases/arrowcase') return detail;
+  });
   assert.doesNotMatch(view.newCase(), /name="color_attribution_arrows"/);
   view.state.activeCase = detail;
-  view.state.page = 'case-settings';
-  assert.match(view.settingsPage(), /name="color_attribution_arrows" type="checkbox" checked/);
-  assert.match(view.settingsPage(), /Color arrows by attribution/);
-  await view.submitSettings({name: detail.name, color_attribution_arrows_present: '1', color_attribution_arrows: 'on'});
-  assert.equal(view.calls.findLast(call => call.path === '/api/cases/arrowcase/settings').body.settings.color_attribution_arrows, true);
-  await view.submitSettings({name: detail.name, color_attribution_arrows_present: '1'});
-  assert.equal(view.calls.findLast(call => call.path === '/api/cases/arrowcase/settings').body.settings.color_attribution_arrows, false);
+  await view.dispatch('view-plots');
+  assert.match(view.workspace(), /name="color_attribution_arrows" type="checkbox" checked/);
+  assert.match(view.workspace(), /Color arrows by attribution/);
+  await view.submitPlotSettings({color_attribution_arrows_present: '1'});
+  assert.equal(view.calls.findLast(call => call.path === '/api/cases/arrowcase/plot-settings').body.settings.color_attribution_arrows, false);
+  await view.submitPlotSettings({color_attribution_arrows_present: '1', color_attribution_arrows: 'on'});
+  assert.equal(view.calls.findLast(call => call.path === '/api/cases/arrowcase/plot-settings').body.settings.color_attribution_arrows, true);
+  assert.equal(view.calls.some(call => call.path.endsWith('/actions')), false);
 });
 
 test('limited forms preserve attribution arrow settings and explicit unchecked controls disable them', async () => {
@@ -876,23 +910,28 @@ test('peg-out preview URLs and transaction text are rendered safely', async () =
   assert.match(html, /&lt;script&gt;/);
 });
 
-test('named-group layout is opt-in, saved per case, and retained by trace-only forms', async () => {
+test('named-group layout is opt-in, saved in Plot Layouts, and retained by trace-only forms', async () => {
   const detail = {id: 'centeredcase', name: 'Treasury layout', run_defaults: {...defaults, center_name: 'Treasury Group'}, runs: []};
-  const view = await harness(path => path === '/api/cases/centeredcase' ? detail : undefined);
+  const view = await harness((path, body) => {
+    if (path === '/api/cases/centeredcase/plot-settings') {
+      Object.assign(detail.run_defaults, body.settings);
+      return detail;
+    }
+    if (path === '/api/cases/centeredcase') return detail;
+  });
   assert.doesNotMatch(view.newCase(), /name="center_name"/);
   await view.dispatch('open-case', {dataset: {id: detail.id}});
-  await view.dispatch('case-settings');
-  assert.match(view.settingsPage(), /name="center_name" maxlength="120" value="Treasury Group"/);
-  assert.match(view.settingsPage(), /Layout only: tracing and all connections stay the same/);
-  assert.match(view.settingsPage(), /Use Sync and reorganize/);
-  await view.submitSettings({name: detail.name, center_name: '  Treasury  '});
-  assert.equal(view.calls.findLast(call => call.path === '/api/cases/centeredcase/settings').body.settings.center_name, 'Treasury');
+  await view.dispatch('view-plots');
+  assert.match(view.workspace(), /name="center_name" maxlength="120" value="Treasury Group"/);
+  assert.match(view.workspace(), /Layout only: tracing and all connections stay the same/);
+  await view.submitPlotSettings({center_name: '  Treasury  '});
+  assert.equal(view.calls.findLast(call => call.path === '/api/cases/centeredcase/plot-settings').body.settings.center_name, 'Treasury');
   const previous = {...defaults, hub_addresses: [], center_name: 'Treasury Group'};
   assert.equal(view.readSettings({values: defaults}, previous).center_name, 'Treasury Group');
   assert.equal(view.readSettings({values: {...defaults, center_name: ''}}, previous).center_name, '');
   assert.equal(view.readSettings({values: defaults}).center_name, '');
-  await view.submitSettings({name: detail.name, center_name: ''});
-  assert.equal(view.calls.findLast(call => call.path === '/api/cases/centeredcase/settings').body.settings.center_name, '');
+  await view.submitPlotSettings({center_name: ''});
+  assert.equal(view.calls.findLast(call => call.path === '/api/cases/centeredcase/plot-settings').body.settings.center_name, '');
 });
 
 test('changing the centered group makes saved ELK and compact previews stale', async () => {
@@ -919,9 +958,9 @@ test('named-group suggestions use local active attribution names and escape opti
     {name: 'Group "<test>', enabled_addresses: 2},
   ]} : undefined);
   view.state.activeCase = {id: 'centeredcase', name: 'Case', run_defaults: defaults, runs: []};
-  view.state.page = 'case-settings';
+  view.state.page = 'case'; view.state.caseView = 'plots';
   const list = {innerHTML: ''};
-  view.elements.set('#settings-form input[name="center_name"]', {value: ' Treasury '});
+  view.elements.set('#plot-layout-form input[name="center_name"]', {value: ' Treasury '});
   view.elements.set('#center-name-options', list);
   await view.suggestCenterNames();
   assert.deepEqual(view.calls.findLast(call => call.path.endsWith('/name-colors')).body, {query: 'Treasury', offset: 0, limit: 100});
@@ -936,9 +975,12 @@ test('investigation tool views isolate panels and preserve the selected snapshot
   view.state.activeCase = {id: 'case', name: 'Case', run_defaults: defaults, latest_run: 'latest-id', runs: [{id: 'old-id'}, {id: 'latest-id'}]};
   view.state.selectedRun = 'old-id';
   assert.match(view.workspace(), /id="collection-panel"/);
-  assert.doesNotMatch(view.workspace(), /id="plot-views-panel"|data-action="workflow-board-sync"/);
+  assert.doesNotMatch(view.workspace(), /Collection settings|Choose a plotting goal/);
+  assert.doesNotMatch(view.workspace(), /id="plot-layouts-panel"|data-action="workflow-board-sync"/);
   await view.dispatch('view-plots');
-  assert.match(view.workspace(), /id="plot-views-panel"/);
+  assert.match(view.workspace(), /id="plot-layouts-panel"/);
+  assert.match(view.workspace(), /Plot Layouts/);
+  assert.doesNotMatch(view.workspace(), /Plot views/);
   assert.doesNotMatch(view.workspace(), /id="collection-panel"|data-action="workflow-board-sync"/);
   await view.dispatch('view-history');
   assert.match(view.workspace(), /CSV downloads/);
@@ -984,6 +1026,141 @@ const workflowCase = (extra = {}) => ({id: 'case1', name: 'Shared evidence', see
   run_defaults: defaults, runs: [{id: 'saved1', status: 'bounded_complete', max_hops: 10}], latest_run: 'saved1',
   plots: [], boards: [], ...extra});
 const workflowEdit = (view, id, value) => view.workflowInput({id: 'workflow-' + id, value});
+const layoutKeys = ['layout_attempts', 'connector_style', 'include_fees', 'color_attribution_arrows',
+  'group_context_inputs', 'center_name', 'hub_addresses'];
+
+test('Plot Layouts owns every layout control and explains persistence without starting collection', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({runs: [], latest_run: undefined});
+  await view.dispatch('view-plots');
+  const html = view.workspace();
+  assert.match(html, /id="plot-layout-form"/);
+  for (const key of layoutKeys) assert.equal((html.match(new RegExp(`name="${key}"`, 'g')) || []).length, 1, key);
+  for (const label of ['Separate branch hubs', 'Center named group', 'Group isolated context inputs',
+    'Color arrows by attribution', 'Connector appearance', 'Save layout settings']) assert.ok(html.includes(label), label);
+  assert.match(html, /saved (?:locally )?(?:with|for|in|per) (?:this |each |the )?investigation/i);
+  assert.doesNotMatch(html, /Graph settings/);
+  assert.match(html, /data-action="plot-settings-save"/);
+  assert.equal(view.calls.length, 1);
+});
+
+test('generating a plot saves changed layout settings before queuing the selected saved-data goal', async () => {
+  const detail = workflowCase();
+  const first = 'G' + 'a'.repeat(33), second = 'H' + 'b'.repeat(33);
+  const view = await harness((path, body) => {
+    if (path === '/api/cases/case1/plot-settings') {
+      detail.run_defaults = {...detail.run_defaults, ...body.settings};
+      return detail;
+    }
+    if (path === '/api/cases/case1/actions') return {id: 'plotjob', status: 'running'};
+  });
+  view.state.activeCase = detail;
+  await view.dispatch('view-plots');
+  view.plotForm({layout_attempts: '40', connector_style: 'curved', include_fees_present: '1', include_fees: 'on',
+    group_context_inputs_present: '1', group_context_inputs: 'on', color_attribution_arrows_present: '1',
+    color_attribution_arrows: 'on', center_name: '  Treasury  ', hub_addresses: `${second}\n${first}\n${second}`});
+  await view.dispatch('workflow-plot');
+  const writes = view.calls.filter(call => call.body);
+  assert.deepEqual(writes.map(call => call.path), ['/api/cases/case1/plot-settings', '/api/cases/case1/actions']);
+  assert.deepEqual(writes[0].body, {settings: {layout_attempts: 40, connector_style: 'curved', include_fees: true,
+    group_context_inputs: true, color_attribution_arrows: true, center_name: 'Treasury', hub_addresses: [first, second]}});
+  assert.deepEqual(writes[1].body, {action: 'plot', goal: 'full', run_id: 'saved1', min_hops: 0, max_hops: 0});
+  assert.equal(view.state.job.live, false);
+});
+
+test('unchanged layout settings skip the save request when generating a plot', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'plotjob', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase();
+  await view.dispatch('view-plots');
+  view.plotForm({layout_attempts: '25', connector_style: 'straight', include_fees_present: '1',
+    group_context_inputs_present: '1', color_attribution_arrows_present: '1', center_name: '', hub_addresses: ''});
+  await view.dispatch('workflow-plot');
+  assert.equal(view.calls.filter(call => call.path.endsWith('/plot-settings')).length, 0);
+  assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 1);
+});
+
+test('saving a filtered layout preserves full-trace options and reloads saved preferences in a new session', async () => {
+  const hubs = ['G' + 'a'.repeat(33)];
+  const detail = workflowCase({runs: [], latest_run: undefined, run_defaults: {...defaults,
+    include_fees: true, group_context_inputs: true, hub_addresses: hubs}});
+  const respond = (path, body) => {
+    if (path === '/api/cases/case1/plot-settings') {
+      detail.run_defaults = {...detail.run_defaults, ...body.settings};
+      return detail;
+    }
+    if (path === '/api/cases/case1') return detail;
+  };
+  const view = await harness(respond);
+  view.state.activeCase = detail;
+  await view.dispatch('view-plots');
+  await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+  const disabledFields = view.workspace().match(/<fieldset[^>]*\bdisabled[^>]*>[\s\S]*?<\/fieldset>/)?.[0];
+  assert.ok(disabledFields);
+  for (const key of ['include_fees', 'group_context_inputs', 'hub_addresses']) assert.ok(disabledFields.includes(`name="${key}"`));
+  view.plotForm({layout_attempts: '61', connector_style: 'curved', center_name: 'Saved Treasury',
+    color_attribution_arrows_present: '1', color_attribution_arrows: 'on'});
+  await view.dispatch('plot-settings-save');
+  const saved = view.calls.find(call => call.path.endsWith('/plot-settings')).body.settings;
+  assert.deepEqual(Object.keys(saved).sort(), [...layoutKeys].sort());
+  assert.equal(saved.include_fees, true);
+  assert.equal(saved.group_context_inputs, true);
+  assert.deepEqual(saved.hub_addresses, hubs);
+  assert.equal(view.calls.some(call => call.path.endsWith('/actions')), false);
+  const restarted = await harness(respond);
+  await restarted.dispatch('open-case', {dataset: {id: 'case1'}});
+  await restarted.dispatch('view-plots');
+  assert.match(restarted.workspace(), /name="layout_attempts"[^>]*value="61"/);
+  assert.match(restarted.workspace(), /value="Saved Treasury"/);
+  assert.equal(restarted.state.settings.layout_attempts, 25, 'per-investigation saves do not overwrite workspace preferences');
+});
+
+test('a failed layout save retains edits and prevents generation until the save succeeds', async () => {
+  const view = await harness(path => path.endsWith('/plot-settings') ? {error: 'Cannot save layout settings.'} : undefined);
+  view.state.activeCase = workflowCase();
+  await view.dispatch('view-plots');
+  view.plotForm({layout_attempts: '45', center_name: 'Retain this group'});
+  await assert.rejects(view.dispatch('workflow-plot'), /Cannot save layout settings/);
+  assert.equal(view.calls.some(call => call.path.endsWith('/actions')), false);
+  assert.equal(view.state.activeCase.run_defaults.layout_attempts, 25);
+  assert.match(view.workspace(), /name="layout_attempts"[^>]*value="45"/);
+  assert.match(view.workspace(), /value="Retain this group"/);
+  assert.equal(view.isBusy(), false);
+});
+
+test('invalid layout controls prevent both saving and queuing a plot', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase();
+  await view.dispatch('view-plots');
+  view.plotForm({layout_attempts: '0'}, false);
+  await view.dispatch('workflow-plot');
+  await view.submitPlotSettings({layout_attempts: '0'}, false);
+  assert.equal(view.calls.length, 1);
+});
+
+test('layout drafts survive tab navigation and remain isolated between investigations', async () => {
+  const cases = {first: workflowCase({id: 'first', run_defaults: {...defaults, center_name: 'First saved'}}),
+    second: workflowCase({id: 'second', run_defaults: {...defaults, center_name: 'Second saved'}})};
+  const view = await harness(path => Object.values(cases).find(detail => path === `/api/cases/${detail.id}`));
+  await view.dispatch('open-case', {dataset: {id: 'first'}});
+  await view.dispatch('view-plots');
+  view.editPlotSettings({center_name: 'First unsaved', layout_attempts: '33'});
+  view.elements.delete('#plot-layout-form');
+  await view.dispatch('view-collect');
+  await view.dispatch('view-plots');
+  assert.match(view.workspace(), /value="First unsaved"/);
+  assert.match(view.workspace(), /name="layout_attempts"[^>]*value="33"/);
+  await view.dispatch('open-case', {dataset: {id: 'second'}});
+  await view.dispatch('view-plots');
+  assert.match(view.workspace(), /value="Second saved"/);
+  assert.doesNotMatch(view.workspace(), /First unsaved/);
+  view.editPlotSettings({center_name: 'Second unsaved'});
+  view.elements.delete('#plot-layout-form');
+  await view.dispatch('open-case', {dataset: {id: 'first'}});
+  await view.dispatch('view-plots');
+  assert.match(view.workspace(), /value="First unsaved"/);
+  assert.doesNotMatch(view.workspace(), /Second unsaved/);
+  assert.equal(view.calls.some(call => call.body), false, 'draft navigation does not silently persist settings');
+});
 
 test('all plotting goals are visible and plot only the selected saved run without fetching', async () => {
   for (const goal of ['full', 'connections', 'pegouts']) {
@@ -1203,7 +1380,7 @@ test('settings data tools preserve an unsaved investigation draft and remain out
   const html = view.settingsPage();
   assert.match(html, /value="Unsaved investigation name"/);
   assert.match(html, /name="hops"[^>]*value="7"/);
-  assert.match(html, /name="center_name"[^>]*value="Treasury"/);
+  assert.doesNotMatch(html, /name="center_name"/);
   const form = html.match(/<form id="settings-form"[\s\S]*?<\/form>/)?.[0];
   assert.ok(form);
   assert.doesNotMatch(form, /data-action="(?:input-import-open|change-outputs-open|addresses)"/);
