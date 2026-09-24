@@ -139,6 +139,57 @@ class LocalWebTests(unittest.TestCase):
             start.assert_not_called()
         self.assertEqual((path / "case.json").read_bytes(), before)
 
+    def test_liquid_blockchain_lookup_and_case_creation_round_trip_without_board(self):
+        txid = synthetic_txid()
+        with patch.object(self.server, "start_job", return_value={"id": "synthetic"}) as start:
+            self.success("/api/lookup", {"txids": txid, "blockchain": "liquid"}, 202)
+            self.assertEqual(start.call_args.args[0], ["inspect-txs", "--txids", txid])
+            self.assertTrue(start.call_args.kwargs["live"])
+        info = self.success("/api/cases", {"name": "Liquid without board", "seeds": [txid + ":0"],
+                                           "blockchain": "liquid"}, 201)
+        self.assertEqual(info["blockchain"], "liquid")
+        self.assertFalse(info["fixture"])
+        self.assertIsNone(info["miro_board"])
+        path, metadata = self.server.case(info["id"])
+        self.assertEqual(metadata["blockchain"], "liquid")
+        self.assertEqual(read_json(path / "case.json")["blockchain"], "liquid")
+        self.assertEqual(self.success("/api/cases/" + info["id"])["blockchain"], "liquid")
+        self.assertEqual(self.success("/api/session")["cases"][0]["blockchain"], "liquid")
+        legacy = self.success("/api/cases", {"name": "Legacy linked board", "seeds": [txid + ":0"],
+                                             "blockchain": "liquid", "board": "LEGACY="}, 201)
+        self.assertEqual(legacy["miro_board"], "LEGACY=")
+        self.assertEqual(legacy["blockchain"], "liquid")
+
+    def test_unsupported_blockchain_never_starts_lookup_or_creates_case(self):
+        txid = synthetic_txid()
+        with patch.object(self.server, "start_job") as start, \
+                patch("liquid_tracer.web.create_investigation") as create:
+            for blockchain in ("bitcoin", "ethereum", "fixture", "live", "Liquid", " liquid ", "", None, True, [], {}):
+                for route, body in (("/api/lookup", {"txids": txid}),
+                                    ("/api/cases", {"name": "Unsupported", "seeds": [txid + ":0"]})):
+                    with self.subTest(blockchain=blockchain, route=route):
+                        code, response, _ = self.request(route, {**body, "blockchain": blockchain})
+                        self.assertEqual(code, 400)
+                        self.assertIn("Only Liquid", response["error"])
+            start.assert_not_called()
+            create.assert_not_called()
+        self.assertFalse(self.server.root.exists())
+        self.assertEqual(self.server.jobs, {})
+        self.assertIsNone(self.server.active_job)
+
+    def test_legacy_case_summary_defaults_blockchain_without_changing_saved_bytes(self):
+        _, info = self.create()
+        path, metadata = self.server.case(info["id"])
+        metadata.pop("blockchain")
+        save_json(path / "case.json", metadata)
+        before = (path / "case.json").read_bytes()
+        summary = self.success("/api/cases/" + info["id"])
+        self.assertEqual(summary["blockchain"], "liquid")
+        self.assertTrue(summary["fixture"])
+        self.assertEqual(self.success("/api/session")["cases"][0]["blockchain"], "liquid")
+        self.assertEqual(self.server.case_summary(path, metadata)["blockchain"], "liquid")
+        self.assertEqual((path / "case.json").read_bytes(), before)
+
     def test_new_lookups_and_cases_default_to_live_without_fixture_paths(self):
         txid = synthetic_txid()
         with patch.object(self.server, "start_job", return_value={"id": "synthetic"}) as start:
@@ -150,6 +201,7 @@ class LocalWebTests(unittest.TestCase):
                     info = self.success("/api/cases", {
                         "name": "Live investigation", "seeds": [txid + ":0"], **source}, 201)
                     self.assertFalse(info["fixture"])
+                    self.assertEqual(info["blockchain"], "liquid")
                     _, metadata = self.server.case(info["id"])
                     self.assertIsNone(metadata["fixture"])
         self.assertIsNone(self.server.active_job)

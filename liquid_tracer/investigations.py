@@ -28,6 +28,13 @@ DEFAULTS = {
 }
 
 
+def validate_blockchain(value):
+    """Validate the chain identity independently of live or fixture data sources."""
+    if not isinstance(value, str) or value != "liquid":
+        raise TraceError("Unsupported blockchain. Only Liquid is currently available.")
+    return value
+
+
 def default_root():
     root = os.environ.get("LIQUID_INVESTIGATIONS_DIR")
     return Path(root).expanduser() if root else Path(os.environ.get("LIQUID_TRACER_ROOT") or Path.cwd()) / "cases"
@@ -100,7 +107,7 @@ def _validate_case(metadata):
     identity = metadata.get("case_id")
     if not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{32}", identity):
         raise TraceError("Invalid case identity; restore the original case.json")
-    return metadata
+    return {**metadata, "blockchain": validate_blockchain(metadata.get("blockchain", "liquid"))}
 
 
 def read_case(case):
@@ -136,7 +143,8 @@ def _name(value):
     return value.strip()
 
 
-def create_investigation(root, name, *, board=None, fixture=None, seeds=None, run_defaults=None):
+def create_investigation(root, name, *, board=None, fixture=None, seeds=None, run_defaults=None, blockchain="liquid"):
+    blockchain = validate_blockchain(blockchain)
     name = _name(name)
     defaults = validate_settings(run_defaults or {})
     if board:
@@ -154,7 +162,7 @@ def create_investigation(root, name, *, board=None, fixture=None, seeds=None, ru
     case = root / f"{slug}-{identity[:8]}"
     case.mkdir()  # Never reuse an existing investigation, even if names match.
     save_json(case / "case.json", {
-        "schema_version": 1, "case_id": identity, "name": name,
+        "schema_version": 1, "case_id": identity, "name": name, "blockchain": blockchain,
         "created_at": now(), "miro_board": board or None,
         "fixture": str(fixture) if fixture else None, "seeds": normalized,
         "run_defaults": defaults,

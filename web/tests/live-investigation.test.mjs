@@ -95,33 +95,41 @@ test('startup offers an empty live investigation without fetching bundled sample
   assert.deepEqual(view.calls, [{path: '/api/session', body: undefined}]);
   assert.equal(view.state.draft.txids, '');
   assert.equal(view.state.draft.seeds, '');
+  assert.equal(view.state.draft.blockchain, 'liquid');
   assert.match(view.newCase(), /This lookup uses your Blockstream credits/);
+  assert.match(view.newCase(), /<select name="blockchain" required><option value="liquid" selected>Liquid Network<\/option><\/select>/);
+  assert.doesNotMatch(view.newCase(), /name="board"|Miro board URL or ID/);
   view.state.draft.txids = txid;
   await view.dispatch('lookup');
-  assert.deepEqual(view.calls[1], {path: '/api/lookup', body: {source: 'live', txids: txid}});
+  assert.deepEqual(view.calls[1], {path: '/api/lookup', body: {source: 'live', blockchain: 'liquid', txids: txid}});
   assert.equal(view.state.job.live, true);
+  assert.match(view.newCase(), /<select name="blockchain" required disabled>/);
 });
 
 test('successful creation sends live source and resets the draft without sample seeds', async () => {
   const detail = {id: 'newcase', name: 'My investigation', run_defaults: defaults, runs: [], seeds: [`${txid}:0`]};
   const view = await harness((path) => path === '/api/cases' || path === '/api/cases/newcase' ? detail : undefined);
-  await view.submit({name: detail.name, txids: txid, seeds: `${txid}:0`, board: ''});
+  await view.submit({name: detail.name, blockchain: 'liquid', txids: txid, seeds: `${txid}:0`});
   const create = view.calls.find(call => call.path === '/api/cases');
   assert.equal(create.body.source, 'live');
+  assert.equal(create.body.blockchain, 'liquid');
+  assert.equal(Object.hasOwn(create.body, 'board'), false);
   assert.deepEqual(create.body.seeds, [`${txid}:0`]);
   assert.equal(view.state.activeCase.id, detail.id);
   assert.equal(view.state.draft.txids, '');
   assert.equal(view.state.draft.seeds, '');
   assert.equal(view.state.draft.selected.size, 0);
+  assert.equal(view.state.draft.blockchain, 'liquid');
   assert.equal(view.isBusy(), false);
 });
 
 test('failed creation retains investigator inputs and releases the form for retry', async () => {
   const view = await harness(path => path === '/api/cases' ? {error: 'Could not save investigation.'} : undefined);
-  await view.submit({name: 'Keep this name', txids: txid, seeds: `${txid}:2`, board: ''});
+  await view.submit({name: 'Keep this name', blockchain: 'liquid', txids: txid, seeds: `${txid}:2`});
   assert.equal(view.state.draft.name, 'Keep this name');
   assert.equal(view.state.draft.txids, txid);
   assert.equal(view.state.draft.seeds, `${txid}:2`);
+  assert.equal(view.state.draft.blockchain, 'liquid');
   assert.match(view.state.error, /Could not save investigation/);
   assert.equal(view.isBusy(), false);
 });
@@ -137,6 +145,7 @@ for (const live of [true, false]) {
     assert.equal(view.state.job.live, live);
     await view.pollJob();
     assert.equal(view.state.job, null);
+    assert.equal(view.state.draft.blockchain, 'liquid');
     if (live) {
       assert.equal(view.state.draft.txids, txid);
       assert.equal(view.state.draft.reports.length, 1);

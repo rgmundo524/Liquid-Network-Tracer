@@ -92,6 +92,7 @@ type InvestigationBoard = {
 type Case = {
   id: string;
   name: string;
+  blockchain?: string;
   latest_run?: string;
   fixture?: string | boolean;
   miro_board?: string;
@@ -233,7 +234,7 @@ const state = {
     name: "",
     txids: "",
     seeds: "",
-    board: "",
+    blockchain: "liquid",
     settings: { ...defaults },
     reports: [] as Report[],
     selected: new Set<string>(),
@@ -559,7 +560,7 @@ function dashboard(): string {
 
 function newCase(): string {
   const draft = state.draft;
-  return `<div class="page-heading"><div><div class="eyebrow">Build a starting point</div><h1 id="page-title" tabindex="-1">New investigation</h1><p>Choose the transactions and exact outputs you want to follow.</p></div>${button("Back to investigations", "dashboard", "", "ghost")}</div><form id="new-case-form"><div class="form-grid"><div class="form-stack"><section class="panel"><div class="panel-head"><h2><span class="section-number">1</span> Investigation details</h2></div><div class="panel-body"><label class="field"><span>Investigation name</span><input name="name" maxlength="120" placeholder="e.g. Service withdrawal review" value="${esc(draft.name)}" required autocomplete="off"/></label><label class="field"><span>Miro board URL or ID <span class="muted">(optional)</span></span><input name="board" placeholder="You can link or create a board later" value="${esc(draft.board)}" autocomplete="off"/></label></div></section><section class="panel"><div class="panel-head"><div><h2><span class="section-number">2</span> Starting outputs</h2><p>Multiple transactions can share one investigation.</p></div></div><div class="panel-body"><label class="field"><span>Transaction hashes</span><textarea name="txids" class="mono" rows="3" spellcheck="false" placeholder="Paste transaction hashes separated by commas">${esc(draft.txids)}</textarea><small>Paste up to 100 transaction hashes, separated by commas, spaces, or newlines.</small></label><div class="heading-actions">${button("Load outputs", "lookup", "search", "", isBusy())}</div><p class="small muted" style="margin-top:12px">This lookup uses your Blockstream credits. Watch the terminal for Proton Pass prompts.</p><div id="lookup-outputs">${draft.reports.length ? '<p class="small muted" style="margin-top:17px">Amounts are base units; ?? means unavailable.</p>' : ""}${draft.reports
+  return `<div class="page-heading"><div><div class="eyebrow">Build a starting point</div><h1 id="page-title" tabindex="-1">New investigation</h1><p>Choose a blockchain and the exact outputs you want to follow.</p></div>${button("Back to investigations", "dashboard", "", "ghost")}</div><form id="new-case-form"><div class="form-grid"><div class="form-stack"><section class="panel"><div class="panel-head"><h2><span class="section-number">1</span> Investigation details</h2></div><div class="panel-body"><div class="field-row"><label class="field"><span>Investigation name</span><input name="name" maxlength="120" placeholder="e.g. Service withdrawal review" value="${esc(draft.name)}" required autocomplete="off"/></label><label class="field"><span>Blockchain</span><select name="blockchain" required${disabled(isBusy())}><option value="liquid" selected>Liquid Network</option></select></label></div><p class="small muted">Liquid Network is currently the only supported blockchain.</p></div></section><section class="panel"><div class="panel-head"><div><h2><span class="section-number">2</span> Starting outputs</h2><p>Multiple transactions can share one investigation.</p></div></div><div class="panel-body"><label class="field"><span>Transaction hashes</span><textarea name="txids" class="mono" rows="3" spellcheck="false" placeholder="Paste transaction hashes separated by commas">${esc(draft.txids)}</textarea><small>Paste up to 100 transaction hashes, separated by commas, spaces, or newlines.</small></label><div class="heading-actions">${button("Load outputs", "lookup", "search", "", isBusy())}</div><p class="small muted" style="margin-top:12px">This lookup uses your Blockstream credits. Watch the terminal for Proton Pass prompts.</p><div id="lookup-outputs">${draft.reports.length ? '<p class="small muted" style="margin-top:17px">Amounts are base units; ?? means unavailable.</p>' : ""}${draft.reports
     .map(
       (report, index) =>
         `<section class="output-group"><header><span>Transaction ${index + 1}</span><span class="mono" title="${esc(report.txid)}">${esc(short(report.txid, 15))}</span></header>${report.outputs
@@ -571,7 +572,7 @@ function newCase(): string {
     )
     .join(
       "",
-    )}${draft.reports.length ? `<p class="selection-count" id="selection-count">${draft.selected.size} starting output${draft.selected.size === 1 ? "" : "s"} selected</p>` : ""}</div><details class="direct-seeds"${draft.seeds ? " open" : ""}><summary>Enter exact output references directly</summary><label class="field"><span>Starting outputs</span><textarea name="seeds" class="mono" rows="2" spellcheck="false" placeholder="TRANSACTION_HASH:0, TRANSACTION_HASH:1">${esc(draft.seeds)}</textarea><small>Optional. These numeric outpoints are combined with checked outputs above.</small></label></details></div></section><section class="panel"><div class="panel-head"><h2>Starting preferences</h2></div><div class="panel-body"><p>Uses workspace defaults: <strong>${draft.settings.hops} additional hops</strong> per run.</p>${traceSummary(draft.settings)}<p class="small muted">After creating the investigation, use Investigation settings to adjust tracing, layout, colors, and Miro.</p></div></section><div class="form-actions"><p>Creates the investigation locally. Start a trace when you are ready.</p><button class="btn primary" type="submit"${disabled(isBusy())}>${icon("plus")}Create investigation</button></div></div><aside class="form-stack"><div class="side-note"><strong>Follow specific outputs</strong>Each selected UTXO becomes a starting point. Shared descendants appear once in the cumulative graph.<ul><li>Choose relevant outputs after lookup.</li><li>Fees and unspendable outputs cannot be selected.</li><li>Hidden amounts and assets appear as ??.</li></ul></div><div class="side-note"><strong>One case, several runs</strong>Each run has its own budget. Continue unfinished branches in a later run, including after closing this interface.</div></aside></div></form>`;
+    )}${draft.reports.length ? `<p class="selection-count" id="selection-count">${draft.selected.size} starting output${draft.selected.size === 1 ? "" : "s"} selected</p>` : ""}</div><details class="direct-seeds"${draft.seeds ? " open" : ""}><summary>Enter exact output references directly</summary><label class="field"><span>Starting outputs</span><textarea name="seeds" class="mono" rows="2" spellcheck="false" placeholder="TRANSACTION_HASH:0, TRANSACTION_HASH:1">${esc(draft.seeds)}</textarea><small>Optional. These numeric outpoints are combined with checked outputs above.</small></label></details></div></section><section class="panel"><div class="panel-head"><h2>Starting preferences</h2></div><div class="panel-body"><p>Uses workspace defaults: <strong>${draft.settings.hops} additional hops</strong> per run.</p>${traceSummary(draft.settings)}<p class="small muted">Adjust tracing, layout, and colors later in Investigation settings.</p></div></section><div class="form-actions"><p>Creates the investigation locally. Start a trace when you are ready.</p><button class="btn primary" type="submit"${disabled(isBusy())}>${icon("plus")}Create investigation</button></div></div><aside class="form-stack"><div class="side-note"><strong>Follow specific outputs</strong>Each selected UTXO becomes a starting point. Shared descendants appear once in the cumulative graph.<ul><li>Choose relevant outputs after lookup.</li><li>Fees and unspendable outputs cannot be selected.</li><li>Hidden amounts and assets appear as ??.</li></ul></div><div class="side-note"><strong>One case, several runs</strong>Each run has its own budget. Continue unfinished branches in a later run, including after closing this interface.</div></aside></div></form>`;
 }
 
 function boardUrl(board: string): string {
@@ -1219,7 +1220,7 @@ function saveDraft(): void {
   state.draft.name = String(data.get("name") || "");
   state.draft.txids = String(data.get("txids") || "");
   state.draft.seeds = String(data.get("seeds") || "");
-  state.draft.board = String(data.get("board") || "");
+  state.draft.blockchain = String(data.get("blockchain") ?? state.draft.blockchain);
   state.draft.settings = readSettings(form, state.draft.settings);
 }
 
@@ -1785,7 +1786,7 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
       );
     await startJob(
       "/api/lookup",
-      { source: "live", txids: state.draft.txids },
+      { source: "live", blockchain: state.draft.blockchain, txids: state.draft.txids },
       "lookup",
       true,
     );
@@ -1961,7 +1962,7 @@ app.addEventListener("submit", (event) => {
         const created = await api<Case>("/api/cases", {
           name: state.draft.name,
           source: "live",
-          board: state.draft.board,
+          blockchain: state.draft.blockchain,
           seeds,
           settings: state.draft.settings,
         });
@@ -1971,7 +1972,7 @@ app.addEventListener("submit", (event) => {
           name: "",
           txids: "",
           seeds: "",
-          board: "",
+          blockchain: "liquid",
           settings: { ...state.settings },
           reports: [],
           selected: new Set(),
