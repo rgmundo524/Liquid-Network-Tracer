@@ -108,7 +108,7 @@ class NamedGroupPreferencesTests(unittest.TestCase):
             graph["graph_options"]["center_name"] = name
             self.assertIsNone(center_order(graph))
             self.assertEqual(_request_graph(graph), ordinary)
-            self.assertEqual(_request(ordinary[0], 1)["branchProfile"], "balanced")
+            self.assertEqual(_request(ordinary[0], 1)["branchProfile"], "flow_weighted")
 
     def test_centering_is_requested_for_one_attempt_and_contains_no_name(self):
         graph = named_fixture()

@@ -5,7 +5,7 @@ from .common import TraceError
 
 DEFAULT_LAYOUT_ATTEMPTS = 25
 MAX_LAYOUT_ATTEMPTS = 1000
-LAYOUT_SEARCH_VERSION = 3
+LAYOUT_SEARCH_VERSION = 4
 
 
 def normalize_layout_attempts(value=None):

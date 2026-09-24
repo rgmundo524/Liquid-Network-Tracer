@@ -22,9 +22,9 @@ class BranchBoundaryAdapterTests(unittest.TestCase):
         original = copy.deepcopy(request)
         choices = [_request(request, index) for index in range(1, 8)]
         self.assertEqual([choice["boundaryOrdering"] for choice in choices],
-                         [False, True, False, True, False, True, False])
+                         [True, False, True, False, True, False, True])
         self.assertEqual([choice["branchProfile"] for choice in choices],
-                         ["balanced", *["flow_weighted"] * 6])
+                         ["flow_weighted", "balanced", *["flow_weighted"] * 5])
         self.assertEqual(choices[:3], [_request(request, index) for index in range(1, 4)])
         self.assertEqual(request, original)
         request.pop("branchNodeOrder")
@@ -35,7 +35,7 @@ class BranchBoundaryAdapterTests(unittest.TestCase):
         graph["fee_items"] = {"c": {"endpoint": "shapes"}}
         with patch("liquid_tracer.elk_layout.branch_order", return_value=["d", "b", "c", "a"]):
             request, _, _ = _request_graph(graph)
-        self.assertEqual(request["branchNodeOrder"], ["d", "b", "a"])
+        self.assertEqual(request["branchNodeOrder"], ["b", "a", "d"])
         self.assertEqual([child["id"] for child in request["children"]], ["a", "b", "d"])
         self.assertEqual([child["layoutOptions"]["elk.partitioning.partition"]
                           for child in request["children"]], ["1", "1", "2"])
@@ -111,6 +111,7 @@ class BranchBoundaryWorkerTests(unittest.TestCase):
 
     def test_real_worker_rejects_invalid_boundary_order_before_layout(self):
         request, _, _ = _request_graph(crossing_graph())
+        request.pop("branchNodeOrder")
         order = [node["id"] for node in request["children"]]
         mutations = [{"boundaryOrdering": True},
                      {"branchNodeOrder": order, "boundaryOrdering": None},

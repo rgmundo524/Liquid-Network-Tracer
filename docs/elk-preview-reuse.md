@@ -3,10 +3,10 @@
 Ordinary **Sync to Miro** now checks completed full-graph ELK previews under the
 investigation's `previews/` directory before launching another layout calculation.
 A matching preview reports **Reusing the completed ELK layout; no recalculation**.
-Previews made before the current search revision 3, including the failed-attempt
-outcome metadata, are no longer reused. The earlier connector-label spacing,
+Previews made before the current search revision 4, including the branch-first candidate schedule
+and transaction-proximity scoring, are no longer reused. The earlier connector-label spacing,
 input ordering, horizontal spacing, change-output and small-jog corrections remain included.
-The current branch-organization revision 2 is also required, including the new branch-boundary candidate ordering and quality measurements.
+The current branch-organization revision 3 is also required, including local fork ordering, sibling grouping and transaction-neighborhood measurements. Completed search outcome metadata remains required; earlier saved files remain available for historical viewing.
 Horizontal-spacing revision 2 reduces the default gap between object columns from 200 to 150 units. Older spacing previews must be refreshed. Regenerate older **Compact graph** previews too, because their saved clearance rules describe the previous spacing.
 Choose **Refresh layout preview** to save a compatible replacement.
 Keep the entire preview directory, not just its SVG: graph.json,
