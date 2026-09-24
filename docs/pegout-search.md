@@ -1,21 +1,29 @@
 # Trace to peg-outs
 
 Use **Trace to peg-outs** in the investigation workspace or terminal menu to
-search forward from a Liquid transaction and plot paths reaching peg-out
-requests. The transaction does not need to be a starting transaction in the
-main investigation, and the search is available before the first full run.
+search forward from all of the investigation's originally selected seed UTXOs
+and plot paths reaching peg-out requests. The search is available before the
+first full run.
 
-1. Enter the transaction ID.
-2. Enter the minimum and maximum number of transaction hops.
-3. Choose **Trace and plot peg-outs**.
-4. Review the search status, peg-out report, and graph. If a budget interrupted
+1. Enter the minimum and maximum number of transaction hops.
+2. Choose **Trace and plot peg-outs**.
+3. Review the search status, peg-out report, and graph. If a budget interrupted
    the search, choose **Resume search** to continue its saved frontier.
 
-The origin transaction is **hop 0**. One forward UTXO spend adds one hop, and both
-bounds are inclusive. A range of 0–0 finds requests in the origin transaction.
+Each starting transaction is **hop 0**. Only its selected seed outputs start
+the search; unselected sibling outputs are excluded, including at hop 0.
+One forward UTXO spend adds one hop, and both bounds are inclusive. A range of
+0–0 finds requests among the selected seed outputs themselves.
 A range of 2–4 includes any verified path of two, three, or four spends ending in
 a peg-out request. If a request is also reachable in one hop, its qualifying
-longer paths still appear. All origin outputs are considered.
+longer paths still appear. All saved seed UTXOs participate, including selections
+from multiple starting transactions.
+
+For an independent search, enable **Use a different starting transaction** and
+enter a transaction ID. This optional mode considers **all outputs** of that
+transaction, including peg-out requests at hop 0, as before. It does not change
+the investigation's seeds. If the investigation has no selected seeds, choose
+this mode explicitly; the search will not substitute all outputs automatically.
 
 The search fetches transactions using the investigation's API source, confirmed
 transaction cache, request throttling, and bounded parallel fetching. Each
@@ -37,8 +45,10 @@ undiscovered. A completed bounded search is limited to its selected hop range,
 confirmation policy, stop rules, and observed spends. Zero results are not proof
 that no peg-out exists.
 
-Select a saved search to resume with the same transaction and range. To change
-the range, start a new search. Its transaction responses can reuse the existing
+Select a saved search to resume with the same saved seed selection or custom
+transaction and range. Saved searches show their starting scope. Later changes
+to investigation seeds do not change a saved search. To change the range or
+starting scope, start a new search. Its transaction responses can reuse the existing
 case cache. A failed layout does not erase tracing progress: choose **Refresh
 peg-out preview** to render its archived evidence again without fetching more
 transactions. If interruption prevented the archive from finishing, recover and
@@ -55,9 +65,16 @@ saved IDs with your values. For live searches, use `liquid-live` in place of
 `python3 -m liquid_tracer` to retrieve the normal local credentials.
 
 ```sh
-python3 -m liquid_tracer pegouts --case CASE_DIRECTORY --txid TXID --min-hops 2 --max-hops 4
+python3 -m liquid_tracer pegouts --case CASE_DIRECTORY --min-hops 2 --max-hops 4
 python3 -m liquid_tracer pegouts --case CASE_DIRECTORY --resume SEARCH_ID
 python3 -m liquid_tracer pegouts-preview --case CASE_DIRECTORY --search SEARCH_ID
+```
+
+Omit `--txid` to use the saved selected seed UTXOs. Use `--txid` only for the
+optional custom transaction mode:
+
+```sh
+python3 -m liquid_tracer pegouts --case CASE_DIRECTORY --txid TXID --min-hops 2 --max-hops 4
 ```
 
 The search accepts `--max-transactions`, `--max-outpoints`, `--max-requests`, and

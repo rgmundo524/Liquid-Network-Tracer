@@ -91,12 +91,21 @@ def legend_notes(graph=None):
         query = report.get("query") if isinstance(report, dict) else None
         if not isinstance(query, dict):
             raise TraceError("Peg-out legend requires its reviewed search query")
-        query = validate_query(query.get("txid"), query.get("min_hops"), query.get("max_hops"))
+        query = validate_query(query.get("txid"), query.get("min_hops"), query.get("max_hops"),
+                               seeds=query.get("seeds"))
+        if "seeds" in query:
+            count = len({seed.split(":")[0] for seed in query["seeds"]})
+            origin = (f"Peg-out search: {len(query['seeds'])} selected seed UTXO(s) "
+                      f"from {count} starting transaction(s).")
+            hop_zero = "Each starting transaction is hop 0."
+        else:
+            origin = "Peg-out search origin: " + query["txid"]
+            hop_zero = "The origin is hop 0."
         coverage = ("Coverage: bounded search completed. " if report.get("source_run_status") == "bounded_complete"
                     else "Coverage: partial search. ")
         notes.extend([
-            "Peg-out search origin: " + query["txid"],
-            f"Range: {query['min_hops']} to {query['max_hops']} transaction hops, inclusive. The origin is hop 0.",
+            origin,
+            f"Range: {query['min_hops']} to {query['max_hops']} transaction hops, inclusive. " + hop_zero,
             "Only qualifying paths are plotted. Their combined edges can also form routes outside the selected range.",
             "Peg-out diamonds are Liquid requests, not confirmation of Bitcoin payouts.",
             coverage + "Stopped, unconfirmed or unsearched branches may contain undiscovered peg-outs; no result does not prove absence.",

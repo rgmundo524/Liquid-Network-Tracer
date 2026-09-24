@@ -26,6 +26,104 @@ def report(state, minimum=0, maximum=10, origin=None):
 
 
 class PegoutPathTests(unittest.TestCase):
+    def test_validate_selected_seed_outputs_preserves_legacy_query_shape(self):
+        seeds = ["  " + tx("b").upper() + ":01 ", tx("a") + ":0", tx("b") + ":1"]
+        before = list(seeds)
+        self.assertEqual(validate_query(seeds=seeds),
+                         {"seeds": [tx("a") + ":0", tx("b") + ":1"], "min_hops": 0, "max_hops": 10})
+        self.assertEqual(seeds, before)
+        for value in ([], "bad", [True], [None], ["bad"], [tx("a") + ":-1"],
+                      [tx("a") + ":4294967296"]):
+            with self.subTest(seeds=value), self.assertRaises(TraceError):
+                validate_query(seeds=value)
+        with self.assertRaises(TraceError):
+            validate_query(tx("a"), seeds=[tx("a") + ":0"])
+        with self.assertRaises(TraceError):
+            validate_query(seeds=[tx("a") + ":0"], min_hops=2, max_hops=1)
+        self.assertEqual(validate_query(tx("a")), {"txid": tx("a"), "min_hops": 0, "max_hops": 10})
+
+    def test_seed_query_uses_all_selected_roots_without_unselected_siblings(self):
+        state = graph_state((("a:0", "c"), ("a:1", "d"), ("b:0", "e")), seeds=("a:0", "b:0"))
+        selected = {add_pegout(state, tx("c")), add_pegout(state, tx("e"))}
+        add_pegout(state, tx("d"))
+        add_pegout(state, tx("a"))
+        before = deepcopy(state)
+        query = validate_query(seeds=state["seeds"], max_hops=1)
+        graph = pegout_graph(state, query)
+        self.assertEqual({row["outpoint"] for row in graph["pegouts"]["matches"]}, selected)
+        self.assertEqual(graph["pegouts"]["outpoints"], sorted(state["seeds"]))
+        self.assertEqual({node["id"] for node in graph["nodes"] if node.get("role") == "starting_transaction"},
+                         {"tx:" + tx("a"), "tx:" + tx("b")})
+        self.assertTrue(all(row["hops"] == [1] for row in graph["pegouts"]["matches"]))
+        self.assertIn("selected seed outputs", graph["pegouts"]["scope"])
+        self.assertIn("each seed transaction is hop 0", graph["notice"])
+        self.assertEqual(graph["graph_options"]["pegout_query"], query)
+        validate_plan(make_plan(graph))
+        self.assertEqual(state, before)
+
+    def test_seed_hop_zero_matches_only_selected_pegout_outputs(self):
+        state = graph_state(seeds=("a:0", "b:0"))
+        selected = add_pegout(state, tx("a"))
+        add_pegout(state, tx("a"))
+        add_pegout(state, tx("b"))
+        graph = pegout_graph(state, validate_query(seeds=[selected, tx("b") + ":0"], max_hops=0))
+        self.assertEqual([(row["outpoint"], row["hops"]) for row in graph["pegouts"]["matches"]],
+                         [(selected, [0])])
+        self.assertEqual([edge["id"] for edge in graph["edges"]], ["out:" + selected])
+
+    def test_reached_seed_transaction_allows_its_other_outputs_only_downstream(self):
+        state = graph_state((("a:0", "b"), ("b:0", "c"), ("b:1", "d")), seeds=("a:0", "b:0"))
+        selected = add_pegout(state, tx("b"))
+        sibling = add_pegout(state, tx("b"))
+        endpoint_c = add_pegout(state, tx("c"))
+        endpoint_d = add_pegout(state, tx("d"))
+        query = validate_query(seeds=[*state["seeds"], selected], max_hops=2)
+        result = pegout_graph(state, query)["pegouts"]
+        self.assertEqual({row["outpoint"]: row["hops"] for row in result["matches"]},
+                         {selected: [0, 1], sibling: [1], endpoint_c: [1, 2], endpoint_d: [2]})
+        self.assertEqual(set(result["outpoints"]), {tx("a") + ":0", tx("b") + ":0", tx("b") + ":1"})
+        one = pegout_graph(state, {**query, "min_hops": 1, "max_hops": 1})["pegouts"]
+        self.assertEqual({row["outpoint"] for row in one["matches"]}, {selected, sibling, endpoint_c})
+        self.assertNotIn(tx("b") + ":1", one["outpoints"])
+
+    def test_multiple_seed_paths_keep_distances_and_service_allowances_on_merge(self):
+        state = graph_state((("a:0", "d"), ("b:0", "c"), ("c:0", "d"), ("d:0", "e")),
+                            seeds=("a:0", "b:0"))
+        endpoint = add_pegout(state, tx("e"))
+        capped = annotation(stop=False)
+        capped.update(kind="outpoint", value=tx("a") + ":0", hop_limit=1)
+        state["labels"] = [capped]
+        query = validate_query(seeds=state["seeds"], max_hops=3)
+        result = pegout_graph(state, query)["pegouts"]
+        self.assertEqual([(row["outpoint"], row["hops"]) for row in result["matches"]], [(endpoint, [3])])
+        self.assertEqual(set(result["outpoints"]), {tx("b") + ":0", tx("c") + ":0", tx("d") + ":0"})
+        state["labels"] = []
+        result = pegout_graph(state, query)["pegouts"]
+        self.assertEqual(result["matches"][0]["hops"], [2, 3])
+        self.assertEqual(result["match_count"], 1)
+
+    def test_seed_query_handles_partial_bootstrap_and_rejects_missing_known_output(self):
+        state = graph_state(seeds=("a:0",))
+        with self.assertRaisesRegex(TraceError, "does not exist"):
+            pegout_graph(state, validate_query(seeds=[tx("a") + ":1"]))
+        state["transactions"] = {}
+        graph = pegout_graph(state, validate_query(seeds=state["seeds"]))
+        self.assertEqual(graph["nodes"], [])
+        self.assertEqual(graph["edges"], [])
+
+    def test_seed_roots_each_respect_saved_confirmation_policy(self):
+        state = graph_state((("a:0", "c"), ("b:0", "d")), seeds=("a:0", "b:0"))
+        unconfirmed_path = add_pegout(state, tx("c"))
+        confirmed_path = add_pegout(state, tx("d"))
+        state["transactions"][tx("a")]["data"]["status"] = {"confirmed": False}
+        query = validate_query(seeds=state["seeds"])
+        graph = pegout_graph(state, query)
+        self.assertEqual([row["outpoint"] for row in graph["pegouts"]["matches"]], [confirmed_path])
+        state["include_unconfirmed"] = True
+        graph = pegout_graph(state, query)
+        self.assertEqual({row["outpoint"] for row in graph["pegouts"]["matches"]},
+                         {unconfirmed_path, confirmed_path})
+
     def test_validate_transaction_and_inclusive_bounds(self):
         self.assertEqual(validate_query("  " + tx("a").upper() + " ", 0, 0),
                          {"txid": tx("a"), "min_hops": 0, "max_hops": 0})
@@ -194,7 +292,7 @@ class PegoutPathTests(unittest.TestCase):
         state["status"] = "paused"
         ordinary = build_graph(state)
         ordinary_notes = legend_notes(ordinary)
-        self.assertEqual(len(ordinary_notes), 5)
+        self.assertEqual(len(ordinary_notes), 6)
         graph = pegout_graph(state, validate_query(tx("a"), 1, 4))
         graph["notice"] = "UNTRUSTED NOTICE MUST NOT BECOME LEGEND CONTENT"
         plan = make_plan(graph)
@@ -256,6 +354,35 @@ class PegoutPathTests(unittest.TestCase):
             actual = report(state, minimum, maximum, ids[0])
             self.assertEqual(set(actual["outpoints"]), expected_edges, iteration)
             self.assertEqual({row["txid"]: set(row["hops"]) for row in actual["matches"]}, expected_matches, iteration)
+
+            # Compare selected-output searches against independent exhaustive
+            # traversal too, including seed transactions reached downstream.
+            saved = {key: record["data"] for key, record in state["transactions"].items()}
+            candidates = [f"{key}:{index}" for key in ids for index in range(len(saved[key]["vout"]))]
+            if not candidates:
+                continue
+            seeds = {key for key in candidates if rng.random() < .4} or {candidates[0]}
+            expected_edges, expected_matches = set(), {}
+            stack = [(root, [], maximum) for root in {key.split(":")[0] for key in seeds}]
+            while stack:
+                current, path, allowance = stack.pop()
+                if minimum <= len(path) <= maximum:
+                    for index, value in enumerate(saved[current]["vout"]):
+                        key = f"{current}:{index}"
+                        if value.get("pegout") and (path or key in seeds):
+                            expected_edges.update(path)
+                            expected_matches.setdefault(key, set()).add(len(path))
+                if len(path) >= maximum:
+                    continue
+                for parent, child, key, _, cap in edges:
+                    budget = min(allowance, cap)
+                    if parent == current and budget > 0 and (path or key in seeds):
+                        stack.append((child, path + [key], budget - 1))
+            query = validate_query(seeds=sorted(seeds), min_hops=minimum, max_hops=maximum)
+            actual = pegout_graph(state, query)["pegouts"]
+            self.assertEqual(set(actual["outpoints"]), expected_edges, iteration)
+            self.assertEqual({row["outpoint"]: set(row["hops"]) for row in actual["matches"]},
+                             expected_matches, iteration)
 
 
 if __name__ == "__main__":

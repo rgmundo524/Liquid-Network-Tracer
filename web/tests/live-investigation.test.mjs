@@ -663,11 +663,29 @@ const pegoutCase = (searches = [], overrides = {}) => ({id: 'case1', name: 'Peg-
   run_defaults: defaults, runs: [], seeds: [], pegout_searches: searches, ...overrides});
 const pegoutEdit = (view, id, value, checked = false) => view.pegoutInput({id: 'pegouts-' + id, value, checked});
 
-test('peg-out search is available before a full run, validates range, and starts a real bounded search', async () => {
+test('peg-out search defaults to all saved selected seeds before the first full run', async () => {
   const view = await harness(path => path.endsWith('/actions') ? {id: 'pegjob', status: 'running'} : undefined);
-  view.state.activeCase = pegoutCase();
-  assert.match(view.pegoutsGraph(view.state.activeCase), /data-action="pegouts-start"[^>]*>/);
-  assert.match(view.pegoutsGraph(view.state.activeCase), /Hop 0 is that transaction/);
+  view.state.activeCase = pegoutCase([], {seeds: [`${txid}:1`, `${txid}:4`, `${'b'.repeat(64)}:0`]});
+  const html = view.pegoutsGraph(view.state.activeCase);
+  assert.match(html, /data-action="pegouts-start"[^>]*>/);
+  assert.match(html, /3 selected seed UTXOs from 2 starting transactions/);
+  assert.match(html, /Each starting transaction is hop 0/);
+  assert.match(html, /Unselected sibling outputs at the start are excluded/);
+  assert.doesNotMatch(html, /id="pegouts-txid"/);
+  pegoutEdit(view, 'min', '2'); pegoutEdit(view, 'max', '4');
+  await view.dispatch('pegouts-start');
+  assert.deepEqual(view.calls.at(-1), {path: '/api/cases/case1/actions', body: {action: 'pegouts', min_hops: 2, max_hops: 4}});
+  assert.equal(view.state.job.live, true);
+  assert.equal(view.state.job.action, 'pegouts');
+});
+
+test('peg-out custom origin is opt-in, starts empty, and uses the entered transaction', async () => {
+  const view = await harness();
+  view.state.activeCase = pegoutCase([], {seeds: [`${'b'.repeat(64)}:3`]});
+  pegoutEdit(view, 'custom', '', true);
+  const html = view.pegoutsGraph(view.state.activeCase);
+  assert.match(html, /id="pegouts-txid"[^>]*value=""/);
+  assert.match(html, /custom search considers all outputs/);
   pegoutEdit(view, 'txid', txid.toUpperCase()); pegoutEdit(view, 'min', '2'); pegoutEdit(view, 'max', '4');
   await view.dispatch('pegouts-start');
   assert.deepEqual(view.calls.at(-1), {path: '/api/cases/case1/actions', body: {action: 'pegouts', txid, min_hops: 2, max_hops: 4}});
@@ -675,10 +693,34 @@ test('peg-out search is available before a full run, validates range, and starts
   assert.equal(view.state.job.action, 'pegouts');
 });
 
+test('turning custom origin off restores seed scope and never sends its stale transaction', async () => {
+  const view = await harness(); view.state.activeCase = pegoutCase([], {seeds: [`${txid}:2`]});
+  pegoutEdit(view, 'custom', '', true); pegoutEdit(view, 'txid', 'b'.repeat(64));
+  pegoutEdit(view, 'custom', '', false);
+  assert.doesNotMatch(view.pegoutsGraph(view.state.activeCase), /id="pegouts-txid"/);
+  await view.dispatch('pegouts-start');
+  assert.deepEqual(view.calls.at(-1).body, {action: 'pegouts', min_hops: 0, max_hops: 10});
+});
+
+test('missing seeds prevent the default search and offer an explicit custom origin', async () => {
+  const view = await harness(); view.state.activeCase = pegoutCase();
+  const html = view.pegoutsGraph(view.state.activeCase);
+  assert.match(html, /no selected seed UTXOs/);
+  assert.match(html, /Use a different starting transaction/);
+  assert.match(html, /data-action="pegouts-start"[^>]* disabled/);
+  await assert.rejects(view.dispatch('pegouts-start'), /no selected seed UTXOs/);
+  assert.equal(view.calls.length, 1);
+  pegoutEdit(view, 'custom', '', true); pegoutEdit(view, 'txid', txid);
+  assert.doesNotMatch(view.pegoutsGraph(view.state.activeCase), /data-action="pegouts-start"[^>]* disabled/);
+  await view.dispatch('pegouts-start');
+  assert.equal(view.calls.at(-1).body.txid, txid);
+});
+
 test('peg-out invalid IDs and inverted or noninteger ranges never start jobs', async () => {
   for (const [id, low, high] of [['bad', '0', '4'], [txid, '5', '4'], [txid, '-1', '4'],
     [txid, '0', '2.5'], [txid, '', '4'], [txid, '0', '2147483648']]) {
     const view = await harness(); view.state.activeCase = pegoutCase();
+    pegoutEdit(view, 'custom', '', true);
     pegoutEdit(view, 'txid', id); pegoutEdit(view, 'min', low); pegoutEdit(view, 'max', high);
     await assert.rejects(view.dispatch('pegouts-start'), /transaction ID|hop limits/);
     assert.equal(view.calls.length, 1);
@@ -686,11 +728,25 @@ test('peg-out invalid IDs and inverted or noninteger ranges never start jobs', a
 });
 
 test('peg-out hop zero is inclusive and fixture searches stay offline', async () => {
-  const view = await harness(); view.state.activeCase = pegoutCase([], {fixture: true});
-  pegoutEdit(view, 'txid', txid); pegoutEdit(view, 'min', '0'); pegoutEdit(view, 'max', '0');
+  const view = await harness(); view.state.activeCase = pegoutCase([], {fixture: true, seeds: [`${txid}:2`]});
+  pegoutEdit(view, 'min', '0'); pegoutEdit(view, 'max', '0');
   await view.dispatch('pegouts-start');
   assert.equal(view.state.job.live, false);
-  assert.deepEqual(view.calls.at(-1).body, {action: 'pegouts', txid, min_hops: 0, max_hops: 0});
+  assert.deepEqual(view.calls.at(-1).body, {action: 'pegouts', min_hops: 0, max_hops: 0});
+});
+
+test('saved seed scope uses its captured selections alongside legacy transaction searches', async () => {
+  const view = await harness();
+  const saved = pegoutSearch({txid: undefined, seeds: [`${txid}:1`, `${txid}:4`, `${'b'.repeat(64)}:0`]});
+  const legacy = pegoutSearch({id: '2'.repeat(16), txid: 'c'.repeat(64)});
+  view.state.activeCase = pegoutCase([saved, legacy], {seeds: [`${'d'.repeat(64)}:2`]});
+  const html = view.pegoutsGraph(view.state.activeCase);
+  assert.match(html, /Investigation seeds: 1 selected seed UTXO from 1 starting transaction/);
+  assert.match(html, /Saved scope: 3 selected seed UTXOs from 2 starting transactions/);
+  assert.match(html, /All outputs of c/);
+  assert.doesNotMatch(html, /undefined/);
+  await view.dispatch('pegouts-resume');
+  assert.deepEqual(view.calls.at(-1).body, {action: 'pegouts', resume: saved.id});
 });
 
 test('peg-out resume and preview target the independent search rather than the main run', async () => {
