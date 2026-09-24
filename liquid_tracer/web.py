@@ -424,6 +424,7 @@ class LocalServer(ThreadingHTTPServer):
             from .cli import miro_recovery_status
             from .board_rebuild import rebuild_status
 
+            summary["seeds"] = list(metadata["seeds"]) if isinstance(metadata.get("seeds"), list) else []
             summary["runs"] = sorted(runs, key=lambda run: (run.get("created_at") or "", run["id"]), reverse=True)
             summary["artifacts"] = self.saved_artifacts(case, metadata, {run["id"] for run in runs})
             summary["pegout_searches"] = self.pegout_searches(case)
