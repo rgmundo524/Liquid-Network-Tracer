@@ -422,20 +422,31 @@ test('inherited layout attempts are available in Plot Layouts after creating an 
   assert.match(view.workspace(), /name="layout_attempts"[^>]*value="80"/);
 });
 
-test('workspace and investigation settings preserve layout preferences without exposing duplicate controls', async () => {
+test('workspace saves layout defaults for future investigations while existing cases keep their preferences', async () => {
   const inherited = {...defaults, layout_attempts: 70, connector_style: 'curved', include_fees: true,
     group_context_inputs: true, color_attribution_arrows: true, center_name: 'Treasury', hub_addresses: ['G' + 'a'.repeat(33)]};
   const detail = {id: 'layoutcase', name: 'Layout case', run_defaults: inherited, runs: []};
-  const view = await harness(path => path === '/api/cases/layoutcase' ? detail : undefined);
+  let savedDefaults = {...inherited};
+  const respond = (path, body) => {
+    if (path === '/api/session') return {csrf: 'test', settings: savedDefaults, cases: [detail]};
+    if (path === '/api/settings') {savedDefaults = body.settings; return {settings: savedDefaults};}
+    if (path === '/api/cases/layoutcase') return detail;
+  };
+  const view = await harness(respond);
   view.state.page = 'settings';
-  view.state.settings = inherited;
-  assert.doesNotMatch(view.settingsPage(), /name="(?:layout_attempts|connector_style|include_fees|group_context_inputs|color_attribution_arrows|center_name|hub_addresses)"/);
-  await view.submitSettings({hops: '4'});
+  const html = view.settingsPage();
+  for (const key of layoutKeys) assert.equal((html.match(new RegExp(`name="${key}"`, 'g')) || []).length, 1, key);
+  assert.match(html, /Starting values for new investigations/);
+  await view.submitSettings({hops: '4', layout_attempts: '35', connector_style: 'elbowed',
+    include_fees_present: '1', group_context_inputs_present: '1', color_attribution_arrows_present: '1',
+    center_name: '', hub_addresses: ''});
   const workspace = view.calls.find(call => call.path === '/api/settings').body.settings;
-  assert.equal(workspace.hops, 4);
-  for (const key of ['layout_attempts', 'connector_style', 'include_fees', 'group_context_inputs', 'color_attribution_arrows', 'center_name', 'hub_addresses']) {
-    assert.deepEqual(workspace[key], inherited[key]);
-  }
+  assert.deepEqual(workspace, {...inherited, hops: 4, layout_attempts: 35, connector_style: 'elbowed',
+    include_fees: false, group_context_inputs: false, color_attribution_arrows: false, center_name: '', hub_addresses: []});
+  assert.deepEqual(JSON.parse(JSON.stringify(view.state.draft.settings)), workspace);
+  const restarted = await harness(respond);
+  assert.deepEqual(JSON.parse(JSON.stringify(restarted.state.draft.settings)), workspace);
+  assert.deepEqual(detail.run_defaults, inherited);
   view.state.activeCase = detail;
   view.state.page = 'case-settings';
   assert.doesNotMatch(view.settingsPage(), /name="(?:layout_attempts|connector_style|include_fees|group_context_inputs|color_attribution_arrows|center_name|hub_addresses)"/);
@@ -445,6 +456,25 @@ test('workspace and investigation settings preserve layout preferences without e
   for (const key of ['layout_attempts', 'connector_style', 'include_fees', 'group_context_inputs', 'color_attribution_arrows', 'center_name', 'hub_addresses']) {
     assert.deepEqual(investigation[key], inherited[key]);
   }
+});
+
+test('unsaved workspace layout defaults survive navigation without changing investigation layouts', async () => {
+  const view = await harness();
+  view.navigate('settings');
+  view.elements.set('#settings-form', {values: {layout_attempts: '51', connector_style: 'curved',
+    include_fees_present: '1', include_fees: 'on', center_name: 'Workspace Treasury'}});
+  view.navigate('dashboard');
+  view.elements.delete('#settings-form');
+  view.state.activeCase = workflowCase({run_defaults: {...defaults, center_name: 'Case Treasury'}});
+  await view.dispatch('view-plots');
+  assert.match(view.workspace(), /name="center_name"[^>]*value="Case Treasury"/);
+  view.navigate('settings');
+  const html = view.settingsPage();
+  assert.match(html, /name="layout_attempts"[^>]*value="51"/);
+  assert.match(html, /name="connector_style"><option value="straight">Straight<\/option><option value="curved" selected>/);
+  assert.match(html, /name="include_fees" type="checkbox" checked/);
+  assert.match(html, /name="center_name"[^>]*value="Workspace Treasury"/);
+  assert.equal(view.calls.some(call => call.body), false);
 });
 
 test('a limited form preserves the prior layout-attempt count when the input is absent', async () => {
