@@ -177,7 +177,7 @@ try {
     }
   }
   const orders = inputPortOrders(request.graph);
-  const organizeBranches = [1, 2, 3, 4].includes(request.graph.branchOrganization);
+  const organizeBranches = [1, 2, 3, 4, 5].includes(request.graph.branchOrganization);
   delete request.graph.branchOrganization;
   // Load and construct inside the diagnostic boundary so setup failures do
   // not expose module paths or get retried as stochastic seed failures.
