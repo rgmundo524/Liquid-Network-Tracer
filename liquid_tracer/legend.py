@@ -80,6 +80,7 @@ def legend_notes(graph=None):
         ("Named arrows color only links directly entering or leaving that address; other arrows use the defaults."
          if arrows else "Arrows use the traced and context colors shown above."),
         "Thick red borders mark branch convergence. Colors and links do not prove ownership or allocate value.",
+        "L-BTC amounts use L-BTC units: 100,000,000 base units = 1 L-BTC. Other assets use base units.",
         "?? = not publicly available. STOP TRACING = an explicit address boundary.",
     ]
     if (graph or {}).get("graph_options", {}).get("view") == "pegout_paths":
