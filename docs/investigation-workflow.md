@@ -122,8 +122,10 @@ investigation preferences.
 
 Both **Investigation settings** and **Workspace defaults** persist across
 sessions. Investigation settings apply to the current case. Workspace defaults
-set collection limits and the Miro sync budget for future cases, without
-changing existing investigations. Layout preferences live in **Plot Layouts**.
+set collection limits, all seven plot layout preferences, and the Miro sync
+budget copied into future cases, without changing existing investigations.
+Edit a current investigation's layout preferences in **Plot Layouts**;
+Workspace defaults supplies their starting values only.
 
 ## Existing investigations and older searches
 

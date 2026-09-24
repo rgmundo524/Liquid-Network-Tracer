@@ -1257,20 +1257,20 @@ function saveSettingsDraft(): void {
   if (!form || !renderedSettingsKey) return;
   const data = new FormData(form);
   const previous = settingsDrafts.get(renderedSettingsKey)?.settings || {...defaults, ...(renderedSettingsKey === "workspace" ? state.settings : state.activeCase?.run_defaults)};
-  settingsDrafts.set(renderedSettingsKey, {settings: {...readSettings(form, previous), ...selectLayoutSettings(previous)}, name: String(data.get("name") || ""), board: String(data.get("board") || "")});
+  settingsDrafts.set(renderedSettingsKey, {settings: {...readSettings(form, previous), ...(renderedSettingsKey === "workspace" ? {} : selectLayoutSettings(previous))}, name: String(data.get("name") || ""), board: String(data.get("board") || "")});
 }
 
 function settingsPage(): string {
   const isCase = state.page === "case-settings", detail = state.activeCase;
   const draft = settingsDrafts.get(settingsKey());
   const settings = draft?.settings || {...defaults, ...(isCase ? detail?.run_defaults : state.settings)};
-  return `<div class="page-heading"><div><div class="eyebrow">${isCase ? esc(detail?.name) : "Workspace"}</div><h1 id="page-title" tabindex="-1">${isCase ? "Investigation settings" : "Workspace defaults"}</h1><p>${isCase ? "Data, collection limits, attribution colors, and Miro sync limits for this investigation. Plot appearance is saved in Plot Layouts." : "Default collection and Miro sync limits copied into new investigations. Existing investigations keep their own settings. Set plot appearance inside each investigation’s Plot Layouts."}</p></div>${button(isCase ? "Back to investigation" : "Back to investigations", isCase ? "back-case" : "dashboard", "", "ghost")}</div>
-    <nav class="settings-navigation" aria-label="Settings sections">${isCase ? '<a href="#settings-data">Investigation data</a>' : ""}<a href="#settings-trace">Tracing</a><a href="#settings-miro">Miro</a>${isCase ? '<a href="#settings-colors">Colors</a>' : ""}</nav>
+  return `<div class="page-heading"><div><div class="eyebrow">${isCase ? esc(detail?.name) : "Workspace"}</div><h1 id="page-title" tabindex="-1">${isCase ? "Investigation settings" : "Workspace defaults"}</h1><p>${isCase ? "Data, collection limits, attribution colors, and Miro sync limits for this investigation. Plot appearance is saved in Plot Layouts." : "Collection limits, plot layout preferences, and Miro sync limits copied into new investigations. Existing investigations keep their own settings."}</p></div>${button(isCase ? "Back to investigation" : "Back to investigations", isCase ? "back-case" : "dashboard", "", "ghost")}</div>
+    <nav class="settings-navigation" aria-label="Settings sections">${isCase ? '<a href="#settings-data">Investigation data</a>' : ""}<a href="#settings-trace">Tracing</a>${!isCase ? '<a href="#settings-layout">Plot layouts</a>' : ""}<a href="#settings-miro">Miro</a>${isCase ? '<a href="#settings-colors">Colors</a>' : ""}</nav>
     ${isCase && detail ? `<div class="settings-layout">${investigationDataPanel(detail)}</div>` : ""}
     <form id="settings-form" class="settings-layout">
     ${isCase ? `<section class="panel"><div class="panel-body"><label class="field"><span>Investigation name</span><input name="name" maxlength="120" required value="${esc(draft?.name ?? detail?.name)}" autocomplete="off"/></label></div></section>` : ""}
     <section class="panel" id="settings-trace"><div class="panel-head"><div><h2>Tracing</h2><p>Saved defaults for each bounded run.</p></div></div><div class="panel-body">${budgetFields(settings)}</div></section>
-
+    ${!isCase ? `<section class="panel" id="settings-layout"><div class="panel-head"><div><h2>Plot layout defaults</h2><p>Starting values for new investigations. Adjust each investigation separately in Plot Layouts.</p></div></div><div class="panel-body">${graphFields(settings)}</div></section>` : ""}
     <section class="panel" id="settings-miro"><div class="panel-head"><h2>Miro</h2></div><div class="panel-body">${isCase ? `${button("Manage investigation boards", "view-boards", "board", "", isBusy())}<p class="small muted">Create, link and sync boards in Miro boards.</p>` : ""}${numericField(settings, "max_new_items", "New Miro items", "Maximum new objects and connections per sync.")}<p class="small muted">Live actions use your existing SecretSpec and Proton Pass configuration.</p></div></section>
     <div class="form-actions settings-save"><p>${isCase ? "Save once to update this investigation." : "Applies to investigations created after saving."}</p><button type="submit" class="btn primary"${disabled(isBusy())}>${icon("check")}Save settings</button></div></form>
     ${isCase && detail ? `<section class="panel" id="settings-colors"><div class="panel-head"><div><h2>Colors</h2><p>Graph roles and attribution names. Color edits save separately.</p></div>${button("Edit colors", "name-colors-open", "", "", isBusy())}</div></section>${nameColorsPanel(detail.id, isBusy())}` : ""}`;
@@ -2060,7 +2060,7 @@ app.addEventListener("submit", (event) => {
     } else if (form.id === "settings-form") {
       const savedKey = settingsKey();
       const previous = {...defaults, ...(state.page === "case-settings" ? state.activeCase?.run_defaults : state.settings)};
-      const settings = {...readSettings(form, previous), ...selectLayoutSettings(previous)};
+      const settings = {...readSettings(form, previous), ...(state.page === "case-settings" ? selectLayoutSettings(previous) : {})};
       const data = new FormData(form);
       if (state.page === "case-settings" && state.activeCase) {
         const caseId = state.activeCase.id;
