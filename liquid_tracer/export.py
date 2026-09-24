@@ -15,8 +15,9 @@ from .graph_markers import node_border
 from .services import confidence_value
 from .attribution_presentation import display_name, attribution_reference
 from .name_colors import apply_name_colors, apply_attribution_arrow_colors, color_text, color_value
+from .edge_labels import caption_text
 
-PRESENTATION_VERSION = 24
+PRESENTATION_VERSION = 25
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -485,9 +486,11 @@ def svg_graph(graph):
     for edge, (path, (label_x, label_y), _) in routes:
         context = edge["role"].startswith("context")
         color = edge_color(edge)
-        chunks.append(f'<g class="edge {"context" if context else "tracked"}" data-edge-key="{html.escape(edge["id"], quote=True)}"><title>{html.escape(edge["outpoint"] + " | " + edge["quantity"])}</title>'
+        caption = (f'<text x="{label_x}" y="{label_y-10}" text-anchor="middle" font-size="11" fill="{color}">{html.escape(edge["label"])}</text>'
+                   if caption_text(edge) else '')
+        chunks.append(f'<g class="edge {"context" if context else "tracked"}" data-edge-key="{html.escape(edge["id"], quote=True)}"><title>{html.escape(edge["label"] + " | " + edge["outpoint"] + " | " + edge["quantity"])}</title>'
             f'<path d="{path}" fill="none" stroke="{color}" stroke-width="{stroke_width(edge["role"])}" marker-end="url(#{edge_marker_id(edge)})"/>'
-            f'<text x="{label_x}" y="{label_y-10}" text-anchor="middle" font-size="11" fill="{color}">{html.escape(edge["label"])}</text></g>')
+            f'{caption}</g>')
     for node in graph["nodes"]:
         x, y, fill = node["x"], node["y"], node["color"]
         node_width, node_height = node["width"], node["height"]

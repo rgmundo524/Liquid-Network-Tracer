@@ -301,7 +301,7 @@ def _svg(graph, nodes, edges, *, banner=True):
                      + _escape(notice) + '</text>'] if banner else []), '<g id="edges" fill="none">'])
     for index, edge in enumerate(edges):
         marker = edge_marker_id(edge)
-        caption = _text(caption_text(edge))
+        caption = _text(caption_text(edge, display=False))
         lines.append(f'<path id="edge-{index}" data-edge-id="{_escape(edge["id"])}" '
                      f'data-source="{_escape(edge["source"])}" data-target="{_escape(edge["target"])}" '
                      f'data-appearance="{edge["connector_shape"]}" d="{_path(edge["points"], edge["connector_shape"] == "curved")}" '

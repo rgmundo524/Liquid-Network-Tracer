@@ -10,7 +10,7 @@ from collections import defaultdict
 from copy import deepcopy
 
 
-CONTEXT_GROUP_VERSION = 1
+CONTEXT_GROUP_VERSION = 2
 NOTICE = ("Context summaries contain isolated external input addresses, not an "
           "ownership group. Original addresses and input evidence remain in local exports.")
 
@@ -103,6 +103,7 @@ addresses are required; all must connect only as external inputs to one tx.
         inputs = [edge for node in members for edge in incident[node["id"]]]
         key = "context-group:" + target.removeprefix("tx:")
         input_count = len(inputs)
+        dense = input_count > 8
         summary = {
             "id": key, "kind": "context_group", "role": "context_group",
             "label": (f"{len(addresses)} context addresses\n"
@@ -110,7 +111,10 @@ addresses are required; all must connect only as external inputs to one tx.
             "column": nodes[target]["column"] - 1,
             "x": min(node["x"] for node in members),
             "y": sum(node["y"] for node in members) / len(members),
-            "width": 240, "height": max(160, (input_count + 1) * 18),
+            # The rectangle summarizes input evidence; its size does not need
+            # one text row per UTXO. ELK can preserve distinct zero-size ports
+            # within this fixed shape, as it already does on transactions.
+            "width": 240, "height": 160,
             "color": members[0].get("color", "#f5f6f8"),
             "text_color": members[0].get("text_color", "#15253b"),
             "url": None,
@@ -122,6 +126,11 @@ addresses are required; all must connect only as external inputs to one tx.
         for edge in inputs:
             edge["original_source"] = edge["source"]
             edge["source"] = key
+            if dense:
+                # Keep every connector and its original evidence. Reserving a
+                # separate visible caption for hundreds of parallel inputs
+                # creates an enormous layout channel beside a small summary.
+                edge["caption_display"] = "details_only"
         removed.update(member_ids)
         summaries.append(summary)
     result["nodes"] = [node for node in result["nodes"] if node["id"] not in removed] + summaries
