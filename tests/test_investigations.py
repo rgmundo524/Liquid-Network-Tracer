@@ -19,6 +19,53 @@ class InvestigationTests(unittest.TestCase):
         self.root = Path(self.temp.name) / "cases"
         self.project = Path(__file__).resolve().parents[1]
 
+    def test_blockchain_is_persisted_for_new_cases_and_survives_updates(self):
+        for options in ({}, {"blockchain": "liquid"}):
+            with self.subTest(options=options):
+                case = create_investigation(self.root, "Liquid case", **options)
+                self.assertEqual(read_json(case / "case.json")["blockchain"], "liquid")
+                self.assertEqual(read_case(Path(str(case)))["blockchain"], "liquid")
+                update_case(case, {"name": "Renamed Liquid case"})
+                self.assertEqual(read_case(case)["blockchain"], "liquid")
+                before = (case / "case.json").read_bytes()
+                with self.assertRaises(TraceError):
+                    update_case(case, {"blockchain": "bitcoin"})
+                self.assertEqual((case / "case.json").read_bytes(), before)
+
+    def test_legacy_blockchain_defaults_on_read_without_rewriting_case_or_evidence(self):
+        case = create_investigation(self.root, "Legacy Liquid", fixture=self.project / "tests/data/synthetic-api.json")
+        metadata = read_json(case / "case.json")
+        metadata.pop("blockchain")
+        save_json(case / "case.json", metadata)
+        evidence = case / "runs" / ("a" * 16)
+        evidence.mkdir(parents=True)
+        save_json(evidence / "trace.json", {"legacy_evidence": True})
+        before = {str(path.relative_to(case)): path.read_bytes() for path in case.rglob("*") if path.is_file()}
+        readback = read_case(case)
+        self.assertEqual(readback["blockchain"], "liquid")
+        self.assertEqual(readback["fixture"], metadata["fixture"])
+        self.assertEqual(dict(list_investigations(self.root))[case]["blockchain"], "liquid")
+        self.assertEqual(before, {str(path.relative_to(case)): path.read_bytes() for path in case.rglob("*") if path.is_file()})
+
+    def test_unsupported_or_malformed_blockchains_fail_before_creating_case(self):
+        for blockchain in ("bitcoin", "ethereum", "fixture", "live", "Liquid", " liquid ", "", None, True, [], {}):
+            with self.subTest(blockchain=blockchain), self.assertRaisesRegex(TraceError, "Only Liquid"):
+                create_investigation(self.root, "Unsupported chain", blockchain=blockchain)
+            self.assertFalse(self.root.exists())
+
+    def test_invalid_stored_blockchain_is_rejected_without_rewriting_metadata(self):
+        case = create_investigation(self.root, "Invalid chain")
+        for blockchain in ("bitcoin", None, [], {}):
+            with self.subTest(blockchain=blockchain):
+                metadata = read_json(case / "case.json")
+                metadata["blockchain"] = blockchain
+                save_json(case / "case.json", metadata)
+                before = (case / "case.json").read_bytes()
+                with self.assertRaisesRegex(TraceError, "Only Liquid"):
+                    read_case(case)
+                self.assertIn("Only Liquid", list_investigations(self.root)[0][1]["error"])
+                self.assertEqual((case / "case.json").read_bytes(), before)
+
     def test_distinct_investigations_survive_restart_and_preserve_metadata(self):
         first = create_investigation(self.root, "The same case", board="https://miro.com/app/board/FIRST=/")
         second = create_investigation(self.root, "The same case", board="SECOND=")

@@ -25,7 +25,7 @@ from urllib.parse import quote, unquote, urlsplit
 from .common import TraceError, read_json
 from .inspection import parse_transaction_hashes
 from .investigations import (create_investigation, default_root, load_settings,
-                             read_case, save_settings, update_case, validate_settings)
+                             read_case, save_settings, update_case, validate_blockchain, validate_settings)
 from .menu import _command, _environment, _lookup_reports, _project, _seed_values, _trace_arguments
 from .progress import public_progress
 from .layout_search import MAX_LAYOUT_ATTEMPTS, normalize_layout_attempts
@@ -385,6 +385,7 @@ class LocalServer(ThreadingHTTPServer):
 
     def case_summary(self, case, metadata, detail=False):
         summary = {"id": metadata["case_id"], "name": metadata.get("name") or case.name,
+                   "blockchain": validate_blockchain(metadata.get("blockchain", "liquid")),
                    "created_at": metadata.get("created_at"), "latest_run": metadata.get("latest_run"),
                    "fixture": bool(metadata.get("fixture")), "miro_board": metadata.get("miro_board"),
                    "run_defaults": validate_settings(metadata.get("run_defaults", {})),
@@ -1332,17 +1333,22 @@ class Handler(BaseHTTPRequestHandler):
     def post(self, parts, body):
         if parts == ["api", "settings"]:
             return {"settings": save_settings(self.server.root, body.get("settings"))}, 200
+        if parts in (["api", "lookup"], ["api", "cases"]):
+            try:
+                blockchain = validate_blockchain(body.get("blockchain", "liquid"))
+            except TraceError as error:
+                raise RequestError(str(error)) from None
         if parts == ["api", "lookup"]:
-            if set(body) - {"txids", "source"}:
-                raise RequestError("Transaction lookup accepts transaction IDs only; not fixture files or custom arguments.")
+            if set(body) - {"txids", "source", "blockchain"}:
+                raise RequestError("Transaction lookup accepts transaction IDs and a supported blockchain only; not fixture files or custom arguments.")
             if body.get("source", "live") != "live":
                 raise RequestError("New transaction lookups use live Liquid data.")
             txids = parse_transaction_hashes(body.get("txids"))
             arguments = ["inspect-txs", "--txids", ",".join(txids)]
             return self.server.start_job(arguments, action="lookup", live=True, txids=txids), 202
         if parts == ["api", "cases"]:
-            if set(body) - {"name", "seeds", "board", "settings", "source"}:
-                raise RequestError("New investigations accept a name, starting outputs, board and settings only; not fixture files.")
+            if set(body) - {"name", "seeds", "board", "settings", "source", "blockchain"}:
+                raise RequestError("New investigations accept a name, blockchain, starting outputs, board and settings only; not fixture files.")
             if body.get("source", "live") != "live":
                 raise RequestError("New investigations use live Liquid data.")
             seeds = body.get("seeds")
@@ -1351,7 +1357,7 @@ class Handler(BaseHTTPRequestHandler):
             normalized = _seed_values(" ".join(seeds))
             settings = validate_settings(body.get("settings", load_settings(self.server.root)))
             case = create_investigation(self.server.root, body.get("name"), seeds=normalized,
-                board=body.get("board") or None, run_defaults=settings)
+                board=body.get("board") or None, run_defaults=settings, blockchain=blockchain)
             return self.server.case_summary(case, read_case(case), detail=True), 201
         if len(parts) == 4 and parts[:2] == ["api", "cases"]:
             case, metadata = self.server.case(parts[2])
