@@ -73,7 +73,7 @@ class LayoutSearchTests(unittest.TestCase):
         with patch("liquid_tracer.elk_layout._worker", side_effect=worker):
             optimize_graph(graph, layout_attempts=1)
             optimize_graph(graph, layout_attempts=4)
-        self.assertEqual(observed, [(1, "balanced"), (1, "balanced"), (7, "flow_weighted"),
+        self.assertEqual(observed, [(1, "flow_weighted"), (1, "flow_weighted"), (7, "balanced"),
                                     (19, "flow_weighted"), (layout_seeds(4)[3], "flow_weighted")])
 
     def test_thousand_object_graph_keeps_all_objects_across_requested_attempts(self):
@@ -160,6 +160,7 @@ class LayoutSearchTests(unittest.TestCase):
         graph = crossing_graph()
         request, _, _ = _request_graph(graph)
         candidates = {seed: synthetic_candidate(request, [seed]) for seed in layout_seeds(2)}
+        candidates[layout_seeds(2)[0]][0]["branchBoundary"] = True
         processes = []
         for seed in layout_seeds(2):
             process = Mock(returncode=0)

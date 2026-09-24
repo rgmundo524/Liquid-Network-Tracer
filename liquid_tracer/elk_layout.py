@@ -34,6 +34,7 @@ from .branch_layout import (BRANCH_LAYOUT_VERSION, edge_priorities, organization
                             compact_context_inputs, hub_nodes)
 from .branch_boundaries import branch_order, boundary_metrics
 from .named_group_layout import (CORE_STRAIGHTNESS, center_order, center_metrics, group_structure)
+from .transaction_neighborhoods import neighborhood_order, neighborhood_metrics
 
 
 ALGORITHM = "elk_layered_v1"
@@ -411,7 +412,7 @@ def _request_graph(graph):
             item["labels"] = [{"id": "label:" + edge["id"], "text": "caption", **caption_size(edge),
                                "layoutOptions": {"elk.edgeLabels.placement": "CENTER"}}]
         edge_values.append(item)
-    ordered_nodes = branch_order(graph)
+    ordered_nodes = neighborhood_order(graph, branch_order(graph))
     centered_order = center_order(graph, ordered_nodes, centered)
     center_metadata = {"centerNodeOrder": centered_order} if centered_order is not None else {}
     boundary_order = ({"branchNodeOrder": [key for key in ordered_nodes if key in main]}
@@ -784,6 +785,8 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
             miro_estimate = layout_metrics(main, midpoint_elbows=True)
             organization = organization_metrics(main)
             result["layout"]["branch_organization"]["travel"] = organization
+            neighborhoods = neighborhood_metrics(result)
+            result["layout"]["branch_organization"]["neighborhoods"] = neighborhoods
             boundaries = boundary_metrics(result)
             result["layout"]["branch_organization"]["boundaries"] = boundaries
             centered = center_metrics(result)
@@ -792,15 +795,18 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
             # Compare native ELK routes with a simple board-routing estimate. A
             # forced semantic slot order must not win merely because ELK can draw
             # bends that Miro cannot receive. Branch separation follows every
-            # collision gate; traced-first and shorter travel break later ties.
+            # collision gate. Local forks and transaction proximity matter even
+            # within one seed lineage; historical date/port order is secondary.
             score = (score_metrics["node_overlaps"], score_metrics["node_intersections"],
                      miro_estimate["node_intersections"], score_metrics["crossings"], miro_estimate["crossings"],
                      endpoint_metrics["endpoint_order_inversions"], endpoint_metrics["coincident_ports"],
                      score_metrics["connector_overlaps"], miro_estimate["connector_overlaps"],
                      centered["alignment_deviation"], centered["center_offset"],
                      boundaries["interleavings"], boundaries["boundary_depth"], boundaries["interbranch_travel"],
-                     result["layout"]["input_order"]["policy"] != "traced_first",
-                     organization["weighted_vertical_travel"] + score_metrics["edge_length"], score_metrics["edge_length"])
+                     neighborhoods["flow_order_inversions"], neighborhoods["sibling_interleavings"],
+                     neighborhoods["transaction_distance"], neighborhoods["transaction_center_drift"],
+                     organization["weighted_vertical_travel"] + score_metrics["edge_length"], score_metrics["edge_length"],
+                     result["layout"]["input_order"]["policy"] != "traced_first")
             if best is None or score < best[0]:
                 best = (score, result, metrics, candidate["seed"])
             # Drop the current candidate and its graph views before requesting
@@ -834,26 +840,31 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
         compacted_estimate = layout_metrics(compacted, midpoint_elbows=True)
         original_ports, compacted_ports = attachment_order_metrics(result), attachment_order_metrics(compacted)
         original_boundaries, compacted_boundaries = boundary_metrics(result), boundary_metrics(compacted)
+        original_neighbors, compacted_neighbors = neighborhood_metrics(result), neighborhood_metrics(compacted)
         original_center, compacted_center = center_metrics(result), center_metrics(compacted)
         def routing_quality(value):
             return (value["node_intersections"], value["crossings"], value["connector_overlaps"])
         safe_boundaries = all(compacted_boundaries[key] <= original_boundaries[key]
                               for key in ("interleavings", "boundary_depth", "interbranch_travel"))
+        safe_neighbors = all(compacted_neighbors[key] <= original_neighbors[key]
+                             for key in ("flow_order_inversions", "sibling_interleavings", "transaction_distance"))
         safe = (not original_estimate["truncated"] and not compacted_estimate["truncated"]
                 and routing_quality(compacted_estimate) <= routing_quality(original_estimate)
                 and compacted_ports["endpoint_order_inversions"] <= original_ports["endpoint_order_inversions"]
                 and compacted_ports["coincident_ports"] <= original_ports["coincident_ports"]
                 and all(compacted_center[key] <= original_center[key]
                         for key in ("alignment_deviation", "center_offset"))
-                and safe_boundaries)
+                and safe_boundaries and safe_neighbors)
         if safe:
             result = compacted
         else:
             result["layout"]["branch_organization"]["context_compaction_rejected"] = (
-                "branch_boundary_quality" if not safe_boundaries else "attachment_routing_estimate")
+                "branch_boundary_quality" if not safe_boundaries else
+                "transaction_neighborhood_quality" if not safe_neighbors else "attachment_routing_estimate")
     else:
         result = compacted
     result["layout"]["branch_organization"]["boundaries"] = boundary_metrics(result)
+    result["layout"]["branch_organization"]["neighborhoods"] = neighborhood_metrics(result)
     if graph.get("graph_options", {}).get("center_name"):
         result["layout"]["named_group"] = center_metrics(result)
     after = layout_metrics(result)

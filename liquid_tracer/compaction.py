@@ -447,6 +447,18 @@ def _eligible(node, incident, nodes, fee_ids):
 
 def _sibling_order(nodes, adjacent):
     limits = defaultdict(list)
+    # Compaction shortens an established layout, not its branch ordering.
+    # Preserve neighbors from the entire dependency column as well as siblings
+    # so an address cannot slip between another transaction's output group.
+    columns = defaultdict(list)
+    for key, node in nodes.items():
+        if "column" in node:
+            columns[node["column"]].append(key)
+    for values in columns.values():
+        ordered = sorted(values, key=lambda key: (nodes[key]["y"], key))
+        for i, key in enumerate(ordered):
+            limits[key].append((ordered[i - 1] if i else None,
+                                ordered[i + 1] if i + 1 < len(ordered) else None))
     for node in nodes.values():
         if node["kind"] != "transaction":
             continue
@@ -737,6 +749,8 @@ def compact_graph(graph, progress=None):
     result["layout"]["metrics"].update(public_search_counts(result["layout"].get("search")))
     if result.get("graph_options", {}).get("center_name"):
         result["layout"]["named_group"] = center_metrics(result)
+    from .transaction_neighborhoods import neighborhood_metrics
+    result["layout"].setdefault("branch_organization", {})["neighborhoods"] = neighborhood_metrics(result)
     result["layout"]["compaction"] = {
         "algorithm": ALGORITHM_COMPACTION, "version": 1, "before": before, "after": after,
         "moved_addresses": moved_addresses, "moved_components": moved_components,
