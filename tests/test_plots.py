@@ -125,7 +125,7 @@ class PlotTests(unittest.TestCase):
         fresh = preview_plot(self.case, "pegouts")
         self.assertTrue(fresh["empty"])
 
-    def test_current_settings_apply_and_changes_invalidate_review(self):
+    def test_saved_layout_keeps_its_settings_after_current_preferences_change(self):
         update_case(self.case, {"run_defaults": {"include_fees": True, "group_context_inputs": True,
                                                 "center_name": "Example", "connector_style": "elbowed"}})
         result = preview_plot(self.case, "full")
@@ -134,7 +134,98 @@ class PlotTests(unittest.TestCase):
         self.assertTrue(graph["include_fees"])
         self.assertEqual(graph["graph_options"]["center_name"], "Example")
         self.assertEqual(self.layout.call_args.kwargs["connector_style"], "elbowed")
-        update_case(self.case, {"run_defaults": {"connector_style": "straight"}})
+        snapshot = deepcopy(result["layout_settings"])
+        before = self.bytes(Path(result["directory"]))
+        update_case(self.case, {"run_defaults": {"connector_style": "straight", "layout_attempts": 3,
+                                                "color_attribution_arrows": True,
+                                                "hub_addresses": ["H" * 34]}})
+        old_graph, _ = reviewed_plot(self.case, result["preview_id"])
+        self.assertEqual(old_graph, graph)
+        self.assertEqual(old_graph["plot"]["layout_settings"], snapshot)
+        self.assertEqual(self.bytes(Path(result["directory"])), before)
+        fresh = preview_plot(self.case, "full")
+        self.assertEqual(fresh["layout_settings"]["connector_style"], "straight")
+        self.assertEqual(fresh["layout_settings"]["layout_attempts"], 3)
+        self.assertFalse(fresh["layout_settings"]["include_fees"])
+        listed = list_plots(self.case)
+        self.assertEqual(len(listed), 2)
+        self.assertTrue(all(item["reviewable"] for item in listed))
+        self.assertEqual({item["layout_settings"]["connector_style"] for item in listed}, {"straight", "elbowed"})
+
+    def test_filtered_layout_snapshot_masks_full_graph_options(self):
+        update_case(self.case, {"run_defaults": {"include_fees": True, "group_context_inputs": True,
+                                                "hub_addresses": ["H" * 34], "center_name": "Example",
+                                                "color_attribution_arrows": True, "layout_attempts": 3}})
+        for goal in ("connections", "pegouts"):
+            with self.subTest(goal=goal):
+                result = preview_plot(self.case, goal)
+                graph, _ = reviewed_plot(self.case, result["preview_id"])
+                settings = result["layout_settings"]
+                self.assertFalse(settings["include_fees"])
+                self.assertFalse(settings["group_context_inputs"])
+                self.assertEqual(settings["hub_addresses"], [])
+                self.assertEqual(settings["center_name"], "Example")
+                self.assertTrue(settings["color_attribution_arrows"])
+                self.assertFalse(any(edge["role"].startswith("context") for edge in graph["edges"]))
+                self.assertFalse(graph["include_fees"])
+                self.assertFalse(any(node["kind"] == "context_group" for node in graph["nodes"]))
+
+    def test_legacy_plot_without_settings_snapshot_keeps_strict_review(self):
+        result = preview_plot(self.case, "full")
+        directory = Path(result["directory"])
+        graph = read_json(directory / "graph.json")
+        graph["plot"].pop("layout_settings")
+        save_json(directory / "graph.json", graph)
+        save_json(directory / "plot.json", graph["plot"])
+        self.rehash_preview(directory)
+        reviewed_plot(self.case, result["preview_id"])
+        before = self.bytes(directory)
+        update_case(self.case, {"run_defaults": {"connector_style": "elbowed"}})
+        with self.assertRaisesRegex(TraceError, "changed"):
+            reviewed_plot(self.case, result["preview_id"])
+        self.assertFalse(list_plots(self.case)[0]["reviewable"])
+        self.assertEqual(self.bytes(directory), before)
+
+    def test_snapshot_settings_hash_validation_and_graph_consistency(self):
+        result = preview_plot(self.case, "full")
+        directory = Path(result["directory"])
+        original = read_json(directory / "graph.json")
+        for change in ("extra", "type", "noncanonical", "hash", "graph", "version"):
+            graph = deepcopy(original)
+            settings = graph["plot"]["layout_settings"]
+            if change == "extra":
+                settings["private_path"] = "/private/unsupported"
+            elif change == "type":
+                settings["layout_attempts"] = True
+            elif change == "noncanonical":
+                settings["hub_addresses"] = ["H" * 34, "H" * 34]
+            elif change == "version":
+                settings["presentation_version"] += 1
+            else:
+                settings["connector_style"] = "elbowed"
+            if change != "hash":
+                graph["plot"]["settings_sha256"] = digest(canonical(settings))
+            save_json(directory / "graph.json", graph)
+            save_json(directory / "plot.json", graph["plot"])
+            self.rehash_preview(directory)
+            with self.subTest(change=change), self.assertRaises(TraceError):
+                reviewed_plot(self.case, result["preview_id"])
+
+    def test_new_presentation_version_requires_regeneration(self):
+        from liquid_tracer.export import PRESENTATION_VERSION
+
+        result = preview_plot(self.case, "full")
+        with patch("liquid_tracer.export.PRESENTATION_VERSION", PRESENTATION_VERSION + 1):
+            with self.assertRaisesRegex(TraceError, "presentation version"):
+                reviewed_plot(self.case, result["preview_id"])
+            listed = list_plots(self.case)
+            self.assertEqual(len(listed), 1)
+            self.assertFalse(listed[0]["reviewable"])
+
+    def test_attribution_changes_still_invalidate_a_saved_layout(self):
+        result = preview_plot(self.case, "full")
+        update_case(self.case, {"run_defaults": {"connector_style": "elbowed"}})
+        set_service(self.case, "SYNTHETIC-c-address", name="New assessment", stop_tracing=False)
         with self.assertRaisesRegex(TraceError, "changed"):
             reviewed_plot(self.case, result["preview_id"])
 

@@ -12,6 +12,7 @@ from liquid_tracer.common import TraceError, save_json
 from liquid_tracer.investigations import read_case, update_case
 from liquid_tracer.investigation_boards import link_board
 from liquid_tracer.plots import preview_plot
+from liquid_tracer.services import set_service
 from tests import test_web
 from tests.test_attribution_convergence import graph_state
 from tests.test_connections import saved_case
@@ -110,11 +111,41 @@ class WorkflowWebTests(unittest.TestCase):
         case, route, _ = self.collected()
         plot = preview_plot(case, "full")
         artifact = self.server.public_result(plot, "plot", case, [])["artifact"]
-        update_case(case, {"run_defaults": {"include_fees": True}})
+        set_service(case, "SYNTHETIC-a-address", name="Changed assessment", stop_tracing=False)
         detail = self.success(route)
         self.assertFalse(detail["plots"][0]["reviewable"])
         self.assertNotIn("artifact", detail["plots"][0])
         self.assertEqual(self.request(artifact["preview_url"])[0], 400)
+
+    def test_saved_layout_settings_remain_available_and_syncable_after_preference_change(self):
+        case, route, _ = self.collected()
+        plot = preview_plot(case, "full")
+        board = link_board(case, "full", "Original layout", "ORIGINAL=")
+        update_case(case, {"run_defaults": {"include_fees": True, "connector_style": "elbowed"}})
+        detail = self.success(route)
+        listed = detail["plots"][0]
+        self.assertTrue(listed["reviewable"])
+        self.assertEqual(listed["layout_settings"], plot["layout_settings"])
+        self.assertFalse(listed["layout_settings"]["include_fees"])
+        self.assertEqual(listed["layout_settings"]["connector_style"], "straight")
+        self.assertIn(b"svg", self.success(listed["artifact"]["preview_url"]).lower())
+        with patch.object(self.server, "start_job", return_value={"id": "sync"}) as start:
+            self.success(route + "/actions", {"action": "board-sync", "record_id": board["id"],
+                                                "preview_id": plot["preview_id"], "reorganize": True}, 202)
+            self.assertEqual(start.call_args.args[0][0], "investigation-board-sync")
+
+    def test_public_layout_settings_omit_unknown_or_malformed_nested_fields(self):
+        from liquid_tracer.workflow_api import public_plot
+
+        case, _, _ = self.collected()
+        plot = preview_plot(case, "full")
+        settings = plot["layout_settings"]
+        for invalid in (None, [], {**settings, "private_path": "/private/source"},
+                        {**settings, "connector_style": {"private_path": "/private/source"}}):
+            with self.subTest(value=invalid):
+                result = public_plot({**plot, "layout_settings": invalid})
+                self.assertNotIn("layout_settings", result)
+                self.assertNotIn("/private/source", json.dumps(result))
 
     def test_busy_plot_registry_does_not_hide_the_investigation_or_expose_paths(self):
         _, route, _ = self.collected()

@@ -1156,6 +1156,12 @@ dialog::backdrop {
 }
 
 .workspace-content { display: grid; gap: 22px; margin-top: 22px; min-width: 0; }
+.layout-fields { border: 0; padding: 0; margin: 24px 0 16px; min-width: 0; }
+.layout-fields > legend { font-size: 14px; font-weight: 600; color: #36584d; padding: 0 0 16px; }
+.layout-fields .field-row { margin-bottom: 18px; }
+.full-trace-fields { border-top: 1px solid #e0e9e4; padding-top: 16px; }
+.full-trace-fields > legend { padding: 0 12px 0 0; }
+.layout-fields:disabled { opacity: .65; }
 .plot-goals { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 24px; }
 .plot-goal, .board-choice { text-align: left; background: #fff; border: 1px solid #d9e5df; border-radius: 9px; color: #36584d; padding: 17px; cursor: pointer; }
 .plot-goal strong, .board-choice strong { display: block; font-size: 13px; margin-bottom: 7px; }

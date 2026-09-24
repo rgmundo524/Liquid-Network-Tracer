@@ -1,4 +1,5 @@
 import http.client
+import fcntl
 import json
 import os
 import pty
@@ -115,6 +116,53 @@ class LocalWebTests(unittest.TestCase):
         self.assertEqual(self.request("/api/settings", raw="{")[0], 400)
         self.assertFalse(self.server.root.exists())
         self.assertIn(b"Synthetic UI", self.success("/"))
+
+    def test_plot_settings_route_persists_only_layout_fields_without_jobs(self):
+        _, info = self.create()
+        path, metadata = self.server.case(info["id"])
+        defaults = {**metadata["run_defaults"], "hops": 7, "max_requests": 123, "max_transactions": 87}
+        update_case(path, {"miro_board": "PRESERVE=", "run_defaults": defaults})
+        before = read_json(path / "case.json")
+        settings = {"layout_attempts": 33, "connector_style": "curved", "include_fees": True,
+                    "color_attribution_arrows": True, "group_context_inputs": True,
+                    "center_name": " Treasury ", "hub_addresses": ["G" * 34]}
+        with patch.object(self.server, "start_job") as start, \
+                patch("liquid_tracer.api.Esplora.get", side_effect=AssertionError("No data fetch")), \
+                patch("liquid_tracer.miro.sync", side_effect=AssertionError("No Miro writes")):
+            result = self.success("/api/cases/" + info["id"] + "/plot-settings", {"settings": settings})
+            start.assert_not_called()
+        expected_defaults = {**defaults, **settings, "center_name": "Treasury"}
+        self.assertEqual(result["run_defaults"], expected_defaults)
+        self.assertEqual(read_json(path / "case.json"), {**before, "run_defaults": expected_defaults})
+        reopened = LocalServer(self.server.root, self.assets, port=0)
+        self.addCleanup(reopened.server_close)
+        self.assertEqual(reopened.session()["cases"][0]["run_defaults"], expected_defaults)
+        result = self.success("/api/cases/" + info["id"] + "/plot-settings", {"settings": {"include_fees": False}})
+        self.assertEqual(result["run_defaults"], {**expected_defaults, "include_fees": False})
+        self.assertEqual((result["name"], result["miro_board"], result["blockchain"], result["seeds"]),
+                         (before["name"], before["miro_board"], before["blockchain"], before["seeds"]))
+
+    def test_plot_settings_route_rejects_extra_fields_bad_values_and_active_locks(self):
+        _, info = self.create()
+        path, _ = self.server.case(info["id"])
+        route = "/api/cases/" + info["id"] + "/plot-settings"
+        before = (path / "case.json").read_bytes()
+        invalid = [{}, {"settings": {}, "name": "Wrong"}, {"settings": {}, "board": "OTHER="},
+                   {"settings": None}, {"settings": []}, {"settings": {"max_requests": 3}},
+                   {"settings": {"hops": 10}}, {"settings": {"include_fees": "false"}},
+                   {"settings": {"layout_attempts": True}}, {"settings": {"hub_addresses": ["short"]}}]
+        with patch.object(self.server, "start_job") as start:
+            for body in invalid:
+                with self.subTest(body=body):
+                    self.assertEqual(self.request(route, body)[0], 400)
+                    self.assertEqual((path / "case.json").read_bytes(), before)
+            with (path / "case.lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                status, value, _ = self.request(route, {"settings": {"include_fees": True}})
+                self.assertEqual(status, 400)
+                self.assertIn("operation is active", value["error"])
+            start.assert_not_called()
+        self.assertEqual((path / "case.json").read_bytes(), before)
 
     def test_run_hop_allowance_preserves_saved_defaults(self):
         _, case = self.create()
