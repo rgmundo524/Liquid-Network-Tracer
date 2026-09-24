@@ -47,6 +47,7 @@ type Run = {
   created_at?: string;
   transaction_count?: number;
   frontier_count?: number;
+  max_hops?: number;
 };
 type Download = { name: string; url: string };
 type Artifact = RenderingMetadata & {
@@ -77,6 +78,17 @@ type JobProgress = {
   retry_after?: number;
   elapsed_seconds?: number;
 };
+type PlotGoal = "full" | "connections" | "pegouts";
+type Plot = {
+  preview_id: string; goal: PlotGoal; run_id: string; min_hops: number; max_hops: number | null;
+  created_at: string; status: string; node_count: number; edge_count: number; transaction_count: number;
+  match_count?: number; connection_count?: number; source_max_hops?: number; source_run_status?: string;
+  source_stop_reason?: string; notice?: string; coverage_notice?: string; reviewable: boolean; reason?: string; empty?: boolean; artifact?: Artifact;
+};
+type InvestigationBoard = {
+  id: string; name: string; goal: PlotGoal; board_id: string; board_url: string; status: string;
+  preview_id?: string; run_id?: string; legacy_snapshot?: boolean; can_sync: boolean; notice?: string; pending_count?: number;
+};
 type Case = {
   id: string;
   name: string;
@@ -93,6 +105,10 @@ type Case = {
   runs?: Run[];
   artifacts?: Record<string, RunArtifacts>;
   pegout_searches?: PegoutSearch[];
+  plots?: Plot[];
+  boards?: InvestigationBoard[];
+  plots_notice?: string;
+  boards_notice?: string;
 };
 type Output = {
   vout: number;
@@ -166,7 +182,7 @@ type AddressActivity = {
 };
 type AddressRow = { address: string; run_output_count?: number; service: ServiceRule | null; activity: AddressActivity | null };
 type AddressPage = { run_id: string; rows: AddressRow[]; total: number; offset: number; limit: number };
-type CaseView = "graph" | "data" | "paths" | "exports" | "history";
+type CaseView = "collect" | "plots" | "boards" | "data" | "exports" | "history";
 type Page = "dashboard" | "new" | "case" | "settings" | "case-settings" | "addresses";
 type ActiveJob = {
   id: string;
@@ -197,7 +213,7 @@ const defaults: Settings = {
 };
 const state = {
   csrf: "",
-  caseView: "graph" as CaseView,
+  caseView: "collect" as CaseView,
   settings: { ...defaults },
   cases: [] as Case[],
   page: "dashboard" as Page,
@@ -233,6 +249,7 @@ let dialogPreviewId = "";
 let dialogRebuild: { caseId: string; sourceBoard: string; runId: string } | null = null;
 let submitting = false;
 let pageGeneration = 0;
+let workflowDraft = {caseId: "", goal: "full" as PlotGoal, minHops: "0", maxHops: "10", plot: "", board: "", boardPlot: "", boardGoal: "full" as PlotGoal, boardName: "", boardUrl: "", recoveryUrl: ""};
 let pegoutDraft = {caseId: "", custom: false, txid: "", minHops: "0", maxHops: "10", selected: "", board: "", approved: ""};
 
 const esc = (value: unknown): string =>
@@ -836,6 +853,116 @@ function csvDownloads(artifact: Artifact | undefined, saved: boolean, includeFee
   return `<section class="panel"><div class="panel-head"><div><h2>CSV downloads</h2><p>${tables.length ? "One row per displayed transaction input or output." : "Export transaction I/O, not graph objects."}</p></div>${tables.length ? button("Refresh CSV export", "csv", "refresh", "small", !saved || isBusy()) : ""}</div>${tables.length ? `<div class="downloads">${tables.map((item) => downloadLink(item, `Download ${item.name}`, "download-link")).join("")}</div><div class="export-footer"><span class="small muted">${includeFees ? "Fee flows included" : "Fee flows hidden"} · Indexes start at 0 · Amounts are exact base units · Unknown values stay blank.</span>${provenance.length ? `<details class="provenance-downloads"><summary>Export provenance</summary><div class="artifact-actions">${provenance.map((item) => downloadLink(item, item.name, "ghost")).join("")}</div></details>` : ""}</div>` : `<div class="panel-body"><p class="artifact-note">${mismatch ? "The saved export uses a different fee setting. Create a new export to match the current settings." : "Create transactions.csv for this full-trace snapshot. Use the Starter connections panel for its filtered transaction CSV."}</p>${button("Create CSV export", "csv", "table", "", !saved || isBusy())}</div>`}</section>`;
 }
 
+const plotGoals: {id: PlotGoal; name: string; description: string}[] = [
+  {id: "full", name: "Full trace", description: "Every collected transaction and its traced branches."},
+  {id: "connections", name: "Starter connections", description: "Directed paths connecting your starting transactions."},
+  {id: "pegouts", name: "Paths to peg-outs", description: "Paths from selected seed UTXOs to peg-out requests."},
+];
+
+function goalName(goal: string): string {
+  return plotGoals.find(item => item.id === goal)?.name || human(goal);
+}
+
+function currentWorkflow(detail: Case): typeof workflowDraft {
+  if (workflowDraft.caseId !== detail.id) workflowDraft = {caseId: detail.id, goal: "full", minHops: "0", maxHops: "10", plot: "", board: "", boardPlot: "", boardGoal: "full", boardName: "", boardUrl: "", recoveryUrl: ""};
+  return workflowDraft;
+}
+
+function currentPlot(detail: Case): Plot | undefined {
+  const draft = currentWorkflow(detail);
+  return detail.plots?.find(item => item.preview_id === draft.plot) || detail.plots?.[0];
+}
+
+function currentBoard(detail: Case): InvestigationBoard | undefined {
+  const draft = currentWorkflow(detail);
+  return detail.boards?.find(item => item.id === draft.board) || detail.boards?.[0];
+}
+
+function collectDataPanel(detail: Case, saved: boolean, settings: Settings): string {
+  return `<section class="panel" id="collection-panel"><div class="panel-head"><div><h2>Collect transaction data</h2><p>Collect once, then reuse the saved evidence for every plotting goal.</p></div></div><div class="panel-body"><p>Follow your ${detail.seed_count ?? detail.seeds?.length ?? 0} selected starting outputs and save a new run. Continuing adds hops from the latest run. Budgets, tracing stops and address hop limits apply.</p><p class="artifact-note">Collection does not generate plots or update Miro. A paused run can be continued here. Plot views uses only the data already saved.</p>${traceSummary(settings)}<div class="task-actions">${button(saved ? "Continue collecting data" : "Collect transaction data", "trace-dialog", "play", "primary", isBusy())}${button("Collection settings", "case-settings", "settings", "", isBusy())}${button("Choose a plotting goal", "view-plots", "graph", "", !saved)}</div><hr/><h3>Address activity</h3><p class="small muted">Missing transaction counts are fetched during collection. Retry any unresolved counts here.</p>${button("Fetch address transaction counts", "address-counts", "refresh", "small", !saved || isBusy())}</div></section>`;
+}
+
+function plotViewsPanel(detail: Case, saved: boolean): string {
+  const draft = currentWorkflow(detail), plot = currentPlot(detail), artifact = plot?.artifact;
+  const preview = safeLocalUrl(artifact?.preview_url);
+  return `<section class="panel" id="plot-views-panel"><div class="panel-head"><div><h2>Plot views</h2><p>Choose a goal and build a view from the selected saved run.</p></div><span class="badge gray">Saved data only</span></div><div class="panel-body"><div class="plot-goals" role="group" aria-label="Plotting goal">${plotGoals.map(goal => `<button class="plot-goal${draft.goal === goal.id ? " selected" : ""}" data-action="plot-goal" data-goal="${goal.id}" aria-pressed="${draft.goal === goal.id}"${disabled(isBusy())}><strong>${goal.name}</strong><span>${goal.description}</span></button>`).join("")}</div>${draft.goal !== "full" ? `<div class="field-row">${draft.goal === "pegouts" ? `<label class="field"><span>Minimum hops</span><input id="workflow-min-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.minHops)}"${disabled(isBusy())}/></label>` : ""}<label class="field"><span>Maximum hops</span><input id="workflow-max-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.maxHops)}"${disabled(isBusy())}/></label></div>` : ""}<p class="artifact-note">Plotting makes no blockchain requests. A hop filter cannot reveal data beyond your collection coverage. If a path is missing, collect more data first and generate another plot.</p>${draft.goal === "pegouts" ? '<p class="small muted">Starting transactions are hop 0. Only selected starting UTXOs are followed. A peg-out request does not confirm the separate Bitcoin payout.</p>' : ""}<div class="task-actions">${button(`Generate ${goalName(draft.goal).toLowerCase()} plot`, "workflow-plot", "graph", "primary", !saved || isBusy())}${button("Collect more data", "view-collect", "play")}${button("Graph settings", "case-settings", "settings", "", isBusy())}</div>${!saved ? '<p class="artifact-note">Collect transaction data before generating a plot.</p>' : ""}</div></section>
+  <section class="panel" id="saved-plots-panel"><div class="panel-head"><div><h2>Saved plots</h2><p>Each plot records its collection run and tracing goal.</p></div><span class="badge gray">${detail.plots?.length || 0} plots</span></div><div class="panel-body">${detail.plots_notice ? `<p class="artifact-note" role="status">${esc(detail.plots_notice)}</p>` : ""}${plot ? `<label class="field"><span>Plot</span><select id="workflow-plot-picker">${(detail.plots || []).map(item => `<option value="${esc(item.preview_id)}"${item.preview_id === plot.preview_id ? " selected" : ""}>${esc(goalName(item.goal))} · ${esc(short(item.run_id, 8))} · ${esc(formatDate(item.created_at))}</option>`).join("")}</select></label><p>${esc(goalName(plot.goal))} · Run ${esc(short(plot.run_id, 8))}${plot.goal !== "full" ? ` · Hops ${plot.min_hops}–${plot.max_hops}` : ""} · ${plot.node_count} objects · ${plot.edge_count} connections.</p>${plot.coverage_notice && !plot.notice?.includes(plot.coverage_notice) ? `<p class="artifact-note">${esc(plot.coverage_notice)}</p>` : ""}${plot.notice ? `<p class="artifact-note">${esc(plot.notice)}</p>` : ""}${plot.empty ? '<p class="artifact-note">No matching paths were found in this saved data. Collect more data or adjust the hop range.</p>' : ""}${!plot.reviewable ? `<p class="artifact-note">${esc(plot.reason || "No matching paths in this saved data.")}</p>` : ""}<div class="task-actions">${button("Manage Miro boards", "plot-boards", "board", "primary")}${downloadLink(artifact?.downloads.find(item => item.name === "graph.svg"), "Download SVG")}${detailPagesLink(artifact?.downloads)}${preview ? `<a class="btn small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">Open full view</a>` : ""}</div>` : '<p class="artifact-note">Your generated plots will appear here. All three goals use the same saved collection data.</p>'}</div>${preview ? `<iframe loading="lazy" class="graph-preview" src="${esc(preview)}#chart" title="${esc(goalName(plot!.goal))} saved plot" sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe>` : ""}</section>`;
+}
+
+function plotDownloadsPanel(detail: Case): string {
+  const plot = currentPlot(detail);
+  return `<section class="panel"><div class="panel-head"><div><h2>Plot downloads</h2><p>Download the chart and evidence for any saved plotting goal.</p></div></div><div class="panel-body">${detail.plots_notice ? `<p class="artifact-note">${esc(detail.plots_notice)}</p>` : ""}${plot ? `<label class="field"><span>Saved plot</span><select id="workflow-plot-picker">${(detail.plots || []).map(item => `<option value="${esc(item.preview_id)}"${item.preview_id === plot.preview_id ? " selected" : ""}>${esc(goalName(item.goal))} · Run ${esc(short(item.run_id, 8))} · ${esc(formatDate(item.created_at))}</option>`).join("")}</select></label><div class="artifact-actions">${(plot.artifact?.downloads || []).map(item => downloadLink(item, item.name)).join("")}</div>${!plot.reviewable ? `<p class="artifact-note">${esc(plot.reason || "Generate this plot again to refresh its files.")}</p>` : ""}` : `<p class="artifact-note">Generate a saved plot to download its chart and transaction evidence.</p>${button("Choose a plotting goal", "view-plots", "graph")}`}</div></section>`;
+}
+
+function fullBoardMaintenance(detail: Case, saved: boolean, artifacts: RunArtifacts, settings: Settings): string {
+  return `<section class="panel"><div class="panel-head"><div><h2>Full trace board tools</h2><p>Recovery and layout tools for the original investigation board.</p></div></div><div class="panel-body">${miroRecoveryNotice(detail)}<div class="task-actions">${button("Preview changes", "miro-preview", "search", "", !saved || isBusy())}${button("Create / update Miro frames", "miro-frames-dialog", "layers", "", !saved || Boolean(detail.miro_recovery?.pending_count) || isBusy())}${detail.miro_recovery?.can_recover_frame ? button("Recover interrupted frame", "miro-frame-review", "refresh", "", isBusy()) : ""}${detail.miro_recovery?.can_confirm_empty ? button("Recover empty-board sync", "miro-recover-dialog", "refresh", "", isBusy()) : ""}</div><p class="small muted">When the graph is finished, create its frames separately. Run this again after further syncing or rearranging to update the frames.</p><details class="tool-details"><summary>Board maintenance</summary><div class="panel-body">${button("Merge duplicate addresses", "address-merge-dialog", "graph", "", isBusy() || !saved)}${rebuildAction(detail, saved)}</div></details></div></section><details class="tool-details"><summary>Full trace layout and compaction</summary>${elkGraph(artifacts.elk, saved, settings)}${compactGraph(artifacts.compact, saved, detail)}</details>`;
+}
+
+function matchingBoardPlots(detail: Case, board: InvestigationBoard | undefined): Plot[] {
+  return (detail.plots || []).filter(plot => plot.goal === board?.goal && plot.reviewable && !plot.empty && plot.node_count > 0 &&
+    (!board?.pending_count || plot.preview_id === board.preview_id));
+}
+
+function boardsPanel(detail: Case, saved: boolean, artifacts: RunArtifacts, settings: Settings): string {
+  const draft = currentWorkflow(detail), selected = currentBoard(detail), boards = detail.boards || [];
+  const plots = matchingBoardPlots(detail, selected);
+  const chosen = plots.find(plot => plot.preview_id === draft.boardPlot) || plots[0];
+  const legacyFull = selected?.board_id === detail.miro_board && selected?.goal === "full";
+  const locked = isBusy() || !selected?.can_sync || !chosen;
+  return `<section class="panel" id="miro-boards-panel"><div class="panel-head"><div><h2>Miro boards</h2><p>View and manage every board linked to this investigation.</p></div><span class="badge gray">${boards.length} boards</span></div><div class="panel-body">${detail.boards_notice ? `<p class="artifact-note" role="status">${esc(detail.boards_notice)}</p>` : ""}${boards.length ? `<div class="board-list" role="group" aria-label="Investigation boards">${boards.map(board => `<button class="board-choice${board.id === selected?.id ? " selected" : ""}" data-action="workflow-board-select" data-record="${esc(board.id)}" aria-pressed="${board.id === selected?.id}"><strong>${esc(board.name || goalName(board.goal))}</strong><span>${esc(goalName(board.goal))} · ${esc(human(board.status))}${board.legacy_snapshot ? " · Archived snapshot" : ""}</span></button>`).join("")}</div>` : '<p class="artifact-note">No boards yet. Create a private board or link an existing one below.</p>'}${selected ? `<div class="board-management"><h3>${esc(selected.name || goalName(selected.goal))}</h3>${selected.board_id ? `<a class="board-link" href="${esc(boardUrl(selected.board_id))}" target="_blank" rel="noopener noreferrer">Open Miro board ${icon("external")}</a>` : ""}${selected.notice ? `<p class="artifact-note">${esc(selected.notice)}</p>` : ""}${!selected.board_id ? `<label class="field"><span>Created board URL or ID</span><input id="workflow-recovery-url" maxlength="512" value="${esc(draft.recoveryUrl)}"${disabled(isBusy())}/><small>If creation was interrupted, locate the board in Miro and link it to this saved entry.</small></label>${button("Link created board to this entry", "workflow-board-recover", "board", "", isBusy())}` : ""}${selected.can_sync ? `<label class="field"><span>Plot to sync · ${esc(goalName(selected.goal))}</span><select id="workflow-board-plot"${disabled(!plots.length || isBusy())}>${plots.length ? plots.map(plot => `<option value="${esc(plot.preview_id)}"${plot.preview_id === chosen?.preview_id ? " selected" : ""}>Run ${esc(short(plot.run_id, 8))}${plot.goal !== "full" ? ` · Hops ${plot.min_hops}–${plot.max_hops}` : ""} · ${esc(formatDate(plot.created_at))}</option>`).join("") : '<option value="">Generate a matching plot first</option>'}</select></label><div class="task-actions">${button("Sync to Miro", "workflow-board-sync", "refresh", "primary", locked)}${button("Sync and reorganize", "workflow-board-organize", "graph", "", locked)}${button("Generate matching plot", "board-plot-goal", "graph", "", isBusy())}</div><p class="small muted">Sync keeps existing positions. Sync and reorganize also applies the plot layout. These actions update only this board and do not fetch transaction data.</p>${selected.pending_count ? '<p class="artifact-note">This board has an interrupted operation. Retry its saved plot to resume. An uncertain item creation may require recovery before retrying.</p>' : ""}` : '<p class="artifact-note">This saved board is available to view. Create a managed board below to sync new plots.</p>'}</div>` : ""}</div></section>
+  <section class="panel"><div class="panel-head"><div><h2>Add a Miro board</h2><p>Give each board a plotting goal so updates go to the right place.</p></div></div><div class="panel-body"><div class="field-row"><label class="field"><span>Plotting goal</span><select id="workflow-board-goal"${disabled(isBusy())}>${plotGoals.map(goal => `<option value="${goal.id}"${draft.boardGoal === goal.id ? " selected" : ""}>${goal.name}</option>`).join("")}</select></label><label class="field"><span>Board name</span><input id="workflow-board-name" maxlength="60" value="${esc(draft.boardName)}" placeholder="${esc(`${detail.name} · ${goalName(draft.boardGoal)}`.slice(0, 60))}"${disabled(isBusy())}/></label></div><div class="task-actions">${button("Create private Miro board", "workflow-board-create", "plus", "primary", isBusy())}</div><label class="field"><span>Or link an existing board URL or ID</span><input id="workflow-board-url" maxlength="512" value="${esc(draft.boardUrl)}" placeholder="https://miro.com/app/board/…"${disabled(isBusy())}/></label>${button("Link existing board", "workflow-board-link", "board", "", isBusy())}<p class="small muted">Create or link once, then use the same sync controls for every plotting goal. Credentials are retrieved through the launching terminal.</p></div></section>${legacyFull || !selected && detail.miro_board ? fullBoardMaintenance(detail, saved, artifacts, settings) : ""}`;
+}
+
+function workflowInput(element: HTMLInputElement | HTMLSelectElement): boolean {
+  if (!element.id?.startsWith("workflow-") || !state.activeCase || isBusy()) return false;
+  const draft = currentWorkflow(state.activeCase);
+  const fields: Record<string, "minHops" | "maxHops" | "plot" | "boardPlot" | "boardName" | "boardUrl" | "recoveryUrl"> = {"workflow-min-hops": "minHops", "workflow-max-hops": "maxHops", "workflow-plot-picker": "plot", "workflow-board-plot": "boardPlot", "workflow-board-name": "boardName", "workflow-board-url": "boardUrl", "workflow-recovery-url": "recoveryUrl"};
+  if (element.id === "workflow-board-goal" && plotGoals.some(goal => goal.id === element.value)) draft.boardGoal = element.value as PlotGoal;
+  else if (fields[element.id]) draft[fields[element.id]] = element.value;
+  else return false;
+  if (["workflow-plot-picker", "workflow-board-goal", "workflow-board-plot"].includes(element.id)) render();
+  return true;
+}
+
+async function workflowAction(action: string, element?: HTMLElement): Promise<boolean> {
+  if (!["plot-goal", "workflow-plot", "plot-boards", "workflow-board-select", "board-plot-goal", "workflow-board-create", "workflow-board-link", "workflow-board-sync", "workflow-board-organize", "workflow-board-recover"].includes(action)) return false;
+  const detail = state.activeCase;
+  if (!detail || isBusy()) return true;
+  const draft = currentWorkflow(detail);
+  if (action === "plot-goal") {
+    if (plotGoals.some(goal => goal.id === element?.dataset.goal)) draft.goal = element!.dataset.goal as PlotGoal;
+    render(); return true;
+  }
+  if (action === "workflow-board-select") {draft.board = element?.dataset.record || ""; draft.boardPlot = ""; render(); return true;}
+  if (action === "plot-boards") {
+    const plot = currentPlot(detail);
+    if (plot) {draft.boardPlot = plot.preview_id; draft.boardGoal = plot.goal; draft.board = detail.boards?.find(board => board.goal === plot.goal && board.can_sync)?.id || "";}
+    state.caseView = "boards"; render(); return true;
+  }
+  if (action === "board-plot-goal") {draft.goal = currentBoard(detail)?.goal || "full"; state.caseView = "plots"; render(); return true;}
+  let body: Record<string, unknown>;
+  if (action === "workflow-plot") {
+    if (!currentRun()) throw new Error("Collect transaction data first, then select a saved run to plot.");
+    const min = draft.goal === "pegouts" ? draft.minHops.trim() : "0", max = draft.goal === "full" ? "0" : draft.maxHops.trim();
+    if ([min, max].some(value => !/^\d+$/.test(value) || Number(value) > 2147483647) || Number(min) > Number(max)) throw new Error("Enter whole-number hop limits from 0 to 2147483647, with minimum no greater than maximum.");
+    body = {action: "plot", goal: draft.goal, run_id: currentRun()!.id, min_hops: Number(min), max_hops: Number(max)};
+  } else if (action === "workflow-board-recover") {
+    const board = currentBoard(detail);
+    if (!board || board.board_id || !draft.recoveryUrl.trim()) throw new Error("Enter the URL of the board created during the interrupted operation.");
+    body = {action: "board-link", record_id: board.id, goal: board.goal, name: board.name, board: draft.recoveryUrl.trim()};
+  } else if (action === "workflow-board-create" || action === "workflow-board-link") {
+    body = {action: action === "workflow-board-create" ? "board-create" : "board-link", goal: draft.boardGoal, name: draft.boardName.trim() || `${detail.name} · ${goalName(draft.boardGoal)}`.slice(0, 60)};
+    if (action === "workflow-board-link") {if (!draft.boardUrl.trim()) throw new Error("Enter a Miro board URL or ID to link."); body.board = draft.boardUrl.trim();}
+  } else {
+    const board = currentBoard(detail), plots = matchingBoardPlots(detail, board);
+    const plot = plots.find(item => item.preview_id === draft.boardPlot) || plots[0];
+    if (!board?.can_sync || !plot) throw new Error("Select a managed board and a matching saved plot before syncing.");
+    body = {action: "board-sync", record_id: board.id, preview_id: plot.preview_id, reorganize: action === "workflow-board-organize"};
+  }
+  await startJob(`/api/cases/${encodeURIComponent(detail.id)}/actions`, body, String(body.action), body.action !== "plot" && body.action !== "board-link", detail.id);
+  return true;
+}
+
 function workspace(): string {
   const detail = state.activeCase;
   if (!detail)
@@ -855,18 +982,19 @@ function workspace(): string {
     )
     .join("");
 
-  const views: [CaseView, string][] = [["graph", "Graph & Miro"], ["data", "Investigation data"], ["paths", "Path searches"], ["exports", "Downloads"], ["history", "Run history"]];
+  const views: [CaseView, string][] = [["collect", "Collect data"], ["plots", "Plot views"], ["boards", "Miro boards"], ["data", "Investigation data"], ["exports", "Downloads"], ["history", "History"]];
   const dataPanel = `<section class="panel"><div class="panel-head"><div><h2>Investigation data</h2><p>Manage attributions, tracing stops, and change outputs here.</p></div></div><div class="panel-body"><div class="task-actions">${button("Import CSV files", "input-import-open", "plus", "primary", isBusy())}${button("Address review", "addresses", "search", "", isBusy())}${button("Change outputs", "change-outputs-open", "graph", "", isBusy())}<a class="btn" href="/api/cases/${esc(encodeURIComponent(detail.id))}/input-exports/all" download>${icon("download")}Export input CSVs</a></div><p class="small muted">Import attributions, name colors, and change outputs together. Export input CSVs downloads all saved attributions, name colors, and change outputs across every page. Unsaved edits are excluded. Colors and graph preferences are in Investigation settings.</p></div></section>${inputImportPanel(detail.id, isBusy())}${changeOutputsPanel(detail.id, isBusy())}`;
   const content = state.caseView === "data" ? dataPanel
-    : state.caseView === "paths" ? `${connectionsGraph(artifacts.connections, saved)}${pegoutsGraph(detail)}`
-    : state.caseView === "exports" ? `${csvDownloads(artifacts.csv, saved, settings.include_fees)}${localGraph(artifacts.mermaid, saved, settings)}`
-    : state.caseView === "history" ? `<section class="panel"><div class="panel-head"><div><h2>Run history</h2><p>Every continuation preserves the preceding snapshot.</p></div><span class="badge gray">${(detail.runs || []).length} runs</span></div>${detail.runs?.length ? `<div class="table-wrap"><table class="run-list"><thead><tr><th>Run</th><th>Recorded</th><th>Status</th><th>Transactions</th></tr></thead><tbody>${detail.runs.map((item) => `<tr class="${item.id === run?.id ? "selected" : ""}"><td><button data-run="${esc(item.id)}">${esc(short(item.id, 8))}</button>${item.id === detail.latest_run ? '<div class="muted">Latest</div>' : ""}</td><td><span class="muted">${esc(formatDate(item.created_at))}</span></td><td><span class="badge ${item.status === "error" ? "red" : "gray"}">${esc(human(item.status))}</span></td><td>${esc(item.transaction_count ?? "—")}</td></tr>`).join("")}</tbody></table></div>` : '<div class="panel-body small muted">Your first completed or bounded run will appear here.</div>'}</section>`
-    : `${elkGraph(artifacts.elk, saved, settings)}<details class="tool-details" id="compact-tools"><summary>Compact layout${artifacts.compact ? " · Saved comparison available" : ""}</summary>${compactGraph(artifacts.compact, saved, detail)}</details>`;
-  return `<div class="page-heading case-heading"><div><div class="eyebrow">Investigation workspace</div><h1 id="page-title" tabindex="-1">${esc(detail.name)}</h1><div class="workspace-meta"><span class="badge ${detail.fixture ? "purple" : ""}">${detail.fixture ? "Synthetic data" : "Live Liquid"}</span><span class="badge gray">${(detail.runs || []).length} saved runs</span></div></div><div class="heading-actions">${button("Investigation settings", "case-settings", "settings", "", isBusy())}${button(saved ? "Continue investigation" : "Start first run", "trace-dialog", "play", "primary", isBusy())}</div></div>
+    : state.caseView === "plots" ? plotViewsPanel(detail, saved)
+    : state.caseView === "boards" ? boardsPanel(detail, saved, artifacts, settings)
+    : state.caseView === "exports" ? `${plotDownloadsPanel(detail)}${csvDownloads(artifacts.csv, saved, settings.include_fees)}${localGraph(artifacts.mermaid, saved, settings)}`
+    : state.caseView === "history" ? `<section class="panel"><div class="panel-head"><div><h2>Run history</h2><p>Every continuation preserves the preceding snapshot.</p></div><span class="badge gray">${(detail.runs || []).length} runs</span></div>${detail.runs?.length ? `<div class="table-wrap"><table class="run-list"><thead><tr><th>Run</th><th>Recorded</th><th>Status</th><th>Transactions</th></tr></thead><tbody>${detail.runs.map((item) => `<tr class="${item.id === run?.id ? "selected" : ""}"><td><button data-run="${esc(item.id)}">${esc(short(item.id, 8))}</button>${item.id === detail.latest_run ? '<div class="muted">Latest</div>' : ""}</td><td><span class="muted">${esc(formatDate(item.created_at))}</span></td><td><span class="badge ${item.status === "error" ? "red" : "gray"}">${esc(human(item.status))}</span></td><td>${esc(item.transaction_count ?? "—")}</td></tr>`).join("")}</tbody></table></div>` : '<div class="panel-body small muted">Your first completed or bounded run will appear here.</div>'}</section>${detail.pegout_searches?.length ? `<details class="tool-details"><summary>Earlier standalone peg-out searches</summary>${pegoutsGraph(detail)}</details>` : ""}${artifacts.connections ? `<details class="tool-details"><summary>Earlier starter-connection snapshot</summary>${connectionsGraph(artifacts.connections, saved)}</details>` : ""}`
+    : collectDataPanel(detail, saved, settings);
+  return `<div class="page-heading case-heading"><div><div class="eyebrow">Investigation workspace</div><h1 id="page-title" tabindex="-1">${esc(detail.name)}</h1><div class="workspace-meta"><span class="badge ${detail.fixture ? "purple" : ""}">${detail.fixture ? "Synthetic data" : "Live Liquid"}</span><span class="badge gray">${(detail.runs || []).length} saved runs</span></div></div><div class="heading-actions">${button("Investigation settings", "case-settings", "settings", "", isBusy())}</div></div>
     <nav class="case-navigation" aria-label="Investigation tools">${views.map(([view, label]) => `<button type="button" class="case-nav${state.caseView === view ? " active" : ""}" data-action="view-${view}"${state.caseView === view ? ' aria-current="page"' : ""}>${label}</button>`).join("")}</nav>
     ${last ? resultBanner(last.action, last.result) : ""}
-    <section class="panel"><div class="panel-head"><div><h2>${saved ? "Saved run" : "Ready to trace"}</h2><p>${saved ? "Select a snapshot to review, render, or export." : "Your starting outputs and limits are saved."}</p></div>${saved ? `<label class="run-picker">Snapshot<select class="input" id="run-picker" aria-label="Saved run snapshot">${runOptions}</select></label>` : '<span class="badge gray">No runs yet</span>'}</div>${saved ? `<div class="run-summary"><div><span>Tracked transactions</span><strong>${esc(run?.transaction_count ?? "—")}</strong></div><div><span>Unfinished branches</span><strong>${esc(run?.frontier_count ?? "—")}</strong></div><div><span>Run status</span><strong class="text-value">${esc(human(run?.status || "saved"))}</strong></div></div><div class="run-note">${icon("clock")}<span>${esc(formatDate(run?.created_at))}${run?.stop_reason ? ` · ${esc(human(run.stop_reason))}` : ""}</span></div>` : `<div class="empty-state" style="padding:31px 24px"><div class="empty-icon">${icon("graph")}</div><h2>${detail.seed_count ?? detail.seeds?.length ?? "Your"} starting output${(detail.seed_count ?? detail.seeds?.length) === 1 ? "" : "s"} selected</h2><p>Run the first trace to record exact output spends and build your investigation graph.</p></div>`}</section>
-    <div class="workspace-grid"><div class="workspace-main">${content}</div><aside class="workspace-aside"><section class="panel"><div class="panel-body"><div class="action-card-head"><span class="action-icon">${icon("board")}</span><div><h3>Miro board</h3><p>Your editable investigation graph</p></div></div><p class="action-description">Sync the selected snapshot, or sync and reorganize in one action. Layout previews are optional.</p>${detail.miro_board ? `<a class="board-link" href="${esc(boardUrl(detail.miro_board))}" target="_blank" rel="noopener noreferrer">Open linked board ${icon("external")}</a>` : '<p class="board-empty">No board linked yet. Create one or add its URL in settings.</p>'}${miroRecoveryNotice(detail)}<div class="action-buttons">${button("Preview changes", "miro-preview", "search", "wide", !saved || !detail.miro_board || isBusy())}${button("Sync to Miro", "miro-sync-dialog", "refresh", "", !saved || !detail.miro_board || Boolean(detail.miro_recovery?.pending_count) || isBusy())}${button("Sync and reorganize", "miro-organize-dialog", "graph", "wide", !saved || !detail.miro_board || Boolean(detail.miro_recovery?.pending_count) || isBusy())}${button("Create / update Miro frames", "miro-frames-dialog", "layers", "wide", !saved || !detail.miro_board || Boolean(detail.miro_recovery?.pending_count) || isBusy())}<p class="small muted">When the graph is finished, create its frames separately. Run this again after further syncing or rearranging to update the frames.</p>${detail.miro_recovery?.can_recover_frame ? button("Recover interrupted frame", "miro-frame-review", "refresh", "wide", !detail.miro_board || isBusy()) : ""}${detail.miro_recovery?.can_confirm_empty ? button("Recover empty-board sync", "miro-recover-dialog", "refresh", "wide", !detail.miro_board || isBusy()) : ""}${detail.miro_board ? `<details class="tool-details"><summary>Board maintenance</summary>${button("Merge duplicate addresses", "address-merge-dialog", "graph", "", isBusy() || !saved)}${rebuildAction(detail, saved)}</details>` : button("Create Miro board", "miro-create-dialog", "plus", "wide", isBusy())}</div></div></section><section class="panel"><div class="panel-body"><h3>Next trace</h3><p><strong>${settings.hops} additional hops</strong> from the latest run.</p>${traceSummary(settings)}${button("Edit investigation settings", "case-settings", "settings", "small", isBusy())}<details class="tool-details"><summary>Address counts</summary><p class="small muted">Missing counts are fetched automatically. Retry unresolved counts here.</p>${button("Fetch address transaction counts", "address-counts", "refresh", "small", !saved || isBusy())}</details></div></section></aside></div>`;
+    <section class="panel"><div class="panel-head"><div><h2>${saved ? "Collected data" : "Ready to collect"}</h2><p>${saved ? "Choose the collected data used for plots and downloads." : "Your starting outputs and limits are saved."}</p></div>${saved ? `<label class="run-picker">Snapshot<select class="input" id="run-picker" aria-label="Saved run snapshot">${runOptions}</select></label>` : '<span class="badge gray">No runs yet</span>'}</div>${saved ? `<div class="run-summary"><div><span>Tracked transactions</span><strong>${esc(run?.transaction_count ?? "—")}</strong></div><div><span>Unfinished branches</span><strong>${esc(run?.frontier_count ?? "—")}</strong></div><div><span>Run status</span><strong class="text-value">${esc(human(run?.status || "saved"))}</strong></div></div><div class="run-note">${icon("clock")}<span>${esc(formatDate(run?.created_at))}${run?.max_hops !== undefined ? ` · Collection hop limit: ${run.max_hops}` : ""}${run?.stop_reason ? ` · ${esc(human(run.stop_reason))}` : ""}</span></div>` : `<div class="empty-state" style="padding:31px 24px"><div class="empty-icon">${icon("graph")}</div><h2>${detail.seed_count ?? detail.seeds?.length ?? "Your"} starting output${(detail.seed_count ?? detail.seeds?.length) === 1 ? "" : "s"} selected</h2><p>Collect data first, then choose a plotting goal and its Miro board.</p></div>`}</section>
+    <div class="workspace-content">${content}</div>`;
 }
 
 function saveAddressDraft(): void {
@@ -1068,7 +1196,7 @@ function settingsPage(): string {
     ${isCase ? `<section class="panel"><div class="panel-body"><label class="field"><span>Investigation name</span><input name="name" maxlength="120" required value="${esc(draft?.name ?? detail?.name)}" autocomplete="off"/></label></div></section>` : ""}
     <section class="panel" id="settings-trace"><div class="panel-head"><div><h2>Tracing</h2><p>Saved defaults for each bounded run.</p></div></div><div class="panel-body">${budgetFields(settings)}</div></section>
     <section class="panel" id="settings-layout"><div class="panel-head"><div><h2>Graph layout</h2><p>Use Sync and reorganize to apply placement changes to Miro.</p></div></div><div class="panel-body">${graphFields(settings, isCase)}</div></section>
-    <section class="panel" id="settings-miro"><div class="panel-head"><h2>Miro</h2></div><div class="panel-body">${isCase ? `<label class="field"><span>Miro board URL or ID</span><input name="board" value="${esc(draft?.board ?? detail?.miro_board)}" placeholder="Link an existing board, or leave empty" autocomplete="off"/></label>` : ""}${numericField(settings, "max_new_items", "New Miro items", "Maximum new objects and connections per sync.")}<p class="small muted">Live actions use your existing SecretSpec and Proton Pass configuration.</p></div></section>
+    <section class="panel" id="settings-miro"><div class="panel-head"><h2>Miro</h2></div><div class="panel-body">${isCase ? `${button("Manage investigation boards", "view-boards", "board", "", isBusy())}<p class="small muted">Create, link and sync boards in Miro boards.</p>` : ""}${numericField(settings, "max_new_items", "New Miro items", "Maximum new objects and connections per sync.")}<p class="small muted">Live actions use your existing SecretSpec and Proton Pass configuration.</p></div></section>
     <div class="form-actions settings-save"><p>${isCase ? "Save once to update this investigation." : "Applies to investigations created after saving."}</p><button type="submit" class="btn primary"${disabled(isBusy())}>${icon("check")}Save settings</button></div></form>
     ${isCase && detail ? `<section class="panel" id="settings-colors"><div class="panel-head"><div><h2>Colors</h2><p>Graph roles and attribution names. Color edits save separately.</p></div>${button("Edit colors", "name-colors-open", "", "", isBusy())}</div></section>${nameColorsPanel(detail.id, isBusy())}` : ""}`;
 }
@@ -1129,7 +1257,7 @@ async function openCase(id: string): Promise<void> {
   resetNameColors(detail.id);
   resetChangeOutputs(detail.id);
   state.selectedRun = "latest";
-  state.caseView = "graph";
+  state.caseView = "collect";
   state.page = "case";
   state.error = "";
   history.replaceState(null, "", `#case/${encodeURIComponent(id)}`);
@@ -1293,6 +1421,18 @@ async function pollJob(): Promise<void> {
         if (state.activeCase?.id === active.caseId) {
           state.activeCase = detail;
           if (active.action === "trace") state.selectedRun = "latest";
+          if (active.action === "plot") {
+            const draft = currentWorkflow(detail);
+            draft.plot = String(result.preview_id || "");
+            draft.boardPlot = draft.plot;
+            state.caseView = "plots";
+          }
+          if (["board-create", "board-link"].includes(active.action)) {
+            const draft = currentWorkflow(detail);
+            draft.board = String(result.record_id || result.id || "");
+            draft.boardUrl = ""; draft.recoveryUrl = "";
+            state.caseView = "boards";
+          }
           if (["pegouts", "pegouts-preview"].includes(active.action)) {
             currentPegoutSearch(detail);
             pegoutDraft.selected = String(result.search_id || result.run_id || "");
@@ -1339,7 +1479,11 @@ async function pollJob(): Promise<void> {
         toast(
           (
             {
-              trace: "Bounded run saved.",
+              trace: "Collected data saved. Choose Plot views to generate a chart.",
+              plot: "Plot generated from saved collection data.",
+              "board-create": "Miro board created. Select a saved plot to sync.",
+              "board-link": "Miro board linked. Select a saved plot to sync.",
+              "board-sync": "The selected Miro board was updated.",
               "address-counts": "Address transaction counts saved. Regenerate a preview or sync Miro. Run again to fetch any remaining missing counts.",
               "address-inspect": "Address activity saved. Review the history coverage before drawing conclusions.",
               mermaid: result.renderer === "direct_svg" ? "Direct SVG fallback is ready. " + fallbackNotice(result) : "Mermaid chart is ready.",
@@ -1448,8 +1592,8 @@ function openActionDialog(action: string): void {
   const settings = { ...defaults, ...detail.run_defaults };
   const titles: Record<string, string> = {
     trace: detail.latest_run
-      ? "Continue this investigation"
-      : "Start the first run",
+      ? "Continue collecting transaction data"
+      : "Collect transaction data",
     "miro-sync": "Sync the graph to Miro",
     "miro-frames": "Create / update Miro frames",
     "miro-organize": "Sync and reorganize the Miro graph",
@@ -1459,8 +1603,8 @@ function openActionDialog(action: string): void {
   };
   const descriptions: Record<string, string> = {
     trace: detail.latest_run
-      ? "Continue the latest saved frontier with another bounded allowance. Earlier runs remain available."
-      : "Follow the selected starting outputs within the limits below.",
+      ? "Continue the latest saved frontier with another bounded allowance. Earlier runs remain available. Generate plots separately after collection."
+      : "Follow the selected starting outputs within the limits below. Generate plots separately after collection.",
     "miro-sync":
       "Add the selected saved graph to the linked board. Existing manual arrangements are preserved during normal sync. Create or update frames separately when the graph is finished.",
     "miro-frames":
@@ -1477,7 +1621,7 @@ function openActionDialog(action: string): void {
   const live = action !== "trace" || !detail.fixture;
   const defaultBoardName =
     `${detail.fixture ? "SYNTHETIC DATA · " : ""}${detail.name}`.slice(0, 60);
-  dialog.innerHTML = `<form id="action-form"><header class="dialog-head"><div><h2 id="dialog-title">${titles[action]}</h2><p>${descriptions[action]}</p></div><button type="button" class="dialog-close" data-action="close-dialog" aria-label="Close dialog">${icon("close")}</button></header><div class="dialog-body">${action === "trace" ? `${numericField(settings, "hops", "Additional hops for this run", "0 retries the current frontier. This does not change saved defaults.")}${traceSummary(settings)}<p class="small muted">Other limits and graph preferences come from Investigation settings.</p><button type="button" class="btn small" data-action="edit-case-settings">Edit investigation settings</button>` : action === "miro-create" ? `<label class="field"><span>Board name</span><input name="board_name" required maxlength="60" value="${esc(defaultBoardName)}"/></label>` : action === "miro-recover" ? `<div class="dialog-board"><span>Linked board</span><a class="board-link" href="${esc(boardUrl(detail.miro_board!))}" target="_blank" rel="noopener noreferrer">Open linked board ${icon("external")}</a><span>${detail.miro_recovery?.pending_count} unconfirmed items</span></div><label class="check-line"><input type="checkbox" name="confirm_empty" required/><span><strong>I inspected this Miro board after the failed sync and it is empty.</strong><small>If any objects are present, cancel and reconcile the pending items individually.</small></span></label>` : `<div class="dialog-board"><span>Linked board</span><strong>${esc(detail.miro_board)}</strong><span style="margin-top:10px">Selected snapshot</span><strong class="mono">${esc(currentRun()?.id || detail.latest_run)}</strong><span style="margin-top:10px">New item budget</span><strong>${settings.max_new_items} items</strong>${compact ? `<span style="margin-top:10px">Saved preview</span><strong class="mono">${esc(compact.preview_id)}</strong><span>${esc(human(compact.connector_style || "straight"))} connectors · ${compact.include_fees ? "Fee flows included" : "Fee flows hidden"}</span>` : ""}</div>`}${live ? `<div class="alert ${["miro-organize", "miro-compact"].includes(action) ? "warning" : ""}">${icon(["miro-organize", "miro-compact"].includes(action) ? "info" : "lock")}<div><strong>${action === "trace" ? "Uses your Blockstream API credits" : action === "miro-recover" ? "Reads Miro and updates local recovery state" : "Changes your Miro workspace"}</strong><p>SecretSpec retrieves credentials through the launching terminal. Complete any Proton Pass prompt there.</p></div></div>` : '<div class="alert">' + icon("shield") + "<div><strong>Offline synthetic data</strong><p>This run uses the investigation’s saved fixture and needs no API credentials.</p></div></div>"}</div><footer class="dialog-footer"><button type="button" class="btn" data-action="close-dialog">Cancel</button><button type="submit" class="btn primary">${icon(action === "trace" ? "play" : action === "miro-create" ? "plus" : "refresh")}${action === "trace" ? "Start bounded run" : action === "miro-create" ? "Create private board" : action === "miro-organize" ? "Sync and reorganize" : action === "miro-compact" ? "Apply compact layout" : action === "miro-frames" ? "Create / update frames" : action === "miro-recover" ? "Verify empty board and recover" : "Sync to Miro"}</button></footer></form>`;
+  dialog.innerHTML = `<form id="action-form"><header class="dialog-head"><div><h2 id="dialog-title">${titles[action]}</h2><p>${descriptions[action]}</p></div><button type="button" class="dialog-close" data-action="close-dialog" aria-label="Close dialog">${icon("close")}</button></header><div class="dialog-body">${action === "trace" ? `${numericField(settings, "hops", "Additional hops for this run", "0 retries the current frontier. This does not change saved defaults.")}${traceSummary(settings)}<p class="small muted">Other limits and graph preferences come from Investigation settings.</p><button type="button" class="btn small" data-action="edit-case-settings">Edit investigation settings</button>` : action === "miro-create" ? `<label class="field"><span>Board name</span><input name="board_name" required maxlength="60" value="${esc(defaultBoardName)}"/></label>` : action === "miro-recover" ? `<div class="dialog-board"><span>Linked board</span><a class="board-link" href="${esc(boardUrl(detail.miro_board!))}" target="_blank" rel="noopener noreferrer">Open linked board ${icon("external")}</a><span>${detail.miro_recovery?.pending_count} unconfirmed items</span></div><label class="check-line"><input type="checkbox" name="confirm_empty" required/><span><strong>I inspected this Miro board after the failed sync and it is empty.</strong><small>If any objects are present, cancel and reconcile the pending items individually.</small></span></label>` : `<div class="dialog-board"><span>Linked board</span><strong>${esc(detail.miro_board)}</strong><span style="margin-top:10px">Selected snapshot</span><strong class="mono">${esc(currentRun()?.id || detail.latest_run)}</strong><span style="margin-top:10px">New item budget</span><strong>${settings.max_new_items} items</strong>${compact ? `<span style="margin-top:10px">Saved preview</span><strong class="mono">${esc(compact.preview_id)}</strong><span>${esc(human(compact.connector_style || "straight"))} connectors · ${compact.include_fees ? "Fee flows included" : "Fee flows hidden"}</span>` : ""}</div>`}${live ? `<div class="alert ${["miro-organize", "miro-compact"].includes(action) ? "warning" : ""}">${icon(["miro-organize", "miro-compact"].includes(action) ? "info" : "lock")}<div><strong>${action === "trace" ? "Uses your Blockstream API credits" : action === "miro-recover" ? "Reads Miro and updates local recovery state" : "Changes your Miro workspace"}</strong><p>SecretSpec retrieves credentials through the launching terminal. Complete any Proton Pass prompt there.</p></div></div>` : '<div class="alert">' + icon("shield") + "<div><strong>Offline synthetic data</strong><p>This run uses the investigation’s saved fixture and needs no API credentials.</p></div></div>"}</div><footer class="dialog-footer"><button type="button" class="btn" data-action="close-dialog">Cancel</button><button type="submit" class="btn primary">${icon(action === "trace" ? "play" : action === "miro-create" ? "plus" : "refresh")}${action === "trace" ? "Collect transaction data" : action === "miro-create" ? "Create private board" : action === "miro-organize" ? "Sync and reorganize" : action === "miro-compact" ? "Apply compact layout" : action === "miro-frames" ? "Create / update frames" : action === "miro-recover" ? "Verify empty board and recover" : "Sync to Miro"}</button></footer></form>`;
   dialog.showModal();
 }
 
@@ -1496,11 +1640,12 @@ async function caseAction(action: string): Promise<void> {
 async function dispatch(action: string, element?: HTMLElement): Promise<void> {
   if (action.startsWith("view-") && state.activeCase) {
     const view = action.slice(5);
-    if (["graph", "data", "paths", "exports", "history"].includes(view)) {
+    if (["collect", "plots", "boards", "data", "exports", "history"].includes(view)) {
       state.caseView = view as CaseView; state.page = "case"; render();
     }
     return;
   }
+  if (await workflowAction(action, element)) return;
   if (await pegoutAction(action)) return;
   if (action === "address-import-open") action = "input-import-open";
   if (action === "input-import-open" && state.activeCase && !isBusy()) {
@@ -1694,6 +1839,7 @@ app.addEventListener("click", (event) => {
 
 app.addEventListener("change", (event) => {
   const element = event.target as HTMLInputElement | HTMLSelectElement;
+  if (workflowInput(element)) return;
   if (pegoutInput(element)) return;
   if (element.id === "input-import-files") {
     void inputImportFiles(element as HTMLInputElement, render, isBusy()).catch(handleError);
@@ -1748,6 +1894,7 @@ app.addEventListener("input", (event) => {
     clearTimeout(centerNameTimer);
     centerNameTimer = setTimeout(() => { void suggestCenterNames().catch(() => {}); }, 150);
   }
+  if (workflowInput(event.target as HTMLInputElement | HTMLSelectElement)) return;
   if (pegoutInput(event.target as HTMLInputElement | HTMLSelectElement)) return;
   if (inputImportInput(event.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement)) return;
   if (changeOutputsInput(event.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement)) return;
@@ -1832,7 +1979,7 @@ app.addEventListener("submit", (event) => {
         const caseId = state.activeCase.id;
         await api(`/api/cases/${encodeURIComponent(caseId)}/settings`, {
           name: String(data.get("name") || ""),
-          board: String(data.get("board") || ""),
+          board: state.activeCase.miro_board || "",
           settings,
         });
         state.activeCase = await api<Case>(

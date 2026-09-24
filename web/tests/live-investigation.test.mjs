@@ -15,7 +15,7 @@ const source = stripTypeScriptTypes(
     .replace('void initialize().catch(', 'globalThis.startup = initialize().catch('),
   {mode: 'transform'},
 );
-const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy, pegoutsGraph, pegoutInput, currentPegoutSearch, suggestCenterNames, render, navigate};');
+const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy, pegoutsGraph, pegoutInput, currentPegoutSearch, suggestCenterNames, render, navigate, workflowInput, currentWorkflow};');
 const txid = 'a'.repeat(64);
 const defaults = {hops: 1, max_transactions: 20, max_outpoints: 100, max_requests: 30,
   max_seconds: 60, max_new_items: 750, layout_attempts: 25, connector_style: 'straight'};
@@ -231,6 +231,7 @@ async function recoveryHarness(review = frameReview(), failure = null) {
 
 test('interrupted frame browser flow reviews first, explicitly adopts, and selects the interrupted run without syncing', async () => {
   const view = await recoveryHarness();
+  view.state.caseView = 'boards';
   assert.match(view.workspace(), /Recover interrupted frame/);
   await view.dispatch('miro-frame-review');
   assert.deepEqual(view.calls.find(call => call.path.endsWith('/actions')).body, {action: 'miro-frame-review'});
@@ -244,6 +245,7 @@ test('interrupted frame browser flow reviews first, explicitly adopts, and selec
   await view.pollJob();
   assert.equal(view.state.selectedRun, 'interrupted');
   assert.equal(view.state.activeCase.miro_recovery.pending_count, 0);
+  view.state.caseView = 'boards';
   assert.match(view.workspace(), /Choose Create \/ update Miro frames to finish framing the saved graph/);
   assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 2);
 });
@@ -448,7 +450,9 @@ test('frames use a separate confirmed live job for the selected snapshot', async
     ? {id: 'frames1', status: 'running', live: true} : undefined);
   view.state.activeCase = detail;
   view.state.selectedRun = 'first';
+  view.state.caseView = 'boards';
   assert.match(view.workspace(), /Create \/ update Miro frames/);
+  view.state.caseView = 'boards';
   assert.match(view.workspace(), /When the graph is finished, create its frames separately/);
   await view.dispatch('miro-frames-dialog');
   assert.equal(view.dialog.open, true);
@@ -469,8 +473,10 @@ test('frame controls require a saved run, board, idle workspace, and resolved re
       latest_run: condition === 'run' ? undefined : 'run1',
       miro_recovery: {pending_count: condition === 'recovery' ? 1 : 0}};
     if (condition === 'busy') view.state.job = {id: 'busy', status: 'running', action: 'trace'};
-    const control = view.workspace().match(/<button[^>]*data-action="miro-frames-dialog"[^>]*>/)[0];
-    assert.match(control, /disabled/);
+    view.state.caseView = 'boards';
+    const control = view.workspace().match(/<button[^>]*data-action="miro-frames-dialog"[^>]*>/)?.[0];
+    if (condition === 'board') assert.equal(control, undefined);
+    else assert.match(control, /disabled/);
     await view.dispatch('miro-frames-dialog');
     assert.equal(view.dialog.open, false, condition);
     assert.equal(view.calls.length, 1);
@@ -518,6 +524,7 @@ test('fresh board action stays available during old-board recovery and pins revi
     miro_recovery: {pending_count: 1}};
   const view = await harness(path => path.endsWith('/actions') ? {id: 'rebuild1', status: 'running'} : undefined);
   view.state.activeCase = detail;
+  view.state.caseView = 'boards';
   const control = view.workspace().match(/<button[^>]*data-action="miro-rebuild-dialog"[^>]*>/)[0];
   assert.doesNotMatch(control, /disabled/);
   await view.dispatch('miro-rebuild-dialog');
@@ -537,6 +544,7 @@ test('resume rebuild forwards original source and saved run after replacement be
   view.state.activeCase = {id: 'case1', name: 'Fresh graph', miro_board: 'NEW=', latest_run: 'later',
     run_defaults: defaults, runs: [{id: 'original'}, {id: 'later'}],
     miro_rebuild: {status: 'syncing', previous_board_id: 'OLD=', board_id: 'NEW=', run_id: 'original', name: 'Saved copy'}};
+  view.state.caseView = 'boards';
   assert.match(view.workspace(), /Resume board rebuild/);
   await view.dispatch('miro-rebuild-dialog');
   assert.match(view.dialog.innerHTML, /value="Saved copy" readonly/);
@@ -551,6 +559,7 @@ test('uncertain board creation cannot request another board; completed rebuild c
     run_defaults: defaults, runs: [{id: 'saved1'}],
     miro_rebuild: {status: 'pending', previous_board_id: 'OLD=', run_id: 'saved1', name: 'Saved copy', notice: 'Inspect your Miro boards.'}};
   view.state.activeCase = detail;
+  view.state.caseView = 'boards';
   const control = view.workspace().match(/<button[^>]*data-action="miro-rebuild-dialog"[^>]*>/)[0];
   assert.match(control, /disabled/);
   await view.dispatch('miro-rebuild-dialog');
@@ -572,6 +581,7 @@ test('failed rebuild refreshes receipt status and renders a resume action', asyn
   view.state.job = {id: 'rebuild1', action: 'miro-rebuild', caseId: 'case1', live: true};
   await view.pollJob();
   assert.equal(view.state.activeCase.miro_board, 'NEW=');
+  view.state.caseView = 'boards';
   assert.match(view.workspace(), /Resume board rebuild/);
 });
 
@@ -916,11 +926,11 @@ test('investigation tool views isolate panels and preserve the selected snapshot
   const view = await harness();
   view.state.activeCase = {id: 'case', name: 'Case', run_defaults: defaults, latest_run: 'latest-id', runs: [{id: 'old-id'}, {id: 'latest-id'}]};
   view.state.selectedRun = 'old-id';
-  assert.match(view.workspace(), /id="elk-layout-panel"/);
-  assert.doesNotMatch(view.workspace(), /id="pegouts-txid"|id="connection-hops"/);
-  await view.dispatch('view-paths');
-  assert.match(view.workspace(), /id="connection-hops"/);
-  assert.doesNotMatch(view.workspace(), /id="elk-layout-panel"/);
+  assert.match(view.workspace(), /id="collection-panel"/);
+  assert.doesNotMatch(view.workspace(), /id="plot-views-panel"|data-action="workflow-board-sync"/);
+  await view.dispatch('view-plots');
+  assert.match(view.workspace(), /id="plot-views-panel"/);
+  assert.doesNotMatch(view.workspace(), /id="collection-panel"|data-action="workflow-board-sync"/);
   await view.dispatch('view-exports');
   assert.match(view.workspace(), /CSV downloads/);
   assert.doesNotMatch(view.workspace(), /id="connection-hops"/);
@@ -951,4 +961,183 @@ test('partial settings forms preserve absent values and unchecked rendered contr
   const cleared = view.readSettings({values: {include_fees_present: '1', group_context_inputs_present: '1'}}, prior);
   assert.equal(cleared.include_fees, false); assert.equal(cleared.group_context_inputs, false);
   assert.equal(cleared.color_attribution_arrows, true);
+});
+
+const workflowPlot = (goal, id, extra = {}) => ({preview_id: id, goal, run_id: 'saved1', min_hops: 0,
+  max_hops: goal === 'full' ? null : 10, created_at: '2026-09-24T00:00:00Z', status: 'plotted',
+  node_count: 3, edge_count: 2, transaction_count: 1, reviewable: true,
+  notice: 'Saved-data-only plot. No additional transactions were fetched.',
+  artifact: {preview_id: id, downloads: [], preview_url: `/files/case1/previews/${id}/graph.html`}, ...extra});
+const workflowBoard = (goal, id, extra = {}) => ({id, name: `${goal} board`, goal, board_id: `miro-${id}`,
+  board_url: `https://miro.com/app/board/miro-${id}/`, status: 'linked', legacy_snapshot: false, can_sync: true, ...extra});
+const workflowCase = (extra = {}) => ({id: 'case1', name: 'Shared evidence', seeds: [`${txid}:0`], seed_count: 1,
+  run_defaults: defaults, runs: [{id: 'saved1', status: 'bounded_complete', max_hops: 10}], latest_run: 'saved1',
+  plots: [], boards: [], ...extra});
+const workflowEdit = (view, id, value) => view.workflowInput({id: 'workflow-' + id, value});
+
+test('all plotting goals are visible and plot only the selected saved run without fetching', async () => {
+  for (const goal of ['full', 'connections', 'pegouts']) {
+    const view = await harness(path => path.endsWith('/actions') ? {id: 'plotjob', status: 'running'} : undefined);
+    view.state.activeCase = workflowCase({runs: [{id: 'older'}, {id: 'saved1'}]});
+    view.state.selectedRun = 'older';
+    await view.dispatch('view-plots');
+    const html = view.workspace();
+    for (const name of ['Full trace', 'Starter connections', 'Paths to peg-outs']) assert.match(html, new RegExp(name));
+    assert.doesNotMatch(html, /data-action="(?:trace-dialog|pegouts-start|miro-sync-dialog|workflow-board-sync)"/);
+    await view.dispatch('plot-goal', {dataset: {goal}});
+    workflowEdit(view, 'min-hops', '2'); workflowEdit(view, 'max-hops', '10');
+    await view.dispatch('workflow-plot');
+    assert.deepEqual(view.calls.at(-1), {path: '/api/cases/case1/actions', body: {
+      action: 'plot', goal, run_id: 'older', min_hops: goal === 'pegouts' ? 2 : 0, max_hops: goal === 'full' ? 0 : 10}});
+    assert.equal(view.state.job.live, false);
+    assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 1);
+  }
+});
+
+test('plot views explain missing collection, retain all goals, and reject invalid bounds locally', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({runs: [], latest_run: undefined});
+  await view.dispatch('view-plots');
+  assert.match(view.workspace(), /Collect transaction data before generating a plot/);
+  assert.match(view.workspace(), /data-action="workflow-plot"[^>]*disabled/);
+  assert.equal((view.workspace().match(/data-action="plot-goal"/g) || []).length, 3);
+  await assert.rejects(view.dispatch('workflow-plot'), /Collect transaction data first/);
+  view.state.activeCase = workflowCase();
+  await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+  workflowEdit(view, 'min-hops', '11'); workflowEdit(view, 'max-hops', '10');
+  await assert.rejects(view.dispatch('workflow-plot'), /hop limits/);
+  assert.equal(view.calls.length, 1);
+});
+
+test('central board manager creates or links boards before collection for each goal', async () => {
+  for (const goal of ['full', 'connections', 'pegouts']) {
+    for (const method of ['create', 'link']) {
+      const view = await harness(path => path.endsWith('/actions') ? {id: 'boardjob', status: 'running'} : undefined);
+      view.state.activeCase = workflowCase({runs: [], latest_run: undefined});
+      await view.dispatch('view-boards');
+      assert.match(view.workspace(), /No boards yet/);
+      workflowEdit(view, 'board-goal', goal); workflowEdit(view, 'board-name', 'My board');
+      workflowEdit(view, 'board-url', 'https://miro.com/app/board/target=/');
+      await view.dispatch('workflow-board-' + method);
+      assert.deepEqual(view.calls.at(-1).body, {action: 'board-' + method, goal, name: 'My board',
+        ...(method === 'link' ? {board: 'https://miro.com/app/board/target=/'} : {})});
+      assert.equal(view.state.job.live, method === 'create');
+    }
+  }
+});
+
+test('shared sync buttons pin the selected board and a matching plot without changing full-trace board', async () => {
+  for (const reorganize of [false, true]) {
+    const view = await harness(path => path.endsWith('/actions') ? {id: 'syncjob', status: 'running'} : undefined);
+    view.state.activeCase = workflowCase({miro_board: 'original-full',
+      plots: [workflowPlot('full', 'fullplot'), workflowPlot('pegouts', 'pegplot')],
+      boards: [workflowBoard('full', 'fullboard'), workflowBoard('pegouts', 'pegboard')]});
+    await view.dispatch('view-boards');
+    await view.dispatch('workflow-board-select', {dataset: {record: 'pegboard'}});
+    const html = view.workspace();
+    assert.match(html, /miro-pegboard/);
+    assert.match(html, /value="pegplot"/);
+    assert.doesNotMatch(html, /value="fullplot"|data-action="miro-frames-dialog"|data-action="miro-sync-dialog"/);
+    await view.dispatch(reorganize ? 'workflow-board-organize' : 'workflow-board-sync');
+    assert.deepEqual(view.calls.at(-1).body, {action: 'board-sync', record_id: 'pegboard', preview_id: 'pegplot', reorganize});
+    assert.equal(view.state.activeCase.miro_board, 'original-full');
+  }
+});
+
+test('archived boards remain visible, stale plots cannot sync, and busy jobs block duplicate writes', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'job', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'stale', {reviewable: false, reason: 'Settings changed'})],
+    boards: [workflowBoard('pegouts', 'managed'), workflowBoard('pegouts', 'old', {legacy_snapshot: true, can_sync: false})]});
+  await view.dispatch('view-boards');
+  assert.match(view.workspace(), /Archived snapshot/);
+  assert.match(view.workspace(), /data-action="workflow-board-sync"[^>]*disabled/);
+  await assert.rejects(view.dispatch('workflow-board-sync'), /matching saved plot/);
+  await view.dispatch('workflow-board-select', {dataset: {record: 'old'}});
+  assert.doesNotMatch(view.workspace(), /data-action="workflow-board-sync"/);
+  view.state.job = {id: 'busy', action: 'board-sync'};
+  await view.dispatch('workflow-board-create');
+  assert.equal(view.calls.length, 1);
+});
+
+test('interrupted board creation links the known Miro board to its original registry entry', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'linkjob', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase({boards: [workflowBoard('pegouts', 'pending', {board_id: null, status: 'pending_creation', can_sync: false})]});
+  await view.dispatch('view-boards');
+  assert.match(view.workspace(), /Link created board to this entry/);
+  workflowEdit(view, 'recovery-url', 'created-board');
+  await view.dispatch('workflow-board-recover');
+  assert.deepEqual(view.calls.at(-1).body, {action: 'board-link', record_id: 'pending', goal: 'pegouts', name: 'pegouts board', board: 'created-board'});
+});
+
+test('job completion selects the generated plot or initialized board from the refreshed API response', async () => {
+  for (const action of ['plot', 'board-create', 'board-link']) {
+    const plot = workflowPlot('pegouts', 'newplot'), board = workflowBoard('pegouts', 'newboard');
+    const detail = workflowCase({plots: [plot], boards: [board]});
+    const view = await harness(path => path === '/api/jobs/job' ? {status: 'succeeded', result: action === 'plot' ? plot : board}
+      : path === '/api/cases/case1' ? detail : undefined);
+    view.state.activeCase = workflowCase();
+    view.state.job = {id: 'job', action, caseId: 'case1'};
+    await view.pollJob();
+    assert.equal(view.state.caseView, action === 'plot' ? 'plots' : 'boards');
+    assert.equal(view.currentWorkflow(detail)[action === 'plot' ? 'plot' : 'board'], action === 'plot' ? 'newplot' : 'newboard');
+  }
+});
+
+test('real populated case-detail contract feeds saved plot previews and common board sync controls', async () => {
+  const details = JSON.parse(execFileSync('python3', ['-m', 'web.tests.case_detail_fixture'], {
+    cwd: new URL('../../', import.meta.url), encoding: 'utf8', timeout: 15000,
+  }));
+  for (const detail of Object.values(details)) {
+    assert.ok(Array.isArray(detail.plots)); assert.ok(Array.isArray(detail.boards));
+  }
+  const detail = details.workflow;
+  assert.equal(detail.plots.length, 1); assert.equal(detail.boards.length, 1);
+  const view = await harness(path => path === `/api/cases/${detail.id}` ? detail
+    : path.endsWith('/actions') ? {id: 'syncjob', status: 'running'} : undefined);
+  await view.dispatch('open-case', {dataset: {id: detail.id}});
+  await view.dispatch('view-plots');
+  assert.match(view.workspace(), /<iframe/);
+  assert.match(view.workspace(), /Paths to peg-outs/);
+  assert.match(view.workspace(), /Collection hop limit: 10/);
+  await view.dispatch('view-boards');
+  assert.match(view.workspace(), /Peg-out case board/);
+  assert.doesNotMatch(view.workspace().match(/<button[^>]*data-action="workflow-board-sync"[^>]*>/)[0], /disabled/);
+  await view.dispatch('workflow-board-sync');
+  assert.deepEqual(view.calls.at(-1).body, {action: 'board-sync', record_id: detail.boards[0].id,
+    preview_id: detail.plots[0].preview_id, reorganize: false});
+});
+
+test('interrupted sync permits its saved plot retry and excludes newer plots until recovery completes', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'retry', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'newer'), workflowPlot('pegouts', 'saved')],
+    boards: [workflowBoard('pegouts', 'interrupted', {pending_count: 1, preview_id: 'saved', status: 'interrupted'})]});
+  await view.dispatch('view-boards');
+  assert.match(view.workspace(), /value="saved"/);
+  assert.doesNotMatch(view.workspace(), /value="newer"/);
+  await view.dispatch('workflow-board-sync');
+  assert.deepEqual(view.calls.at(-1).body, {action: 'board-sync', record_id: 'interrupted', preview_id: 'saved', reorganize: false});
+});
+
+test('empty plots cannot sync and unavailable registries show the API notice', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'empty', {empty: true, node_count: 0})],
+    boards: [workflowBoard('pegouts', 'managed')], plots_notice: 'Plot access temporarily blocked.',
+    boards_notice: 'Restore the saved board registry.'});
+  await view.dispatch('view-boards');
+  assert.match(view.workspace(), /Restore the saved board registry/);
+  assert.match(view.workspace(), /data-action="workflow-board-sync"[^>]*disabled/);
+  await assert.rejects(view.dispatch('workflow-board-sync'), /matching saved plot/);
+  await view.dispatch('view-plots');
+  assert.match(view.workspace(), /Plot access temporarily blocked/);
+  assert.match(view.workspace(), /No matching paths were found/);
+});
+
+test('settings direct board management to the central tab and preserve the original full-board binding', async () => {
+  const detail = workflowCase({miro_board: 'original-full'});
+  const view = await harness(path => path === '/api/cases/case1' ? detail : undefined);
+  view.state.activeCase = detail; view.state.page = 'case-settings';
+  assert.match(view.settingsPage(), /Manage investigation boards/);
+  assert.doesNotMatch(view.settingsPage(), /name="board"/);
+  await view.submitSettings({name: detail.name});
+  assert.equal(view.calls.find(call => call.path.endsWith('/settings')).body.board, 'original-full');
 });

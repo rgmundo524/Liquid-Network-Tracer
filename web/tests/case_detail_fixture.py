@@ -5,9 +5,15 @@ import json
 import tempfile
 import threading
 from pathlib import Path
+from unittest.mock import patch
 
 from liquid_tracer.investigations import create_investigation, read_case
 from liquid_tracer.web import LocalServer
+from liquid_tracer.investigation_boards import link_board
+from liquid_tracer.plots import preview_plot
+from tests.test_attribution_convergence import graph_state, tx
+from tests.test_connections import saved_case
+from tests.test_pegout_paths import add_pegout
 
 
 def main():
@@ -20,6 +26,17 @@ def main():
         ):
             case = create_investigation(base / "cases", name, seeds=seeds)
             cases[name] = read_case(case)["case_id"]
+        # Populate through production plot and registry code, then read the real
+        # HTTP contract. No blockchain or Miro requests are allowed here.
+        workflow = create_investigation(base / "cases", "workflow", seeds=[tx("a") + ":0"],
+                                        run_defaults={"layout_attempts": 1})
+        state = graph_state((("a:0", "c"), ("c:0", "b")), seeds=("a:0", "b:0"))
+        add_pegout(state, tx("b"))
+        saved_case(workflow, state)
+        with patch("liquid_tracer.elk_layout.optimize_graph", side_effect=lambda graph, **kwargs: graph):
+            preview_plot(workflow, "pegouts", max_hops=10)
+        link_board(workflow, "pegouts", "Peg-out case board", "workflow-board")
+        cases["workflow"] = read_case(workflow)["case_id"]
         server = LocalServer(base / "cases", base / "assets", port=0)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()

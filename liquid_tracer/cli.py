@@ -212,6 +212,30 @@ def parser():
     fee_arguments(layout)
     connector_arguments(layout)
     context_arguments(layout)
+    plot = commands.add_parser("plot", help="Plot a goal from a saved data collection without fetching transactions")
+    plot.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    plot.add_argument("--goal", choices=("full", "connections", "pegouts"), required=True)
+    plot.add_argument("--run", default="latest")
+    plot.add_argument("--min-hops", type=int, default=0)
+    plot.add_argument("--max-hops", type=int, default=10)
+    plot.add_argument("--open", dest="open_browser", action="store_true")
+    managed_boards = commands.add_parser("investigation-boards", help="List every saved Miro board for an investigation")
+    managed_boards.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    for command, help_text in (("investigation-board-create", "Create a private Miro board for a plotting goal"),
+                               ("investigation-board-link", "Link an existing Miro board to a plotting goal")):
+        managed = commands.add_parser(command, help=help_text)
+        managed.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+        managed.add_argument("--goal", choices=("full", "connections", "pegouts"), required=True)
+        managed.add_argument("--name", required=True)
+        if command == "investigation-board-link":
+            managed.add_argument("--board", required=True)
+            managed.add_argument("--record")
+    managed_sync = commands.add_parser("investigation-board-sync", help="Sync a reviewed plot to its investigation board")
+    managed_sync.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    managed_sync.add_argument("--record", required=True)
+    managed_sync.add_argument("--preview", required=True)
+    managed_sync.add_argument("--reorganize", action="store_true")
+    managed_sync.add_argument("--max-items", type=int, default=750)
     connections = commands.add_parser("connections", help="Plot only saved directed paths between starting transactions")
     connections.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     connections.add_argument("--run", default="latest")
@@ -1220,6 +1244,25 @@ def main(argv=None, *, progress=None):
                                                 args.connector_style, args.open_browser, progress,
                                                 group_context_inputs=args.group_context_inputs,
                                                 layout_attempts=args.layout_attempts), indent=2))
+        elif args.command == "plot":
+            from .plots import preview_plot
+            print(json.dumps(preview_plot(args.case, args.goal, args.run,
+                min_hops=args.min_hops, max_hops=args.max_hops,
+                open_browser=args.open_browser, progress=progress), indent=2))
+        elif args.command == "investigation-boards":
+            from .investigation_boards import list_boards
+            print(json.dumps({"boards": list_boards(args.case)}, indent=2))
+        elif args.command == "investigation-board-create":
+            from .investigation_boards import create_board as create_investigation_board
+            print(json.dumps(create_investigation_board(args.case, args.goal, args.name), indent=2))
+        elif args.command == "investigation-board-link":
+            from .investigation_boards import link_board
+            print(json.dumps(link_board(args.case, args.goal, args.name, args.board,
+                                        record_id=args.record), indent=2))
+        elif args.command == "investigation-board-sync":
+            from .investigation_boards import sync_board
+            print(json.dumps(sync_board(args.case, args.record, args.preview,
+                reorganize=args.reorganize, max_items=args.max_items, progress=progress), indent=2))
         elif args.command == "connections":
             from .connections import preview_connections
             print(json.dumps(preview_connections(args.case, args.run, args.hops,

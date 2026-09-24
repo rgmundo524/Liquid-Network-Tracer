@@ -77,11 +77,12 @@ When a button is highlighted, use **↑ ↓ ← →** to move between buttons an
 
 1. Choose **New investigation** and give it a name. The program creates a unique subdirectory under `cases/`.
 2. Paste one or more bare Liquid transaction hashes, separated by commas, into **Transaction hashes** and choose **Load outputs**. New investigations use Live Liquid. Review the outputs grouped by transaction, use Enter to toggle the relevant rows across transactions, then choose **Use selected outputs**. This fills the starting-output field; it replaces any existing entries. Alternatively enter known outputs directly as `HASH:NUMBER`, separated by whitespace or commas. Optionally provide an existing Miro board URL or ID; you can add it later.
-3. Start the first bounded run from the investigation menu. Review the hop and request limits before running it. The trace retrieves credentials through SecretSpec when the configured API requires them.
-4. Review the saved run summary and exported file locations. If the case has no board, choose **Create Miro board**, review its name and visibility, and create it. Then choose **Preview Miro** and **Sync to Miro** to publish the saved run.
-5. Next time, launch `liquid-trace`, choose **Continue investigation**, and select the saved case. Continue its latest run with another bounded hop allowance, or review and sync what is already saved.
+3. Choose **Collect transaction data** and review its hop and request limits. Collection retrieves credentials through SecretSpec when the configured API requires them. Later collections use **additional hops** from the previous saved ceiling.
+4. Choose **Choose plotting goal** under **Plot saved data**. Select a saved run and a goal: full investigation, starter connections, or paths to peg-outs. These plots use saved evidence only and make no API requests.
+5. Choose **View / create / sync boards**. Create or link a named board for a goal, select its saved plot, and sync it. Each investigation can have several boards, and each board can be refreshed from later plots.
+6. Next time, launch `liquid-trace`, choose **Continue investigation**, and select the saved case. Collect more data if needed, or plot and sync what is already saved.
 
-The investigation settings let you change its name, board, run limits, fee visibility, and connector appearance. Top-level **Settings** changes defaults for new investigations. Existing investigations keep their own saved defaults. Creating a board saves its ID with the case and shows its URL in the investigation menu. It creates an empty board; publishing the traced graph is a separate **Sync to Miro** action. A completed run can be synced after creating or linking a board without tracing again.
+The investigation settings let you change its name, legacy full-graph board, run limits, fee visibility, and connector appearance. Top-level **Settings** changes defaults for new investigations. Existing investigations keep their own saved defaults. **Miro boards** manages the investigation's separate named boards and their plotting goals. Creating a board makes an empty destination; publishing a saved plot is a separate sync action. See the [investigation workflow guide](docs/investigation-workflow.md).
 
 Choose **ELK layout preview** after saving a run to inspect the proposed positions and routes locally, compare estimated crossings and overlaps, and download its SVG. It needs no Miro board. Missing address transaction counts are fetched first, using credentials when the configured API requires them; layout calculation remains local. The preview uses the same ELK calculation as the default Miro plan, while actual Miro routes and existing manual arrangements can differ.
 
@@ -93,7 +94,7 @@ Choose **Export CSV** beside **Mermaid chart** to save tables from the latest ru
 
 **Load outputs** accepts up to 100 distinct transaction hashes. Commas, spaces, or newlines separate hashes; duplicates are removed and the full list is validated before lookup. One credential session and API client serve the batch. The shared lookup budget defaults to five API attempts and 30 seconds per distinct transaction, including authentication and retries. For 10 transactions that means at most 50 attempts and 300 seconds across the batch. A failed lookup preserves the existing starting-output field; a partial result is not applied.
 
-Lookup creates no investigation or trace and follows no subsequent spends. The selected output references are saved when you create the investigation; the later trace fetches and archives its own evidence. Selected UTXOs from all starting transactions share one investigation, board, and set of run limits. Shared descendants are represented once. Continuing a bounded run resumes its saved branches; adding different starting transactions currently requires a new investigation.
+Lookup creates no investigation or trace and follows no subsequent spends. The selected output references are saved when you create the investigation; the later trace fetches and archives its own evidence. Selected UTXOs from all starting transactions share one investigation and set of run limits, with separate boards for different plotting goals. Shared descendants are represented once. Continuing a bounded run resumes its saved branches; adding different starting transactions currently requires a new investigation.
 
 ## Local browser interface
 
@@ -109,15 +110,16 @@ This builds the interface and opens [http://127.0.0.1:4321](http://127.0.0.1:432
 The browser and terminal interfaces share the same `cases/`, defaults, run history, and Miro mappings. An investigation created in either interface can be reopened in the other without importing or migrating it.
 
 1. Open a saved investigation, or create a new Live Liquid investigation. Paste comma-separated transaction hashes, load their outputs, and select the relevant UTXOs grouped by transaction.
-2. Choose **Start first run** or **Continue investigation**, set the hop allowance for this run, and start tracing. Other limits use the saved defaults. A later run continues the investigation's latest saved snapshot.
-3. Select a saved run to review it, create an **ELK layout preview** or Mermaid chart, or export CSV tables. Use **Download SVG** beside either chart or the individual CSV download buttons. Layout reports, Mermaid source, and supporting files are also available. Downloads remain available after reopening the investigation; selecting a different run shows that run's products. Changed display settings are identified so you can regenerate the affected product.
-4. Create a private Miro board or link an existing board in the investigation settings. Sync the saved run to Miro; **Preview changes** is optional. **Sync and reorganize graph** is a separate action because it can move existing managed objects and change their connector appearance and attachment points.
+2. Open **Collect data**, set the hop allowance for this run, and start collection. Other limits use the saved defaults. A later run resumes the latest saved snapshot with additional hops.
+3. Open **Plot views** and choose a goal: **Full trace**, **Starter connections**, or **Paths to peg-outs**. Select a saved collection run, set any hop filter, and generate the plot locally. Plotting fetches no new evidence or address statistics. Review its source coverage and layout.
+4. Open **Miro boards**. Create or link a board for that goal, select the saved plot, then choose **Sync to Miro** or **Sync and reorganize**. Each board has its own mapping and status; later plots can refresh the same board.
+5. Use **Downloads** for saved SVGs, tables, layout reports, and supporting files. Older products remain available after reopening the investigation; changed display settings identify plots that need to be regenerated.
 
 **Investigation settings** collects tracing limits, graph layout, Miro configuration, and colors. **Workspace defaults** supplies starting preferences for new investigations. Changing the hop allowance in a run dialog applies only to that run. Imports use **Preview → Apply**; changing a file or import option requires a fresh preview.
 
-The task tabs separate **Graph & Miro**, **Investigation data**, **Path searches**, **Downloads**, and **Run history**. The selected saved snapshot stays selected across tabs. Saved-run review, CSV export, and Miro plan preview need no API credentials. ELK and Mermaid charts can require credentials to fetch missing address counts before local rendering. Miro board creation, sync, and organization contact Miro and require its access token.
+The task tabs separate **Collect data**, **Plot views**, **Miro boards**, **Investigation data**, **Downloads**, and **History**. The selected saved snapshot stays selected across tabs. The main plotting workflow is fully offline; collection is the separate fetching phase. Older ELK and Mermaid tools can still fetch missing address counts before local rendering. Miro board creation and sync contact Miro and require its access token. Linking and listing boards are local actions.
 
-The usual cycle is **Trace → Create or link a board once → Sync to Miro → Continue run → Sync to Miro**. Keep the same investigation and board. Normal sync preserves your arrangement and adds the continuation. If the existing positions leave no room, or you want a fresh arrangement, choose **Sync and reorganize graph**. This action both adds the selected saved run and rearranges the managed graph; no separate sync or new trace is required afterward. It cannot reserve space for a future run that has not been traced. You may also tidy the native shapes in Miro by hand.
+The usual cycle is **Collect data → Plot views → Sync selected boards**. Create or link each goal's board once. Normal sync preserves the positions of retained objects. If the existing positions leave no room, or you want a fresh arrangement, choose **Sync and reorganize**. Obsolete generated objects are removed only after checks protect analyst changes and unrelated connections. Each board's status and history remain separate, while the underlying collection data is shared. You may also tidy the native shapes in Miro by hand.
 
 During sync, the browser and launching terminal show the current stage and completed/total item counts. Existing-item checks finish before any board changes, so the board itself may initially appear unchanged. The display distinguishes checking, layout preparation, updates, new items, and temporary API retry waits. Counts belong to the current stage, not a predicted completion time. A failed action retains its last stage; consult the terminal for the specific API or mapping error before retrying.
 
@@ -125,21 +127,25 @@ Live actions retrieve credentials through the existing SecretSpec/Proton Pass se
 
 Astro supplies the local interface; Python serves it and runs the existing tracer commands. The built interface and ELK/Mermaid previews need no CDN or hosted frontend. Use the local previews to review layouts and Miro for online editing and collaboration. See [local browser development](docs/development.md#local-astro-interface) for build and test commands.
 
-## Find peg-outs within a hop range
+## Plot peg-outs within a hop range
 
-The **Trace to peg-outs** panel and terminal menu default to all the investigation's
-originally selected seed UTXOs. Enter an inclusive minimum and maximum hop count,
-then choose **Trace and plot peg-outs**. Each starting transaction is hop 0; each spending transaction adds
-one hop. The search fetches missing transactions within the investigation's saved
-budgets and respects its stop rules and attribution hop limits. Only paths
-reaching matching peg-out requests are plotted. Unselected sibling outputs at
-the start are excluded. Enable **Use a different starting transaction** to search
-all outputs of another transaction instead.
+Collect the relevant transaction data, then choose **Paths to peg-outs** in
+**Plot views**. Enter an inclusive minimum and maximum hop count. Each starting
+transaction is hop 0; each spending transaction adds one hop. The plot follows
+the investigation's originally selected seed UTXOs and excludes unselected
+siblings. It reads the saved collection run without fetching more transactions.
+Use **Miro boards** to initialize and maintain a separate board for this goal.
 
-Paused searches resume with their saved starting points and hop range. Search history and previews
-are separate from the full investigation, with reviewed publication to a separate
-Miro board. A request is not confirmation of its Bitcoin payout. See the
-[peg-out search guide](docs/pegout-search.md) for range examples, recovery, and CLI
+For a 10-hop view, first collect enough evidence to cover that depth and check
+whether a budget or stop rule limited coverage. Missing matches in saved data
+do not prove that no peg-out exists. A request is not confirmation of its Bitcoin
+payout. The [investigation workflow guide](docs/investigation-workflow.md)
+explains the shared data and multi-board workflow.
+
+Earlier standalone **Trace to peg-outs** searches remain available under
+**History**, with their original scope and resume controls. These legacy searches
+can still fetch independently and retain their separate snapshot publication.
+See the [legacy peg-out search guide](docs/pegout-search.md) for recovery and CLI
 commands.
 
 ## Where investigations and runs are saved
@@ -528,6 +534,11 @@ Prefer outpoint labels when attribution applies to a particular payment. Address
 `docs/bridge-research.md` explains the current leads. `examples/handoffs.csv` is a **manual research ledger**, not an automated cross-chain matcher or input to this version's graph. No Liquid service addresses are preloaded as attributed facts.
 
 ## Keep one editable Miro graph up to date
+
+For the unified multi-board workflow, use **Miro boards** and the
+[investigation workflow guide](docs/investigation-workflow.md). The following
+commands describe the existing full-graph board tools, which remain available
+for compatibility and recovery.
 
 Obtain an access token with **`boards:read` and `boards:write`** scopes and access to your Miro team. Follow [Miro's REST API quickstart](https://developers.miro.com/docs/rest-api-build-your-first-hello-world-app). Store the token with the setup helper. If it expires, replace it and retry the selected action; this program does not refresh Miro tokens automatically.
 

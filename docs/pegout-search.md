@@ -1,5 +1,10 @@
 # Trace to peg-outs
 
+This guide describes the older standalone search and its recovery commands.
+For the shared **Collect data → Plot views → Miro boards** workflow, use
+[the investigation workflow guide](investigation-workflow.md). Its peg-out plots
+read saved collection data, and its boards can be updated with later plots.
+
 Use **Trace to peg-outs** in the investigation workspace or terminal menu to
 search forward from all of the investigation's originally selected seed UTXOs
 and plot paths reaching peg-out requests. The search is available before the
