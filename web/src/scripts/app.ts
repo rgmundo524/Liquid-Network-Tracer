@@ -182,7 +182,7 @@ type AddressActivity = {
 };
 type AddressRow = { address: string; run_output_count?: number; service: ServiceRule | null; activity: AddressActivity | null };
 type AddressPage = { run_id: string; rows: AddressRow[]; total: number; offset: number; limit: number };
-type CaseView = "collect" | "plots" | "boards" | "data" | "exports" | "history";
+type CaseView = "collect" | "plots" | "boards" | "history";
 type Page = "dashboard" | "new" | "case" | "settings" | "case-settings" | "addresses";
 type ActiveJob = {
   id: string;
@@ -875,7 +875,10 @@ function currentPlot(detail: Case): Plot | undefined {
 
 function currentBoard(detail: Case): InvestigationBoard | undefined {
   const draft = currentWorkflow(detail);
-  return detail.boards?.find(item => item.id === draft.board) || detail.boards?.[0];
+  if (draft.board) return detail.boards?.find(item => item.id === draft.board);
+  if (draft.boardPlot) return detail.boards?.find(board =>
+    board.can_sync && matchingBoardPlots(detail, board).some(plot => plot.preview_id === draft.boardPlot));
+  return detail.boards?.[0];
 }
 
 function collectDataPanel(detail: Case, saved: boolean, settings: Settings): string {
@@ -886,7 +889,7 @@ function plotViewsPanel(detail: Case, saved: boolean): string {
   const draft = currentWorkflow(detail), plot = currentPlot(detail), artifact = plot?.artifact;
   const preview = safeLocalUrl(artifact?.preview_url);
   return `<section class="panel" id="plot-views-panel"><div class="panel-head"><div><h2>Plot views</h2><p>Choose a goal and build a view from the selected saved run.</p></div><span class="badge gray">Saved data only</span></div><div class="panel-body"><div class="plot-goals" role="group" aria-label="Plotting goal">${plotGoals.map(goal => `<button class="plot-goal${draft.goal === goal.id ? " selected" : ""}" data-action="plot-goal" data-goal="${goal.id}" aria-pressed="${draft.goal === goal.id}"${disabled(isBusy())}><strong>${goal.name}</strong><span>${goal.description}</span></button>`).join("")}</div>${draft.goal !== "full" ? `<div class="field-row">${draft.goal === "pegouts" ? `<label class="field"><span>Minimum hops</span><input id="workflow-min-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.minHops)}"${disabled(isBusy())}/></label>` : ""}<label class="field"><span>Maximum hops</span><input id="workflow-max-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.maxHops)}"${disabled(isBusy())}/></label></div>` : ""}<p class="artifact-note">Plotting makes no blockchain requests. A hop filter cannot reveal data beyond your collection coverage. If a path is missing, collect more data first and generate another plot.</p>${draft.goal === "pegouts" ? '<p class="small muted">Starting transactions are hop 0. Only selected starting UTXOs are followed. A peg-out request does not confirm the separate Bitcoin payout.</p>' : ""}<div class="task-actions">${button(`Generate ${goalName(draft.goal).toLowerCase()} plot`, "workflow-plot", "graph", "primary", !saved || isBusy())}${button("Collect more data", "view-collect", "play")}${button("Graph settings", "case-settings", "settings", "", isBusy())}</div>${!saved ? '<p class="artifact-note">Collect transaction data before generating a plot.</p>' : ""}</div></section>
-  <section class="panel" id="saved-plots-panel"><div class="panel-head"><div><h2>Saved plots</h2><p>Each plot records its collection run and tracing goal.</p></div><span class="badge gray">${detail.plots?.length || 0} plots</span></div><div class="panel-body">${detail.plots_notice ? `<p class="artifact-note" role="status">${esc(detail.plots_notice)}</p>` : ""}${plot ? `<label class="field"><span>Plot</span><select id="workflow-plot-picker">${(detail.plots || []).map(item => `<option value="${esc(item.preview_id)}"${item.preview_id === plot.preview_id ? " selected" : ""}>${esc(goalName(item.goal))} · ${esc(short(item.run_id, 8))} · ${esc(formatDate(item.created_at))}</option>`).join("")}</select></label><p>${esc(goalName(plot.goal))} · Run ${esc(short(plot.run_id, 8))}${plot.goal !== "full" ? ` · Hops ${plot.min_hops}–${plot.max_hops}` : ""} · ${plot.node_count} objects · ${plot.edge_count} connections.</p>${plot.coverage_notice && !plot.notice?.includes(plot.coverage_notice) ? `<p class="artifact-note">${esc(plot.coverage_notice)}</p>` : ""}${plot.notice ? `<p class="artifact-note">${esc(plot.notice)}</p>` : ""}${plot.empty ? '<p class="artifact-note">No matching paths were found in this saved data. Collect more data or adjust the hop range.</p>' : ""}${!plot.reviewable ? `<p class="artifact-note">${esc(plot.reason || "No matching paths in this saved data.")}</p>` : ""}<div class="task-actions">${button("Manage Miro boards", "plot-boards", "board", "primary")}${downloadLink(artifact?.downloads.find(item => item.name === "graph.svg"), "Download SVG")}${detailPagesLink(artifact?.downloads)}${preview ? `<a class="btn small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">Open full view</a>` : ""}</div>` : '<p class="artifact-note">Your generated plots will appear here. All three goals use the same saved collection data.</p>'}</div>${preview ? `<iframe loading="lazy" class="graph-preview" src="${esc(preview)}#chart" title="${esc(goalName(plot!.goal))} saved plot" sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe>` : ""}</section>`;
+  <section class="panel" id="saved-plots-panel"><div class="panel-head"><div><h2>Saved plots</h2><p>Each plot records its collection run and tracing goal.</p></div><span class="badge gray">${detail.plots?.length || 0} plots</span></div><div class="panel-body">${detail.plots_notice ? `<p class="artifact-note" role="status">${esc(detail.plots_notice)}</p>` : ""}${plot ? `<label class="field"><span>Plot</span><select id="workflow-plot-picker">${(detail.plots || []).map(item => `<option value="${esc(item.preview_id)}"${item.preview_id === plot.preview_id ? " selected" : ""}>${esc(goalName(item.goal))} · ${esc(short(item.run_id, 8))} · ${esc(formatDate(item.created_at))}</option>`).join("")}</select></label><p>${esc(goalName(plot.goal))} · Run ${esc(short(plot.run_id, 8))}${plot.goal !== "full" ? ` · Hops ${plot.min_hops}–${plot.max_hops}` : ""} · ${plot.node_count} objects · ${plot.edge_count} connections.</p>${plot.coverage_notice && !plot.notice?.includes(plot.coverage_notice) ? `<p class="artifact-note">${esc(plot.coverage_notice)}</p>` : ""}${plot.notice ? `<p class="artifact-note">${esc(plot.notice)}</p>` : ""}${plot.empty ? '<p class="artifact-note">No matching paths were found in this saved data. Collect more data or adjust the hop range.</p>' : ""}${!plot.reviewable ? `<p class="artifact-note">${esc(plot.reason || "No matching paths in this saved data.")}</p>` : ""}<p class="small muted">Choose an output for this saved plot. The ELK SVG uses the same layout shown below.</p><div class="task-actions">${button("Sync with Miro", "plot-boards", "board", "primary", !plot.reviewable || Boolean(plot.empty) || plot.node_count === 0 || isBusy())}${downloadLink(artifact?.downloads.find(item => item.name === "graph.svg"), "Download ELK SVG")}${detailPagesLink(artifact?.downloads)}${preview ? `<a class="btn small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">Open full view</a>` : ""}</div>` : '<p class="artifact-note">Your generated plots will appear here. All three goals use the same saved collection data.</p>'}</div>${preview ? `<iframe loading="lazy" class="graph-preview" src="${esc(preview)}#chart" title="${esc(goalName(plot!.goal))} saved plot" sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe>` : ""}</section>`;
 }
 
 function plotDownloadsPanel(detail: Case): string {
@@ -906,11 +909,12 @@ function matchingBoardPlots(detail: Case, board: InvestigationBoard | undefined)
 function boardsPanel(detail: Case, saved: boolean, artifacts: RunArtifacts, settings: Settings): string {
   const draft = currentWorkflow(detail), selected = currentBoard(detail), boards = detail.boards || [];
   const plots = matchingBoardPlots(detail, selected);
-  const chosen = plots.find(plot => plot.preview_id === draft.boardPlot) || plots[0];
+  const chosen = draft.boardPlot ? plots.find(plot => plot.preview_id === draft.boardPlot) : plots[0];
+  const requestedPlot = detail.plots?.find(plot => plot.preview_id === draft.boardPlot);
   const legacyFull = selected?.board_id === detail.miro_board && selected?.goal === "full";
   const locked = isBusy() || !selected?.can_sync || !chosen;
-  return `<section class="panel" id="miro-boards-panel"><div class="panel-head"><div><h2>Miro boards</h2><p>View and manage every board linked to this investigation.</p></div><span class="badge gray">${boards.length} boards</span></div><div class="panel-body">${detail.boards_notice ? `<p class="artifact-note" role="status">${esc(detail.boards_notice)}</p>` : ""}${boards.length ? `<div class="board-list" role="group" aria-label="Investigation boards">${boards.map(board => `<button class="board-choice${board.id === selected?.id ? " selected" : ""}" data-action="workflow-board-select" data-record="${esc(board.id)}" aria-pressed="${board.id === selected?.id}"><strong>${esc(board.name || goalName(board.goal))}</strong><span>${esc(goalName(board.goal))} · ${esc(human(board.status))}${board.legacy_snapshot ? " · Archived snapshot" : ""}</span></button>`).join("")}</div>` : '<p class="artifact-note">No boards yet. Create a private board or link an existing one below.</p>'}${selected ? `<div class="board-management"><h3>${esc(selected.name || goalName(selected.goal))}</h3>${selected.board_id ? `<a class="board-link" href="${esc(boardUrl(selected.board_id))}" target="_blank" rel="noopener noreferrer">Open Miro board ${icon("external")}</a>` : ""}${selected.notice ? `<p class="artifact-note">${esc(selected.notice)}</p>` : ""}${!selected.board_id ? `<label class="field"><span>Created board URL or ID</span><input id="workflow-recovery-url" maxlength="512" value="${esc(draft.recoveryUrl)}"${disabled(isBusy())}/><small>If creation was interrupted, locate the board in Miro and link it to this saved entry.</small></label>${button("Link created board to this entry", "workflow-board-recover", "board", "", isBusy())}` : ""}${selected.can_sync ? `<label class="field"><span>Plot to sync · ${esc(goalName(selected.goal))}</span><select id="workflow-board-plot"${disabled(!plots.length || isBusy())}>${plots.length ? plots.map(plot => `<option value="${esc(plot.preview_id)}"${plot.preview_id === chosen?.preview_id ? " selected" : ""}>Run ${esc(short(plot.run_id, 8))}${plot.goal !== "full" ? ` · Hops ${plot.min_hops}–${plot.max_hops}` : ""} · ${esc(formatDate(plot.created_at))}</option>`).join("") : '<option value="">Generate a matching plot first</option>'}</select></label><div class="task-actions">${button("Sync to Miro", "workflow-board-sync", "refresh", "primary", locked)}${button("Sync and reorganize", "workflow-board-organize", "graph", "", locked)}${button("Generate matching plot", "board-plot-goal", "graph", "", isBusy())}</div><p class="small muted">Sync keeps existing positions. Sync and reorganize also applies the plot layout. These actions update only this board and do not fetch transaction data.</p>${selected.pending_count ? '<p class="artifact-note">This board has an interrupted operation. Retry its saved plot to resume. An uncertain item creation may require recovery before retrying.</p>' : ""}` : '<p class="artifact-note">This saved board is available to view. Create a managed board below to sync new plots.</p>'}</div>` : ""}</div></section>
-  <section class="panel"><div class="panel-head"><div><h2>Add a Miro board</h2><p>Give each board a plotting goal so updates go to the right place.</p></div></div><div class="panel-body"><div class="field-row"><label class="field"><span>Plotting goal</span><select id="workflow-board-goal"${disabled(isBusy())}>${plotGoals.map(goal => `<option value="${goal.id}"${draft.boardGoal === goal.id ? " selected" : ""}>${goal.name}</option>`).join("")}</select></label><label class="field"><span>Board name</span><input id="workflow-board-name" maxlength="60" value="${esc(draft.boardName)}" placeholder="${esc(`${detail.name} · ${goalName(draft.boardGoal)}`.slice(0, 60))}"${disabled(isBusy())}/></label></div><div class="task-actions">${button("Create private Miro board", "workflow-board-create", "plus", "primary", isBusy())}</div><label class="field"><span>Or link an existing board URL or ID</span><input id="workflow-board-url" maxlength="512" value="${esc(draft.boardUrl)}" placeholder="https://miro.com/app/board/…"${disabled(isBusy())}/></label>${button("Link existing board", "workflow-board-link", "board", "", isBusy())}<p class="small muted">Create or link once, then use the same sync controls for every plotting goal. Credentials are retrieved through the launching terminal.</p></div></section>${legacyFull || !selected && detail.miro_board ? fullBoardMaintenance(detail, saved, artifacts, settings) : ""}`;
+  return `<section class="panel" id="miro-boards-panel"><div class="panel-head"><div><h2>Miro boards</h2><p>View and manage every board linked to this investigation.</p></div><span class="badge gray">${boards.length} boards</span></div><div class="panel-body">${requestedPlot ? `<p class="artifact-note">Selected output: ${esc(goalName(requestedPlot.goal))} · Run ${esc(short(requestedPlot.run_id, 8))}${requestedPlot.goal !== "full" ? ` · Hops ${requestedPlot.min_hops}–${requestedPlot.max_hops}` : ""}. Sync uses this saved plot.</p>${!selected ? '<p class="artifact-note">Create or link a board for this plotting goal below, or select an existing board.</p>' : ""}` : ""}${detail.boards_notice ? `<p class="artifact-note" role="status">${esc(detail.boards_notice)}</p>` : ""}${boards.length ? `<div class="board-list" role="group" aria-label="Investigation boards">${boards.map(board => `<button class="board-choice${board.id === selected?.id ? " selected" : ""}" data-action="workflow-board-select" data-record="${esc(board.id)}" aria-pressed="${board.id === selected?.id}"><strong>${esc(board.name || goalName(board.goal))}</strong><span>${esc(goalName(board.goal))} · ${esc(human(board.status))}${board.legacy_snapshot ? " · Archived snapshot" : ""}</span></button>`).join("")}</div>` : '<p class="artifact-note">No boards yet. Create a private board or link an existing one below.</p>'}${selected ? `<div class="board-management"><h3>${esc(selected.name || goalName(selected.goal))}</h3>${selected.board_id ? `<a class="board-link" href="${esc(boardUrl(selected.board_id))}" target="_blank" rel="noopener noreferrer">Open Miro board ${icon("external")}</a>` : ""}${selected.notice ? `<p class="artifact-note">${esc(selected.notice)}</p>` : ""}${!selected.board_id ? `<label class="field"><span>Created board URL or ID</span><input id="workflow-recovery-url" maxlength="512" value="${esc(draft.recoveryUrl)}"${disabled(isBusy())}/><small>If creation was interrupted, locate the board in Miro and link it to this saved entry.</small></label>${button("Link created board to this entry", "workflow-board-recover", "board", "", isBusy())}` : ""}${selected.can_sync ? `<label class="field"><span>Plot to sync · ${esc(goalName(selected.goal))}</span><select id="workflow-board-plot"${disabled(!plots.length || isBusy())}>${!chosen ? '<option value="" selected>Choose a saved plot for this board</option>' : ""}${plots.length ? plots.map(plot => `<option value="${esc(plot.preview_id)}"${plot.preview_id === chosen?.preview_id ? " selected" : ""}>Run ${esc(short(plot.run_id, 8))}${plot.goal !== "full" ? ` · Hops ${plot.min_hops}–${plot.max_hops}` : ""} · ${esc(formatDate(plot.created_at))}</option>`).join("") : '<option value="">No eligible saved plot. Use Plot views to generate one.</option>'}</select></label><div class="task-actions">${button("Sync to Miro", "workflow-board-sync", "refresh", "primary", locked)}${button("Sync and reorganize", "workflow-board-organize", "graph", "", locked)}</div><p class="small muted">Sync keeps existing positions. Sync and reorganize also applies the plot layout. These actions update only this board and do not fetch transaction data.</p>${selected.pending_count ? '<p class="artifact-note">This board has an interrupted operation. Retry its saved plot to resume. An uncertain item creation may require recovery before retrying.</p>' : ""}` : '<p class="artifact-note">This saved board is available to view. Create a managed board below to sync new plots.</p>'}</div>` : ""}</div></section>
+  <section class="panel"><div class="panel-head"><div><h2>Add a Miro board</h2><p>Give each board a plotting goal so updates go to the right place.</p></div></div><div class="panel-body"><div class="field-row"><label class="field"><span>Plotting goal</span><select id="workflow-board-goal"${disabled(isBusy())}>${plotGoals.map(goal => `<option value="${goal.id}"${draft.boardGoal === goal.id ? " selected" : ""}>${goal.name}</option>`).join("")}</select></label><label class="field"><span>Board name</span><input id="workflow-board-name" maxlength="60" value="${esc(draft.boardName)}" placeholder="${esc(`${detail.name} · ${goalName(draft.boardGoal)}`.slice(0, 60))}"${disabled(isBusy())}/></label></div><div class="task-actions">${button("Create private Miro board", "workflow-board-create", "plus", "primary", isBusy())}</div><label class="field"><span>Or link an existing board URL or ID</span><input id="workflow-board-url" maxlength="512" value="${esc(draft.boardUrl)}" placeholder="https://miro.com/app/board/…"${disabled(isBusy())}/></label>${button("Link existing board", "workflow-board-link", "board", "", isBusy())}<p class="small muted">Create or link once, then use the same sync controls for every plotting goal. Credentials are retrieved through the launching terminal.</p></div></section>${legacyFull || !selected && !requestedPlot && detail.miro_board ? fullBoardMaintenance(detail, saved, artifacts, settings) : ""}`;
 }
 
 function workflowInput(element: HTMLInputElement | HTMLSelectElement): boolean {
@@ -918,14 +922,14 @@ function workflowInput(element: HTMLInputElement | HTMLSelectElement): boolean {
   const draft = currentWorkflow(state.activeCase);
   const fields: Record<string, "minHops" | "maxHops" | "plot" | "boardPlot" | "boardName" | "boardUrl" | "recoveryUrl"> = {"workflow-min-hops": "minHops", "workflow-max-hops": "maxHops", "workflow-plot-picker": "plot", "workflow-board-plot": "boardPlot", "workflow-board-name": "boardName", "workflow-board-url": "boardUrl", "workflow-recovery-url": "recoveryUrl"};
   if (element.id === "workflow-board-goal" && plotGoals.some(goal => goal.id === element.value)) draft.boardGoal = element.value as PlotGoal;
-  else if (fields[element.id]) draft[fields[element.id]] = element.value;
+  else if (fields[element.id]) draft[fields[element.id]] = element.id === "workflow-board-plot" && !element.value ? "unselected" : element.value;
   else return false;
   if (["workflow-plot-picker", "workflow-board-goal", "workflow-board-plot"].includes(element.id)) render();
   return true;
 }
 
 async function workflowAction(action: string, element?: HTMLElement): Promise<boolean> {
-  if (!["plot-goal", "workflow-plot", "plot-boards", "workflow-board-select", "board-plot-goal", "workflow-board-create", "workflow-board-link", "workflow-board-sync", "workflow-board-organize", "workflow-board-recover"].includes(action)) return false;
+  if (!["plot-goal", "workflow-plot", "plot-boards", "workflow-board-select", "workflow-board-create", "workflow-board-link", "workflow-board-sync", "workflow-board-organize", "workflow-board-recover"].includes(action)) return false;
   const detail = state.activeCase;
   if (!detail || isBusy()) return true;
   const draft = currentWorkflow(detail);
@@ -933,13 +937,17 @@ async function workflowAction(action: string, element?: HTMLElement): Promise<bo
     if (plotGoals.some(goal => goal.id === element?.dataset.goal)) draft.goal = element!.dataset.goal as PlotGoal;
     render(); return true;
   }
-  if (action === "workflow-board-select") {draft.board = element?.dataset.record || ""; draft.boardPlot = ""; render(); return true;}
+  if (action === "workflow-board-select") {draft.board = element?.dataset.record || ""; render(); return true;}
   if (action === "plot-boards") {
     const plot = currentPlot(detail);
-    if (plot) {draft.boardPlot = plot.preview_id; draft.boardGoal = plot.goal; draft.board = detail.boards?.find(board => board.goal === plot.goal && board.can_sync)?.id || "";}
+    if (!plot?.reviewable || plot.empty || plot.node_count === 0) throw new Error("Select a current saved plot with activity before syncing to Miro.");
+    draft.boardPlot = plot.preview_id;
+    draft.boardGoal = plot.goal;
+    const selectedBoard = detail.boards?.find(board => board.id === draft.board);
+    draft.board = (selectedBoard?.goal === plot.goal && selectedBoard.can_sync ? selectedBoard
+      : detail.boards?.find(board => board.goal === plot.goal && board.can_sync))?.id || "";
     state.caseView = "boards"; render(); return true;
   }
-  if (action === "board-plot-goal") {draft.goal = currentBoard(detail)?.goal || "full"; state.caseView = "plots"; render(); return true;}
   let body: Record<string, unknown>;
   if (action === "workflow-plot") {
     if (!currentRun()) throw new Error("Collect transaction data first, then select a saved run to plot.");
@@ -955,12 +963,16 @@ async function workflowAction(action: string, element?: HTMLElement): Promise<bo
     if (action === "workflow-board-link") {if (!draft.boardUrl.trim()) throw new Error("Enter a Miro board URL or ID to link."); body.board = draft.boardUrl.trim();}
   } else {
     const board = currentBoard(detail), plots = matchingBoardPlots(detail, board);
-    const plot = plots.find(item => item.preview_id === draft.boardPlot) || plots[0];
+    const plot = draft.boardPlot ? plots.find(item => item.preview_id === draft.boardPlot) : plots[0];
     if (!board?.can_sync || !plot) throw new Error("Select a managed board and a matching saved plot before syncing.");
     body = {action: "board-sync", record_id: board.id, preview_id: plot.preview_id, reorganize: action === "workflow-board-organize"};
   }
   await startJob(`/api/cases/${encodeURIComponent(detail.id)}/actions`, body, String(body.action), body.action !== "plot" && body.action !== "board-link", detail.id);
   return true;
+}
+
+function investigationDataPanel(detail: Case): string {
+  return `<section class="panel" id="settings-data"><div class="panel-head"><div><h2>Investigation data</h2><p>Manage attributions, tracing stops, and change outputs here.</p></div></div><div class="panel-body"><div class="task-actions">${button("Import CSV files", "input-import-open", "plus", "primary", isBusy())}${button("Address review", "addresses", "search", "", isBusy())}${button("Change outputs", "change-outputs-open", "graph", "", isBusy())}${button("Assign colors", "name-colors-open", "", "", isBusy())}<a class="btn" href="/api/cases/${esc(encodeURIComponent(detail.id))}/input-exports/all" download>${icon("download")}Export input CSVs</a></div><p class="small muted">Import attributions, name colors, and change outputs together. Export input CSVs downloads all saved attributions, name colors, and change outputs across every page. Unsaved edits are excluded. Imports, address assessments and color changes save separately from the settings form.</p></div></section>${inputImportPanel(detail.id, isBusy())}${changeOutputsPanel(detail.id, isBusy())}`;
 }
 
 function workspace(): string {
@@ -982,13 +994,11 @@ function workspace(): string {
     )
     .join("");
 
-  const views: [CaseView, string][] = [["collect", "Collect data"], ["plots", "Plot views"], ["boards", "Miro boards"], ["data", "Investigation data"], ["exports", "Downloads"], ["history", "History"]];
-  const dataPanel = `<section class="panel"><div class="panel-head"><div><h2>Investigation data</h2><p>Manage attributions, tracing stops, and change outputs here.</p></div></div><div class="panel-body"><div class="task-actions">${button("Import CSV files", "input-import-open", "plus", "primary", isBusy())}${button("Address review", "addresses", "search", "", isBusy())}${button("Change outputs", "change-outputs-open", "graph", "", isBusy())}<a class="btn" href="/api/cases/${esc(encodeURIComponent(detail.id))}/input-exports/all" download>${icon("download")}Export input CSVs</a></div><p class="small muted">Import attributions, name colors, and change outputs together. Export input CSVs downloads all saved attributions, name colors, and change outputs across every page. Unsaved edits are excluded. Colors and graph preferences are in Investigation settings.</p></div></section>${inputImportPanel(detail.id, isBusy())}${changeOutputsPanel(detail.id, isBusy())}`;
-  const content = state.caseView === "data" ? dataPanel
-    : state.caseView === "plots" ? plotViewsPanel(detail, saved)
+  const views: [CaseView, string][] = [["collect", "Collect data"], ["plots", "Plot views"], ["boards", "Miro boards"], ["history", "History & downloads"]];
+
+  const content = state.caseView === "plots" ? plotViewsPanel(detail, saved)
     : state.caseView === "boards" ? boardsPanel(detail, saved, artifacts, settings)
-    : state.caseView === "exports" ? `${plotDownloadsPanel(detail)}${csvDownloads(artifacts.csv, saved, settings.include_fees)}${localGraph(artifacts.mermaid, saved, settings)}`
-    : state.caseView === "history" ? `<section class="panel"><div class="panel-head"><div><h2>Run history</h2><p>Every continuation preserves the preceding snapshot.</p></div><span class="badge gray">${(detail.runs || []).length} runs</span></div>${detail.runs?.length ? `<div class="table-wrap"><table class="run-list"><thead><tr><th>Run</th><th>Recorded</th><th>Status</th><th>Transactions</th></tr></thead><tbody>${detail.runs.map((item) => `<tr class="${item.id === run?.id ? "selected" : ""}"><td><button data-run="${esc(item.id)}">${esc(short(item.id, 8))}</button>${item.id === detail.latest_run ? '<div class="muted">Latest</div>' : ""}</td><td><span class="muted">${esc(formatDate(item.created_at))}</span></td><td><span class="badge ${item.status === "error" ? "red" : "gray"}">${esc(human(item.status))}</span></td><td>${esc(item.transaction_count ?? "—")}</td></tr>`).join("")}</tbody></table></div>` : '<div class="panel-body small muted">Your first completed or bounded run will appear here.</div>'}</section>${detail.pegout_searches?.length ? `<details class="tool-details"><summary>Earlier standalone peg-out searches</summary>${pegoutsGraph(detail)}</details>` : ""}${artifacts.connections ? `<details class="tool-details"><summary>Earlier starter-connection snapshot</summary>${connectionsGraph(artifacts.connections, saved)}</details>` : ""}`
+    : state.caseView === "history" ? `<section class="panel"><div class="panel-head"><div><h2>Run history</h2><p>Every continuation preserves the preceding snapshot.</p></div><span class="badge gray">${(detail.runs || []).length} runs</span></div>${detail.runs?.length ? `<div class="table-wrap"><table class="run-list"><thead><tr><th>Run</th><th>Recorded</th><th>Status</th><th>Transactions</th></tr></thead><tbody>${detail.runs.map((item) => `<tr class="${item.id === run?.id ? "selected" : ""}"><td><button data-run="${esc(item.id)}">${esc(short(item.id, 8))}</button>${item.id === detail.latest_run ? '<div class="muted">Latest</div>' : ""}</td><td><span class="muted">${esc(formatDate(item.created_at))}</span></td><td><span class="badge ${item.status === "error" ? "red" : "gray"}">${esc(human(item.status))}</span></td><td>${esc(item.transaction_count ?? "—")}</td></tr>`).join("")}</tbody></table></div>` : '<div class="panel-body small muted">Your first completed or bounded run will appear here.</div>'}</section>${plotDownloadsPanel(detail)}${csvDownloads(artifacts.csv, saved, settings.include_fees)}${localGraph(artifacts.mermaid, saved, settings)}${detail.pegout_searches?.length ? `<details class="tool-details"><summary>Earlier standalone peg-out searches</summary>${pegoutsGraph(detail)}</details>` : ""}${artifacts.connections ? `<details class="tool-details"><summary>Earlier starter-connection snapshot</summary>${connectionsGraph(artifacts.connections, saved)}</details>` : ""}`
     : collectDataPanel(detail, saved, settings);
   return `<div class="page-heading case-heading"><div><div class="eyebrow">Investigation workspace</div><h1 id="page-title" tabindex="-1">${esc(detail.name)}</h1><div class="workspace-meta"><span class="badge ${detail.fixture ? "purple" : ""}">${detail.fixture ? "Synthetic data" : "Live Liquid"}</span><span class="badge gray">${(detail.runs || []).length} saved runs</span></div></div><div class="heading-actions">${button("Investigation settings", "case-settings", "settings", "", isBusy())}</div></div>
     <nav class="case-navigation" aria-label="Investigation tools">${views.map(([view, label]) => `<button type="button" class="case-nav${state.caseView === view ? " active" : ""}" data-action="view-${view}"${state.caseView === view ? ' aria-current="page"' : ""}>${label}</button>`).join("")}</nav>
@@ -1026,7 +1036,7 @@ function selectAddress(row: AddressRow): void {
 async function loadAddresses(offset: number): Promise<void> {
   const detail = state.activeCase;
   if (!detail || isBusy()) return;
-  saveAddressDraft();
+  saveSettingsDraft(); saveAddressDraft();
   const generation = ++pageGeneration;
   state.page = "addresses";
   state.error = "";
@@ -1100,7 +1110,7 @@ function addressReviewPage(): string {
   const review = state.addressReview, data = review.data, selected = review.selected;
   const busy = isBusy() || review.loading;
   const options = (detail.runs || []).map(run => `<option value="${esc(run.id)}"${run.id === (state.selectedRun === "latest" ? detail.latest_run : state.selectedRun) ? " selected" : ""}>${esc(run.id)}${run.id === detail.latest_run ? " · Latest" : ""}</option>`).join("");
-  return `<div class="page-heading"><div><div class="eyebrow">${esc(detail.name)}</div><h1 id="page-title" tabindex="-1">Address review</h1><p>Review activity, record your assessment, and choose where future tracing stops.</p></div><div class="heading-actions">${button("Import CSV files", "input-import-open", "", "", busy)}${button("Assign colors", "name-colors-open", "", "", busy)}${button("Back to investigation", "back-case", "arrow")}</div></div>
+  return `<div class="page-heading"><div><div class="eyebrow">${esc(detail.name)}</div><h1 id="page-title" tabindex="-1">Address review</h1><p>Review activity, record your assessment, and choose where future tracing stops.</p></div><div class="heading-actions">${button("Import CSV files", "input-import-open", "", "", busy)}${button("Assign colors", "name-colors-open", "", "", busy)}${button("Back to investigation settings", "case-settings", "arrow")}</div></div>
     <details class="panel" id="advanced-attributions"><summary class="panel-body">Advanced imports: pasted address lists or JSON</summary>${addressImportPanel(detail.id, busy)}</details>
     <div class="address-review-grid"><section class="panel"><div class="panel-head"><div><h2>Saved addresses</h2><p>Selected run, saved reviews, and service assessments</p></div></div>
     <div class="panel-body"><label class="field"><span>Saved run</span><select id="address-run-picker"${disabled(busy)}>${options || '<option value="latest">No saved run yet</option>'}</select></label>
@@ -1190,8 +1200,9 @@ function settingsPage(): string {
   const isCase = state.page === "case-settings", detail = state.activeCase;
   const draft = settingsDrafts.get(settingsKey());
   const settings = draft?.settings || {...defaults, ...(isCase ? detail?.run_defaults : state.settings)};
-  return `<div class="page-heading"><div><div class="eyebrow">${isCase ? esc(detail?.name) : "Workspace"}</div><h1 id="page-title" tabindex="-1">${isCase ? "Investigation settings" : "Workspace defaults"}</h1><p>${isCase ? "Tracing, graph layout, colors, and Miro in one place." : "Starting preferences for new investigations. Existing investigations keep their own settings."}</p></div>${button(isCase ? "Back to investigation" : "Back to investigations", isCase ? "back-case" : "dashboard", "", "ghost")}</div>
-    <nav class="settings-navigation" aria-label="Settings sections"><a href="#settings-trace">Tracing</a><a href="#settings-layout">Graph layout</a><a href="#settings-miro">Miro</a>${isCase ? '<a href="#settings-colors">Colors</a>' : ""}</nav>
+  return `<div class="page-heading"><div><div class="eyebrow">${isCase ? esc(detail?.name) : "Workspace"}</div><h1 id="page-title" tabindex="-1">${isCase ? "Investigation settings" : "Workspace defaults"}</h1><p>${isCase ? "Investigation data, tracing rules, graph layout, colors, and Miro preferences." : "Starting preferences for new investigations. Existing investigations keep their own settings."}</p></div>${button(isCase ? "Back to investigation" : "Back to investigations", isCase ? "back-case" : "dashboard", "", "ghost")}</div>
+    <nav class="settings-navigation" aria-label="Settings sections">${isCase ? '<a href="#settings-data">Investigation data</a>' : ""}<a href="#settings-trace">Tracing</a><a href="#settings-layout">Graph layout</a><a href="#settings-miro">Miro</a>${isCase ? '<a href="#settings-colors">Colors</a>' : ""}</nav>
+    ${isCase && detail ? `<div class="settings-layout">${investigationDataPanel(detail)}</div>` : ""}
     <form id="settings-form" class="settings-layout">
     ${isCase ? `<section class="panel"><div class="panel-body"><label class="field"><span>Investigation name</span><input name="name" maxlength="120" required value="${esc(draft?.name ?? detail?.name)}" autocomplete="off"/></label></div></section>` : ""}
     <section class="panel" id="settings-trace"><div class="panel-head"><div><h2>Tracing</h2><p>Saved defaults for each bounded run.</p></div></div><div class="panel-body">${budgetFields(settings)}</div></section>
@@ -1265,7 +1276,7 @@ async function openCase(id: string): Promise<void> {
 }
 
 function navigate(page: Page): void {
-  saveSettingsDraft();
+  saveSettingsDraft(); saveAddressDraft();
   resetFrameRecovery();
   dialog.close();
   saveDraft();
@@ -1640,7 +1651,8 @@ async function caseAction(action: string): Promise<void> {
 async function dispatch(action: string, element?: HTMLElement): Promise<void> {
   if (action.startsWith("view-") && state.activeCase) {
     const view = action.slice(5);
-    if (["collect", "plots", "boards", "data", "exports", "history"].includes(view)) {
+    if (["collect", "plots", "boards", "history"].includes(view)) {
+      saveSettingsDraft(); saveAddressDraft();
       state.caseView = view as CaseView; state.page = "case"; render();
     }
     return;
@@ -1649,7 +1661,7 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
   if (await pegoutAction(action)) return;
   if (action === "address-import-open") action = "input-import-open";
   if (action === "input-import-open" && state.activeCase && !isBusy()) {
-    saveSettingsDraft(); saveAddressDraft(); state.page = "case"; state.caseView = "data";
+    saveSettingsDraft(); saveAddressDraft(); state.page = "case-settings";
   }
   if (state.activeCase && await inputImportAction(action, {
       caseId: state.activeCase.id, busy: isBusy(), render,
@@ -1669,7 +1681,7 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
     if (state.job?.caseId === detail.id && state.job.action === action) frameRecoveryStarted(detail.id, version, state.job.id);
     return;
   }
-  if (action === "change-outputs-open" && state.activeCase) {state.page = "case"; state.caseView = "data"; render();}
+  if (action === "change-outputs-open" && state.activeCase && !isBusy()) {saveSettingsDraft(); saveAddressDraft(); state.page = "case-settings"; render();}
   if (state.activeCase && await changeOutputsAction(action, {
       caseId: state.activeCase.id, busy: isBusy(), render,
       post: (path, body) => api(path, body as Record<string, unknown>),
@@ -1681,7 +1693,7 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
         return state.job?.id || null;
       }
     }, element)) return;
-  if (action === "name-colors-open" && state.activeCase && state.page !== "case-settings") {saveAddressDraft(); navigate("case-settings");}
+  if (action === "name-colors-open" && state.activeCase && !isBusy()) {saveSettingsDraft(); saveAddressDraft(); if (state.page !== "case-settings") navigate("case-settings");}
   if (state.activeCase && await nameColorsAction(action, {caseId: state.activeCase.id, busy: isBusy(), render,
       post: (path, body) => api(path, body as Record<string, unknown>)}, element)) return;
   if (state.activeCase && await addressImportAction(action, {
