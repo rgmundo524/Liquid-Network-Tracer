@@ -17,6 +17,7 @@ MESSAGES = {
     "address_counts_ready": "Address transaction counts are ready",
     "address_counts_incomplete": "Some address counts are unavailable; see the lookup summary",
     "optimizing": "Optimizing the saved graph with ELK",
+    "exporting_plot": "Saving plot previews and transaction CSV",
     "compacting": "Compacting address positions and activity components",
     "preflight": "Checking existing Miro items before making changes",
     "layout": "Preparing the graph layout",
@@ -195,6 +196,7 @@ class ProgressReporter:
             elapsed = f"; {value['elapsed_seconds']:g}s elapsed" if "elapsed_seconds" in value else ""
             try:
                 prefix = ("Counts: " if value["phase"].startswith("address_counts") else
+                          "Plot: " if value["phase"] == "exporting_plot" else
                           "Peg-outs: " if value["phase"].startswith("pegout_") else
                           "ELK: " if value["phase"] in ("optimizing", "compacting") else "Miro: ")
                 print(prefix + value["message"] + counts + wait + elapsed, file=sys.stderr, flush=True)

@@ -234,3 +234,16 @@ class PlotTests(unittest.TestCase):
         self.assertEqual(plan["shapes"], [])
         self.assertEqual(graph["plot"]["status"], "empty")
         self.layout.assert_not_called()
+
+    def test_failed_csv_export_reports_export_stage_without_publishing_partial_plot(self):
+        events = []
+        before = self.bytes(self.archive)
+        with patch("liquid_tracer.transaction_csv.write_transaction_csv", side_effect=TraceError("Synthetic export failure")):
+            with self.assertRaisesRegex(TraceError, "Synthetic export failure"):
+                preview_plot(self.case, "full", progress=events.append)
+        self.assertEqual(events[-1], {"phase": "exporting_plot", "completed": 0, "total": 1})
+        self.assertEqual(list_plots(self.case), [])
+        self.assertEqual(self.bytes(self.archive), before)
+        result = preview_plot(self.case, "full", progress=events.append)
+        self.assertEqual(events[-1], {"phase": "exporting_plot", "completed": 1, "total": 1})
+        self.assertEqual([item["preview_id"] for item in list_plots(self.case)], [result["preview_id"]])

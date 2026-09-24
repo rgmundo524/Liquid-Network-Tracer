@@ -196,6 +196,8 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, open_b
             report.update(match_count=graph["pegouts"]["match_count"], status=graph["pegouts"]["status"])
         graph["plot"] = report
         destination = _ordinary(case / "previews" / (state["run_id"] + "-plots-" + uuid.uuid4().hex[:8]))
+        if progress:
+            progress({"phase": "exporting_plot", "completed": 0, "total": 1})
         result = export_layout(graph, destination) if graph["nodes"] else _empty_export(graph, destination)
         try:
             plan = plot_plan(graph)
@@ -212,6 +214,8 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, open_b
         except BaseException:
             (destination / "SHA256SUMS").unlink(missing_ok=True)
             raise
+        if progress:
+            progress({"phase": "exporting_plot", "completed": 1, "total": 1})
         return {**_summary(graph, destination.name), **result, "directory": str(destination.resolve()),
                 "browser_opened": open_preview(result["html"]) if open_browser else False}
 
