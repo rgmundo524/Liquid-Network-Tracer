@@ -401,7 +401,7 @@ function traceSummary(settings: Settings): string {
 }
 
 function hubAddressFields(settings: Settings): string {
-  return `<div class="settings-divider"></div><label class="field"><span>Separate branch hubs</span><textarea name="hub_addresses" class="mono" rows="4" spellcheck="false" placeholder="One full Liquid address per line">${esc(settings.hub_addresses.join("\n"))}</textarea><small>Choose high-activity or shared addresses to arrange apart from their branches. Each address keeps one identity and all connections. This does not classify an address as a service.</small></label>`;
+  return `<div class="settings-divider"></div><label class="field"><span>Separate branch hubs</span><textarea name="hub_addresses" class="mono" rows="4" spellcheck="false" placeholder="One full Liquid address per line">${esc(settings.hub_addresses.join("\n"))}</textarea><small>Use high-activity or shared addresses as new tree roots for the layout. Spending transactions line up vertically when other inputs allow; their outputs branch to the right. Each address keeps one identity and all connections. Tracing stays the same.</small></label>`;
 }
 
 function centerNameFields(settings: Settings, suggest = false): string {

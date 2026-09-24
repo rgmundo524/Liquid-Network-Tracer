@@ -445,7 +445,7 @@ def _eligible(node, incident, nodes, fee_ids):
     return low if producers else high, preferred, low, high
 
 
-def _sibling_order(nodes, adjacent):
+def _sibling_order(nodes, adjacent, layout_columns=None):
     limits = defaultdict(list)
     # Compaction shortens an established layout, not its branch ordering.
     # Preserve neighbors from the entire dependency column as well as siblings
@@ -453,7 +453,7 @@ def _sibling_order(nodes, adjacent):
     columns = defaultdict(list)
     for key, node in nodes.items():
         if "column" in node:
-            columns[node["column"]].append(key)
+            columns[(layout_columns or {}).get(key, node["column"])].append(key)
     for values in columns.values():
         ordered = sorted(values, key=lambda key: (nodes[key]["y"], key))
         for i, key in enumerate(ordered):
@@ -475,9 +475,10 @@ def _sibling_order(nodes, adjacent):
     return limits
 
 
-def _compact_addresses(nodes, edges, points, adjacent, fee_ids, bounds, budget, notify, locked_nodes=()):
+def _compact_addresses(nodes, edges, points, adjacent, fee_ids, bounds, budget, notify, locked_nodes=(),
+                       *, layout_columns=None):
     geometry = _Geometry(nodes, edges, points, budget)
-    siblings = _sibling_order(nodes, adjacent)
+    siblings = _sibling_order(nodes, adjacent, layout_columns)
     moved, skipped = 0, 0
     candidates = sorted((node for node in nodes.values() if node["kind"] == "address"), key=lambda n: (n["x"], n["y"], n["id"]))
     for index, node in enumerate(candidates):
@@ -733,7 +734,10 @@ def compact_graph(graph, progress=None):
     from .named_group_layout import center_metrics, group_structure
     centered_nodes = group_structure(result)["core"]
     locked_nodes.update(centered_nodes)
-    moved_addresses, skipped_addresses = _compact_addresses(nodes, edges, points, adjacent, fee_ids, bounds, budget, notify, locked_nodes)
+    from .hub_layout import hub_plan
+    moved_addresses, skipped_addresses = _compact_addresses(
+        nodes, edges, points, adjacent, fee_ids, bounds, budget, notify, locked_nodes,
+        layout_columns=hub_plan(result)["columns"])
     _, current_bounds = _measure(nodes, edges, points, fee_ids, adjacent, annotations, frame_groups)
     moved_components, skipped_components, fee_components = _pack_components(
         nodes, edges, points, fee_ids, current_bounds, budget, notify, frame_groups, centered_nodes)

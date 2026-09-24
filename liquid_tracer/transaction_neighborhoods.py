@@ -8,9 +8,11 @@ fees, and explicitly separated hubs never become forward ordering constraints.
 
 from collections import defaultdict
 from statistics import median
+from .hub_layout import hub_layout_view
 
 
 def _structure(graph):
+    graph = hub_layout_view(graph)
     excluded = {key for key, item in graph.get("fee_items", {}).items()
                 if item.get("endpoint") == "shapes"}
     excluded.update(node["id"] for node in graph["nodes"] if node.get("layout_hub") is True)

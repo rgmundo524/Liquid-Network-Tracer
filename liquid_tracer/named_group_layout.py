@@ -7,6 +7,7 @@ input and a named output; no address-level traversal invents a value flow.
 
 from collections import defaultdict
 from statistics import median
+from .hub_layout import hub_layout_view
 
 
 NAMED_GROUP_LAYOUT_VERSION = 1
@@ -65,6 +66,7 @@ def center_order(graph, base_order=None, structure=None):
     they are assigned above/below the core with a deterministic greedy balance.
     ELK retains those vertical orders while routing every original connection.
     """
+    graph = hub_layout_view(graph)
     structure = group_structure(graph) if structure is None else structure
     if not structure["members"]:
         return None
@@ -114,6 +116,7 @@ def center_order(graph, base_order=None, structure=None):
 
 def center_metrics(graph, structure=None):
     """Measure central band drift after collision safety in candidate selection."""
+    graph = hub_layout_view(graph)
     structure = group_structure(graph) if structure is None else structure
     nodes = {node["id"]: node for node in graph["nodes"]}
     columns, core_columns = defaultdict(list), defaultdict(list)
