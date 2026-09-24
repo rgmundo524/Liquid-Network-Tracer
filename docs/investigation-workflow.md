@@ -1,8 +1,10 @@
-# Collect data, plot views, manage boards
+# Collect data, plot views, download or sync
 
 An investigation owns one set of saved collection runs and can have several Miro
 boards. Each board has a name and a plotting goal. Use the same collected data
 to make a full investigation chart, starter-connection chart, and peg-out chart.
+In the browser, the usual sequence is **Collect data → Plot views → Download ELK
+SVG or sync with Miro**. Generate one plot, then choose its output destination.
 
 ## 1. Collect data
 
@@ -35,14 +37,26 @@ requests. Missing address statistics stay unavailable until collected separately
 Changing the plotting goal does not alter seeds or collected evidence.
 
 Every plot records its source run, goal, and coverage. Review the preview before
-syncing. A plot with no matching paths does not prove that no connection or
+downloading or syncing. A plot with no matching paths does not prove that no connection or
 peg-out exists outside the saved coverage. A peg-out request does not establish
 which Bitcoin transaction paid it.
 
 A plot with no matching activity remains available to review, but its Miro sync
 is disabled. It does not clear an existing board.
 
-## 3. Miro boards
+## 3. Download the plot or sync with Miro
+
+The saved browser plot offers **Download ELK SVG** and **Sync with Miro**.
+Downloading returns that plot's SVG immediately. **Sync with Miro** opens the
+board manager with the same saved plot selected. Neither action requires you to
+generate another plot.
+
+Miro publication uses the saved graph and layout. Normal sync preserves retained
+objects' current positions, while **Sync and reorganize** applies the saved
+layout. Miro chooses its connector routes, so the board's appearance can differ
+from the ELK SVG.
+
+### Manage boards
 
 Open **Miro boards** in the browser, or **View / create / sync boards** in the
 terminal. This shows the investigation's boards, their goals, saved status,
@@ -69,6 +83,18 @@ Linking a board records its destination locally without contacting Miro. If an
 action stops, inspect the saved board status before retrying; uncertain writes
 must be reconciled through the existing recovery flow.
 
+## Settings, history, and downloads
+
+The browser has four task tabs: **Collect data**, **Plot views**, **Miro boards**,
+and **History & downloads**. The last tab combines saved-run history with SVGs,
+tables, reports, and other saved files.
+
+Use **Investigation settings → Investigation data** to import CSVs, review
+addresses, manage change outputs, and export saved input CSVs. Colors are also
+in Investigation settings. Imports retain their **Preview → Apply** flow, and
+color edits save through their own controls. **Save settings** saves the
+investigation preferences.
+
 ## Existing investigations and older searches
 
 The existing full-investigation board appears in the board list. The previous
@@ -80,7 +106,7 @@ snapshots and remain available to open. Create a managed board for that goal to
 use the new repeatable plot-and-sync workflow. Existing boards and search archives
 are not silently replaced.
 
-In the browser, older standalone search controls are under **History**. In the
+In the browser, older standalone search controls are under **History & downloads**. In the
 terminal, they remain explicitly labeled below the primary collection, plotting,
 and board steps. Use the main **Plot views** workflow for a new view of collected
 investigation data.

@@ -164,7 +164,7 @@ test('saved fixture investigations retain synthetic provenance and offline trace
 
 test('input CSV download is available before and after tracing, including while busy', async () => {
   const view = await harness();
-  view.state.caseView = 'data';
+  view.state.page = 'case-settings';
   const caseId = 'case \'"><script>name</script>';
   const detail = {id: caseId, name: 'My investigation', run_defaults: defaults, runs: []};
   view.state.activeCase = detail;
@@ -173,7 +173,7 @@ test('input CSV download is available before and after tracing, including while 
     detail.runs = traced ? [{id: 'savedrun', transaction_count: 1, frontier_count: 0}] : [];
     detail.latest_run = traced ? 'savedrun' : undefined;
     view.state.job = {id: 'busy', status: 'running', action: 'trace'};
-    const html = view.workspace();
+    const html = view.settingsPage();
     assert.ok(html.includes(`href="${expected}" download>`));
     assert.match(html, /Export input CSVs/);
     assert.match(html, /all saved attributions, name colors, and change outputs across every page/);
@@ -653,12 +653,12 @@ test('changing attribution arrow colors invalidates Mermaid, ELK and compact pre
 test('one CSV import entry is available before the first trace and opens from review pages', async () => {
   const view = await harness();
   view.state.activeCase = {id: 'csvcase', name: 'CSV investigation', run_defaults: defaults, runs: [], seeds: [`${txid}:0`]};
-  await view.dispatch("view-data");
-  assert.match(view.workspace(), /data-action="input-import-open"/);
-  assert.doesNotMatch(view.workspace(), /data-action="address-import-open"/);
+  await view.dispatch("case-settings");
+  assert.match(view.settingsPage(), /data-action="input-import-open"/);
+  assert.doesNotMatch(view.settingsPage(), /data-action="address-import-open"/);
   view.state.page = 'addresses';
   await view.dispatch('input-import-open');
-  assert.equal(view.state.page, 'case');
+  assert.equal(view.state.page, 'case-settings');
   assert.deepEqual(view.importActions, [{action: 'input-import-open', caseId: 'csvcase'}]);
   assert.equal(view.calls.length, 1, 'opening the shared importer needs no lookup or trace');
   view.state.job = {id: 'running', action: 'trace', caseId: 'csvcase'};
@@ -931,8 +931,9 @@ test('investigation tool views isolate panels and preserve the selected snapshot
   await view.dispatch('view-plots');
   assert.match(view.workspace(), /id="plot-views-panel"/);
   assert.doesNotMatch(view.workspace(), /id="collection-panel"|data-action="workflow-board-sync"/);
-  await view.dispatch('view-exports');
+  await view.dispatch('view-history');
   assert.match(view.workspace(), /CSV downloads/);
+  assert.match(view.workspace(), /Run history/);
   assert.doesNotMatch(view.workspace(), /id="connection-hops"/);
   assert.equal(view.state.selectedRun, 'old-id');
   assert.equal(view.calls.length, 1, 'navigation performs no fetches or writes');
@@ -1140,4 +1141,63 @@ test('settings direct board management to the central tab and preserve the origi
   assert.doesNotMatch(view.settingsPage(), /name="board"/);
   await view.submitSettings({name: detail.name});
   assert.equal(view.calls.find(call => call.path.endsWith('/settings')).body.board, 'original-full');
+});
+
+test('one saved ELK plot feeds SVG export and Miro sync without generating another layout', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'syncjob', status: 'running'} : undefined);
+  const selected = workflowPlot('pegouts', 'reviewed', {artifact: {preview_id: 'reviewed',
+    preview_url: '/files/case1/previews/reviewed/graph.html',
+    downloads: [{name: 'graph.svg', url: '/files/case1/previews/reviewed/graph.svg'}]}});
+  view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'newer'), selected],
+    boards: [workflowBoard('full', 'overview'), workflowBoard('pegouts', 'cashouts'), workflowBoard('pegouts', 'second-cashouts')]});
+  await view.dispatch('view-plots');
+  workflowEdit(view, 'plot-picker', 'reviewed');
+  const html = view.workspace();
+  assert.match(html, /Sync with Miro/);
+  assert.match(html, /Download ELK SVG/);
+  assert.match(html, /href="\/files\/case1\/previews\/reviewed\/graph.svg"/);
+  await view.dispatch('plot-boards');
+  assert.equal(view.state.caseView, 'boards');
+  assert.equal(view.currentWorkflow(view.state.activeCase).boardPlot, 'reviewed');
+  assert.doesNotMatch(view.workspace(), /Generate matching plot|data-action="board-plot-goal"/);
+  await view.dispatch('workflow-board-select', {dataset: {record: 'second-cashouts'}});
+  assert.equal(view.currentWorkflow(view.state.activeCase).boardPlot, 'reviewed');
+  assert.equal(view.calls.length, 1, 'choosing a destination reuses the generated plot without requests');
+  await view.dispatch('workflow-board-sync');
+  assert.deepEqual(view.calls.at(-1).body, {action: 'board-sync', record_id: 'second-cashouts', preview_id: 'reviewed', reorganize: false});
+});
+
+test('plot handoff never silently substitutes a different goal or an interrupted older plot', async () => {
+  for (const board of [workflowBoard('full', 'overview'),
+    workflowBoard('pegouts', 'interrupted', {pending_count: 1, preview_id: 'older', status: 'interrupted'})]) {
+    const view = await harness();
+    view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'chosen'),
+      workflowPlot('pegouts', 'older'), workflowPlot('full', 'fullplot')], boards: [board]});
+    await view.dispatch('view-plots');
+    workflowEdit(view, 'plot-picker', 'chosen');
+    await view.dispatch('plot-boards');
+    assert.equal(view.currentWorkflow(view.state.activeCase).boardGoal, 'pegouts');
+    await assert.rejects(view.dispatch('workflow-board-sync'), /matching saved plot|selected plot|compatible|managed board/);
+    assert.equal(view.calls.length, 1, 'a missing or interrupted destination cannot publish another plot');
+  }
+});
+
+test('settings data tools preserve an unsaved investigation draft and remain outside its save form', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase();
+  await view.dispatch('case-settings');
+  view.elements.set('#settings-form', {values: {...defaults, name: 'Unsaved investigation name', hops: '7', center_name: 'Treasury'}});
+  await view.dispatch('input-import-open');
+  assert.equal(view.state.page, 'case-settings');
+  await view.dispatch('change-outputs-open');
+  assert.equal(view.state.page, 'case-settings');
+  const html = view.settingsPage();
+  assert.match(html, /value="Unsaved investigation name"/);
+  assert.match(html, /name="hops"[^>]*value="7"/);
+  assert.match(html, /name="center_name"[^>]*value="Treasury"/);
+  const form = html.match(/<form id="settings-form"[\s\S]*?<\/form>/)?.[0];
+  assert.ok(form);
+  assert.doesNotMatch(form, /data-action="(?:input-import-open|change-outputs-open|addresses)"/);
+  for (const action of ['input-import-open', 'change-outputs-open', 'addresses']) assert.ok(html.includes(`data-action="${action}"`));
+  assert.equal(view.calls.length, 1, 'opening settings tools neither saves preferences nor starts collection');
 });
