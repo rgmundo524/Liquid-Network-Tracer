@@ -35,6 +35,7 @@ from .branch_layout import (BRANCH_LAYOUT_VERSION, edge_priorities, organization
 from .branch_boundaries import branch_order, boundary_metrics
 from .named_group_layout import (CORE_STRAIGHTNESS, center_order, center_metrics, group_structure)
 from .transaction_neighborhoods import neighborhood_order, neighborhood_metrics
+from .hub_layout import hub_plan, hub_layout_view
 
 
 ALGORITHM = "elk_layered_v1"
@@ -366,15 +367,18 @@ def _worker(graph, seeds, progress=None, *, heap_mb=None, cancel_event=None):
 
 
 def _request_graph(graph):
+    original = graph
+    graph = hub_layout_view(graph)
+    # Source-first layering keeps independent hub spenders in a vertical
+    # column even when some output branches terminate earlier than others.
+    hub_layering = ({"elk.layered.layering.strategy": "LONGEST_PATH_SOURCE"}
+                    if hub_plan(graph)["hubs"] else {})
     nodes = {node["id"]: node for node in graph["nodes"]}
     fee_ids = {key for key, item in graph.get("fee_items", {}).items() if item["endpoint"] == "shapes"}
     main = {key: node for key, node in nodes.items() if key not in fee_ids}
-    hubs = hub_nodes(graph) & main.keys()
-    # A selected busy address gets its own entry lane, preserving a single
-    # identity. Its incoming funds remain explicit return connections. Other
-    # nodes keep their recorded transaction-dependency partitions unchanged.
-    hub_column = min((node["column"] for node in main.values()), default=0) - 1
-    columns = {key: hub_column if key in hubs else node["column"] for key, node in main.items()}
+    # Explicit hubs restart presentation depth. The temporary view retains
+    # every object and connector; original dependency columns remain saved.
+    columns = {key: node["column"] for key, node in main.items()}
     children, port_map = {}, {}
     for key, node in sorted(main.items()):
         children[key] = {"id": key, "width": node["width"], "height": node["height"], "ports": [],
@@ -428,13 +432,13 @@ def _request_graph(graph):
         "elk.layered.nodePlacement.strategy": "BRANDES_KOEPF",
         "elk.layered.nodePlacement.favorStraightEdges": "true",
         "elk.layered.edgeLabels.sideSelection": "ALWAYS_UP", "elk.spacing.edgeLabel": "7",
-        "elk.padding": "[top=0,left=0,bottom=0,right=0]"},
+        "elk.padding": "[top=0,left=0,bottom=0,right=0]", **hub_layering},
         "children": list(children.values()), "edges": edge_values,
         "branchOrganization": BRANCH_LAYOUT_VERSION,
         **boundary_order,
         **center_metadata,
         "inputPortOrders": {key: [port_map[edge_id][1] for edge_id in order]
-                            for key, order in input_orders(graph).items()}}, port_map, fee_ids
+                            for key, order in input_orders(original).items()}}, port_map, fee_ids
 
 
 def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
@@ -552,16 +556,23 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
             if not edge["routing_exception"]:
                 edge.update(connector_shape="elbowed", routing_exception="unchecked")
     exceptions = sum(bool(edge["routing_exception"]) and connector_style != "elbowed" for edge in edges)
-    # Enforce the recorded transaction dependency order even for merged-address
-    # display cycles. ELK partitions may route backwards but cannot reverse TXs.
+    # Preserve every dependency except a verified vin routed through a selected
+    # hub. That exact relation returns to the hub before starting its new tree.
+    hub_layout = hub_plan(graph)
+    columns = hub_layout["columns"]
     for node in nodes.values():
         if node["kind"] != "transaction":
             continue
-        for vin in node.get("details", {}).get("transaction", {}).get("vin", []):
+        for index, vin in enumerate(node.get("details", {}).get("transaction", {}).get("vin", [])):
             parent = nodes.get("tx:" + str(vin.get("txid", "")))
             if (parent and not vin.get("is_pegin") and not vin.get("is_coinbase")
-                    and parent["column"] < node["column"] and parent["x"] >= node["x"]):
+                    and (node["id"], index) not in hub_layout["cut_inputs"]
+                    and columns.get(parent["id"], parent["column"]) < columns.get(node["id"], node["column"])
+                    and parent["x"] >= node["x"]):
                 raise TraceError("ELK could not preserve transaction order; no Miro changes were made")
+    for hub, children in hub_layout["roots"].items():
+        if any(nodes[hub]["x"] >= nodes[child]["x"] for child in children):
+            raise TraceError("ELK could not preserve separate hub tree order; no Miro changes were made")
     main = [nodes[key] for key in main_ids]
     shift = -260 if fees else 0
     result["layout"] = {"algorithm": ALGORITHM, "version": ELK_VERSION, "direction": "left_to_right",
@@ -576,7 +587,9 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
                                                  "profile": candidate.get("branchProfile", "balanced"),
                                                  "boundary_ordering": boundary_ordering,
                                                  "hubs": sorted(hub_nodes(graph)),
-                                                 "hub_rule": "separate_entry_lane_with_return_connections"},
+                                                 "hub_rule": "restart_tree_depth_with_return_connections",
+                                                 "hub_roots": hub_layout["roots"],
+                                                 "hub_columns": hub_layout["columns"]},
                         "horizontal_spacing": copy.deepcopy(candidate.get("horizontal_spacing", {})),
                         "edge_labels": {"version": LABEL_LAYOUT_VERSION, "estimated": True,
                                         "font_size": FONT_SIZE, "placement": "center_above",
@@ -594,6 +607,8 @@ def _validate_graph(graph, connector_style):
         raise TraceError("Connector style must be straight, elbowed, or curved")
     if not isinstance(graph, dict) or not isinstance(graph.get("nodes"), list) or not isinstance(graph.get("edges"), list):
         raise TraceError("Cannot optimize an invalid graph")
+    if "_hub_layout_view" in graph or "_hub_layout_plan" in graph:
+        raise TraceError("Cannot optimize an internal layout view")
     nodes = {}
     for node in graph["nodes"]:
         if (not isinstance(node, dict) or not isinstance(node.get("id"), str) or node["id"] in nodes

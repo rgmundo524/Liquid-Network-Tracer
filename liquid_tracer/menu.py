@@ -381,8 +381,9 @@ def create_app(root=None):
                     yield Label("Separate branch hubs")
                     yield TextArea("\n".join(self.settings["hub_addresses"]), id="hub-addresses")
                     yield Static("Enter one full Liquid address per line. Choose high-activity or shared addresses "
-                                 "to arrange apart from their branches. Each address keeps one identity and all "
-                                 "connections. This does not classify an address as a service.", markup=False)
+                                 "as new tree roots for the layout. Spending transactions line up vertically when "
+                                 "other inputs allow; their outputs branch to the right. Each address keeps one "
+                                 "identity and all connections. Tracing stays the same.", markup=False)
                     yield Label("Miro connector appearance")
                     yield Select([("Straight", "straight"), ("Curved", "curved"), ("Elbowed", "elbowed")],
                                  value=self.settings["connector_style"], allow_blank=False, id="connector-style")
