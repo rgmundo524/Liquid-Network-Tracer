@@ -80,7 +80,7 @@ class GraphPresentationTests(unittest.TestCase):
         self.assertEqual(graph_quantity(hidden), "?? ??")
         self.assertEqual(graph_quantity({}), "?? ??")
         self.assertEqual(graph_quantity({"asset": LBTC}), "?? L-BTC")
-        self.assertEqual(graph_quantity({"value": 0, "asset": LBTC}), "0 base units L-BTC")
+        self.assertEqual(graph_quantity({"value": 0, "asset": LBTC}), "0 L-BTC")
         self.assertEqual(graph_quantity({"value": 9007199254740993}),
                          "9007199254740993 base units ??")
         other_asset = "12" * 32

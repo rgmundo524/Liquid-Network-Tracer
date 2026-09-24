@@ -16,7 +16,7 @@ from .services import confidence_value
 from .attribution_presentation import display_name, attribution_reference
 from .name_colors import apply_name_colors, apply_attribution_arrow_colors, color_text, color_value
 
-PRESENTATION_VERSION = 23
+PRESENTATION_VERSION = 24
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -56,7 +56,7 @@ def legend_lines(graph=None):
         f"{name('unspent_endpoint')} circles: traced branch ends at a UTXO observed unspent. Unchecked or hop-limited outputs do not qualify.",
         arrows,
         "Optional context rectangles summarize isolated input addresses; each input remains a separate arrow. Full members stay in local exports; a summary does not imply common ownership.",
-        "Captions: vin/vout number · amount asset. ?? = not publicly available. Known amounts are in base units.",
+        "Captions: vin/vout number · amount asset. ?? = not publicly available. L-BTC amounts use whole-token units (100,000,000 base units = 1 L-BTC); other assets use base units.",
         "STOP TRACING: an explicit address boundary, independent of confidence. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards.",
         "Thick red border: INPUT MERGE = distinct starting lineages meet in a transaction; shared-address receipts from distinct branches also highlight the receiving address and all participating senders. Neither proves ownership or value allocation.",
         "TX count inside circles: confirmed + mempool transactions at last lookup; ?? = unavailable. Not the number of visible arrows.",
@@ -85,8 +85,16 @@ def edge_marker_id(edge):
 def graph_quantity(output):
     """Compact public quantity without inferring hidden assets or values."""
     value, asset = output.get("value"), output.get("asset")
+    is_lbtc = isinstance(asset, str) and asset.lower() == LBTC
     amount = "??" if value is None else str(value) + " base units"
-    name = "L-BTC" if asset == LBTC else (short(asset) if asset else "??")
+    if is_lbtc and type(value) is int:
+        # Integer arithmetic preserves every satoshi, including values larger
+        # than a floating-point number can represent exactly.
+        whole, fraction = divmod(abs(value), 100_000_000)
+        amount = ("-" if value < 0 else "") + str(whole)
+        if fraction:
+            amount += "." + f"{fraction:08d}".rstrip("0")
+    name = "L-BTC" if is_lbtc else (short(asset) if asset else "??")
     return amount + " " + name
 
 
