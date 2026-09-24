@@ -109,6 +109,65 @@ def _identity(proof):
     return {key: proof[key] for key in ("key", "target", "members", "inputs")}
 
 
+def resize_updates(plan, state, remote, removed):
+    """Shrink unchanged legacy summaries during an explicit reorganization.
+
+    The membership proof supplies the generated size, since normal graph
+    geometry intentionally remains analyst-owned. Never resize other shapes or
+    a summary whose content, font, dimensions or rotation was edited.
+    """
+    from .miro import _same
+    from .miro_legend_updates import geometry_snapshot
+
+    updates = {}
+    shapes = {item["key"]: item["body"] for item in plan["shapes"]}
+    for key, desired in plan.get("context_group_items", {}).items():
+        record, actual = state["items"].get(key), remote.get(key)
+        if key in removed or not record or not actual or record.get("endpoint") != "shapes":
+            continue
+        previous = _valid(record.get("context_group_proof"))
+        old = geometry_snapshot({"geometry": previous["geometry"]})
+        new = geometry_snapshot({"geometry": desired["geometry"]})
+        live = geometry_snapshot(actual)
+        legacy = {"width": 240., "height": float(max(160, (len(previous["inputs"]) + 1) * 18))}
+        if (_identity(previous) != _identity(desired) or old != legacy or new != {"width": 240., "height": 160.}
+                or old["height"] <= new["height"] or live is None
+                or any(not math.isclose(live[axis], old[axis], rel_tol=0, abs_tol=.01) for axis in old)
+                or actual.get("data", {}).get("shape") != "rectangle"):
+            continue
+        try:
+            rotation = float(actual.get("geometry", {}).get("rotation", actual.get("rotation", 0)))
+            if not math.isfinite(rotation) or rotation % 360:
+                continue
+        except (TypeError, ValueError, OverflowError):
+            continue
+        managed = record.get("managed", {})
+        content = actual.get("data", {}).get("content")
+        if (not isinstance(content, str) or not any(
+                _same(content, body.get("data", {}).get("content"), ("data", "content"))
+                for body in (managed, shapes[key]))
+                or not _same(actual.get("style", {}).get("fontSize"),
+                             managed.get("style", {}).get("fontSize"), ("style", "fontSize"))):
+            continue
+        updates[key] = {"geometry": copy.deepcopy(desired["geometry"])}
+    return updates
+
+
+def acknowledge_resize(record, body, expected):
+    """Refresh only acknowledged dimensions, also after an uncertain PATCH."""
+    from .miro_legend_updates import geometry_snapshot
+
+    current = geometry_snapshot(body)
+    desired = geometry_snapshot({"geometry": expected})
+    if current is None or desired is None or any(
+            not math.isclose(current[axis], desired[axis], rel_tol=0, abs_tol=.01) for axis in current):
+        return False
+    proof = copy.deepcopy(_valid(record.get("context_group_proof")))
+    proof["geometry"] = current
+    record["context_group_proof"] = proof
+    return True
+
+
 def removals(plan, state):
     """Prove every replacement using both saved group and desired edge evidence."""
     desired_groups = validate(plan)

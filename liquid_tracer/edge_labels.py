@@ -20,7 +20,11 @@ PADDING_Y = 5
 LABEL_LAYOUT_VERSION = 1
 
 
-def caption_text(edge):
+def caption_text(edge, *, display=True):
+    # Dense context summaries keep each original label/quantity in evidence
+    # and hover details, without reserving hundreds of on-chart text boxes.
+    if display and edge.get("caption_display") == "details_only":
+        return ""
     label, quantity = str(edge.get("label") or ""), str(edge.get("quantity") or "")
     # Synthetic geometry-only edges have no caption. Miro's separator remains
     # present for real captions even when the quantity is empty.

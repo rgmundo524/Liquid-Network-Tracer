@@ -17,7 +17,7 @@ from .layout import HORIZONTAL_NODE_GAP
 from .miro_frames import _padded
 from .elk_layout import ALGORITHM, _default_attachments, _validate_graph, attachment_point, segment_hits_node, layout_metrics
 from .layout_search_reporting import public_search_counts
-from .edge_labels import caption_box, translate_label
+from .edge_labels import caption_box, caption_text, translate_label
 
 ALGORITHM_COMPACTION = "local_address_components_v1"
 LINKED_HORIZONTAL = float(HORIZONTAL_NODE_GAP)
@@ -204,6 +204,8 @@ def _length(points):
 
 
 def _caption(edge, points):
+    if not caption_text(edge):
+        return None
     # Preserve ELK's reserved label box and the midpoint estimate used for
     # Miro. Miro chooses its own final route and caption position, so the
     # combined footprint is deliberately conservative.

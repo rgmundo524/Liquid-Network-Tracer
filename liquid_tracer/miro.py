@@ -60,8 +60,10 @@ def make_plan(graph):
                       "textAlign": "center", "textAlignVertical": "middle"}}})
     transaction_keys = {node["id"] for node in graph["nodes"] if node["kind"] == "transaction"}
     for edge in graph["edges"]:
+        caption = caption_text(edge)
         connector = {"key": edge["id"], "source": edge["source"], "target": edge["target"], "body": {
-            "shape": edge.get("connector_shape", "curved"), "captions": [{"content": html.escape(caption_text(edge)), "position": "50%"}],
+            "shape": edge.get("connector_shape", "curved"),
+            "captions": [{"content": html.escape(caption), "position": "50%"}] if caption else [],
             "style": {"startStrokeCap": "none", "endStrokeCap": "stealth", "strokeStyle": "normal",
                       "strokeColor": edge_color(edge),
                       "strokeWidth": str(stroke_width(edge["role"])), "fontSize": str(CAPTION_FONT_SIZE)}}}
@@ -371,6 +373,8 @@ def _recover_updates(state, remote):
                 and miro_legend_updates.geometry_snapshot(remote[key]) ==
                     miro_legend_updates.geometry_snapshot(entry["patch"])):
             miro_legend_updates.remember_geometry(record, remote[key])
+        if key.startswith(context_group_miro.PREFIX) and "geometry" in entry["patch"]:
+            context_group_miro.acknowledge_resize(record, remote[key], entry["patch"]["geometry"])
 
 
 def _editable(body, endpoint):
@@ -1509,7 +1513,7 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
             if any((item.get(field) or {}).get("id") in annotation_removals for item in inventory.values()
                    for field in ("startItem", "endItem")):
                 raise TraceError("A board connector attaches to a retiring annotation; preserve that attachment before syncing")
-        legend_updates = {}
+        legend_updates, context_resizes = {}, {}
         if frames_only:
             # Read every retained shape, including older run notes, at its actual
             # canvas position. No graph placement or annotation resizing runs.
@@ -1525,7 +1529,10 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
                         raise TraceError("Miro connector endpoints changed; repair the connection before framing. No board writes made.")
         else:
             legend_updates = miro_legend_updates.resize_updates(plan, state, remote, removals)
-            placement_remote = {key: {**body, **legend_updates.get(key, {})} for key, body in remote.items()}
+            if reorganize:
+                context_resizes = context_group_miro.resize_updates(plan, state, remote, removals)
+            placement_remote = {key: {**body, **legend_updates.get(key, {}), **context_resizes.get(key, {})}
+                                for key, body in remote.items()}
             positions, shift_x = _placements(plan, state, placement_remote, removals, reorganize)
             if not reorganize:
                 positions.update({key: (change["position"]["x"], change["position"]["y"])
@@ -1556,6 +1563,8 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
                         patch["position"] = {"x": x, "y": y, "origin": "center"}
                 if key in legend_updates:
                     patch["geometry"] = copy.deepcopy(legend_updates[key]["geometry"])
+                if key in context_resizes:
+                    patch["geometry"] = copy.deepcopy(context_resizes[key]["geometry"])
                 if annotation and annotation["kind"] == "attribution":
                     geometry = presentation_items.note_geometry(item["body"], remote[key])
                     if any(float(remote[key]["geometry"][axis]) != geometry[axis] for axis in geometry):
@@ -1698,6 +1707,8 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
                     _set(managed, path, _get(actual, path))
                 if key in legend_updates:
                     miro_legend_updates.remember_geometry(record, response)
+                if key in context_resizes and not context_group_miro.acknowledge_resize(record, response, patch["geometry"]):
+                    raise TraceError("Miro did not acknowledge context-summary dimensions; rerun sync to reconcile the saved update journal")
                 report["updated"] += 1
                 if record["endpoint"] == "frames":
                     report["updated_frames"] += 1

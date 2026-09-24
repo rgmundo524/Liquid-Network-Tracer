@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .name_colors import color_text
+from .edge_labels import caption_text
 from .graph_markers import node_border
 from .common import TraceError, save_json
 from .export import COLORS, edge_color, legend_lines
@@ -104,6 +105,9 @@ def mermaid_source(graph):
         lines.append(f"  {identifier}{start}{_label(label)}{end}")
         lines.append(f"  style {identifier} fill:{color},stroke:{border},stroke-width:{thickness}px,color:{color_text(color)}")
     for edge in edges:
+        if not caption_text(edge):
+            lines.append(f"  {ids[edge['source']]} --> {ids[edge['target']]}")
+            continue
         caption = edge["label"] + (" · " + edge["quantity"] if edge.get("quantity") else "")
         lines.append(f"  {ids[edge['source']]} -->|{_label(caption)}| {ids[edge['target']]}")
     for index, edge in enumerate(edges):

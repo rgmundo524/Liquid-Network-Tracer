@@ -10,7 +10,7 @@ from collections import defaultdict
 from .hub_layout import hub_layout_view, hub_plan
 
 
-BRANCH_LAYOUT_VERSION = 5
+BRANCH_LAYOUT_VERSION = 6
 
 
 def hub_nodes(graph):

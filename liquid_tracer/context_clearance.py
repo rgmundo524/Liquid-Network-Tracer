@@ -8,6 +8,7 @@ line. Work limits constrain the search only, never the exported evidence.
 
 import math
 from collections import defaultdict
+from itertools import combinations, product
 from statistics import median
 
 from .compaction import (_Budget, _Index, _box, _expand, _hits_box, _segment_box,
@@ -120,13 +121,41 @@ class _Clearance:
         return True
 
     def conflicts(self, proposed):
-        """Count edge pairs, including all per-vin connectors on a summary."""
+        """Count external crossings, treating a summary's same-target fan as one.
+
+        Moving one summary moves all its vin ports together. The parallel
+        connectors to that same transaction are its presentation fan, not
+        separate branches to keep apart. Preserve every edge and attachment,
+        but do not score this fan's internal overlaps quadratically. Connectors
+        reaching another transaction still receive the ordinary pair checks.
+        """
+        families = defaultdict(list)
+        for key in sorted(proposed):
+            edge = self.edges[key]
+            if (edge.get("role") == "context_input"
+                    and self.nodes[edge["source"]]["kind"] == "context_group"
+                    and self.nodes[edge["target"]]["kind"] == "transaction"):
+                family = "summary", edge["source"], edge["target"]
+            else:
+                family = "edge", key
+            families[family].append(key)
+        external = self.segment_index
+        if any(len(keys) > 1 for keys in families.values()):
+            # The usual spatial query would repeatedly scan the summary's own
+            # hundreds of segments only to discard them below. Build a bounded
+            # index of exactly the external segments the same check uses.
+            external = _Index(self.budget)
+            for part, box in self.segment_index.boxes.items():
+                if not self.budget.spend():
+                    return None
+                if part[0] not in proposed:
+                    external.add(part, box)
         pairs = set()
         for edge_id, variants in proposed.items():
             edge = self.edges[edge_id]
             for route in variants:
                 for a, b in zip(route, route[1:]):
-                    candidates = self.segment_index.query(_segment_box(a, b))
+                    candidates = external.query(_segment_box(a, b))
                     if candidates is None:
                         return None
                     for part in candidates:
@@ -144,9 +173,8 @@ class _Clearance:
                                 ports.append(own)
                         if not _shared_port_only(a, b, *self.segments[part], ports):
                             pairs.add(tuple(sorted((edge_id, other_id))))
-        keys = sorted(proposed)
-        for index, one in enumerate(keys):
-            for two in keys[index + 1:]:
+        for first_family, second_family in combinations(families.values(), 2):
+            for one, two in product(first_family, second_family):
                 for first in proposed[one]:
                     for second in proposed[two]:
                         shared = [point for point in (first[0], first[-1]) if point in (second[0], second[-1])]
@@ -155,7 +183,7 @@ class _Clearance:
                                 if not self.budget.spend():
                                     return None
                                 if not _shared_port_only(a, b, c, d, shared):
-                                    pairs.add((one, two))
+                                    pairs.add(tuple(sorted((one, two))))
         return pairs
 
     def candidates(self, key, incident):
@@ -212,16 +240,28 @@ def repair_context_clearance(graph):
         incident = eligible[key]
         changed = {edge["id"] for edge in incident}
         old_routes = {edge_id: geometry.routes[edge_id] for edge_id in changed}
-        if geometry.shape_clear(key, changed) and geometry.routes_clear(key, old_routes):
+        already_clear = geometry.shape_clear(key, changed) and geometry.routes_clear(key, old_routes)
+        if already_clear and nodes[key]["kind"] != "context_group":
             continue
         node = nodes[key]
         original = node["x"], node["y"]
+        targets = {edge["target"] for edge in incident}
+        def distance(point):
+            return sum(math.dist(point, (nodes[target]["x"], nodes[target]["y"])) for target in targets)
+        original_distance = distance(original)
+        if already_clear and len(targets) == 1:
+            target = nodes[next(iter(targets))]
+            nearest = (_box(target)[0] - LINKED_HORIZONTAL - node["width"] / 2, target["y"])
+            if math.dist(original, nearest) < 1e-6:
+                continue
         baseline = geometry.conflicts(old_routes)
         best = None
         if baseline is not None:
             for point in geometry.candidates(key, incident):
                 if not budget.spend():
                     break
+                if already_clear and distance(point) >= original_distance - 1e-6:
+                    continue
                 node["x"], node["y"] = point
                 if not geometry.shape_clear(key, changed):
                     continue
@@ -232,13 +272,18 @@ def repair_context_clearance(graph):
                 if conflicts is None:
                     break
                 cost = len(conflicts - baseline)
+                # A summary already clear of lines may shorten its fan, but
+                # proximity alone never justifies introducing a new crossing.
+                if already_clear and cost:
+                    continue
                 if best is None or cost < best[0]:
                     best = cost, point, proposed
                 if cost == 0:
                     break
         node["x"], node["y"] = original
         if best is None:
-            unresolved.append(key)
+            if not already_clear:
+                unresolved.append(key)
             continue
         cost, point, proposed = best
         node["x"], node["y"] = point
