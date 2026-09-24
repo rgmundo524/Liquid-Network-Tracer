@@ -708,6 +708,10 @@ dialog::backdrop {
   .topbar {
     padding: 0 25px;
   }
+  .job-banner {
+    padding-left: 25px;
+    padding-right: 25px;
+  }
   .form-grid,
   .workspace-grid {
     grid-template-columns: minmax(0, 1fr) 265px;
@@ -971,10 +975,19 @@ dialog::backdrop {
     grid-template-columns: 1fr;
   }
   .job-banner {
-    padding: 15px 13px;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    padding: 12px 19px;
     gap: 10px;
   }
+  .job-actions {
+    grid-column: 2;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+  }
   .job-time {
+    margin-left: 0;
     font-size: 9px;
   }
   .job-banner strong {
