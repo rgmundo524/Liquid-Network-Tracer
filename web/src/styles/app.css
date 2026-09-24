@@ -28,6 +28,9 @@
 body {
   margin: 0;
 }
+html {
+  scroll-padding-top: calc(var(--workspace-header-height, 76px) + 16px);
+}
 button,
 input,
 select,
@@ -309,6 +312,13 @@ h3 {
 .main-shell {
   min-width: 0;
 }
+.workspace-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: #fff;
+  box-shadow: 0 2px 8px #17303d0a;
+}
 .topbar {
   height: 76px;
   border-bottom: 1px solid var(--line);
@@ -325,19 +335,25 @@ h3 {
   gap: 9px;
   font-size: 12px;
   color: #74858c;
+  min-width: 0;
 }
 .breadcrumb svg {
   width: 15px;
   height: 15px;
+  flex: none;
 }
 .breadcrumb strong {
   color: #3b525d;
   font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .topbar-right {
   display: flex;
   align-items: center;
   gap: 14px;
+  flex: none;
 }
 .local-pill {
   font-size: 10px;
@@ -730,22 +746,28 @@ td .case-title:hover {
   display: flex;
   align-items: flex-start;
   gap: 14px;
-  padding: 18px 20px;
+  padding: 12px 38px;
   background: #e9f5f2;
-  border: 1px solid #cbe5de;
-  border-radius: 11px;
-  margin-bottom: 25px;
+  border-bottom: 1px solid #cbe5de;
 }
 .job-details {
   flex: 1;
   min-width: 0;
+  overflow-wrap: anywhere;
+}
+.job-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  flex: none;
 }
 .job-progress-meta {
   display: flex;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 6px 16px;
-  margin-top: 10px;
+  margin-top: 5px;
   font-size: 10px;
   color: #476f65;
 }
@@ -753,7 +775,7 @@ td .case-title:hover {
   display: block;
   width: 100%;
   height: 6px;
-  margin: 7px 0 10px;
+  margin: 5px 0;
   border: 0;
   border-radius: 4px;
   overflow: hidden;
