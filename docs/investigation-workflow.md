@@ -24,6 +24,12 @@ attribution hop limits, and the confirmation policy still apply. For a chart
 covering up to 10 hops, collect enough data to cover that depth before plotting.
 Choosing 10 in a plotting form does not fetch missing transactions.
 
+The **Collected data** summary shows **Hops collected** for the selected snapshot,
+separately from its configured collection hop limit. This is the deepest recorded
+transaction hop, with starting transactions at hop 0. Some branches may stop
+earlier, so the number does not indicate complete coverage at every hop. If an
+older snapshot has no usable transaction depths, the summary shows **Not recorded**.
+
 The **Collect data** tab contains collection actions. Use the **Plot Layouts**
 tab for the next step and the investigation heading to open settings.
 
@@ -125,16 +131,25 @@ from the ELK SVG.
 ### Manage boards
 
 Open **Miro boards** in the browser, or **View / create / sync boards** in the
-terminal. This shows the investigation's boards, their goals, saved status,
-and links to open them.
+terminal. The browser keeps a separate block visible for every created or linked
+board, including historical boards. Each block has its own name, goal, status,
+Miro link, and saved layout information. Managed boards also have their own
+compatible layout picker and sync controls.
 
 1. Choose a goal and a board name.
 2. Choose **Create Miro board** to create a private board, or paste an existing
    board URL or ID and choose **Link existing board**. You can initialize a board
    before generating a plot. Creating a board does not publish it.
-3. Select the board and a compatible saved plot. The plot's goal must match the
-   board's goal.
-4. Review that plot, then choose **Sync to Miro** or **Sync and reorganize**.
+3. Choose a compatible saved plot in that board's block. The plot's goal must
+   match the board's goal.
+4. Review that plot, then choose **Sync to Miro** or **Sync and reorganize** in
+   the same block.
+
+Changing one board's layout selection does not change another board's selection,
+including boards with the same goal. Draft choices survive tab navigation;
+reopening the application restores each board's saved plot binding. Interrupted
+syncs stay bound to their recorded plot until recovered. A background operation
+temporarily disables other write actions, while all board blocks remain visible.
 
 Normal sync retains existing item positions. Reorganize applies the selected
 plot's layout to the managed graph. Each board keeps its own saved Miro item
