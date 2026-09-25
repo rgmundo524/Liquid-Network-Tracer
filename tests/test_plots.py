@@ -133,6 +133,61 @@ class PlotTests(unittest.TestCase):
                 self.assertIn("No matching activity", Path(result["html"]).read_text())
         self.layout.assert_not_called()
 
+    def test_context_roundtrips_exports_without_expanding_paths_or_mutating_evidence(self):
+        state = graph_state((("a:0", "c"), ("a:1", "d")), seeds=("a:0",), raw_links=(("e:0", "c"),))
+        selected = add_pegout(state, tx("c"))
+        add_pegout(state, tx("d"))
+        state["transactions"][tx("c")]["data"]["vout"].extend([
+            {"scriptpubkey": "6a", "scriptpubkey_type": "op_return", "asset": LBTC, "value": 10},
+            {"scriptpubkey": "", "scriptpubkey_type": "fee", "asset": LBTC, "value": 1}])
+        self.state, self.archive = saved_case(self.case, state)
+        before = self.bytes(self.archive)
+        default = preview_plot(self.case, "pegouts", min_hops=1, max_hops=1)
+        original, original_plan = reviewed_plot(self.case, default["preview_id"])
+        self.assertNotIn("include_context", default["query"])
+        self.assertNotIn("context_edge_count", default)
+        result = preview_plot(self.case, "pegouts", min_hops=1, max_hops=1, include_context=True)
+        graph, plan = reviewed_plot(self.case, result["preview_id"])
+        self.assertEqual(result["query"], {**default["query"], "include_context": True})
+        self.assertEqual(result["context_edge_count"], 3)
+        self.assertEqual(graph["pegouts"]["context_edge_count"], 3)
+        self.assertEqual(graph["pegouts"]["matches"], original["pegouts"]["matches"])
+        self.assertEqual(graph["pegouts"]["outpoints"], original["pegouts"]["outpoints"])
+        self.assertEqual([item["outpoint"] for item in graph["pegouts"]["matches"]], [selected])
+        self.assertEqual(result["match_count"], default["match_count"])
+        self.assertEqual(result["transaction_count"], default["transaction_count"])
+        self.assertEqual(plan["namespace"], original_plan["namespace"])
+        self.assertFalse(graph["graph_options"]["group_context_inputs"])
+        context = {edge["id"]: edge["role"] for edge in graph["edges"] if edge["role"].startswith("context")}
+        self.assertEqual(context, {"out:" + tx("a") + ":1": "context_output",
+                                   "in:" + tx("c") + ":1": "context_input",
+                                   "out:" + tx("c") + ":0": "context_output"})
+        self.assertEqual({edge["id"] for edge in graph["edges"]} - set(context),
+                         {edge["id"] for edge in original["edges"]})
+        directory = Path(result["directory"])
+        with (directory / "transactions.csv").open(newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        context_rows = {(row["Transaction Hash"], row["Direction"], row["Number of I/O"])
+                        for row in rows if "CONTEXT" in row["Address Flags"]}
+        self.assertEqual(context_rows, {(tx("a"), "OUT", "1"), (tx("c"), "IN", "1"), (tx("c"), "OUT", "0")})
+        self.assertEqual(len(rows), len(graph["edges"]))
+        svg = ET.fromstring((directory / "graph.svg").read_bytes())
+        self.assertEqual({node.get("data-node-id") for node in svg.iter() if node.get("data-node-id")},
+                         {node["id"] for node in graph["nodes"]})
+        self.assertEqual(before, self.bytes(self.archive))
+        self.assertTrue(all(item["reviewable"] for item in list_plots(self.case)))
+
+    def test_changed_saved_context_count_is_rejected_even_when_rehashed(self):
+        result = preview_plot(self.case, "pegouts", include_context=True)
+        directory = Path(result["directory"])
+        graph = read_json(directory / "graph.json")
+        graph["plot"]["context_edge_count"] += 1
+        save_json(directory / "graph.json", graph)
+        save_json(directory / "plot.json", graph["plot"])
+        self.rehash_preview(directory)
+        with self.assertRaisesRegex(TraceError, "endpoint options"):
+            reviewed_plot(self.case, result["preview_id"])
+
     def test_optional_endpoints_roundtrip_snapshot_exports_and_shared_board_identity(self):
         state = graph_state((("a:0", "b"),), seeds=("a:0",))
         state["outputs"][tx("b") + ":0"].update(status="unspent_at_observation",
@@ -188,7 +243,7 @@ class PlotTests(unittest.TestCase):
         self.assertEqual(len(plan["connectors"]), 3)
 
     def test_endpoint_options_reject_nonboolean_values_and_nonpegout_goals(self):
-        for key in ("include_unspent", "include_unspendable"):
+        for key in ("include_unspent", "include_unspendable", "include_context"):
             for value in (None, 0, 1, "true", [], {}):
                 with self.subTest(option=key, value=value), self.assertRaises(TraceError):
                     preview_plot(self.case, "pegouts", **{key: value})

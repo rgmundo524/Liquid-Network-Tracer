@@ -222,6 +222,8 @@ def parser():
                       help="Include paths to outputs recorded as unspent in peg-out plots")
     plot.add_argument("--include-unspendable", action="store_true",
                       help="Include paths to non-peg-out unspendable outputs in peg-out plots")
+    plot.add_argument("--include-context", action="store_true",
+                      help="Show other input addresses and spendable sibling outputs around selected peg-out path transactions")
     plot.add_argument("--open", dest="open_browser", action="store_true")
     managed_boards = commands.add_parser("investigation-boards", help="List every saved Miro board for an investigation")
     managed_boards.add_argument("--case", type=Path, default=case_default, required=case_default is None)
@@ -1253,6 +1255,7 @@ def main(argv=None, *, progress=None):
             print(json.dumps(preview_plot(args.case, args.goal, args.run,
                 min_hops=args.min_hops, max_hops=args.max_hops,
                 include_unspent=args.include_unspent, include_unspendable=args.include_unspendable,
+                include_context=args.include_context,
                 open_browser=args.open_browser, progress=progress), indent=2))
         elif args.command == "investigation-boards":
             from .investigation_boards import list_boards

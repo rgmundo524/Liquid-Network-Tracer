@@ -22,10 +22,13 @@ def _endpoint_summary(plot):
         labels.append(f"{counts.get('unspent', 0)} unspent UTXOs")
     if query.get("include_unspendable"):
         labels.append(f"{counts.get('unspendable', 0)} unspendable outputs")
+    if query.get("include_context"):
+        labels.append("context addresses included")
     return ", ".join(labels)
 
 
-def plot_arguments(case, goal, run, minimum="0", maximum="10", *, include_unspent=False, include_unspendable=False):
+def plot_arguments(case, goal, run, minimum="0", maximum="10", *, include_unspent=False, include_unspendable=False,
+                   include_context=False):
     """Validate terminal fields; plotting always uses an explicit saved run."""
     if goal not in GOAL_NAMES:
         raise TraceError("Choose a plotting goal")
@@ -33,6 +36,10 @@ def plot_arguments(case, goal, run, minimum="0", maximum="10", *, include_unspen
         raise TraceError("Additional endpoint options must be true or false")
     if goal != "pegouts" and (include_unspent or include_unspendable):
         raise TraceError("Additional endpoint options apply only to peg-out paths plots")
+    if type(include_context) is not bool:
+        raise TraceError("Include context addresses must be true or false")
+    if goal != "pegouts" and include_context:
+        raise TraceError("Include context addresses applies only to peg-out paths plots")
     if not isinstance(run, str) or not run:
         raise TraceError("Collect transaction data first, then choose a saved run")
     arguments = ["plot", "--case", str(case), "--goal", goal, "--run", run]
@@ -45,6 +52,8 @@ def plot_arguments(case, goal, run, minimum="0", maximum="10", *, include_unspen
         arguments.append("--include-unspent")
     if include_unspendable:
         arguments.append("--include-unspendable")
+    if include_context:
+        arguments.append("--include-context")
     return arguments + ["--open"], False
 
 
@@ -80,6 +89,9 @@ def plot_screen(base, button, case):
                     yield Checkbox("Include unspendable outputs", id="plot-include-unspendable")
                     yield Static("Peg-outs are always included. Unspent means recorded as unspent in this saved collection; "
                                  "it is not a live balance check. Fee outputs are excluded.", markup=False)
+                    yield Checkbox("Include context addresses", id="plot-include-context")
+                    yield Static("Show other input addresses and spendable sibling outputs around the selected path transactions. "
+                                 "Context does not extend the trace or add matching endpoints.", markup=False)
                 yield Static("Hop limits filter the saved data. They do not collect additional transactions. "
                              "A starting transaction is hop 0. Missing matches may reflect incomplete coverage.", markup=False)
                 yield Static("", id="workflow-error", markup=False)
@@ -118,7 +130,8 @@ def plot_screen(base, button, case):
                         self.query_one("#plot-min-hops", Input).value,
                         self.query_one("#plot-max-hops", Input).value,
                         include_unspent=goal == "pegouts" and self.query_one("#plot-include-unspent", Checkbox).value,
-                        include_unspendable=goal == "pegouts" and self.query_one("#plot-include-unspendable", Checkbox).value))
+                        include_unspendable=goal == "pegouts" and self.query_one("#plot-include-unspendable", Checkbox).value,
+                        include_context=goal == "pegouts" and self.query_one("#plot-include-context", Checkbox).value))
                 except ERRORS as error:
                     self.query_one("#workflow-error", Static).update(str(error))
 

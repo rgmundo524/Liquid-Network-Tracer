@@ -134,7 +134,7 @@ Astro supplies the local interface; Python serves it and runs the existing trace
 Collect the relevant transaction data, then choose **Paths to peg-outs** in
 **Plot Layouts**. Enter an inclusive minimum and maximum hop count. Each starting
 transaction is hop 0; each spending transaction adds one hop. The plot follows
-the investigation's originally selected seed UTXOs and excludes unselected
+the investigation's originally selected seed UTXOs without tracing unselected
 siblings. It reads the saved collection run without fetching more transactions.
 Use **Miro boards** to initialize and maintain a separate board for this goal.
 
@@ -152,6 +152,14 @@ Regenerate the layout to change them, then sync that layout to its managed board
 or download its ELK SVG. The endpoint choices do not change collection or fetch
 new observations. The CLI equivalents are `plot --goal pegouts --include-unspent`
 and `--include-unspendable`.
+
+Enable **Include context addresses** to show the other input addresses and
+spendable sibling output addresses around transactions on matching paths. Their
+thinner arrows identify context; they do not extend the trace, change hop
+distances, or add endpoint matches. This uses the saved transaction I/O without
+fetching earlier or later activity. Fee outputs and additional event outputs
+remain excluded. The setting is off by default and saved with each layout;
+the CLI equivalent is `plot --goal pegouts --include-context`.
 
 Peg-out layouts use one circle per full address per network while retaining
 every qualifying UTXO connector and CSV row. Regenerate an older layout to

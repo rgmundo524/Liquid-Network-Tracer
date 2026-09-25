@@ -99,15 +99,18 @@ class WorkflowWebTests(unittest.TestCase):
         case, route, run = self.collected()
         body = {"action": "plot", "goal": "pegouts", "run_id": run, "min_hops": 0, "max_hops": 10}
         with patch.object(self.server, "start_job", return_value={"id": "plot"}) as start:
-            self.success(route + "/actions", {**body, "include_unspent": True, "include_unspendable": True}, 202)
+            self.success(route + "/actions", {**body, "include_unspent": True, "include_unspendable": True,
+                "include_context": True}, 202)
             self.assertEqual(start.call_args.args[0], ["plot", "--case", str(case), "--goal", "pegouts", "--run", run,
-                "--min-hops", "0", "--max-hops", "10", "--include-unspent", "--include-unspendable"])
+                "--min-hops", "0", "--max-hops", "10", "--include-unspent", "--include-unspendable", "--include-context"])
             self.assertFalse(start.call_args.kwargs["live"])
-            self.success(route + "/actions", {**body, "include_unspent": False, "include_unspendable": False}, 202)
+            self.success(route + "/actions", {**body, "include_unspent": False, "include_unspendable": False,
+                "include_context": False}, 202)
             self.assertNotIn("--include-unspent", start.call_args.args[0])
             self.assertNotIn("--include-unspendable", start.call_args.args[0])
+            self.assertNotIn("--include-context", start.call_args.args[0])
             start.reset_mock()
-            for key in ("include_unspent", "include_unspendable"):
+            for key in ("include_unspent", "include_unspendable", "include_context"):
                 for value in (None, 0, 1, "true", [], {}):
                     with self.subTest(option=key, value=value):
                         self.assertEqual(self.request(route + "/actions", {**body, key: value})[0], 400)
@@ -209,6 +212,24 @@ class WorkflowWebTests(unittest.TestCase):
                 self.assertNotIn("endpoint_count", result)
                 self.assertNotIn("/private/source", json.dumps(result))
 
+    def test_context_plot_query_and_count_survive_http_listing_with_strict_public_counts(self):
+        from liquid_tracer.workflow_api import public_plot
+
+        case, route, _ = self.collected()
+        with patch("liquid_tracer.api.Esplora.get", side_effect=AssertionError("offline only")):
+            plot = preview_plot(case, "pegouts", include_context=True)
+            detail = self.success(route)
+        listed = next(item for item in detail["plots"] if item["preview_id"] == plot["preview_id"])
+        self.assertIs(listed["query"]["include_context"], True)
+        self.assertEqual(listed["context_edge_count"], plot["context_edge_count"])
+        self.assertTrue(listed["reviewable"])
+        for invalid in (None, True, -1, 1.0, "1", [], {}):
+            with self.subTest(count=invalid):
+                self.assertNotIn("context_edge_count", public_plot({**plot, "context_edge_count": invalid}))
+        for invalid in (None, {**plot["query"], "include_context": 1}, {**plot["query"], "include_context": False}):
+            with self.subTest(query=invalid):
+                self.assertNotIn("context_edge_count", public_plot({**plot, "query": invalid}))
+
     def test_busy_plot_registry_does_not_hide_the_investigation_or_expose_paths(self):
         _, route, _ = self.collected()
         with patch("liquid_tracer.plots.list_plots", side_effect=TraceError("private/path")), \
@@ -243,10 +264,11 @@ class WorkflowWebTests(unittest.TestCase):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             self.assertEqual(main(["plot", "--case", str(case), "--goal", "pegouts",
-                "--include-unspent", "--include-unspendable"]), 0)
+                "--include-unspent", "--include-unspendable", "--include-context"]), 0)
         result = json.loads(output.getvalue())
         self.assertIs(result["query"]["include_unspent"], True)
         self.assertIs(result["query"]["include_unspendable"], True)
+        self.assertIs(result["query"]["include_context"], True)
 
     def test_worker_board_result_has_no_local_paths_or_supplied_links(self):
         case, _, _ = self.collected()

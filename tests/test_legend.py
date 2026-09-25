@@ -124,3 +124,20 @@ class LegendTests(unittest.TestCase):
         self.assertIn("Unchecked and hop-limited outputs do not qualify", notes)
         self.assertIn("Fee outputs are excluded", notes)
         self.assertNotIn("Selected endpoints:", " ".join(legend_notes(default)))
+
+    def test_pegout_context_legend_distinguishes_background_from_traced_paths(self):
+        from liquid_tracer.pegout_paths import pegout_graph, validate_query
+        from tests.test_attribution_convergence import graph_state
+
+        state = graph_state(seeds=("a:0",))
+        default = pegout_graph(state, validate_query(seeds=state["seeds"]))
+        unchanged = copy.deepcopy(default)
+        unchanged["pegouts"]["query"]["include_context"] = False
+        self.assertEqual(legend_notes(default), legend_notes(unchanged))
+        expanded = pegout_graph(state, validate_query(seeds=state["seeds"], include_context=True))
+        notes = " ".join(legend_notes(expanded))
+        self.assertNotIn("Only qualifying paths are plotted", notes)
+        self.assertIn("Thinner context arrows do not establish traced paths", notes)
+        self.assertIn("other input addresses and spendable sibling outputs", notes)
+        self.assertIn("does not expand the trace", notes)
+        self.assertIn("Only qualifying paths are plotted", " ".join(legend_notes(default)))

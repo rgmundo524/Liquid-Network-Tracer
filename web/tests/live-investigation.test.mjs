@@ -1257,26 +1257,101 @@ test('peg-out endpoints default off and optional booleans are submitted only for
   }
 });
 
-test('endpoint drafts survive tab and goal changes without leaking into another investigation', async () => {
+test('endpoint and context drafts survive tab and goal changes without leaking into another investigation', async () => {
   const view = await harness();
   view.state.activeCase = workflowCase();
   await view.dispatch('view-plots');
   await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
   view.workflowInput({id: 'workflow-include-unspent', checked: true});
   view.workflowInput({id: 'workflow-include-unspendable', checked: true});
+  view.workflowInput({id: 'workflow-include-context', checked: true});
   await view.dispatch('view-boards');
   await view.dispatch('view-plots');
   await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
   await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
-  for (const id of ['unspent', 'unspendable']) assert.match(view.workspace(), new RegExp(`id="workflow-include-${id}"[^>]*checked`));
+  for (const id of ['unspent', 'unspendable', 'context']) assert.match(view.workspace(), new RegExp(`id="workflow-include-${id}"[^>]*checked`));
   view.workflowInput({id: 'workflow-include-unspent', checked: false});
+  view.workflowInput({id: 'workflow-include-context', checked: false});
   await view.dispatch('view-plots');
   assert.doesNotMatch(view.workspace(), /id="workflow-include-unspent"[^>]*checked/);
+  assert.doesNotMatch(view.workspace(), /id="workflow-include-context"[^>]*checked/);
+  view.workflowInput({id: 'workflow-include-context', checked: true});
   view.state.activeCase = workflowCase({id: 'other'});
   await view.dispatch('view-plots');
   await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
-  for (const id of ['unspent', 'unspendable']) assert.doesNotMatch(view.workspace(), new RegExp(`id="workflow-include-${id}"[^>]*checked`));
+  for (const id of ['unspent', 'unspendable', 'context']) assert.doesNotMatch(view.workspace(), new RegExp(`id="workflow-include-${id}"[^>]*checked`));
   assert.equal(view.calls.length, 1);
+});
+
+test('context addresses default off, describe display only, and submit only for peg-out layouts', async () => {
+  for (const goal of ['full', 'connections', 'pegouts']) {
+    for (const includeContext of [false, true]) {
+      const view = await harness(path => path.endsWith('/actions') ? {id: 'plotjob', status: 'running'} : undefined);
+      view.state.activeCase = workflowCase();
+      await view.dispatch('view-plots');
+      assert.doesNotMatch(view.workspace(), /id="workflow-include-context"/);
+      await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+      const html = view.workspace();
+      assert.match(html, /<legend>Context display<\/legend>/);
+      assert.match(html, /Include context addresses/);
+      assert.match(html, /Show other input addresses and sibling output addresses of displayed transactions/);
+      assert.match(html, /Context adds no tracing or fetching and is excluded from endpoint match counts/);
+      assert.doesNotMatch(html, /id="workflow-include-context"[^>]*checked/);
+      view.workflowInput({id: 'workflow-include-context', checked: includeContext});
+      view.workflowInput({id: 'workflow-include-unspent', checked: true});
+      await view.dispatch('plot-goal', {dataset: {goal}});
+      if (goal !== 'pegouts') assert.doesNotMatch(view.workspace(), /id="workflow-include-context"/);
+      await view.dispatch('workflow-plot');
+      assert.deepEqual(view.calls.at(-1).body, {action: 'plot', goal, run_id: 'saved1',
+        min_hops: 0, max_hops: goal === 'full' ? 0 : 10,
+        ...(goal === 'pegouts' ? {include_unspent: true} : {}),
+        ...(goal === 'pegouts' && includeContext ? {include_context: true} : {})});
+      assert.equal(view.state.job.live, false);
+      assert.equal(view.calls.filter(call => call.body).length, 1, 'context display neither updates settings nor collects data');
+      assert.equal(view.workflowInput({id: 'workflow-include-context', checked: !includeContext}), false);
+      assert.equal(view.currentWorkflow(view.state.activeCase).includeContext, includeContext, 'busy jobs preserve the draft');
+    }
+  }
+});
+
+test('saved context scope and separate connection counts appear across plots, downloads, and boards', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'syncjob', status: 'running'} : undefined);
+  const contextual = workflowPlot('pegouts', 'contextual', {query: {include_context: true},
+    match_count: 2, endpoint_count: 2, context_edge_count: 5});
+  view.state.activeCase = workflowCase({plots: [contextual, workflowPlot('pegouts', 'paths', {match_count: 2})],
+    boards: [workflowBoard('pegouts', 'context-board', {preview_id: 'contextual'})]});
+  for (const page of ['plots', 'history', 'boards']) {
+    await view.dispatch('view-' + page);
+    const html = view.workspace();
+    assert.match(html, /Saved layout: Context addresses included\. 5 context connections, excluded from endpoint counts\./);
+    assert.match(html, /Results: 2 peg-out requests\./);
+    const picker = html.match(/<select id="workflow-(?:plot-picker|board-plot)"[^>]*>[\s\S]*?<\/select>/)?.[0];
+    assert.ok(picker);
+    assert.match(picker, /value="contextual"[^>]*>[^<]*Peg-outs · 2 endpoints · Context addresses included/);
+    assert.match(picker, /value="paths"[^>]*>[^<]*Peg-outs · 2 endpoints · Paths only/);
+  }
+  assert.match(view.workspace(), /<button class="board-choice[^>]*>[\s\S]*?Context addresses included/);
+  await view.dispatch('workflow-board-sync');
+  assert.deepEqual(view.calls.at(-1).body, {action: 'board-sync', record_id: 'context-board', preview_id: 'contextual', reorganize: false});
+});
+
+test('context toggles do not change the scope of a selected saved layout', async () => {
+  for (const savedContext of [false, true]) {
+    const view = await harness();
+    view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'saved', {
+      ...(savedContext ? {query: {include_context: true}} : {}), match_count: 2})]});
+    await view.dispatch('view-plots');
+    await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+    view.workflowInput({id: 'workflow-include-context', checked: !savedContext});
+    for (const page of ['plots', 'history']) {
+      await view.dispatch('view-' + page);
+      const html = view.workspace();
+      assert.match(html, new RegExp(`Saved layout: ${savedContext ? 'Context addresses included' : 'Paths only'}\\.`));
+      assert.doesNotMatch(html, new RegExp(`Saved layout: ${savedContext ? 'Paths only' : 'Context addresses included'}\\.`));
+      assert.doesNotMatch(html, /undefined context connections|NaN context connections/);
+    }
+    assert.equal(view.calls.length, 1, 'changing context display neither regenerates nor updates saved plots');
+  }
 });
 
 test('saved endpoint scope and counts remain visible in plot, download, and board selection', async () => {

@@ -35,10 +35,11 @@ class PlotCommandTests(unittest.TestCase):
                 plot_arguments("case", goal, run, minimum, maximum)
 
     def test_optional_endpoints_are_pegout_only_and_never_enable_live_collection(self):
-        arguments, live = plot_arguments("case", "pegouts", "run", include_unspent=True, include_unspendable=True)
+        arguments, live = plot_arguments("case", "pegouts", "run", include_unspent=True, include_unspendable=True,
+                                        include_context=True)
         self.assertFalse(live)
-        self.assertEqual(arguments[-3:], ["--include-unspent", "--include-unspendable", "--open"])
-        for key in ("include_unspent", "include_unspendable"):
+        self.assertEqual(arguments[-4:], ["--include-unspent", "--include-unspendable", "--include-context", "--open"])
+        for key in ("include_unspent", "include_unspendable", "include_context"):
             for value in (None, 1, "true"):
                 with self.subTest(option=key, value=value), self.assertRaises(TraceError):
                     plot_arguments("case", "pegouts", "run", **{key: value})
@@ -52,6 +53,8 @@ class PlotCommandTests(unittest.TestCase):
             "query": {"include_unspent": True, "include_unspendable": True},
             "endpoint_counts": {"pegout": 0, "unspent": 3, "unspendable": 0}}),
             "0 peg-outs, 3 unspent UTXOs, 0 unspendable outputs")
+        self.assertEqual(_endpoint_summary({"goal": "pegouts", "match_count": 1,
+            "query": {"include_context": True}}), "1 peg-outs, context addresses included")
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "Install the optional tui extra")
@@ -137,14 +140,16 @@ class WorkflowMenuTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(app.screen.query_one("#plot-endpoints").display)
             unspent = app.screen.query_one("#plot-include-unspent", Checkbox)
             unspendable = app.screen.query_one("#plot-include-unspendable", Checkbox)
+            context = app.screen.query_one("#plot-include-context", Checkbox)
             self.assertFalse(unspent.value)
             self.assertFalse(unspendable.value)
+            self.assertFalse(context.value)
             app.screen.query_one("#plot-goal", Select).value = "pegouts"
             await pilot.pause()
             self.assertTrue(app.screen.query_one("#plot-endpoints").display)
-            unspent.value = unspendable.value = True
+            unspent.value = unspendable.value = context.value = True
             await self.click(app, pilot, "#plot-go")
-            self.assertEqual(app.result[0][-3:], ["--include-unspent", "--include-unspendable", "--open"])
+            self.assertEqual(app.result[0][-4:], ["--include-unspent", "--include-unspendable", "--include-context", "--open"])
             self.assertFalse(app.result[1])
 
     async def test_hidden_terminal_options_do_not_leak_into_other_goals(self):
@@ -156,11 +161,13 @@ class WorkflowMenuTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(110, 55)) as pilot:
             app.screen.query_one("#plot-goal", Select).value = "pegouts"
             app.screen.query_one("#plot-include-unspent", Checkbox).value = True
+            app.screen.query_one("#plot-include-context", Checkbox).value = True
             app.screen.query_one("#plot-goal", Select).value = "connections"
             await pilot.pause()
             self.assertFalse(app.screen.query_one("#plot-endpoints").display)
             await self.click(app, pilot, "#plot-go")
             self.assertNotIn("--include-unspent", app.result[0])
+            self.assertNotIn("--include-context", app.result[0])
 
     def board_rows(self):
         return [{"id": "board-full", "name": "Full graph", "goal": "full", "board_id": "FULL=",

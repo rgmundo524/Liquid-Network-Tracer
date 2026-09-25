@@ -52,16 +52,149 @@ class PegoutPathTests(unittest.TestCase):
     def test_optional_endpoint_query_flags_are_strict_and_preserve_disabled_queries(self):
         legacy = validate_query(tx("a"))
         self.assertEqual(validate_query(tx("a"), include_unspent=False, include_unspendable=False), legacy)
+        self.assertEqual(validate_query(tx("a"), include_context=False), legacy)
         self.assertEqual(validate_query(tx("a"), include_unspent=True), {**legacy, "include_unspent": True})
+        self.assertEqual(validate_query(tx("a"), include_context=True), {**legacy, "include_context": True})
         self.assertEqual(validate_query(seeds=[tx("a") + ":0"], include_unspendable=True),
                          {"seeds": [tx("a") + ":0"], "min_hops": 0, "max_hops": 10,
                           "include_unspendable": True})
-        for field in ("include_unspent", "include_unspendable"):
+        for field in ("include_unspent", "include_unspendable", "include_context"):
             for value in (None, 0, 1, "true", [], {}):
                 with self.subTest(field=field, value=value), self.assertRaises(TraceError):
                     validate_query(tx("a"), **{field: value})
                 with self.subTest(graph_field=field, value=value), self.assertRaises(TraceError):
                     pegout_graph(graph_state(), {**legacy, field: value})
+
+    def test_context_adds_only_local_address_edges_without_expanding_paths(self):
+        state = graph_state((("a:0", "b"), ("b:0", "c"), ("a:1", "d"), ("e:0", "b")),
+                            raw_links=(("f:0", "b"),), seeds=("a:0", "a:1", "b:1"))
+        endpoint = add_pegout(state, tx("c"))
+        mark_unspent(state, tx("c") + ":0")
+        before = deepcopy(state)
+        query = validate_query(seeds=[tx("a") + ":0"])
+        ordinary = pegout_graph(state, query)
+        self.assertEqual(pegout_graph(state, {**query, "include_context": False}), ordinary)
+        self.assertNotIn("context_edge_count", ordinary["pegouts"])
+        graph = pegout_graph(state, {**query, "include_context": True})
+        self.assertEqual({node["id"] for node in graph["nodes"] if node["kind"] == "transaction"},
+                         {"tx:" + tx(name) for name in ("a", "b", "c")})
+        extra = {"out:" + tx("a") + ":1", "out:" + tx("b") + ":1", "out:" + tx("c") + ":0",
+                 "in:" + tx("b") + ":1", "in:" + tx("b") + ":2"}
+        ordinary_edges = {edge["id"]: edge for edge in ordinary["edges"]}
+        edges = {edge["id"]: edge for edge in graph["edges"]}
+        self.assertEqual(set(edges) - set(ordinary_edges), extra)
+        for key, edge in ordinary_edges.items():
+            self.assertEqual(edges[key], edge)
+        for key in extra:
+            self.assertEqual(edges[key]["role"], "context_input" if key.startswith("in:") else "context_output")
+            self.assertNotIn(key, graph["branch_structure"]["edge_memberships"])
+            if key.startswith("in:"):
+                self.assertIsNone(edges[key]["details"]["validated_trace_link"])
+        for key, value in ordinary["pegouts"].items():
+            if key not in {"query", "scope"}:
+                self.assertEqual(graph["pegouts"][key], value)
+        self.assertEqual(graph["pegouts"]["context_edge_count"], 5)
+        self.assertEqual(graph["pegouts"]["matches"][0]["outpoint"], endpoint)
+        self.assertEqual(graph["branch_structure"], ordinary["branch_structure"])
+        self.assertEqual(graph["address_convergences"], ordinary["address_convergences"])
+        context_output = next(node for node in graph["nodes"] if node["id"] == "liquid:address:SYNTHETIC-c-address")
+        self.assertEqual(context_output["role"], "address")
+        self.assertIsNone(context_output["details"]["occurrences"][0]["trace"])
+        self.assertNotIn("unspent_endpoints", context_output["details"])
+        self.assertIn("do not establish a qualifying path", graph["notice"])
+        self.assertNotIn("Every displayed edge belongs", graph["notice"])
+        self.assertEqual(state, before)
+
+    def test_context_reuses_full_addresses_without_promoting_siblings_to_seeds(self):
+        state = graph_state((("a:0", "b"), ("b:0", "c")), raw_links=(("d:0", "b"),),
+                            seeds=("a:0", "a:1"))
+        shared = "SYNTHETIC-shared-context-and-path"
+        for key in (tx("a") + ":0", tx("a") + ":1", tx("b") + ":0", tx("d") + ":0"):
+            set_address(state, key, shared)
+        endpoint = add_pegout(state, tx("c"))
+        query = validate_query(seeds=[tx("a") + ":0"], min_hops=2, max_hops=2, include_context=True)
+        graph = pegout_graph(state, query)
+        shared_nodes = [node for node in graph["nodes"] if node["id"] == "liquid:address:" + shared]
+        self.assertEqual(len(shared_nodes), 1)
+        self.assertEqual({row["outpoint"] for row in shared_nodes[0]["details"]["occurrences"]},
+                         {tx("a") + ":0", tx("a") + ":1", tx("b") + ":0", tx("d") + ":0"})
+        edges = {edge["id"]: edge for edge in graph["edges"]}
+        self.assertEqual(edges["out:" + tx("a") + ":0"]["role"], "seed_output")
+        self.assertEqual(edges["out:" + tx("a") + ":1"]["role"], "context_output")
+        self.assertEqual(edges["in:" + tx("b") + ":1"]["role"], "context_input")
+        self.assertEqual([(row["outpoint"], row["hops"]) for row in graph["pegouts"]["matches"]],
+                         [(endpoint, [2])])
+        self.assertEqual(graph["pegouts"]["outpoints"], [tx("a") + ":0", tx("b") + ":0"])
+        self.assertEqual(pegout_graph(state, {**query, "min_hops": 0, "max_hops": 1})["nodes"], [])
+
+    def test_context_preserves_unknowns_and_networks_but_excludes_event_only_edges(self):
+        state = graph_state((("a:0", "b"),), seeds=("a:0", "a:1", "a:2"))
+        for index in (1, 2):
+            set_address(state, f"{tx('a')}:{index}", None)
+        data = state["transactions"][tx("b")]["data"]
+        pegin = {"txid": tx("d"), "vout": 2, "is_pegin": True,
+                 "prevout": deepcopy(state["transactions"][tx("a")]["data"]["vout"][0])}
+        data["vin"].extend([pegin, {"is_coinbase": True},
+                            {"txid": tx("e"), "vout": 0, "prevout": {"scriptpubkey": "6a"}},
+                            {"txid": tx("f"), "vout": 0}])
+        root_event = add_pegout(state, tx("a"))
+        unspendable = add_unspendable(state, tx("b"))
+        endpoint = add_pegout(state, tx("b"))
+        fee = tx("b") + ":" + str(len(data["vout"]))
+        data["vout"].append({"scriptpubkey": "", "scriptpubkey_type": "fee", "value": 1, "asset": LBTC})
+        graph = pegout_graph(state, validate_query(seeds=[tx("a") + ":0"], min_hops=1, max_hops=1,
+                                                   include_context=True))
+        ids = {node["id"] for node in graph["nodes"]}
+        self.assertTrue({f"liquid:outpoint:{tx('a')}:1", f"liquid:outpoint:{tx('a')}:2",
+                         f"liquid:outpoint:{tx('f')}:0", "bitcoin:address:SYNTHETIC-a-address",
+                         "liquid:address:SYNTHETIC-a-address"} <= ids)
+        self.assertEqual({node["id"] for node in graph["nodes"] if node["kind"] == "event"}, {"event:" + endpoint})
+        edges = {edge["id"] for edge in graph["edges"]}
+        self.assertTrue(edges.isdisjoint({"out:" + root_event, "out:" + unspendable, "out:" + fee,
+                                         "in:" + tx("b") + ":2", "in:" + tx("b") + ":3"}))
+        self.assertEqual(graph["fee_items"], {})
+
+    def test_context_obeys_hop_caps_and_stops_without_creating_matches(self):
+        state = graph_state((("a:0", "b"), ("b:0", "c")), seeds=("a:0",))
+        at_one = add_pegout(state, tx("b"))
+        add_pegout(state, tx("c"))
+        query = validate_query(seeds=state["seeds"], include_context=True)
+        for mode in ("range", "cap", "stop"):
+            state["labels"] = []
+            current_query = dict(query)
+            if mode == "range":
+                current_query["max_hops"] = 1
+            elif mode == "cap":
+                state["labels"] = [{**annotation(stop=False), "hop_limit": 1}]
+            else:
+                state["labels"] = [annotation(stop=True, address="SYNTHETIC-b-address")]
+            with self.subTest(mode=mode):
+                graph = pegout_graph(state, current_query)
+                self.assertEqual([match["outpoint"] for match in graph["pegouts"]["matches"]], [at_one])
+                self.assertNotIn("tx:" + tx("c"), {node["id"] for node in graph["nodes"]})
+                self.assertEqual(next(edge["role"] for edge in graph["edges"]
+                                      if edge["id"] == "out:" + tx("b") + ":0"), "context_output")
+        state["labels"] = [annotation(stop=True)]
+        empty = pegout_graph(state, query)
+        self.assertEqual((empty["nodes"], empty["edges"], empty["pegouts"]["context_edge_count"]), ([], [], 0))
+        raw_only = graph_state(raw_links=(("a:0", "b"),), seeds=("a:0",))
+        add_pegout(raw_only, tx("b"))
+        self.assertEqual(pegout_graph(raw_only, query)["nodes"], [])
+
+    def test_context_preserves_combined_endpoint_matches_and_counts(self):
+        state = graph_state((("a:0", "b"),), raw_links=(("c:0", "b"),), seeds=("a:0", "b:1"))
+        mark_unspent(state, tx("b") + ":0")
+        add_unspendable(state, tx("b"))
+        add_pegout(state, tx("b"))
+        before = deepcopy(state)
+        query = validate_query(seeds=[tx("a") + ":0"], include_unspent=True, include_unspendable=True)
+        ordinary = pegout_graph(state, query)
+        graph = pegout_graph(state, {**query, "include_context": True})
+        for key in ("matches", "match_count", "endpoint_matches", "endpoint_count", "endpoint_counts",
+                    "outpoints", "transaction_count", "status"):
+            self.assertEqual(graph["pegouts"][key], ordinary["pegouts"][key])
+        self.assertEqual(graph["pegouts"]["context_edge_count"], 2)
+        self.assertEqual(state, before)
 
     def test_optional_endpoints_keep_pegout_report_and_exact_observation_evidence(self):
         state = graph_state((("a:0", "b"),), seeds=("a:0",))
