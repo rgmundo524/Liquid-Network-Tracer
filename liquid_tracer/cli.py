@@ -18,7 +18,7 @@ from .export import build_graph, export_run
 from .investigations import read_case, update_case, validate_settings
 from .inspection import inspect_transaction, inspect_transactions, parse_transaction_hashes
 from .miro import _load_sync_state, _namespace, make_plan, publish, resolve, sync, validate_plan
-from .progress import ProgressReporter
+from .progress import ProgressReporter, report_progress
 from .layout_search import DEFAULT_LAYOUT_ATTEMPTS, MAX_LAYOUT_ATTEMPTS, normalize_layout_attempts
 from .store import Store
 from .trace import new_state, trace
@@ -922,14 +922,20 @@ def run_trace(args, progress=None):
             api.run_id = state["run_id"]
             destination = run_path(args.case, state["run_id"])
             only = {f"{t}:{i}" for t, i in map(parse_outpoint, args.only)} if args.only else None
-            state = trace(api, state, limits, destination / "trace.json", args.include_unconfirmed, only)
+            state = trace(api, state, limits, destination / "trace.json", args.include_unconfirmed, only,
+                          progress=progress)
             if state["status"] != "error" and state.get("stop_reason") != "interrupted":
                 count_report = ensure_counts(args.case, state, fixture=args.fixture, progress=progress)
             else:
                 apply_saved_counts(args.case, state)
                 count_report = {}
+            preserve_trace_failure = state["status"] == "error" or state.get("stop_reason") == "interrupted"
+            if not preserve_trace_failure:
+                report_progress(progress, "exporting_collection", 0, 1)
             export_run(store, state, destination, merge_addresses, args.offline_preview)
             save_latest(args.case, state["run_id"])
+            if not preserve_trace_failure:
+                report_progress(progress, "exporting_collection", 1, 1)
             summary = {"run_id": state["run_id"], "status": state["status"],
                 "stop_reason": state.get("stop_reason"), "stats": state["stats"], "errors": state["errors"],
                 "directory": str(destination.resolve()), "address_counts": count_report}

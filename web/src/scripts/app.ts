@@ -510,15 +510,35 @@ function sidebar(): string {
   }</div><div class="sidebar-bottom"><div class="local-status"><span class="status-dot"></span><div><strong>Running on your computer</strong><p>Local files · Same tracing engine</p></div></div><div class="sidebar-foot">LIQUID NETWORK · UTXO TRACING<br/><span style="display:block;margin-top:7px;letter-spacing:0">Arrows between buttons · Enter to select</span></div></div></aside>`;
 }
 
+const collectionHopPhases: Record<string, string> = {
+  collecting: "Processing",
+  collection_complete: "Collection finished; last processing",
+  collection_paused: "Collection paused while processing",
+  collection_error: "Collection stopped while processing",
+};
+
+function collectionHopLabel(progress: JobProgress): string | undefined {
+  const prefix = Object.hasOwn(collectionHopPhases, progress.phase) ? collectionHopPhases[progress.phase] : undefined;
+  if (!prefix || !Number.isSafeInteger(progress.completed) || !Number.isSafeInteger(progress.total)
+      || progress.completed < 0 || progress.total < 0 || progress.completed > progress.total) return;
+  return `${prefix} hop ${progress.completed} of ${progress.total}`;
+}
+
 function jobProgress(): string {
   const progress = state.job?.progress;
   if (!progress) return '<progress class="job-progress-bar" aria-label="Calculation in progress"></progress>';
+  const hopLabel = collectionHopLabel(progress);
+  if (hopLabel) {
+    const zeroHop = progress.total === 0;
+    const value = zeroHop ? (progress.phase === "collection_complete" ? 1 : 0) : progress.completed;
+    return `<div class="job-progress-meta"><span>Hop progress</span><span>Hop ${progress.completed} / ${progress.total}</span></div><progress class="job-progress-bar" max="${zeroHop ? 1 : progress.total}" value="${value}" aria-label="${esc(hopLabel)}" aria-valuetext="${esc(hopLabel)}"></progress><p class="small muted">${zeroHop ? "Starting transactions only (hop 0). " : ""}Hop depth, not a time estimate.</p>`;
+  }
   const total = Number.isFinite(progress.total) ? Math.max(0, progress.total) : 0;
   const completed = Number.isFinite(progress.completed)
     ? Math.max(0, Math.min(progress.completed, total))
     : 0;
   const waiting = Number.isFinite(progress.retry_after) && progress.retry_after! > 0;
-  const measured = total > 0 && progress.phase !== "optimizing";
+  const measured = total > 0 && progress.phase !== "optimizing" && !Object.hasOwn(collectionHopPhases, progress.phase);
   return `<div class="job-progress-meta"><span>Current stage · ${esc(human(progress.phase))}</span>${measured ? `<span>${esc(completed)} / ${esc(total)}</span>` : ""}</div><progress class="job-progress-bar"${measured ? ` max="${total}" value="${completed}"` : ""} aria-label="${esc(human(progress.phase))}"></progress>${waiting ? `<p class="job-retry">Waiting ${esc(progress.retry_after)} seconds before retrying Miro.</p>` : ""}`;
 }
 
@@ -1567,7 +1587,8 @@ async function pollJob(): Promise<void> {
     } else if (job.status === "failed") {
       if (active.action.startsWith("miro-frame-")) resetFrameRecovery();
       const progress = job.progress || active.progress;
-      const lastStage = progress?.phase
+      const hopLabel = progress && collectionHopLabel(progress);
+      const lastStage = hopLabel ? ` Last reported stage: ${hopLabel}.` : progress?.phase
         ? ` Last reported stage: ${human(progress.phase)}${
             Number.isFinite(progress.completed) && Number.isFinite(progress.total) && progress.total > 0
               ? ` (${progress.completed} / ${progress.total})`

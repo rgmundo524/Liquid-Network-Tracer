@@ -173,6 +173,137 @@ for (const live of [true, false]) {
   });
 }
 
+test('collection polling updates hop depth in the header and then restores address-count and export progress', async () => {
+  let progress = {phase: 'collecting', completed: 0, total: 10, message: 'Processing hop 0 of 10'};
+  const view = await harness(path => path === '/api/jobs/collection' ? {status: 'running', progress} : undefined);
+  const progressElement = {innerHTML: ''}, messageElement = {textContent: ''};
+  view.elements.set('#job-progress', progressElement);
+  view.elements.set('#job-message', messageElement);
+  view.state.job = {id: 'collection', action: 'trace', message: 'Collecting data', started: Date.now()};
+  await view.pollJob();
+  view.render();
+  const header = view.app.innerHTML.match(/<header class="workspace-header">([\s\S]*?)<\/header>/)?.[1];
+  assert.match(header, /Hop progress/);
+  assert.match(header, /Hop 0 \/ 10/);
+  assert.match(header, /<progress[^>]*max="10" value="0"/);
+  assert.match(header, /Hop depth, not a time estimate/);
+  assert.doesNotMatch(view.app.innerHTML.split('<main')[1], /job-progress-bar/);
+  for (const hop of [1, 4, 10]) {
+    progress = {phase: 'collecting', completed: hop, total: 10, message: `Processing hop ${hop} of 10`};
+    await view.pollJob();
+    assert.equal(messageElement.textContent, `Processing hop ${hop} of 10`);
+    assert.match(progressElement.innerHTML, new RegExp(`Hop ${hop} / 10`));
+    assert.match(progressElement.innerHTML, new RegExp(`max="10" value="${hop}"`));
+    assert.match(progressElement.innerHTML, new RegExp(`aria-valuetext="Processing hop ${hop} of 10"`));
+    assert.doesNotMatch(progressElement.innerHTML, /completed|100%/i);
+  }
+  progress = {phase: 'address_counts', completed: 4, total: 26, message: 'Fetching address transaction counts'};
+  await view.pollJob();
+  assert.match(progressElement.innerHTML, /Current stage · address counts/);
+  assert.match(progressElement.innerHTML, /4 \/ 26/);
+  assert.match(progressElement.innerHTML, /max="26" value="4"/);
+  assert.doesNotMatch(progressElement.innerHTML, /Hop progress|Hop 4/);
+  progress = {phase: 'exporting_collection', completed: 0, total: 1, message: 'Saving collected transaction data and downloads'};
+  await view.pollJob();
+  assert.match(progressElement.innerHTML, /Current stage · exporting collection/);
+  assert.match(progressElement.innerHTML, /max="1" value="0"/);
+  assert.doesNotMatch(progressElement.innerHTML, /Hop progress/);
+});
+
+test('reloading collection recovers sanitized cumulative hop progress without using additional-hop defaults', async () => {
+  const progress = JSON.parse(execFileSync('python3', ['-c', [
+    'import json',
+    'from liquid_tracer.progress import public_progress',
+    'event = {"phase": "collecting", "completed": 6, "total": 11, "message": "private provider message"}',
+    'print(json.dumps(public_progress(public_progress(event))))',
+  ].join('\n')], {cwd: new URL('../../', import.meta.url), encoding: 'utf8', timeout: 15000}));
+  const view = await harness(path => {
+    if (path === '/api/session') return {csrf: 'test', settings: {...defaults, hops: 1}, cases: [], active_job: 'collection'};
+    if (path === '/api/jobs/collection') return {id: 'collection', action: 'trace', status: 'running', started_at: 100, progress};
+  });
+  assert.equal(view.state.job.progress.total, 11);
+  assert.match(view.app.innerHTML, /Processing hop 6 of 11/);
+  assert.match(view.app.innerHTML, /Hop 6 \/ 11/);
+  assert.match(view.app.innerHTML, /max="11" value="6"/);
+  assert.doesNotMatch(view.app.innerHTML, /private provider message|of 11;.*of 11/);
+  assert.deepEqual(view.calls.map(call => call.path), ['/api/session', '/api/jobs/collection']);
+});
+
+test('finished and paused collection retain the actual frontier rather than filling to the hop target', async () => {
+  let progress;
+  let status = 'running';
+  const view = await harness(path => path === '/api/jobs/collection' ? {status, message: 'Request budget reached', progress} : undefined);
+  const element = {innerHTML: ''};
+  view.elements.set('#job-progress', element);
+  view.state.job = {id: 'collection', action: 'trace'};
+  for (const [phase, prefix] of [['collection_complete', 'Collection finished; last processing'], ['collection_paused', 'Collection paused while processing'], ['collection_error', 'Collection stopped while processing']]) {
+    progress = {phase, completed: 3, total: 10, message: `${prefix} hop 3 of 10`};
+    await view.pollJob();
+    assert.match(element.innerHTML, /Hop 3 \/ 10/);
+    assert.match(element.innerHTML, /max="10" value="3"/);
+    assert.match(element.innerHTML, new RegExp(`aria-valuetext="${prefix} hop 3 of 10"`));
+    assert.doesNotMatch(element.innerHTML, /value="10"|100%|Collected through/);
+  }
+  status = 'failed';
+  await view.pollJob();
+  assert.equal(view.state.error, 'Request budget reached Last reported stage: Collection stopped while processing hop 3 of 10.');
+});
+
+test('zero-hop collection has a determinate starting-transactions indicator without premature completion', async () => {
+  let progress;
+  const view = await harness(path => path === '/api/jobs/collection' ? {status: 'running', progress} : undefined);
+  const element = {innerHTML: ''};
+  view.elements.set('#job-progress', element);
+  view.state.job = {id: 'collection', action: 'trace'};
+  for (const phase of ['collecting', 'collection_paused', 'collection_error', 'collection_complete']) {
+    progress = {phase, completed: 0, total: 0, message: ''};
+    await view.pollJob();
+    assert.match(element.innerHTML, /Hop 0 \/ 0/);
+    assert.match(element.innerHTML, /Starting transactions only \(hop 0\)/);
+    assert.match(element.innerHTML, new RegExp(`max="1" value="${phase === 'collection_complete' ? 1 : 0}"`));
+    assert.doesNotMatch(element.innerHTML, /max="0"|NaN|Infinity/);
+  }
+  progress = {phase: 'collection_empty', completed: 0, total: 0, message: 'No eligible queued outputs to collect'};
+  await view.pollJob();
+  assert.match(element.innerHTML, /Current stage · collection empty/);
+  assert.doesNotMatch(element.innerHTML, /Hop progress|Hop 0|Starting transactions|max=/);
+});
+
+test('invalid hop counts fall back to an indeterminate stage without rendering impossible depth', async () => {
+  let progress;
+  const view = await harness(path => path === '/api/jobs/collection' ? {status: 'running', progress} : undefined);
+  const element = {innerHTML: ''};
+  view.elements.set('#job-progress', element);
+  view.state.job = {id: 'collection', action: 'trace'};
+  for (const [completed, total] of [[-1, 10], [11, 10], [1.5, 10], [2, 10.5], ['2', 10], [true, 10], [NaN, 10], [2, Infinity], [2, Number.MAX_SAFE_INTEGER + 1], [undefined, 10], [2, null]]) {
+    progress = {phase: 'collecting', completed, total, message: 'Collecting data'};
+    await view.pollJob();
+    assert.match(element.innerHTML, /Current stage · collecting/);
+    assert.match(element.innerHTML, /<progress class="job-progress-bar" aria-label="collecting"><\/progress>/);
+    assert.doesNotMatch(element.innerHTML, /Hop progress|aria-valuetext|NaN|Infinity|max=/);
+  }
+});
+
+test('ELK stays indeterminate and Miro item and retry indicators retain their existing units', async () => {
+  let progress;
+  const view = await harness(path => path === '/api/jobs/layout' ? {status: 'running', progress} : undefined);
+  const element = {innerHTML: ''};
+  view.elements.set('#job-progress', element);
+  view.state.job = {id: 'layout', action: 'miro-sync'};
+  progress = {phase: 'optimizing', completed: 1, total: 3, message: 'Optimizing graph'};
+  await view.pollJob();
+  assert.match(element.innerHTML, /Current stage · optimizing/);
+  assert.doesNotMatch(element.innerHTML, /max=|Hop progress/);
+  progress = {phase: 'creating', completed: 5, total: 40, message: 'Adding new Miro items'};
+  await view.pollJob();
+  assert.match(element.innerHTML, /5 \/ 40/);
+  assert.match(element.innerHTML, /max="40" value="5"/);
+  progress = {phase: 'waiting', completed: 5, total: 40, retry_after: 20, message: 'Waiting before retrying a Miro request'};
+  await view.pollJob();
+  assert.match(element.innerHTML, /Waiting 20 seconds before retrying Miro/);
+  assert.doesNotMatch(element.innerHTML, /Hop progress/);
+});
+
 test('saved fixture investigations retain synthetic provenance and offline trace routing', async () => {
   const view = await harness();
   const detail = {id: 'savedcase', name: 'Archived investigation', fixture: true, run_defaults: defaults, runs: []};
