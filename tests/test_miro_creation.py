@@ -54,8 +54,8 @@ class MiroCreationTests(unittest.TestCase):
 
         report = self.sync(plan, transport=reverse)
         state = read_json(self.path)
-        self.assertEqual(batch_sizes, [20, 20, 19])
-        self.assertEqual(report["created"], 59)
+        self.assertEqual(batch_sizes, [20, 20, 18])
+        self.assertEqual(report["created"], 58)
         self.assertEqual(len(self.remote.writes), 3)
         for item in plan["shapes"]:
             remote = self.remote.items[state["items"][item["key"]]["id"]]
@@ -253,7 +253,7 @@ class MiroCreationTests(unittest.TestCase):
         state = read_json(self.path)
         self.assertEqual(state.get("pending_creations", {}), {})
         self.assertEqual(state["items"], {})
-        self.assertEqual(self.sync()["created"], 7)
+        self.assertEqual(self.sync()["created"], 6)
 
     def test_repeated_interrupts_drain_all_acknowledged_connectors(self):
         both_started, release = threading.Event(), threading.Event()
@@ -290,7 +290,7 @@ class MiroCreationTests(unittest.TestCase):
         state = read_json(self.path)
         self.assertEqual(state["pending_creations"], {})
         self.assertEqual({record["id"] for record in state["items"].values()}, set(self.remote.items))
-        self.assertEqual(len(state["items"]), 7)
+        self.assertEqual(len(state["items"]), 6)
         self.assertEqual(self.sync()["created"], 0)
 
     def test_failed_acknowledgement_checkpoint_preserves_uncertain_batch(self):
@@ -306,8 +306,8 @@ class MiroCreationTests(unittest.TestCase):
             self.sync()
         state = read_json(self.path)
         self.assertEqual(state["items"], {})
-        self.assertEqual(len(state["pending_creations"]), 5)
-        self.assertEqual(len(self.remote.items), 5)
+        self.assertEqual(len(state["pending_creations"]), 4)
+        self.assertEqual(len(self.remote.items), 4)
         before = len(self.remote.calls)
         with self.assertRaisesRegex(TraceError, "outcome is uncertain"):
             self.sync()
@@ -323,8 +323,8 @@ class MiroCreationTests(unittest.TestCase):
         _, _, raw = self.remote("POST", "https://api.miro.com/v2/boards/synthetic/shapes", {}, canonical(item["body"]), 30)
         resolve(self.path, item_id=json.loads(raw)["id"])
         report = self.sync(plan)
-        self.assertEqual(report["created"], 6)
-        self.assertEqual(len(self.remote.items), 7)
+        self.assertEqual(report["created"], 5)
+        self.assertEqual(len(self.remote.items), 6)
         self.assertIsNone(read_json(self.path)["pending"])
 
 

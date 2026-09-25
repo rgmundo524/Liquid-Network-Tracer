@@ -390,7 +390,7 @@ class HistoricalFallbackTests(unittest.TestCase):
                     absolute = attachment_point(node, port)
                     radius = ((absolute["x"] - node["x"]) / (node["width"] / 2)) ** 2 + ((absolute["y"] - node["y"]) / (node["height"] / 2)) ** 2
                     self.assertAlmostEqual(radius, 1, places=6)
-            self.assertEqual(edge["connector_shape"], "elbowed" if edge["routing_exception"] else "curved")
+            self.assertEqual(edge["connector_shape"], "curved")
         self.assertTrue(any(len(set(values)) > 1 for values in transaction_ports.values()))
         self.assertEqual(graph, before)
 
@@ -544,8 +544,8 @@ class RealElkTests(unittest.TestCase):
         self.assertTrue(all(edge["connector_shape"] == "curved" for edge in result["edges"]))
         shared = optimize_graph(build_graph(state_from(chain(3))), connector_style="curved", layout_attempts=3)
         self.assertTrue(any(edge.get("routing_exception") == "return" for edge in shared["edges"]))
-        self.assertTrue(all(edge["connector_shape"] == ("elbowed" if edge.get("routing_exception") else "curved")
-                            for edge in shared["edges"]))
+        self.assertTrue(all(edge["connector_shape"] == "curved" for edge in shared["edges"]))
+        self.assertEqual(shared["layout"]["routing_exceptions"], 0)
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ from .layout import HORIZONTAL_NODE_GAP
 from .miro_frames import _padded
 from .elk_layout import ALGORITHM, _default_attachments, _validate_graph, attachment_point, segment_hits_node, layout_metrics
 from .layout_search_reporting import public_search_counts
-from .edge_labels import caption_box, translate_label
+from .edge_labels import caption_box, caption_text, translate_label
 
 ALGORITHM_COMPACTION = "local_address_components_v1"
 LINKED_HORIZONTAL = float(HORIZONTAL_NODE_GAP)
@@ -204,6 +204,8 @@ def _length(points):
 
 
 def _caption(edge, points):
+    if not caption_text(edge):
+        return None
     # Preserve ELK's reserved label box and the midpoint estimate used for
     # Miro. Miro chooses its own final route and caption position, so the
     # combined footprint is deliberately conservative.
@@ -219,6 +221,20 @@ def _edge_boxes(edge, points):
 def _footprint(nodes, edges, point_map):
     return _envelope([*(_box(node) for node in nodes),
                       *(box for edge in edges for box in _edge_boxes(edge, point_map[edge["id"]]))])
+
+
+def _context_nodes(nodes, edges):
+    return {key for key, node in nodes.items() if node.get("kind") == "context_group"} | {
+        edge["source"] for edge in edges.values() if edge.get("role") == "context_input"
+        and nodes[edge["source"]].get("kind") in ("address", "context_group")}
+
+
+def _route_variants(edge, nodes, points):
+    from .routing_estimates import route_variants
+
+    # Geometry proposals have not yet replaced the stored route. Estimate from
+    # current attachments while retaining precisely the proposed saved bends.
+    return route_variants({**edge, "route": [{"x": x, "y": y} for x, y in points]}, nodes)
 
 
 def _dimensions(box):
@@ -302,6 +318,9 @@ class _Geometry:
         self.budget = budget
         self.node_index, self.segment_index, self.caption_index = (_Index(budget) for _ in range(3))
         self.segment_keys = {}
+        self.context_nodes = _context_nodes(nodes, edges)
+        self.estimated_segment_index = _Index(budget)
+        self.estimated_routes, self.estimated_segment_keys = {}, {}
         for key, node in nodes.items():
             self.node_index.add(key, _box(node))
         for key in edges:
@@ -318,6 +337,57 @@ class _Geometry:
         self.caption_index.remove(key)
         if caption:
             self.caption_index.add(key, caption)
+        if self.context_nodes:
+            for segment in self.estimated_segment_keys.get(key, []):
+                self.estimated_segment_index.remove(segment)
+            variants = _route_variants(self.edges[key], self.nodes, route)
+            self.estimated_routes[key] = variants
+            self.estimated_segment_keys[key] = []
+            for variant, points in enumerate(variants):
+                for i, (a, b) in enumerate(zip(points, points[1:])):
+                    segment = (key, variant, i)
+                    self.estimated_segment_keys[key].append(segment)
+                    self.estimated_segment_index.add(segment, _segment_box(a, b))
+
+    def _context_routes_safe(self, key, proposed):
+        """Keep context objects clear of Miro estimates as well as saved bends.
+
+        A local move must not undo the context clearance pass. Estimates only
+        add checks involving context objects; unrelated compaction continues
+        to use its established native-route checks.
+        """
+        if not self.context_nodes:
+            return True
+        moving_context = key in self.context_nodes
+        if moving_context:
+            clearance = _expand(_box(self.nodes[key]), EDGE_NODE_SPACING)
+            candidates = self.estimated_segment_index.query(clearance)
+            if candidates is None:
+                return False
+            for edge_id, variant, i in candidates:
+                if (edge_id not in proposed
+                        and _hits_box(*self.estimated_routes[edge_id][variant][i:i + 2], clearance)):
+                    return False
+        for edge_id, route in proposed.items():
+            edge = self.edges[edge_id]
+            endpoints = {edge["source"], edge["target"]}
+            for variant in _route_variants(edge, self.nodes, route):
+                for a, b in zip(variant, variant[1:]):
+                    if not self.budget.spend():
+                        return False
+                    candidates = self.node_index.query(_expand(_segment_box(a, b), EDGE_NODE_SPACING))
+                    if candidates is None:
+                        return False
+                    for other in candidates:
+                        if (other not in endpoints and (moving_context or other in self.context_nodes)
+                                and _hits_box(a, b, _expand(self.node_index.boxes[other], EDGE_NODE_SPACING))):
+                            return False
+                    for endpoint in endpoints:
+                        if ((moving_context or endpoint in self.context_nodes)
+                                and segment_hits_node({"x": a[0], "y": a[1]}, {"x": b[0], "y": b[1]},
+                                                      self.nodes[endpoint])):
+                            return False
+        return True
 
     def safe(self, key, proposed, bounds):
         node = self.nodes[key]
@@ -420,7 +490,7 @@ class _Geometry:
                         return False
             if one in new_captions and two in new_captions and _touch(new_captions[one], new_captions[two]):
                 return False
-        return True
+        return self._context_routes_safe(key, proposed)
 
 
 def _eligible(node, incident, nodes, fee_ids):
@@ -445,8 +515,20 @@ def _eligible(node, incident, nodes, fee_ids):
     return low if producers else high, preferred, low, high
 
 
-def _sibling_order(nodes, adjacent):
+def _sibling_order(nodes, adjacent, layout_columns=None):
     limits = defaultdict(list)
+    # Compaction shortens an established layout, not its branch ordering.
+    # Preserve neighbors from the entire dependency column as well as siblings
+    # so an address cannot slip between another transaction's output group.
+    columns = defaultdict(list)
+    for key, node in nodes.items():
+        if "column" in node:
+            columns[(layout_columns or {}).get(key, node["column"])].append(key)
+    for values in columns.values():
+        ordered = sorted(values, key=lambda key: (nodes[key]["y"], key))
+        for i, key in enumerate(ordered):
+            limits[key].append((ordered[i - 1] if i else None,
+                                ordered[i + 1] if i + 1 < len(ordered) else None))
     for node in nodes.values():
         if node["kind"] != "transaction":
             continue
@@ -463,9 +545,10 @@ def _sibling_order(nodes, adjacent):
     return limits
 
 
-def _compact_addresses(nodes, edges, points, adjacent, fee_ids, bounds, budget, notify, locked_nodes=()):
+def _compact_addresses(nodes, edges, points, adjacent, fee_ids, bounds, budget, notify, locked_nodes=(),
+                       *, layout_columns=None):
     geometry = _Geometry(nodes, edges, points, budget)
-    siblings = _sibling_order(nodes, adjacent)
+    siblings = _sibling_order(nodes, adjacent, layout_columns)
     moved, skipped = 0, 0
     candidates = sorted((node for node in nodes.values() if node["kind"] == "address"), key=lambda n: (n["x"], n["y"], n["id"]))
     for index, node in enumerate(candidates):
@@ -562,12 +645,28 @@ def _components(nodes, edges, fee_ids):
     return groups, group_edges, fixed
 
 
-def _pack_components(nodes, edges, points, fee_ids, bounds, budget, notify, frame_groups):
+def _pack_components(nodes, edges, points, fee_ids, bounds, budget, notify, frame_groups, preserved_nodes=()):
     groups, group_edges, fixed = _components(nodes, edges, fee_ids)
+    fee_components = len(fixed)
+    # Named members may share a central row across disconnected components.
+    # Translating those components independently would undo that organization.
+    preserved_nodes = set(preserved_nodes)
+    fixed.update(owner for owner, keys in groups.items() if preserved_nodes.intersection(keys))
     if len(groups) < 2 or bounds is None:
-        return 0, 0, len(fixed)
+        return 0, 0, fee_components
     geometry_boxes = {owner: _footprint((nodes[key] for key in keys), (edges[key] for key in group_edges[owner]), points)
                       for owner, keys in groups.items()}
+    has_context = bool(_context_nodes(nodes, edges))
+    if has_context:
+        # A same-side return can extend beyond its ELK component envelope.
+        # Reserve that estimated corridor before bringing a context component
+        # alongside it. The original native footprint remains the growth cap.
+        for owner in groups:
+            geometry_boxes[owner] = _envelope([
+                geometry_boxes[owner],
+                *(_segment_box(a, b) for key in group_edges[owner]
+                  for route in _route_variants(edges[key], nodes, points[key])
+                  for a, b in zip(route, route[1:]))])
     frame_for_member = {}
     for members in frame_groups:
         frame = _padded(_envelope(_box(nodes[key]) for key in members)) if members else None
@@ -587,7 +686,12 @@ def _pack_components(nodes, edges, points, fee_ids, bounds, budget, notify, fram
     obstacle_index = _Index(budget)
     for edge in edges.values():
         if edge["source"] in fee_ids or edge["target"] in fee_ids:
-            for i, box in enumerate(_edge_boxes(edge, points[edge["id"]])):
+            boxes_for_edge = _edge_boxes(edge, points[edge["id"]])
+            if has_context:
+                boxes_for_edge.extend(_segment_box(a, b)
+                                      for route in _route_variants(edge, nodes, points[edge["id"]])
+                                      for a, b in zip(route, route[1:]))
+            for i, box in enumerate(boxes_for_edge):
                 obstacle_index.add((edge["id"], i), box)
     anchor_x, anchor_y = packing_bounds[:2]
     corners = [(anchor_x, anchor_y)]
@@ -656,7 +760,7 @@ def _pack_components(nodes, edges, points, fee_ids, bounds, budget, notify, fram
             index.add(owner, box)
             moved += 1
         corners.extend(((box[2] + COMPONENT_SPACING, box[1]), (box[0], box[3] + COMPONENT_SPACING)))
-    return moved, skipped, len(fixed)
+    return moved, skipped, fee_components
 
 
 def compact_graph(graph, progress=None):
@@ -684,16 +788,10 @@ def compact_graph(graph, progress=None):
     for edge in edges.values():
         adjacent[edge["source"]].append(edge)
         adjacent[edge["target"]].append(edge)
-    # make_plan uses these fixed note dimensions. They are included in board
-    # extent reporting and stay untouched, so compacting never expands notes.
-    annotations = []
-    for key, position in result["layout"].get("annotations", {}).items():
-        if key in ("legend", "run"):
-            if key == "run" and "namespace" not in result:
-                continue
-            width, height = (1300, 260) if key == "legend" else (1300, 280)
-            annotations.append((position["x"] - width / 2, position["y"] - height / 2,
-                                position["x"] + width / 2, position["y"] + height / 2))
+    # Include the same row-based legend dimensions used by the Miro plan.
+    from .legend_miro import bounds as legend_bounds
+    annotations = [(x - width / 2, y - height / 2, x + width / 2, y + height / 2)
+                   for x, y, width, height in legend_bounds(result)]
     try:
         frame_groups = [tuple(group["shape_keys"]) for group in result.get("activity_frames", {}).get("activities", [])]
         if any(key not in nodes for group in frame_groups for key in group):
@@ -719,9 +817,16 @@ def compact_graph(graph, progress=None):
     # may still translate, but a local address move must not pull the hub back
     # into the branch it was explicitly separated from.
     locked_nodes.update(key for key, node in nodes.items() if node.get("layout_hub") is True)
-    moved_addresses, skipped_addresses = _compact_addresses(nodes, edges, points, adjacent, fee_ids, bounds, budget, notify, locked_nodes)
+    from .named_group_layout import center_metrics, group_structure
+    centered_nodes = group_structure(result)["core"]
+    locked_nodes.update(centered_nodes)
+    from .hub_layout import hub_plan
+    moved_addresses, skipped_addresses = _compact_addresses(
+        nodes, edges, points, adjacent, fee_ids, bounds, budget, notify, locked_nodes,
+        layout_columns=hub_plan(result)["columns"])
     _, current_bounds = _measure(nodes, edges, points, fee_ids, adjacent, annotations, frame_groups)
-    moved_components, skipped_components, fee_components = _pack_components(nodes, edges, points, fee_ids, current_bounds, budget, notify, frame_groups)
+    moved_components, skipped_components, fee_components = _pack_components(
+        nodes, edges, points, fee_ids, current_bounds, budget, notify, frame_groups, centered_nodes)
     after, _ = _measure(nodes, edges, points, fee_ids, adjacent, annotations, frame_groups)
     main = [node for key, node in nodes.items() if key not in fee_ids]
     result["layout"]["main_top"] = min((node["y"] - node["height"] / 2 for node in main), default=160)
@@ -732,6 +837,10 @@ def compact_graph(graph, progress=None):
                                    "estimated": True, "miro_routes_exact": False,
                                    "method": "compaction_comparison", "acceptance_uses_metrics": False}
     result["layout"]["metrics"].update(public_search_counts(result["layout"].get("search")))
+    if result.get("graph_options", {}).get("center_name"):
+        result["layout"]["named_group"] = center_metrics(result)
+    from .transaction_neighborhoods import neighborhood_metrics
+    result["layout"].setdefault("branch_organization", {})["neighborhoods"] = neighborhood_metrics(result)
     result["layout"]["compaction"] = {
         "algorithm": ALGORITHM_COMPACTION, "version": 1, "before": before, "after": after,
         "moved_addresses": moved_addresses, "moved_components": moved_components,

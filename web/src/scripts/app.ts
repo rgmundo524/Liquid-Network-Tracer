@@ -2,6 +2,7 @@ import {beginFrameRecovery, frameRecoveryStarted, frameRecoveryComplete, frameRe
 import {nameColorsPanel, nameColorsInput, nameColorsAction, nameColorsFile, resetNameColors} from "./name-colors";
 import { addressImportPanel, addressImportInput, addressImportFile, addressImportAction, resetAddressImport } from "./address-import";
 import {changeOutputsPanel, changeOutputsInput, changeOutputsFile, changeOutputsAction, changeOutputsLookupComplete, changeOutputsPending, resetChangeOutputs} from "./change-outputs";
+import {inputImportPanel, inputImportInput, inputImportFiles, inputImportAction, inputImportPending, resetInputImport} from "./input-import";
 export {};
 
 type ConnectorStyle = "straight" | "curved" | "elbowed";
@@ -33,10 +34,14 @@ type Settings = {
   max_new_items: number;
   layout_attempts: number;
   include_fees: boolean;
+  color_attribution_arrows: boolean;
   group_context_inputs: boolean;
   hub_addresses: string[];
+  center_name: string;
   connector_style: ConnectorStyle;
 };
+const layoutSettingKeys = ["layout_attempts", "connector_style", "include_fees", "color_attribution_arrows", "group_context_inputs", "center_name", "hub_addresses"] as const;
+type LayoutSettings = Pick<Settings, typeof layoutSettingKeys[number]>;
 type Run = {
   id: string;
   status: string;
@@ -44,6 +49,8 @@ type Run = {
   created_at?: string;
   transaction_count?: number;
   frontier_count?: number;
+  max_hops?: number;
+  collected_hops?: number;
 };
 type Download = { name: string; url: string };
 type Artifact = RenderingMetadata & {
@@ -51,14 +58,21 @@ type Artifact = RenderingMetadata & {
   downloads: Download[];
   preview_url?: string;
   include_fees: boolean;
+  color_attribution_arrows?: boolean;
   group_context_inputs?: boolean;
   hub_addresses?: string[];
+  center_name?: string;
   connector_style?: ConnectorStyle;
   layout_metrics?: LayoutMetrics;
   preview_id?: string;
   compaction?: CompactionReport;
 };
 type RunArtifacts = { mermaid?: Artifact; csv?: Artifact; elk?: Artifact; compact?: Artifact; connections?: Artifact };
+type PegoutSearch = {
+  id: string; search_id?: string; txid?: string; seeds?: string[]; min_hops: number; max_hops: number;
+  status: string; stop_reason?: string | null; created_at?: string; match_count?: number;
+  resumable?: boolean; recoverable?: boolean; artifact?: Artifact;
+};
 type JobProgress = {
   phase: string;
   completed: number;
@@ -67,9 +81,25 @@ type JobProgress = {
   retry_after?: number;
   elapsed_seconds?: number;
 };
+type PlotGoal = "full" | "connections" | "pegouts";
+type Plot = {
+  preview_id: string; goal: PlotGoal; run_id: string; min_hops: number; max_hops: number | null;
+  created_at: string; status: string; node_count: number; edge_count: number; transaction_count: number;
+  match_count?: number; connection_count?: number; source_max_hops?: number; source_run_status?: string;
+  query?: {include_unspent?: boolean; include_unspendable?: boolean; include_context?: boolean};
+  endpoint_count?: number; endpoint_counts?: {pegout: number; unspent: number; unspendable: number};
+  context_edge_count?: number;
+  source_stop_reason?: string; notice?: string; coverage_notice?: string; reviewable: boolean; reason?: string; empty?: boolean; artifact?: Artifact;
+  layout_settings?: LayoutSettings & {presentation_version?: number};
+};
+type InvestigationBoard = {
+  id: string; name: string; goal: PlotGoal; board_id: string | null; board_url: string | null; status: string;
+  preview_id?: string | null; run_id?: string | null; legacy_snapshot?: boolean; can_sync: boolean; notice?: string; pending_count?: number;
+};
 type Case = {
   id: string;
   name: string;
+  blockchain?: string;
   latest_run?: string;
   fixture?: string | boolean;
   miro_board?: string;
@@ -82,6 +112,11 @@ type Case = {
   created_at?: string;
   runs?: Run[];
   artifacts?: Record<string, RunArtifacts>;
+  pegout_searches?: PegoutSearch[];
+  plots?: Plot[];
+  boards?: InvestigationBoard[];
+  plots_notice?: string;
+  boards_notice?: string;
 };
 type Output = {
   vout: number;
@@ -105,8 +140,10 @@ type Result = RenderingMetadata & {
   compaction?: CompactionReport;
   downloads?: Download[];
   include_fees?: boolean;
+  color_attribution_arrows?: boolean;
   group_context_inputs?: boolean;
   hub_addresses?: string[];
+  center_name?: string;
   preview_url?: string;
   transactions?: Report[];
   run_id?: string;
@@ -119,6 +156,7 @@ type Result = RenderingMetadata & {
   updated_frames?: number;
   frames_to_remove?: number;
   fee_items_to_remove?: number;
+  run_notes_to_remove?: number;
   conflicts_count?: number;
   board_url?: string;
   [key: string]: unknown;
@@ -152,6 +190,7 @@ type AddressActivity = {
 };
 type AddressRow = { address: string; run_output_count?: number; service: ServiceRule | null; activity: AddressActivity | null };
 type AddressPage = { run_id: string; rows: AddressRow[]; total: number; offset: number; limit: number };
+type CaseView = "collect" | "plots" | "boards" | "history";
 type Page = "dashboard" | "new" | "case" | "settings" | "case-settings" | "addresses";
 type ActiveJob = {
   id: string;
@@ -174,12 +213,15 @@ const defaults: Settings = {
   max_new_items: 750,
   layout_attempts: 25,
   include_fees: false,
+  color_attribution_arrows: false,
   group_context_inputs: false,
   hub_addresses: [],
+  center_name: "",
   connector_style: "straight",
 };
 const state = {
   csrf: "",
+  caseView: "collect" as CaseView,
   settings: { ...defaults },
   cases: [] as Case[],
   page: "dashboard" as Page,
@@ -199,7 +241,7 @@ const state = {
     name: "",
     txids: "",
     seeds: "",
-    board: "",
+    blockchain: "liquid",
     settings: { ...defaults },
     reports: [] as Report[],
     selected: new Set<string>(),
@@ -215,6 +257,8 @@ let dialogPreviewId = "";
 let dialogRebuild: { caseId: string; sourceBoard: string; runId: string } | null = null;
 let submitting = false;
 let pageGeneration = 0;
+let workflowDraft = {caseId: "", goal: "full" as PlotGoal, minHops: "0", maxHops: "10", includeUnspent: false, includeUnspendable: false, includeContext: false, plot: "", board: "", boardPlot: "", boardGoal: "full" as PlotGoal, boardName: "", boardUrl: ""};
+let pegoutDraft = {caseId: "", custom: false, txid: "", minHops: "0", maxHops: "10", selected: "", board: "", approved: ""};
 
 const esc = (value: unknown): string =>
   String(value ?? "").replace(
@@ -232,7 +276,7 @@ const short = (value: string | undefined, length = 12): string =>
     : "—";
 const human = (value: unknown): string =>
   String(value ?? "—").replaceAll("_", " ");
-const isBusy = (): boolean => !!state.job || submitting || changeOutputsPending();
+const isBusy = (): boolean => !!state.job || submitting || changeOutputsPending() || inputImportPending();
 const disabled = (condition: boolean): string => (condition ? " disabled" : "");
 const outputValue = (output: Output): string =>
   typeof output.value_text === "string"
@@ -353,20 +397,60 @@ function connectorOptions(style: ConnectorStyle): string {
     .join("");
 }
 
-function budgetFields(settings: Settings, prefix = ""): string {
-  const fields: [keyof Settings, string, string][] = [
-    ["hops", "Additional hops", "Per bounded run"],
-    ["max_transactions", "Transactions", "Maximum per run"],
-    ["max_outpoints", "Output lookups", "Maximum per run"],
-    ["max_requests", "API attempts", "Includes retries"],
-    ["max_seconds", "Time limit (seconds)", "Trace request budget"],
-    ["max_new_items", "New Miro items", "Maximum per sync"],
-  ];
-  return `<div class="budget-grid">${fields.map(([key, label, hint]) => `<label class="field"><span>${label}</span><input name="${prefix}${key}" type="number" min="${key === "max_seconds" ? "0.01" : ["hops", "max_new_items"].includes(key) ? "0" : "1"}" step="${key === "max_seconds" ? "any" : "1"}" required value="${esc(settings[key])}"/><small>${hint}</small></label>`).join("")}</div><div class="settings-divider"></div><label class="field"><span>Layout attempts</span><input name="${prefix}layout_attempts" type="number" min="1" max="1000" step="1" required value="${esc(settings.layout_attempts)}"/><small>Compare more graph arrangements for a potentially better layout. More attempts take longer, even for large graphs. Independent of trace hops.</small></label><div class="settings-divider"></div><label class="check-line"><input name="${prefix}include_fees" type="checkbox"${settings.include_fees ? " checked" : ""}/><span><strong>Include transaction fee flows</strong><small>Show fees in graph views. The archived evidence always retains fee data.</small></span></label><div class="settings-divider"></div><label class="check-line"><input name="${prefix}group_context_inputs" type="checkbox"${settings.group_context_inputs ? " checked" : ""}/><span><strong>Group isolated context inputs</strong><small>Optional summary for inputs used only by one transaction. Every input number and output reference remains in the details. Shared or traced addresses stay separate. Use Sync and reorganize to change grouping on an existing board. This replaces generated context objects; preserve their Miro comments first.</small></span></label><div class="settings-divider"></div><label class="field"><span>Miro connector appearance</span><select name="${prefix}connector_style">${connectorOptions(settings.connector_style)}</select><small>Straight lines are the default. Return connections may use elbows to avoid running back through a transaction. Miro draws its own routes; Mermaid has an independent layout.</small></label>`;
+function numericField(settings: Settings, key: keyof Settings, label: string, hint: string): string {
+  return `<label class="field"><span>${label}</span><input name="${key}" type="number" min="${key === "max_seconds" ? "0.01" : ["hops", "max_new_items"].includes(key) ? "0" : "1"}"${key === "layout_attempts" ? ' max="1000"' : ""} step="${key === "max_seconds" ? "any" : "1"}" required value="${esc(settings[key])}"/><small>${hint}</small></label>`;
+}
+
+function budgetFields(settings: Settings): string {
+  return `<div class="budget-grid">${([
+    ["hops", "Additional hops", "Default for each run; 0 retries the current frontier."],
+    ["max_transactions", "Transactions", "Maximum new transactions per run."],
+    ["max_outpoints", "Output lookups", "Maximum per run."],
+    ["max_requests", "API attempts", "Includes retries."],
+    ["max_seconds", "Time limit (seconds)", "Trace request budget."],
+  ] as [keyof Settings, string, string][]).map(([key, label, hint]) => numericField(settings, key, label, hint)).join("")}</div>`;
+}
+
+function graphFields(settings: Settings, suggest = false, goal: PlotGoal = "full", includeContext = false): string {
+  const check = (key: "include_fees" | "color_attribution_arrows" | "group_context_inputs", label: string, hint: string): string =>
+    `<input type="hidden" name="${key}_present" value="1"/><label class="check-line"><input name="${key}" type="checkbox"${settings[key] ? " checked" : ""}/><span><strong>${label}</strong><small>${hint}</small></span></label>`;
+  const canGroupContext = goal === "full" || goal === "pegouts" && includeContext;
+  return `<div class="field-row"><label class="field"><span>Connector appearance</span><select name="connector_style">${connectorOptions(settings.connector_style)}</select></label>${numericField(settings, "layout_attempts", "Layout attempts", "More attempts compare more arrangements and take longer.")}</div>
+    ${check("color_attribution_arrows", "Color arrows by attribution", "Use each named address's assigned color for its arrows.")}
+    ${centerNameFields(settings, suggest)}
+    <fieldset class="layout-fields context-grouping-fields"${disabled(!canGroupContext)}><legend>Context input grouping</legend>
+    ${check("group_context_inputs", "Group isolated context inputs", "Combine isolated external input addresses used by one transaction. Shared or named addresses and context outputs stay separate. Changing this grouping replaces generated context objects; preserve any Miro comments on them first.")}</fieldset>
+    ${goal === "pegouts" && !includeContext ? '<p class="small muted">Enable Include context addresses above to group isolated context inputs.</p>' : goal === "connections" ? '<p class="small muted">Context input grouping applies to Full trace and peg-out layouts with context addresses included.</p>' : ""}
+    <fieldset class="layout-fields full-trace-fields"${disabled(goal !== "full")}><legend>Full trace options</legend>
+    ${check("include_fees", "Include transaction fee flows", "Show fees above the graph.")}
+    ${hubAddressFields(settings)}</fieldset>${goal !== "full" ? '<p class="small muted">Fee flows and separate branch hubs apply to Full trace.</p>' : ""}`;
+}
+
+function traceSummary(settings: Settings): string {
+  return `<p class="settings-summary">Up to <strong>${esc(settings.max_transactions)}</strong> new transactions · <strong>${esc(settings.max_outpoints)}</strong> output lookups · <strong>${esc(settings.max_requests)}</strong> API attempts · <strong>${esc(settings.max_seconds)}s</strong></p>`;
 }
 
 function hubAddressFields(settings: Settings): string {
-  return `<div class="settings-divider"></div><label class="field"><span>Separate branch hubs</span><textarea name="hub_addresses" class="mono" rows="4" spellcheck="false" placeholder="One full Liquid address per line">${esc(settings.hub_addresses.join("\n"))}</textarea><small>Choose high-activity or shared addresses to arrange apart from their branches. Each address keeps one identity and all connections. This does not classify an address as a service.</small></label>`;
+  return `<div class="settings-divider"></div><label class="field"><span>Separate branch hubs</span><textarea name="hub_addresses" class="mono" rows="4" spellcheck="false" placeholder="One full Liquid address per line">${esc(settings.hub_addresses.join("\n"))}</textarea><small>Use high-activity or shared addresses as new tree roots for the layout. Spending transactions line up vertically when other inputs allow; their outputs branch to the right. Each address keeps one identity and all connections. Tracing stays the same.</small></label>`;
+}
+
+function centerNameFields(settings: Settings, suggest = false): string {
+  return `<div class="settings-divider"></div><label class="field"><span>Center named group</span><input name="center_name" maxlength="120" value="${esc(settings.center_name)}" placeholder="Attribution name, or blank to disable" autocomplete="off"${suggest ? ' list="center-name-options"' : ""}/>${suggest ? '<datalist id="center-name-options"></datalist>' : ""}<small>Align this group's addresses and connecting transactions near the center, with other activity branching around them. Enter an attribution name; matching ignores capitalization. Leave blank to disable. Layout only: tracing and all connections stay the same. Use Sync and reorganize to apply this to an existing board.</small></label>`;
+}
+
+let centerNameTimer: ReturnType<typeof setTimeout> | undefined;
+async function suggestCenterNames(): Promise<void> {
+  const detail = state.activeCase;
+  const input = document.querySelector<HTMLInputElement>('#plot-layout-form input[name="center_name"]');
+  if (!detail || state.page !== "case" || state.caseView !== "plots" || !input) return;
+  const query = input.value.trim(), generation = pageGeneration;
+  const result = await api<{rows?: {name: string; enabled_addresses: number}[]}>(`/api/cases/${encodeURIComponent(detail.id)}/name-colors`,
+    {query, offset: 0, limit: 100});
+  if (generation !== pageGeneration || state.activeCase?.id !== detail.id || input.value.trim() !== query
+      || document.querySelector('#plot-layout-form input[name="center_name"]') !== input) return;
+  const list = document.querySelector<HTMLDataListElement>("#center-name-options");
+  if (list) list.innerHTML = (result.rows || []).filter(row => row.enabled_addresses > 0)
+    .map(row => `<option value="${esc(row.name)}"></option>`).join("");
 }
 
 function normalizedHubs(addresses: string[] | undefined): string[] {
@@ -375,21 +459,17 @@ function normalizedHubs(addresses: string[] | undefined): string[] {
 
 function readSettings(form: HTMLFormElement, previous: Settings = defaults): Settings {
   const data = new FormData(form);
+  const number = (key: keyof Settings): number => data.has(key) ? Number(data.get(key)) : Number(previous[key]);
+  const flag = (key: "include_fees" | "color_attribution_arrows" | "group_context_inputs"): boolean =>
+    data.has(`${key}_present`) || data.has(key) ? data.has(key) : previous[key];
   return {
-    hops: Number(data.get("hops")),
-    max_transactions: Number(data.get("max_transactions")),
-    max_outpoints: Number(data.get("max_outpoints")),
-    max_requests: Number(data.get("max_requests")),
-    max_seconds: Number(data.get("max_seconds")),
-    max_new_items: Number(data.get("max_new_items")),
-    layout_attempts: data.has("layout_attempts")
-      ? Number(data.get("layout_attempts")) : previous.layout_attempts,
-    include_fees: data.has("include_fees"),
-    group_context_inputs: data.has("group_context_inputs"),
-    hub_addresses: data.has("hub_addresses")
-      ? normalizedHubs(String(data.get("hub_addresses") || "").split(/\r?\n/))
-      : [...previous.hub_addresses],
-    connector_style: (data.get("connector_style") || "straight") as ConnectorStyle,
+    hops: number("hops"), max_transactions: number("max_transactions"), max_outpoints: number("max_outpoints"),
+    max_requests: number("max_requests"), max_seconds: number("max_seconds"), max_new_items: number("max_new_items"),
+    layout_attempts: number("layout_attempts"), include_fees: flag("include_fees"),
+    color_attribution_arrows: flag("color_attribution_arrows"), group_context_inputs: flag("group_context_inputs"),
+    hub_addresses: data.has("hub_addresses") ? normalizedHubs(String(data.get("hub_addresses") || "").split(/\r?\n/)) : [...previous.hub_addresses],
+    center_name: data.has("center_name") ? String(data.get("center_name") || "").trim() : (previous.center_name || ""),
+    connector_style: (data.get("connector_style") || previous.connector_style) as ConnectorStyle,
   };
 }
 
@@ -410,7 +490,7 @@ function sidebar(): string {
   return `<aside class="sidebar"><div class="brand"><span class="brand-mark">${icon("liquid")}</span><div><strong>Liquid Tracer</strong><small>Investigation workspace</small></div></div><div class="nav-label">Workspace</div><nav aria-label="Main navigation">${[
     ["dashboard", "Investigations", "grid"],
     ["new", "New investigation", "plus"],
-    ["settings", "Settings", "settings"],
+    ["settings", "Workspace defaults", "settings"],
   ]
     .map(
       ([page, label, symbol]) =>
@@ -430,21 +510,41 @@ function sidebar(): string {
   }</div><div class="sidebar-bottom"><div class="local-status"><span class="status-dot"></span><div><strong>Running on your computer</strong><p>Local files · Same tracing engine</p></div></div><div class="sidebar-foot">LIQUID NETWORK · UTXO TRACING<br/><span style="display:block;margin-top:7px;letter-spacing:0">Arrows between buttons · Enter to select</span></div></div></aside>`;
 }
 
+const collectionHopPhases: Record<string, string> = {
+  collecting: "Processing",
+  collection_complete: "Collection finished; last processing",
+  collection_paused: "Collection paused while processing",
+  collection_error: "Collection stopped while processing",
+};
+
+function collectionHopLabel(progress: JobProgress): string | undefined {
+  const prefix = Object.hasOwn(collectionHopPhases, progress.phase) ? collectionHopPhases[progress.phase] : undefined;
+  if (!prefix || !Number.isSafeInteger(progress.completed) || !Number.isSafeInteger(progress.total)
+      || progress.completed < 0 || progress.total < 0 || progress.completed > progress.total) return;
+  return `${prefix} hop ${progress.completed} of ${progress.total}`;
+}
+
 function jobProgress(): string {
   const progress = state.job?.progress;
   if (!progress) return '<progress class="job-progress-bar" aria-label="Calculation in progress"></progress>';
+  const hopLabel = collectionHopLabel(progress);
+  if (hopLabel) {
+    const zeroHop = progress.total === 0;
+    const value = zeroHop ? (progress.phase === "collection_complete" ? 1 : 0) : progress.completed;
+    return `<div class="job-progress-meta"><span>Hop progress</span><span>Hop ${progress.completed} / ${progress.total}</span></div><progress class="job-progress-bar" max="${zeroHop ? 1 : progress.total}" value="${value}" aria-label="${esc(hopLabel)}" aria-valuetext="${esc(hopLabel)}"></progress><p class="small muted">${zeroHop ? "Starting transactions only (hop 0). " : ""}Hop depth, not a time estimate.</p>`;
+  }
   const total = Number.isFinite(progress.total) ? Math.max(0, progress.total) : 0;
   const completed = Number.isFinite(progress.completed)
     ? Math.max(0, Math.min(progress.completed, total))
     : 0;
   const waiting = Number.isFinite(progress.retry_after) && progress.retry_after! > 0;
-  const measured = total > 0 && progress.phase !== "optimizing";
+  const measured = total > 0 && progress.phase !== "optimizing" && !Object.hasOwn(collectionHopPhases, progress.phase);
   return `<div class="job-progress-meta"><span>Current stage · ${esc(human(progress.phase))}</span>${measured ? `<span>${esc(completed)} / ${esc(total)}</span>` : ""}</div><progress class="job-progress-bar"${measured ? ` max="${total}" value="${completed}"` : ""} aria-label="${esc(human(progress.phase))}"></progress>${waiting ? `<p class="job-retry">Waiting ${esc(progress.retry_after)} seconds before retrying Miro.</p>` : ""}`;
 }
 
 function jobBanner(): string {
   if (!state.job) return "";
-  return `<div class="job-banner" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><div class="job-details"><strong id="job-message">${esc(state.job.cancelling ? state.job.message : state.job.progress?.message || state.job.message || "Working on your request…")}</strong><div id="job-progress">${jobProgress()}</div><p>${state.job.live ? "Keep the launching terminal open. If Proton Pass requests login or unlocking, complete it there." : "Processing local evidence. You can browse saved investigations while this completes."}</p>${state.job.cancellable || state.job.cancelling ? `<button class="btn small" id="cancel-job" data-action="cancel-job"${disabled(state.job.cancelling)}>${state.job.cancelling ? "Canceling…" : "Cancel calculation"}</button>` : ""}</div><span class="job-time" id="job-elapsed">0s elapsed</span></div>`;
+  return `<div class="job-banner"><span class="spinner" aria-hidden="true"></span><div class="job-details" role="status" aria-live="polite"><strong id="job-message">${esc(state.job.cancelling ? state.job.message : state.job.progress?.message || state.job.message || "Working on your request…")}</strong><div id="job-progress">${jobProgress()}</div><p>${state.job.live ? "Keep the launching terminal open. If Proton Pass requests login or unlocking, complete it there." : "Processing local evidence. You can browse saved investigations while this completes."}</p></div><div class="job-actions"><span class="job-time" id="job-elapsed">0s elapsed</span>${state.job.cancellable || state.job.cancelling ? `<button class="btn small" id="cancel-job" data-action="cancel-job"${disabled(state.job.cancelling)}>${state.job.cancelling ? "Canceling…" : "Cancel calculation"}</button>` : ""}</div></div>`;
 }
 
 function updateJobProgress(): void {
@@ -460,16 +560,32 @@ function updateJobProgress(): void {
   }
 }
 
+const workspaceHeaderObserver = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(entries => {
+  const header = entries[0]?.target;
+  if (header) document.documentElement.style.setProperty("--workspace-header-height", `${header.getBoundingClientRect().height}px`);
+});
+
 function render(focus = false): void {
+  saveSettingsDraft();
+  const openImports = ['advanced-attributions', 'advanced-name-colors', 'advanced-change-outputs', 'compact-tools']
+    .filter(id => document.querySelector<HTMLDetailsElement>(`#${id}`)?.open);
   const names: Record<Page, string> = {
     dashboard: "Investigations",
     new: "New investigation",
     case: state.activeCase?.name || "Investigation",
-    settings: "Workspace settings",
+    settings: "Workspace defaults",
     "case-settings": "Investigation settings",
     addresses: "Address review",
   };
-  app.innerHTML = `<div class="layout">${sidebar()}<div class="main-shell"><header class="topbar"><div class="breadcrumb">${icon("folder")}<span>Workspace</span>${icon("chevron")}<strong>${esc(names[state.page])}</strong></div><div class="topbar-right"><span class="local-pill">${icon("lock")} LOCAL SESSION</span><span class="avatar" aria-label="Investigation workspace">LT</span></div></header><main id="main" class="content" tabindex="-1">${jobBanner()}${state.error ? `<div class="alert error" role="alert">${icon("info")}<div><strong>Unable to complete the action</strong><p>${esc(state.error)}</p></div><button class="dismiss" data-action="dismiss-error" aria-label="Dismiss error">${icon("close")}</button></div>` : ""}${state.page === "dashboard" ? dashboard() : state.page === "new" ? newCase() : state.page === "case" ? workspace() : state.page === "addresses" ? addressReviewPage() : settingsPage()}</main></div></div>`;
+  app.innerHTML = `<div class="layout">${sidebar()}<div class="main-shell"><header class="workspace-header"><div class="topbar"><div class="breadcrumb">${icon("folder")}<span>Workspace</span>${icon("chevron")}<strong>${esc(names[state.page])}</strong></div><div class="topbar-right"><span class="local-pill">${icon("lock")} LOCAL SESSION</span><span class="avatar" aria-label="Investigation workspace">LT</span></div></div>${jobBanner()}</header><main id="main" class="content" tabindex="-1">${state.error ? `<div class="alert error" role="alert">${icon("info")}<div><strong>Unable to complete the action</strong><p>${esc(state.error)}</p></div><button class="dismiss" data-action="dismiss-error" aria-label="Dismiss error">${icon("close")}</button></div>` : ""}${state.page === "dashboard" ? dashboard() : state.page === "new" ? newCase() : state.page === "case" ? workspace() : state.page === "addresses" ? addressReviewPage() : settingsPage()}</main></div></div>`;
+  workspaceHeaderObserver?.disconnect();
+  const header = document.querySelector(".workspace-header");
+  if (header) workspaceHeaderObserver?.observe(header);
+  renderedSettingsKey = ["case-settings", "settings"].includes(state.page) ? settingsKey() : "";
+  openImports.forEach(id => {
+    const disclosure = document.querySelector<HTMLDetailsElement>(`#${id}`);
+    if (disclosure) disclosure.open = true;
+  });
   updateJobClock();
   if (focus)
     document
@@ -485,7 +601,7 @@ function dashboard(): string {
 
 function newCase(): string {
   const draft = state.draft;
-  return `<div class="page-heading"><div><div class="eyebrow">Build a starting point</div><h1 id="page-title" tabindex="-1">New investigation</h1><p>Choose the transactions and exact outputs you want to follow.</p></div>${button("Back to investigations", "dashboard", "", "ghost")}</div><form id="new-case-form"><div class="form-grid"><div class="form-stack"><section class="panel"><div class="panel-head"><h2><span class="section-number">1</span> Investigation details</h2></div><div class="panel-body"><label class="field"><span>Investigation name</span><input name="name" maxlength="120" placeholder="e.g. Service withdrawal review" value="${esc(draft.name)}" required autocomplete="off"/></label><label class="field"><span>Miro board URL or ID <span class="muted">(optional)</span></span><input name="board" placeholder="You can link or create a board later" value="${esc(draft.board)}" autocomplete="off"/></label></div></section><section class="panel"><div class="panel-head"><div><h2><span class="section-number">2</span> Starting outputs</h2><p>Multiple transactions can share one investigation.</p></div></div><div class="panel-body"><label class="field"><span>Transaction hashes</span><textarea name="txids" class="mono" rows="3" spellcheck="false" placeholder="Paste transaction hashes separated by commas">${esc(draft.txids)}</textarea><small>Paste up to 100 transaction hashes, separated by commas, spaces, or newlines.</small></label><div class="heading-actions">${button("Load outputs", "lookup", "search", "", isBusy())}</div><p class="small muted" style="margin-top:12px">This lookup uses your Blockstream credits. Watch the terminal for Proton Pass prompts.</p><div id="lookup-outputs">${draft.reports.length ? '<p class="small muted" style="margin-top:17px">Amounts are base units; ?? means unavailable.</p>' : ""}${draft.reports
+  return `<div class="page-heading"><div><div class="eyebrow">Build a starting point</div><h1 id="page-title" tabindex="-1">New investigation</h1><p>Choose a blockchain and the exact outputs you want to follow.</p></div>${button("Back to investigations", "dashboard", "", "ghost")}</div><form id="new-case-form"><div class="form-grid"><div class="form-stack"><section class="panel"><div class="panel-head"><h2><span class="section-number">1</span> Investigation details</h2></div><div class="panel-body"><div class="field-row"><label class="field"><span>Investigation name</span><input name="name" maxlength="120" placeholder="e.g. Service withdrawal review" value="${esc(draft.name)}" required autocomplete="off"/></label><label class="field"><span>Blockchain</span><select name="blockchain" required${disabled(isBusy())}><option value="liquid" selected>Liquid Network</option></select></label></div><p class="small muted">Liquid Network is currently the only supported blockchain.</p></div></section><section class="panel"><div class="panel-head"><div><h2><span class="section-number">2</span> Starting outputs</h2><p>Multiple transactions can share one investigation.</p></div></div><div class="panel-body"><label class="field"><span>Transaction hashes</span><textarea name="txids" class="mono" rows="3" spellcheck="false" placeholder="Paste transaction hashes separated by commas">${esc(draft.txids)}</textarea><small>Paste up to 100 transaction hashes, separated by commas, spaces, or newlines.</small></label><div class="heading-actions">${button("Load outputs", "lookup", "search", "", isBusy())}</div><p class="small muted" style="margin-top:12px">This lookup uses your Blockstream credits. Watch the terminal for Proton Pass prompts.</p><div id="lookup-outputs">${draft.reports.length ? '<p class="small muted" style="margin-top:17px">Amounts are base units; ?? means unavailable.</p>' : ""}${draft.reports
     .map(
       (report, index) =>
         `<section class="output-group"><header><span>Transaction ${index + 1}</span><span class="mono" title="${esc(report.txid)}">${esc(short(report.txid, 15))}</span></header>${report.outputs
@@ -497,7 +613,7 @@ function newCase(): string {
     )
     .join(
       "",
-    )}${draft.reports.length ? `<p class="selection-count" id="selection-count">${draft.selected.size} starting output${draft.selected.size === 1 ? "" : "s"} selected</p>` : ""}</div><details class="direct-seeds"${draft.seeds ? " open" : ""}><summary>Enter exact output references directly</summary><label class="field"><span>Starting outputs</span><textarea name="seeds" class="mono" rows="2" spellcheck="false" placeholder="TRANSACTION_HASH:0, TRANSACTION_HASH:1">${esc(draft.seeds)}</textarea><small>Optional. These numeric outpoints are combined with checked outputs above.</small></label></details></div></section><section class="panel"><div class="panel-head"><h2><span class="section-number">3</span> Run limits &amp; display</h2></div><div class="panel-body">${budgetFields(draft.settings)}${hubAddressFields(draft.settings)}</div></section><div class="form-actions"><p>Creates the investigation locally. You will review the first run before tracing.</p><button class="btn primary" type="submit"${disabled(isBusy())}>${icon("plus")}Create investigation</button></div></div><aside class="form-stack"><div class="side-note"><strong>Follow specific outputs</strong>Each selected UTXO becomes a starting point. Shared descendants appear once in the cumulative graph.<ul><li>Choose relevant outputs after lookup.</li><li>Fees and unspendable outputs cannot be selected.</li><li>Hidden amounts and assets appear as ??.</li></ul></div><div class="side-note"><strong>One case, several runs</strong>Each run has its own budget. Continue unfinished branches in a later run, including after closing this interface.</div></aside></div></form>`;
+    )}${draft.reports.length ? `<p class="selection-count" id="selection-count">${draft.selected.size} starting output${draft.selected.size === 1 ? "" : "s"} selected</p>` : ""}</div><details class="direct-seeds"${draft.seeds ? " open" : ""}><summary>Enter exact output references directly</summary><label class="field"><span>Starting outputs</span><textarea name="seeds" class="mono" rows="2" spellcheck="false" placeholder="TRANSACTION_HASH:0, TRANSACTION_HASH:1">${esc(draft.seeds)}</textarea><small>Optional. These numeric outpoints are combined with checked outputs above.</small></label></details></div></section><div class="form-actions"><p>Creates the investigation locally. Start a trace when you are ready.</p><button class="btn primary" type="submit"${disabled(isBusy())}>${icon("plus")}Create investigation</button></div></div><aside class="form-stack"><div class="side-note"><strong>Follow specific outputs</strong>Each selected UTXO becomes a starting point. Shared descendants appear once in the cumulative graph.<ul><li>Choose relevant outputs after lookup.</li><li>Fees and unspendable outputs cannot be selected.</li><li>Hidden amounts and assets appear as ??.</li></ul></div><div class="side-note"><strong>One case, several runs</strong>Each run has its own budget. Continue unfinished branches in a later run, including after closing this interface.</div></aside></div></form>`;
 }
 
 function boardUrl(board: string): string {
@@ -549,15 +665,17 @@ function fallbackNotice(artifact: RenderingMetadata | undefined): string {
   return "";
 }
 
-function localGraph(artifact: Artifact | undefined, saved: boolean, includeFees: boolean): string {
-  const matches = artifact?.include_fees === includeFees;
+function localGraph(artifact: Artifact | undefined, saved: boolean, settings: Settings): string {
+  const includeFees = settings.include_fees;
+  const matches = artifact?.include_fees === includeFees &&
+    (artifact?.color_attribution_arrows ?? false) === settings.color_attribution_arrows;
   const preview = matches ? safeLocalUrl(artifact?.preview_url) : "";
   const svg = matches ? artifact?.downloads.find((item) => item.name === "graph.svg") : undefined;
   const source = matches ? artifact?.downloads.find((item) => item.name === "graph.mmd") : undefined;
   const mismatch = artifact && !matches;
   const name = artifact?.renderer === "direct_svg" ? "Direct SVG fallback" : "Mermaid preview";
   const notice = preview ? fallbackNotice(artifact) : "";
-  return `<section class="panel"><div class="panel-head graph-panel-head"><div><h2>Local graph</h2><p>${esc(name)} of the selected saved run.</p></div><div class="artifact-actions">${downloadLink(svg, "Download SVG", "primary")}${preview ? `<a class="btn ghost small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">${icon("external")}Open full view</a>` : '<span class="badge gray">Offline renderer</span>'}</div></div>${preview ? `${notice ? `<div class="panel-body artifact-note">${esc(notice)}</div>` : ""}<iframe loading="lazy" class="graph-preview" src="${esc(preview)}" title="${esc(name)} of the selected investigation run" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe><div class="preview-caption"><span>Generated from saved evidence · ${includeFees ? "Fee flows included" : "Fee flows hidden"}</span>${downloadLink(source, "Mermaid source (.mmd)", "ghost")}</div>` : `<div class="graph-placeholder"><div class="mini-flow" aria-hidden="true"><span class="mini-node">${icon("folder")}</span><span class="mini-connection"></span><span class="mini-node tx">${icon("layers")}</span><span class="mini-connection"></span><span class="mini-node out">${icon("folder")}</span></div><h3>${mismatch ? "Update the chart’s fee display" : "Your trace, in perspective"}</h3><p>${mismatch ? "The saved chart uses a different fee setting. Create another chart to match this investigation’s current settings." : saved ? "Create a quick local chart from this snapshot, then download the SVG or Mermaid source." : "After your first run, create a local chart or send the flow to an editable Miro board."}</p>${button("Create Mermaid chart", "mermaid", "graph", "", !saved || isBusy())}</div>`}</section>`;
+  return `<section class="panel"><div class="panel-head graph-panel-head"><div><h2>Local graph</h2><p>${esc(name)} of the selected saved run.</p></div><div class="artifact-actions">${downloadLink(svg, "Download SVG", "primary")}${preview ? `${button("Refresh chart", "mermaid", "refresh", "small", !saved || isBusy())}<a class="btn ghost small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">${icon("external")}Open full view</a>` : '<span class="badge gray">Offline renderer</span>'}</div></div>${preview ? `${notice ? `<div class="panel-body artifact-note">${esc(notice)}</div>` : ""}<iframe loading="lazy" class="graph-preview" src="${esc(preview)}" title="${esc(name)} of the selected investigation run" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe><div class="preview-caption"><span>Generated from saved evidence · ${includeFees ? "Fee flows included" : "Fee flows hidden"}</span>${downloadLink(source, "Mermaid source (.mmd)", "ghost")}</div>` : `<div class="graph-placeholder"><div class="mini-flow" aria-hidden="true"><span class="mini-node">${icon("folder")}</span><span class="mini-connection"></span><span class="mini-node tx">${icon("layers")}</span><span class="mini-connection"></span><span class="mini-node out">${icon("folder")}</span></div><h3>${mismatch ? "Update the chart’s display" : "Your trace, in perspective"}</h3><p>${mismatch ? "The saved chart uses different graph settings. Create another chart to match this investigation’s current settings." : saved ? "Create a quick local chart from this snapshot, then download the SVG or Mermaid source." : "After your first run, create a local chart or send the flow to an editable Miro board."}</p>${button("Create Mermaid chart", "mermaid", "graph", "", !saved || isBusy())}</div>`}</section>`;
 }
 
 function connectionsGraph(artifact: Artifact | undefined, saved: boolean): string {
@@ -580,6 +698,109 @@ function connectionsGraph(artifact: Artifact | undefined, saved: boolean): strin
   <p>SecretSpec and Proton Pass prompts appear in the launching terminal.</p>
   ${button("Publish connection snapshot", "miro-connections", "board", "", isBusy())}</details>` : ""}</div>
   ${preview && count ? `${layoutSearchWarning(artifact?.layout_metrics)}<iframe loading="lazy" class="graph-preview" src="${esc(preview)}#chart" title="Starter connection graph" sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe>` : ""}</section>`;
+}
+
+function currentPegoutSearch(detail: Case): PegoutSearch | undefined {
+  if (pegoutDraft.caseId !== detail.id) {
+    pegoutDraft = {caseId: detail.id, custom: false, txid: "", minHops: "0",
+      maxHops: "10", selected: "", board: "", approved: ""};
+  }
+  return detail.pegout_searches?.find(search => search.id === pegoutDraft.selected) || detail.pegout_searches?.[0];
+}
+
+function pegoutSeedScope(seeds: string[]): string {
+  const outputs = new Set(seeds), transactions = new Set(seeds.map(seed => seed.split(":")[0]));
+  return `${outputs.size} selected seed UTXO${outputs.size === 1 ? "" : "s"} from ${transactions.size} starting transaction${transactions.size === 1 ? "" : "s"}`;
+}
+
+function pegoutSearchScope(search: PegoutSearch): string {
+  return search.seeds ? pegoutSeedScope(search.seeds) : `All outputs of ${short(search.txid || "unknown transaction")}`;
+}
+
+function pegoutsGraph(detail: Case): string {
+  const search = currentPegoutSearch(detail), artifact = search?.artifact;
+  const preview = safeLocalUrl(artifact?.preview_url), busy = isBusy();
+  const settings = {...defaults, ...detail.run_defaults};
+  const count = search?.match_count;
+  const partial = search && search.status !== "bounded_complete";
+  const pending = search?.recoverable === true || search?.status === "running";
+  const seeds = detail.seeds || [];
+  return `<section class="panel" id="pegouts-panel"><div class="panel-head"><div><h2>Trace to peg-outs</h2><p>Find downstream peg-out requests within a transaction hop range.</p></div></div>
+  <div class="panel-body"><p>Use the investigation's selected seed UTXOs. Each starting transaction is hop 0; each forward spend adds one hop. Unselected sibling outputs at the start are excluded. Both range limits are included. Only paths reaching a matching peg-out are plotted.</p>
+  ${seeds.length ? `<p>Investigation seeds: ${esc(pegoutSeedScope(seeds))}.</p>` : `<p class="artifact-note">This investigation has no selected seed UTXOs. Enable “Use a different starting transaction” to run a custom search.</p>`}
+  <label class="check-line"><input id="pegouts-custom" type="checkbox"${pegoutDraft.custom ? " checked" : ""}${disabled(busy)}/><span>Use a different starting transaction</span></label>
+  ${pegoutDraft.custom ? `<label class="field"><span>Starting transaction ID</span><input id="pegouts-txid" class="mono" maxlength="64" value="${esc(pegoutDraft.txid)}" autocomplete="off"${disabled(busy)}/></label><p class="small muted">This custom search considers all outputs of the entered transaction, which is hop 0.</p>` : ""}
+  <div class="form-grid"><label class="field"><span>Minimum hops</span><input id="pegouts-min" type="number" min="0" max="2147483647" step="1" value="${esc(pegoutDraft.minHops)}"${disabled(busy)}/></label>
+  <label class="field"><span>Maximum hops</span><input id="pegouts-max" type="number" min="0" max="2147483647" step="1" value="${esc(pegoutDraft.maxHops)}"${disabled(busy)}/></label></div>
+  <p class="small muted">${detail.fixture ? "Uses saved synthetic data." : "Uses your Blockstream API credits. Credentials are retrieved through the launching terminal."} Each search or continuation allows ${settings.max_transactions} new transactions, ${settings.max_outpoints} output lookups, ${settings.max_requests} API attempts and ${settings.max_seconds} seconds. Change these in investigation settings. Saved stop rules and attribution hop limits apply.</p>
+  ${button("Trace and plot peg-outs", "pegouts-start", "graph", "primary", busy || (!pegoutDraft.custom && !seeds.length))}
+  ${search ? `<hr/><label class="field"><span>Saved peg-out search</span><select id="pegouts-history"${disabled(busy)}>${(detail.pegout_searches || []).map(item => `<option value="${esc(item.id)}"${item.id === search.id ? " selected" : ""}>${esc(pegoutSearchScope(item))} · hops ${item.min_hops}–${item.max_hops} · ${esc(human(item.status))} · ${esc(short(item.id, 8))}</option>`).join("")}</select></label>
+  <p>Saved scope: ${esc(pegoutSearchScope(search))}.</p>${search.txid ? `<p class="mono">${esc(search.txid)}</p>` : ""}<p>Hop range ${search.min_hops}–${search.max_hops}. ${esc(human(search.status))}${search.stop_reason ? `: ${esc(human(search.stop_reason))}` : ""}.</p>
+  ${partial ? `<p class="artifact-note">${pending ? "This search was interrupted." : "This search is incomplete."} Resume to continue from its saved progress. Additional peg-outs may remain undiscovered.</p>` : '<p class="small muted">Search reached its current boundary. Unspent outputs, confirmation requirements and stop rules can limit what is discoverable.</p>'}
+  <p>${count === undefined ? "Generate a preview to see the matches found so far." : count === 0 ? "No matching peg-out found in the searched data." : `${count} matching peg-out request${count === 1 ? "" : "s"} found.`}</p>
+  ${button(pending ? "Recover and resume search" : "Resume search", "pegouts-resume", "play", "", busy)}
+  ${button("Refresh peg-out preview", "pegouts-preview", "refresh", "", busy || pending)}
+  <div class="artifact-actions">${downloadLink(artifact?.downloads.find(item => item.name === "graph.svg"), "SVG")}${downloadLink(artifact?.downloads.find(item => item.name === "pegouts.json"), "Peg-out report")}${downloadLink(artifact?.downloads.find(item => item.name === "transactions.csv"), "Transaction CSV")}${preview ? `<a class="btn small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">Open full view</a>` : ""}${detailPagesLink(artifact?.downloads)}</div>
+  ${artifact?.preview_id && count ? `<details><summary>Publish this reviewed snapshot to Miro</summary><p>Choose a separate Miro board for this peg-out snapshot.</p>
+  <label class="field"><span>Separate board URL or ID</span><input id="pegouts-board" maxlength="512" value="${esc(pegoutDraft.board)}"${disabled(busy)}/></label>
+  <label class="check-line"><input id="pegouts-confirm" type="checkbox"${pegoutDraft.approved === artifact.preview_id ? " checked" : ""}${disabled(busy)}/><span>I reviewed this snapshot and authorize publishing it to the board above.</span></label>
+  ${button("Publish peg-out snapshot", "miro-pegouts", "board", "", busy)}</details>` : ""}` : ""}
+  <p class="small muted">A peg-out request does not confirm the separate Bitcoin payout. Paths establish UTXO reachability, without assigning ownership or confidential amounts.</p></div>
+  ${preview && count ? `${layoutSearchWarning(artifact?.layout_metrics)}<iframe loading="lazy" class="graph-preview" src="${esc(preview)}#chart" title="Peg-out paths" sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe>` : ""}</section>`;
+}
+
+function pegoutInput(element: HTMLInputElement | HTMLSelectElement): boolean {
+  if (!element.id?.startsWith("pegouts-") || !state.activeCase || isBusy()) return false;
+  const search = currentPegoutSearch(state.activeCase);
+  if (element.id === "pegouts-custom") { pegoutDraft.custom = (element as HTMLInputElement).checked; render(); }
+  else if (element.id === "pegouts-txid") pegoutDraft.txid = element.value;
+  else if (element.id === "pegouts-min") pegoutDraft.minHops = element.value;
+  else if (element.id === "pegouts-max") pegoutDraft.maxHops = element.value;
+  else if (element.id === "pegouts-history") {
+    pegoutDraft.selected = element.value; pegoutDraft.approved = ""; pegoutDraft.board = ""; render();
+  } else if (element.id === "pegouts-board") {
+    pegoutDraft.board = element.value; pegoutDraft.approved = "";
+    const confirmation = document.querySelector<HTMLInputElement>("#pegouts-confirm");
+    if (confirmation) confirmation.checked = false;
+  } else if (element.id === "pegouts-confirm") pegoutDraft.approved = (element as HTMLInputElement).checked ? search?.artifact?.preview_id || "" : "";
+  return true;
+}
+
+async function pegoutAction(action: string): Promise<boolean> {
+  if (!["pegouts-start", "pegouts-resume", "pegouts-preview", "miro-pegouts"].includes(action)) return false;
+  const detail = state.activeCase;
+  if (!detail || isBusy()) return true;
+  const search = currentPegoutSearch(detail);
+  const operation = action === "pegouts-start" || action === "pegouts-resume" ? "pegouts" : action;
+  const body: Record<string, unknown> = {action: operation};
+  if (action === "pegouts-start") {
+    if (pegoutDraft.custom) {
+      const txid = pegoutDraft.txid.trim().toLowerCase();
+      if (!/^[a-f0-9]{64}$/.test(txid)) throw new Error("Enter one 64-character Liquid transaction ID.");
+      body.txid = txid;
+    } else if (!detail.seeds?.length) {
+      throw new Error("This investigation has no selected seed UTXOs. Enable ‘Use a different starting transaction’ to run a custom search.");
+    }
+    const values = [pegoutDraft.minHops.trim(), pegoutDraft.maxHops.trim()];
+    if (values.some(value => !/^\d+$/.test(value) || Number(value) > 2147483647) || Number(values[0]) > Number(values[1])) {
+      throw new Error("Enter whole-number hop limits from 0 to 2147483647, with minimum no greater than maximum.");
+    }
+    Object.assign(body, {min_hops: Number(values[0]), max_hops: Number(values[1])});
+  } else {
+    if (!search) throw new Error("Choose a saved peg-out search first.");
+    if (action === "pegouts-resume") body.resume = search.id;
+    else if (action === "pegouts-preview") body.search_id = search.id;
+    else {
+      const previewId = search.artifact?.preview_id;
+      if (!previewId || !search.match_count) throw new Error("Generate and review a peg-out preview first.");
+      if (pegoutDraft.approved !== previewId) throw new Error("Review the peg-out snapshot and confirm publication first.");
+      if (!pegoutDraft.board.trim()) throw new Error("Enter a separate Miro board URL or ID.");
+      Object.assign(body, {preview_id: previewId, board: pegoutDraft.board.trim(), confirm_pegouts: true});
+    }
+  }
+  await startJob(`/api/cases/${encodeURIComponent(detail.id)}/actions`, body, operation,
+    action === "miro-pegouts" || operation === "pegouts" && !detail.fixture, detail.id);
+  return true;
 }
 
 function layoutSearchWarning(metrics: LayoutMetrics | undefined): string {
@@ -609,7 +830,9 @@ function graphSettingsMatch(artifact: Artifact | undefined, settings: Settings):
   return Boolean(artifact && artifact.include_fees === settings.include_fees &&
     artifact.connector_style === settings.connector_style &&
     artifact.layout_attempts === settings.layout_attempts &&
+    (artifact.color_attribution_arrows ?? false) === (settings.color_attribution_arrows ?? false) &&
     (artifact.group_context_inputs ?? false) === settings.group_context_inputs &&
+    (artifact.center_name ?? "") === (settings.center_name ?? "") &&
     JSON.stringify(normalizedHubs(artifact.hub_addresses)) === JSON.stringify(normalizedHubs(settings.hub_addresses)));
 }
 
@@ -669,7 +892,291 @@ function csvDownloads(artifact: Artifact | undefined, saved: boolean, includeFee
   const tables = downloads.filter((item) => item.name === "transactions.csv");
   const provenance = downloads.filter((item) => !item.name.endsWith(".csv"));
   const mismatch = artifact && !matches;
-  return `<section class="panel"><div class="panel-head"><div><h2>CSV downloads</h2><p>${tables.length ? "One row per displayed transaction input or output." : "Export transaction I/O, not graph objects."}</p></div>${tables.length ? '<span class="badge">Saved locally</span>' : ""}</div>${tables.length ? `<div class="downloads">${tables.map((item) => downloadLink(item, `Download ${item.name}`, "download-link")).join("")}</div><div class="export-footer"><span class="small muted">${includeFees ? "Fee flows included" : "Fee flows hidden"} · Indexes start at 0 · Amounts are exact base units · Unknown values stay blank.</span>${provenance.length ? `<details class="provenance-downloads"><summary>Export provenance</summary><div class="artifact-actions">${provenance.map((item) => downloadLink(item, item.name, "ghost")).join("")}</div></details>` : ""}</div>` : `<div class="panel-body"><p class="artifact-note">${mismatch ? "The saved export uses a different fee setting. Create a new export to match the current settings." : "Create transactions.csv for this full-trace snapshot. Use the Starter connections panel for its filtered transaction CSV."}</p>${button("Create CSV export", "csv", "table", "", !saved || isBusy())}</div>`}</section>`;
+  return `<section class="panel"><div class="panel-head"><div><h2>CSV downloads</h2><p>${tables.length ? "One row per displayed transaction input or output." : "Export transaction I/O, not graph objects."}</p></div>${tables.length ? button("Refresh CSV export", "csv", "refresh", "small", !saved || isBusy()) : ""}</div>${tables.length ? `<div class="downloads">${tables.map((item) => downloadLink(item, `Download ${item.name}`, "download-link")).join("")}</div><div class="export-footer"><span class="small muted">${includeFees ? "Fee flows included" : "Fee flows hidden"} · Indexes start at 0 · Amounts are exact base units · Unknown values stay blank.</span>${provenance.length ? `<details class="provenance-downloads"><summary>Export provenance</summary><div class="artifact-actions">${provenance.map((item) => downloadLink(item, item.name, "ghost")).join("")}</div></details>` : ""}</div>` : `<div class="panel-body"><p class="artifact-note">${mismatch ? "The saved export uses a different fee setting. Create a new export to match the current settings." : "Create transactions.csv for this full-trace snapshot. Use the Starter connections panel for its filtered transaction CSV."}</p>${button("Create CSV export", "csv", "table", "", !saved || isBusy())}</div>`}</section>`;
+}
+
+const plotGoals: {id: PlotGoal; name: string; description: string}[] = [
+  {id: "full", name: "Full trace", description: "Every collected transaction and its traced branches."},
+  {id: "connections", name: "Starter connections", description: "Directed paths connecting your starting transactions."},
+  {id: "pegouts", name: "Paths to peg-outs", description: "Paths to peg-out requests, optionally including unspent UTXOs and unspendable outputs."},
+];
+
+function goalName(goal: string): string {
+  return plotGoals.find(item => item.id === goal)?.name || human(goal);
+}
+
+function currentWorkflow(detail: Case): typeof workflowDraft {
+  if (workflowDraft.caseId !== detail.id) workflowDraft = {caseId: detail.id, goal: "full", minHops: "0", maxHops: "10", includeUnspent: false, includeUnspendable: false, includeContext: false, plot: "", board: "", boardPlot: "", boardGoal: "full", boardName: "", boardUrl: ""};
+  return workflowDraft;
+}
+
+function currentPlot(detail: Case): Plot | undefined {
+  const draft = currentWorkflow(detail);
+  return detail.plots?.find(item => item.preview_id === draft.plot) || detail.plots?.[0];
+}
+
+type BoardDraft = {plot?: string; recoveryUrl: string};
+const boardDrafts = new Map<string, Map<string, BoardDraft>>();
+
+function currentBoardDraft(detail: Case, board: InvestigationBoard): BoardDraft {
+  let drafts = boardDrafts.get(detail.id);
+  if (!drafts) {drafts = new Map(); boardDrafts.set(detail.id, drafts);}
+  let draft = drafts.get(board.id);
+  if (!draft) {draft = {recoveryUrl: ""}; drafts.set(board.id, draft);}
+  return draft;
+}
+
+function boardFromControl(detail: Case, element?: HTMLElement): InvestigationBoard | undefined {
+  if (element?.dataset.caseId !== detail.id) return undefined;
+  return detail.boards?.find(board => board.id === element.dataset.record);
+}
+
+function interruptedBoard(board: InvestigationBoard): boolean {
+  return Boolean(board.pending_count) || board.status === "interrupted";
+}
+
+function chosenBoardPlot(detail: Case, board: InvestigationBoard): Plot | undefined {
+  const plots = matchingBoardPlots(detail, board), draft = currentBoardDraft(detail, board);
+  // Interrupted operations always resume their saved plot, regardless of an older draft.
+  const id = interruptedBoard(board) ? board.preview_id : draft.plot ?? board.preview_id;
+  return id != null ? plots.find(plot => plot.preview_id === id) : plots[0];
+}
+
+const plotLayoutDrafts = new Map<string, LayoutSettings>();
+
+function selectLayoutSettings(settings: Settings): LayoutSettings {
+  return Object.fromEntries(layoutSettingKeys.map(key => [key,
+    key === "hub_addresses" ? [...settings.hub_addresses] : settings[key]])) as LayoutSettings;
+}
+
+function currentLayoutSettings(detail: Case): LayoutSettings {
+  return selectLayoutSettings({...defaults, ...detail.run_defaults, ...plotLayoutDrafts.get(detail.id)});
+}
+
+function savePlotLayoutDraft(form = document.querySelector<HTMLFormElement>("#plot-layout-form")): void {
+  const detail = state.activeCase;
+  if (!form || !detail || (form.dataset?.caseId && form.dataset.caseId !== detail.id)) return;
+  const previous = {...defaults, ...detail.run_defaults, ...plotLayoutDrafts.get(detail.id)};
+  plotLayoutDrafts.set(detail.id, selectLayoutSettings(readSettings(form, previous)));
+}
+
+async function persistPlotLayoutSettings(detail: Case): Promise<boolean> {
+  const form = document.querySelector<HTMLFormElement>("#plot-layout-form");
+  if (form && !form.reportValidity()) return false;
+  savePlotLayoutDraft(form);
+  const settings = currentLayoutSettings(detail);
+  if (JSON.stringify(settings) === JSON.stringify(selectLayoutSettings({...defaults, ...detail.run_defaults}))) {
+    plotLayoutDrafts.delete(detail.id);
+    return true;
+  }
+  submitting = true;
+  render();
+  try {
+    const updated = await api<Case>(`/api/cases/${encodeURIComponent(detail.id)}/plot-settings`, {settings});
+    if (state.activeCase?.id === detail.id) state.activeCase = updated;
+    state.cases = state.cases.map(item => item.id === detail.id ? updated : item);
+    plotLayoutDrafts.delete(detail.id);
+    const generalDraft = settingsDrafts.get(detail.id);
+    if (generalDraft) generalDraft.settings = {...generalDraft.settings, ...settings};
+    return true;
+  } finally {
+    submitting = false;
+    render();
+  }
+}
+
+function plotEndpointScope(plot: Plot): string {
+  return ["Peg-outs", ...(plot.query?.include_unspent ? ["unspent UTXOs"] : []),
+    ...(plot.query?.include_unspendable ? ["unspendable outputs"] : [])].join(" + ");
+}
+
+function plotEndpointLabel(plot: Plot | undefined): string {
+  if (plot?.goal !== "pegouts") return "";
+  const count = plot.endpoint_count ?? plot.match_count;
+  return ` · ${plotEndpointScope(plot)}${count === undefined ? "" : ` · ${count} endpoints`} · ${plotContextScope(plot)}`;
+}
+
+function plotContextScope(plot: Plot): string {
+  return plot.query?.include_context
+    ? `Context addresses included · isolated inputs ${plot.layout_settings?.group_context_inputs ? "grouped" : "separate"}`
+    : "Paths only";
+}
+
+function plotEndpointSummary(plot: Plot | undefined): string {
+  if (plot?.goal !== "pegouts") return "";
+  const counts = plot.endpoint_counts;
+  const matches = counts ? `${counts.pegout} peg-out requests · ${counts.unspent} unspent UTXOs · ${counts.unspendable} unspendable outputs`
+    : plot.match_count === undefined ? "" : `${plot.match_count} peg-out requests`;
+  const contextCount = plot.query?.include_context && plot.context_edge_count !== undefined
+    ? ` ${plot.context_edge_count} context connections, excluded from endpoint counts.` : "";
+  return `<p class="small muted">Endpoint types: ${esc(plotEndpointScope(plot))}.${matches ? ` Results: ${esc(matches)}.` : ""}</p><p class="small muted">Saved layout: ${plotContextScope(plot)}.${contextCount}</p>`;
+}
+
+function plotChoiceLabel(plot: Plot): string {
+  return `${goalName(plot.goal)} · Run ${short(plot.run_id, 8)}${plot.goal !== "full" ? ` · Hops ${plot.min_hops}–${plot.max_hops}` : ""}${plotEndpointLabel(plot)} · ${formatDate(plot.created_at)}`;
+}
+
+function plotEndpointFields(draft: typeof workflowDraft): string {
+  if (draft.goal !== "pegouts") return "";
+  return `<fieldset class="layout-fields"${disabled(isBusy())}><legend>Additional endpoints</legend>
+    <label class="check-line"><input id="workflow-include-unspent" type="checkbox"${draft.includeUnspent ? " checked" : ""}/><span>Include unspent UTXOs</span></label>
+    <label class="check-line"><input id="workflow-include-unspendable" type="checkbox"${draft.includeUnspendable ? " checked" : ""}/><span>Include unspendable outputs</span></label>
+    <p class="small muted">Peg-out requests are always included. Unspent means observed unspent in the selected collection run. Unchecked outputs and outputs stopped only by a hop limit are not counted as unspent. These choices are saved with each generated layout.</p></fieldset>
+    <fieldset class="layout-fields"${disabled(isBusy())}><legend>Context display</legend>
+    <label class="check-line"><input id="workflow-include-context" type="checkbox"${draft.includeContext ? " checked" : ""}/><span>Include context addresses</span></label>
+    <p class="small muted">Show other input addresses and sibling output addresses of displayed transactions. Context adds no tracing or fetching and is excluded from endpoint match counts. Generate a layout to save this choice; existing layouts stay unchanged.</p></fieldset>`;
+}
+
+function savedLayoutSummary(plot: Plot): string {
+  const settings = plot.layout_settings;
+  if (!settings) return "";
+  const contextGrouping = plot.goal === "full" || plot.goal === "pegouts" && plot.query?.include_context;
+  return `<details class="tool-details"><summary>Saved layout settings</summary><p>${esc(human(settings.connector_style))} connectors · ${esc(settings.layout_attempts)} layout attempts · Attribution arrow colors ${settings.color_attribution_arrows ? "on" : "off"}.</p><p>Centered group: ${esc(settings.center_name || "None")}.${contextGrouping ? ` Isolated context inputs ${settings.group_context_inputs ? "grouped" : "separate"}.` : ""}${plot.goal === "full" ? ` Fee flows ${settings.include_fees ? "shown" : "hidden"}; ${esc(settings.hub_addresses.length)} separate branch hubs.` : ""}</p></details>`;
+}
+
+function collectDataPanel(detail: Case, saved: boolean, settings: Settings): string {
+  return `<section class="panel" id="collection-panel"><div class="panel-head"><div><h2>Collect transaction data</h2><p>Collect once, then reuse the saved evidence for every plotting goal.</p></div></div><div class="panel-body"><p>Follow your ${detail.seed_count ?? detail.seeds?.length ?? 0} selected starting outputs and save a new run. Continuing adds hops from the latest run. Budgets, tracing stops and address hop limits apply.</p><p class="artifact-note">Collection does not generate plots or update Miro. A paused run can be continued here. Plot Layouts uses only the data already saved.</p>${traceSummary(settings)}<div class="task-actions">${button(saved ? "Continue collecting data" : "Collect transaction data", "trace-dialog", "play", "primary", isBusy())}</div><hr/><h3>Address activity</h3><p class="small muted">Missing transaction counts are fetched during collection. Retry any unresolved counts here.</p>${button("Fetch address transaction counts", "address-counts", "refresh", "small", !saved || isBusy())}</div></section>`;
+}
+
+function plotLayoutsPanel(detail: Case, saved: boolean): string {
+  const draft = currentWorkflow(detail), plot = currentPlot(detail), artifact = plot?.artifact;
+  const preview = safeLocalUrl(artifact?.preview_url);
+  const settings = {...defaults, ...detail.run_defaults, ...currentLayoutSettings(detail)};
+  return `<section class="panel" id="plot-layouts-panel"><div class="panel-head"><div><h2>Plot Layouts</h2><p>Choose a tracing goal, adjust its appearance, and generate a saved layout.</p></div><span class="badge gray">Saved data only</span></div><div class="panel-body"><div class="plot-goals" role="group" aria-label="Plotting goal">${plotGoals.map(goal => `<button class="plot-goal${draft.goal === goal.id ? " selected" : ""}" data-action="plot-goal" data-goal="${goal.id}" aria-pressed="${draft.goal === goal.id}"${disabled(isBusy())}><strong>${goal.name}</strong><span>${goal.description}</span></button>`).join("")}</div>${draft.goal !== "full" ? `<div class="field-row">${draft.goal === "pegouts" ? `<label class="field"><span>Minimum hops</span><input id="workflow-min-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.minHops)}"${disabled(isBusy())}/></label>` : ""}<label class="field"><span>Maximum hops</span><input id="workflow-max-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.maxHops)}"${disabled(isBusy())}/></label></div>` : ""}<p class="artifact-note">Plotting makes no blockchain requests. A hop filter cannot reveal data beyond your collection coverage. If a path is missing, collect more data first and generate another plot.</p>${draft.goal === "pegouts" ? '<p class="small muted">Starting transactions are hop 0. Only selected starting UTXOs are followed. A peg-out request does not confirm the separate Bitcoin payout.</p>' : ""}${plotEndpointFields(draft)}<form id="plot-layout-form" data-case-id="${esc(detail.id)}"><fieldset class="layout-fields"${disabled(isBusy())}><legend>Layout settings</legend>${graphFields(settings, true, draft.goal, draft.includeContext)}</fieldset><p class="small muted">Settings are saved for this investigation across restarts when you choose Save layout settings or Generate. Existing layouts and Miro boards keep their saved appearance until you choose a new layout and sync.</p><div class="task-actions">${button(`Generate ${goalName(draft.goal).toLowerCase()} layout`, "workflow-plot", "graph", "primary", !saved || isBusy())}${button("Save layout settings", "plot-settings-save", "check", "", isBusy())}</div></form>${!saved ? '<p class="artifact-note">Collect transaction data before generating a plot.</p>' : ""}</div></section>
+  <section class="panel" id="saved-plots-panel"><div class="panel-head"><div><h2>Saved plot layouts</h2><p>Each layout records its collection run, tracing goal, and saved appearance.</p></div><span class="badge gray">${detail.plots?.length || 0} plots</span></div><div class="panel-body">${detail.plots_notice ? `<p class="artifact-note" role="status">${esc(detail.plots_notice)}</p>` : ""}${plot ? `<label class="field"><span>Plot layout</span><select id="workflow-plot-picker">${(detail.plots || []).map(item => `<option value="${esc(item.preview_id)}"${item.preview_id === plot.preview_id ? " selected" : ""}>${esc(plotChoiceLabel(item))}</option>`).join("")}</select></label><p>${esc(goalName(plot.goal))} · Run ${esc(short(plot.run_id, 8))}${plot.goal !== "full" ? ` · Hops ${plot.min_hops}–${plot.max_hops}` : ""} · ${plot.node_count} objects · ${plot.edge_count} connections.</p>${plotEndpointSummary(plot)}${plot.coverage_notice && !plot.notice?.includes(plot.coverage_notice) ? `<p class="artifact-note">${esc(plot.coverage_notice)}</p>` : ""}${plot.notice ? `<p class="artifact-note">${esc(plot.notice)}</p>` : ""}${plot.empty ? '<p class="artifact-note">No matching paths were found in this saved data. Collect more data or adjust the hop range or endpoint types.</p>' : ""}${!plot.reviewable ? `<p class="artifact-note">${esc(plot.reason || "No matching paths in this saved data.")}</p>` : ""}${savedLayoutSummary(plot)}<p class="small muted">Choose an output for this saved plot. The ELK SVG uses the same layout shown below.</p><div class="task-actions">${button("Sync with Miro", "plot-boards", "board", "primary", !plot.reviewable || Boolean(plot.empty) || plot.node_count === 0 || isBusy())}${downloadLink(artifact?.downloads.find(item => item.name === "graph.svg"), "Download ELK SVG")}${detailPagesLink(artifact?.downloads)}${preview ? `<a class="btn small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">Open full view</a>` : ""}</div>` : '<p class="artifact-note">Your generated plots will appear here. All three goals use the same saved collection data.</p>'}</div>${preview ? `<iframe loading="lazy" class="graph-preview" src="${esc(preview)}#chart" title="${esc(goalName(plot!.goal))} saved plot" sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe>` : ""}</section>`;
+}
+
+function plotDownloadsPanel(detail: Case): string {
+  const plot = currentPlot(detail);
+  return `<section class="panel"><div class="panel-head"><div><h2>Plot downloads</h2><p>Download the chart and evidence for any saved plotting goal.</p></div></div><div class="panel-body">${detail.plots_notice ? `<p class="artifact-note">${esc(detail.plots_notice)}</p>` : ""}${plot ? `<label class="field"><span>Saved plot</span><select id="workflow-plot-picker">${(detail.plots || []).map(item => `<option value="${esc(item.preview_id)}"${item.preview_id === plot.preview_id ? " selected" : ""}>${esc(plotChoiceLabel(item))}</option>`).join("")}</select></label>${plotEndpointSummary(plot)}<div class="artifact-actions">${(plot.artifact?.downloads || []).map(item => downloadLink(item, item.name)).join("")}</div>${!plot.reviewable ? `<p class="artifact-note">${esc(plot.reason || "Generate this plot again to refresh its files.")}</p>` : ""}` : `<p class="artifact-note">Generate a saved plot to download its chart and transaction evidence.</p>${button("Choose a plotting goal", "view-plots", "graph")}`}</div></section>`;
+}
+
+function fullBoardMaintenance(detail: Case, saved: boolean, artifacts: RunArtifacts, settings: Settings): string {
+  return `<section class="panel"><div class="panel-head"><div><h2>Full trace board tools</h2><p>Recovery and layout tools for the original investigation board.</p></div></div><div class="panel-body">${miroRecoveryNotice(detail)}<div class="task-actions">${button("Preview changes", "miro-preview", "search", "", !saved || isBusy())}${button("Create / update Miro frames", "miro-frames-dialog", "layers", "", !saved || Boolean(detail.miro_recovery?.pending_count) || isBusy())}${detail.miro_recovery?.can_recover_frame ? button("Recover interrupted frame", "miro-frame-review", "refresh", "", isBusy()) : ""}${detail.miro_recovery?.can_confirm_empty ? button("Recover empty-board sync", "miro-recover-dialog", "refresh", "", isBusy()) : ""}</div><p class="small muted">When the graph is finished, create its frames separately. Run this again after further syncing or rearranging to update the frames.</p><details class="tool-details"><summary>Board maintenance</summary><div class="panel-body">${button("Merge duplicate addresses", "address-merge-dialog", "graph", "", isBusy() || !saved)}${rebuildAction(detail, saved)}</div></details></div></section><details class="tool-details"><summary>Full trace layout and compaction</summary>${elkGraph(artifacts.elk, saved, settings)}${compactGraph(artifacts.compact, saved, detail)}</details>`;
+}
+
+function matchingBoardPlots(detail: Case, board: InvestigationBoard | undefined): Plot[] {
+  return (detail.plots || []).filter(plot => plot.goal === board?.goal && plot.reviewable && !plot.empty && plot.node_count > 0 &&
+    (!board || !interruptedBoard(board) || plot.preview_id === board.preview_id));
+}
+
+function boardCard(detail: Case, board: InvestigationBoard, saved: boolean, artifacts: RunArtifacts, settings: Settings): string {
+  const draft = currentBoardDraft(detail, board), plots = matchingBoardPlots(detail, board);
+  const chosen = chosenBoardPlot(detail, board);
+  const captured = detail.plots?.find(plot => plot.preview_id === board.preview_id);
+  const focused = currentWorkflow(detail).board === board.id;
+  const attrs = `data-record="${esc(board.id)}" data-case-id="${esc(detail.id)}"`;
+  const locked = isBusy() || !board.can_sync || !chosen;
+  const original = Boolean(detail.miro_board && board.board_id === detail.miro_board && board.goal === "full");
+  const savedLabel = interruptedBoard(board) ? "Saved layout to resume" : "Saved layout";
+  return `<article class="board-card${focused ? " is-target" : ""}" data-board-record="${esc(board.id)}" tabindex="-1"><header class="board-card-head"><div><h3>${esc(board.name || goalName(board.goal))}</h3><p>${esc(goalName(board.goal))} · ${esc(human(board.status))}${board.legacy_snapshot ? " · Archived snapshot" : ""}</p></div>${board.board_id ? `<a class="board-link" href="${esc(boardUrl(board.board_id))}" target="_blank" rel="noopener noreferrer">Open Miro board ${icon("external")}</a>` : ""}</header><div class="board-card-body">${board.notice ? `<p class="artifact-note">${esc(board.notice)}</p>` : ""}<p class="board-saved-layout"><strong>${savedLabel}:</strong> ${captured ? esc(plotChoiceLabel(captured)) : board.preview_id ? `Saved plot ${esc(short(board.preview_id, 12))} · unavailable` : board.run_id ? `Run ${esc(short(board.run_id, 8))}` : "Not synced yet"}</p>${!board.board_id ? `<label class="field"><span>Created board URL or ID</span><input id="workflow-recovery-url-${esc(board.id)}" data-board-field="recoveryUrl" ${attrs} maxlength="512" value="${esc(draft.recoveryUrl)}"${disabled(isBusy())}/><small>If creation was interrupted, locate the board in Miro and link it to this saved entry.</small></label>${button("Link created board to this entry", "workflow-board-recover", "board", "", isBusy(), attrs)}` : ""}${board.can_sync ? `<label class="field"><span>Plot layout to sync · ${esc(goalName(board.goal))}</span><select id="workflow-board-plot-${esc(board.id)}" data-board-field="plot" ${attrs}${disabled(!plots.length || interruptedBoard(board) || isBusy())}>${!chosen ? '<option value="" selected>Choose a saved plot layout for this board</option>' : ""}${plots.length ? plots.map(plot => `<option value="${esc(plot.preview_id)}"${plot.preview_id === chosen?.preview_id ? " selected" : ""}>${esc(plotChoiceLabel(plot))}</option>`).join("") : '<option value="">No eligible saved plot. Use Plot Layouts to generate one.</option>'}</select></label>${plotEndpointSummary(chosen)}<div class="task-actions">${button("Sync to Miro", "workflow-board-sync", "refresh", "primary", locked, attrs)}${button("Sync and reorganize", "workflow-board-organize", "graph", "", locked, attrs)}</div><p class="small muted">Sync keeps existing positions. Sync and reorganize also applies the plot layout. These actions update only this board and do not fetch transaction data.</p>${interruptedBoard(board) ? '<p class="artifact-note">This board has an interrupted operation. Its saved plot is locked until the operation is recovered or completed. Retry to resume; uncertain item creation may require recovery first.</p>' : ""}` : board.board_id ? '<p class="artifact-note">This saved board is available to view. Create a managed board below to sync new plots.</p>' : ""}</div>${original ? `<details class="board-original-tools"><summary>Original full trace board tools</summary>${fullBoardMaintenance(detail, saved, artifacts, settings)}</details>` : ""}</article>`;
+}
+
+function boardsPanel(detail: Case, saved: boolean, artifacts: RunArtifacts, settings: Settings): string {
+  const draft = currentWorkflow(detail), boards = detail.boards || [];
+  const requestedPlot = detail.plots?.find(plot => plot.preview_id === draft.boardPlot);
+  const target = requestedPlot && boards.find(board => board.id === draft.board && board.can_sync &&
+    chosenBoardPlot(detail, board)?.preview_id === requestedPlot.preview_id);
+  const hasOriginal = boards.some(board => board.board_id === detail.miro_board && board.goal === "full");
+  return `<section class="panel" id="miro-boards-panel"><div class="panel-head"><div><h2>Miro boards</h2><p>Each board keeps its own saved layout and sync controls.</p></div><span class="badge gray">${boards.length} boards</span></div><div class="panel-body">${requestedPlot ? `<p class="artifact-note">Selected output: ${esc(goalName(requestedPlot.goal))} · Run ${esc(short(requestedPlot.run_id, 8))}${requestedPlot.goal !== "full" ? ` · Hops ${requestedPlot.min_hops}–${requestedPlot.max_hops}` : ""}${esc(plotEndpointLabel(requestedPlot))}. ${target ? `Ready in ${esc(target.name || goalName(target.goal))} below.` : "Create or link a board for this plotting goal below. Existing boards keep their own layouts."}</p>` : ""}${detail.boards_notice ? `<p class="artifact-note" role="status">${esc(detail.boards_notice)}</p>` : ""}${boards.length ? `<div class="board-list" role="group" aria-label="Investigation boards">${boards.map(board => boardCard(detail, board, saved, artifacts, settings)).join("")}</div>` : '<p class="artifact-note">No boards yet. Create a private board or link an existing one below.</p>'}</div></section>
+  <section class="panel"><div class="panel-head"><div><h2>Add a Miro board</h2><p>Give each board a plotting goal so updates go to the right place.</p></div></div><div class="panel-body"><div class="field-row"><label class="field"><span>Plotting goal</span><select id="workflow-board-goal"${disabled(isBusy())}>${plotGoals.map(goal => `<option value="${goal.id}"${draft.boardGoal === goal.id ? " selected" : ""}>${goal.name}</option>`).join("")}</select></label><label class="field"><span>Board name</span><input id="workflow-board-name" maxlength="60" value="${esc(draft.boardName)}" placeholder="${esc(`${detail.name} · ${goalName(draft.boardGoal)}`.slice(0, 60))}"${disabled(isBusy())}/></label></div><div class="task-actions">${button("Create private Miro board", "workflow-board-create", "plus", "primary", isBusy())}</div><label class="field"><span>Or link an existing board URL or ID</span><input id="workflow-board-url" maxlength="512" value="${esc(draft.boardUrl)}" placeholder="https://miro.com/app/board/…"${disabled(isBusy())}/></label>${button("Link existing board", "workflow-board-link", "board", "", isBusy())}<p class="small muted">Create or link once, then use that board’s own sync controls. Credentials are retrieved through the launching terminal.</p></div></section>${!hasOriginal && detail.miro_board ? `<section class="panel"><div class="panel-head"><div><h2>Original full trace board</h2><p>Tools for the investigation’s original board.</p></div><a class="board-link" href="${esc(boardUrl(detail.miro_board))}" target="_blank" rel="noopener noreferrer">Open Miro board ${icon("external")}</a></div>${fullBoardMaintenance(detail, saved, artifacts, settings)}</section>` : ""}`;
+}
+
+function workflowInput(element: HTMLInputElement | HTMLSelectElement): boolean {
+  if (!element.id?.startsWith("workflow-") || !state.activeCase || isBusy()) return false;
+  const detail = state.activeCase, draft = currentWorkflow(detail);
+  if (element.dataset?.boardField) {
+    const board = boardFromControl(detail, element);
+    if (!board) return false;
+    const boardDraft = currentBoardDraft(detail, board);
+    if (element.dataset.boardField === "plot") {
+      if (!board.can_sync || interruptedBoard(board)) return false;
+      boardDraft.plot = element.value;
+      draft.board = board.id;
+      draft.boardPlot = "";
+      render();
+    } else if (element.dataset.boardField === "recoveryUrl" && !board.board_id) boardDraft.recoveryUrl = element.value;
+    else return false;
+    return true;
+  }
+  const fields: Record<string, "minHops" | "maxHops" | "plot" | "boardName" | "boardUrl"> = {"workflow-min-hops": "minHops", "workflow-max-hops": "maxHops", "workflow-plot-picker": "plot", "workflow-board-name": "boardName", "workflow-board-url": "boardUrl"};
+  if (element.id === "workflow-board-goal" && plotGoals.some(goal => goal.id === element.value)) draft.boardGoal = element.value as PlotGoal;
+  else if (element.id === "workflow-include-unspent") draft.includeUnspent = (element as HTMLInputElement).checked;
+  else if (element.id === "workflow-include-unspendable") draft.includeUnspendable = (element as HTMLInputElement).checked;
+  else if (element.id === "workflow-include-context") {
+    savePlotLayoutDraft();
+    draft.includeContext = (element as HTMLInputElement).checked;
+    render();
+  }
+  else if (fields[element.id]) draft[fields[element.id]] = element.value;
+  else return false;
+  if (["workflow-plot-picker", "workflow-board-goal"].includes(element.id)) render();
+  return true;
+}
+
+async function workflowAction(action: string, element?: HTMLElement): Promise<boolean> {
+  if (!["plot-goal", "workflow-plot", "plot-settings-save", "plot-boards", "workflow-board-create", "workflow-board-link", "workflow-board-sync", "workflow-board-organize", "workflow-board-recover"].includes(action)) return false;
+  const detail = state.activeCase;
+  if (!detail || isBusy()) return true;
+  const draft = currentWorkflow(detail);
+  if (action === "plot-settings-save") {
+    if (await persistPlotLayoutSettings(detail)) toast("Layout settings saved for this investigation.");
+    return true;
+  }
+  if (action === "plot-goal") {
+    savePlotLayoutDraft();
+    if (plotGoals.some(goal => goal.id === element?.dataset.goal)) draft.goal = element!.dataset.goal as PlotGoal;
+    render(); return true;
+  }
+  if (action === "plot-boards") {
+    const plot = currentPlot(detail);
+    if (!plot?.reviewable || plot.empty || plot.node_count === 0) throw new Error("Select a current saved plot with activity before syncing to Miro.");
+    draft.boardPlot = plot.preview_id;
+    draft.boardGoal = plot.goal;
+    const compatible = (detail.boards || []).filter(board => board.can_sync &&
+      matchingBoardPlots(detail, board).some(item => item.preview_id === plot.preview_id));
+    const target = compatible.find(board => board.id === draft.board) ||
+      compatible.find(board => board.preview_id === plot.preview_id) || compatible[0];
+    draft.board = target?.id || "";
+    if (target) currentBoardDraft(detail, target).plot = plot.preview_id;
+    state.caseView = "boards"; render();
+    document.querySelector<HTMLElement>(".board-card.is-target")?.scrollIntoView({block: "nearest"});
+    return true;
+  }
+  let body: Record<string, unknown>;
+  if (action === "workflow-plot") {
+    if (!currentRun()) throw new Error("Collect transaction data first, then select a saved run to plot.");
+    const min = draft.goal === "pegouts" ? draft.minHops.trim() : "0", max = draft.goal === "full" ? "0" : draft.maxHops.trim();
+    if ([min, max].some(value => !/^\d+$/.test(value) || Number(value) > 2147483647) || Number(min) > Number(max)) throw new Error("Enter whole-number hop limits from 0 to 2147483647, with minimum no greater than maximum.");
+    body = {action: "plot", goal: draft.goal, run_id: currentRun()!.id, min_hops: Number(min), max_hops: Number(max)};
+    if (draft.goal === "pegouts") {
+      if (draft.includeUnspent) body.include_unspent = true;
+      if (draft.includeUnspendable) body.include_unspendable = true;
+      if (draft.includeContext) body.include_context = true;
+    }
+    const generation = pageGeneration;
+    if (!await persistPlotLayoutSettings(detail) || state.activeCase?.id !== detail.id || generation !== pageGeneration) return true;
+  } else if (action === "workflow-board-recover") {
+    const board = boardFromControl(detail, element);
+    if (!board) throw new Error("Choose a board entry from this investigation before recovering it.");
+    const recoveryUrl = currentBoardDraft(detail, board).recoveryUrl.trim();
+    if (board.board_id || !recoveryUrl) throw new Error("Enter the URL of the board created during the interrupted operation.");
+    body = {action: "board-link", record_id: board.id, goal: board.goal, name: board.name, board: recoveryUrl};
+  } else if (action === "workflow-board-create" || action === "workflow-board-link") {
+    body = {action: action === "workflow-board-create" ? "board-create" : "board-link", goal: draft.boardGoal, name: draft.boardName.trim() || `${detail.name} · ${goalName(draft.boardGoal)}`.slice(0, 60)};
+    if (action === "workflow-board-link") {if (!draft.boardUrl.trim()) throw new Error("Enter a Miro board URL or ID to link."); body.board = draft.boardUrl.trim();}
+  } else {
+    const board = boardFromControl(detail, element);
+    const plot = board ? chosenBoardPlot(detail, board) : undefined;
+    if (!board?.can_sync || !plot) throw new Error("Select a managed board and a matching saved plot before syncing.");
+    body = {action: "board-sync", record_id: board.id, preview_id: plot.preview_id, reorganize: action === "workflow-board-organize"};
+  }
+  await startJob(`/api/cases/${encodeURIComponent(detail.id)}/actions`, body, String(body.action), body.action !== "plot" && body.action !== "board-link", detail.id);
+  return true;
+}
+
+function investigationDataPanel(detail: Case): string {
+  return `<section class="panel" id="settings-data"><div class="panel-head"><div><h2>Investigation data</h2><p>Manage attributions, tracing stops, and change outputs here.</p></div></div><div class="panel-body"><div class="task-actions">${button("Import CSV files", "input-import-open", "plus", "primary", isBusy())}${button("Address review", "addresses", "search", "", isBusy())}${button("Change outputs", "change-outputs-open", "graph", "", isBusy())}${button("Assign colors", "name-colors-open", "", "", isBusy())}<a class="btn" href="/api/cases/${esc(encodeURIComponent(detail.id))}/input-exports/all" download>${icon("download")}Export input CSVs</a></div><p class="small muted">Import attributions, name colors, and change outputs together. Export input CSVs downloads all saved attributions, name colors, and change outputs across every page. Unsaved edits are excluded. Imports, address assessments and color changes save separately from the settings form.</p></div></section>${inputImportPanel(detail.id, isBusy())}${changeOutputsPanel(detail.id, isBusy())}`;
 }
 
 function workspace(): string {
@@ -690,7 +1197,18 @@ function workspace(): string {
         `<option value="${esc(item.id)}"${(state.selectedRun === "latest" ? detail.latest_run : state.selectedRun) === item.id ? " selected" : ""}>${esc(item.id)}${item.id === detail.latest_run ? " · Latest" : ""}</option>`,
     )
     .join("");
-  return `<div class="page-heading case-heading"><div><div class="eyebrow">Investigation workspace</div><h1 id="page-title" tabindex="-1">${esc(detail.name)}</h1><div class="workspace-meta"><span class="badge ${detail.fixture ? "purple" : ""}">${detail.fixture ? "Synthetic data" : "Live Liquid"}</span><span class="badge gray">${(detail.runs || []).length} saved run${detail.runs?.length === 1 ? "" : "s"}</span><span class="mono">${esc(short(detail.id, 8))}</span></div></div><div class="heading-actions">${button("Address review", "addresses", "search", "", isBusy())}${button("Import attributions", "address-import-open", "", "", isBusy())}${button("Change outputs", "change-outputs-open", "graph", "", isBusy())}<a class="btn" href="/api/cases/${esc(encodeURIComponent(detail.id))}/input-exports/all" download>${icon("download")}Export input CSVs</a>${button("Settings", "case-settings", "settings", "", isBusy())}${button(saved ? "Continue investigation" : "Start first run", "trace-dialog", "play", "primary", isBusy())}</div></div><p class="small muted">Export input CSVs downloads a ZIP with all saved attributions, name colors, and change outputs across every page. Unsaved edits are excluded. Empty lists include column headers; large lists are split into CSV parts.</p>${changeOutputsPanel(detail.id, isBusy())}${last ? resultBanner(last.action, last.result) : ""}<div class="workspace-grid"><div class="workspace-main"><section class="panel"><div class="panel-head"><div><h2>${saved ? "Saved run" : "Ready to trace"}</h2><p>${saved ? "Select a snapshot to review, render, or export." : "Your starting outputs and limits are saved."}</p></div>${saved ? `<label class="run-picker">Snapshot<select class="input" id="run-picker" aria-label="Saved run snapshot">${runOptions}</select></label>` : '<span class="badge gray">No runs yet</span>'}</div>${saved ? `<div class="run-summary"><div><span>Tracked transactions</span><strong>${esc(run?.transaction_count ?? "—")}</strong></div><div><span>Unfinished branches</span><strong>${esc(run?.frontier_count ?? "—")}</strong></div><div><span>Run status</span><strong class="text-value">${esc(human(run?.status || "saved"))}</strong></div></div><div class="run-note">${icon("clock")}<span>${esc(formatDate(run?.created_at))}${run?.stop_reason ? ` · ${esc(human(run.stop_reason))}` : ""}</span></div>` : `<div class="empty-state" style="padding:31px 24px"><div class="empty-icon">${icon("graph")}</div><h2>${detail.seed_count ?? detail.seeds?.length ?? "Your"} starting output${(detail.seed_count ?? detail.seeds?.length) === 1 ? "" : "s"} selected</h2><p>Run the first trace to record exact output spends and build your investigation graph.</p>${button("Review run limits", "trace-dialog", "play", "primary", isBusy())}</div>`}</section>${connectionsGraph(artifacts.connections, saved)}${elkGraph(artifacts.elk, saved, settings)}${compactGraph(artifacts.compact, saved, detail)}${localGraph(artifacts.mermaid, saved, settings.include_fees)}${csvDownloads(artifacts.csv, saved, settings.include_fees)}<section class="panel"><div class="panel-head"><div><h2>Run history</h2><p>Every continuation preserves the preceding snapshot.</p></div><span class="badge gray">${(detail.runs || []).length} runs</span></div>${detail.runs?.length ? `<div class="table-wrap"><table class="run-list"><thead><tr><th>Run</th><th>Recorded</th><th>Status</th><th>Transactions</th></tr></thead><tbody>${detail.runs.map((item) => `<tr class="${item.id === run?.id ? "selected" : ""}"><td><button data-run="${esc(item.id)}">${esc(short(item.id, 8))}</button>${item.id === detail.latest_run ? '<div class="muted">Latest</div>' : ""}</td><td><span class="muted">${esc(formatDate(item.created_at))}</span></td><td><span class="badge ${item.status === "error" ? "red" : "gray"}">${esc(human(item.status))}</span></td><td>${esc(item.transaction_count ?? "—")}</td></tr>`).join("")}</tbody></table></div>` : '<div class="panel-body small muted">Your first completed or bounded run will appear here.</div>'}</section></div><aside class="workspace-aside"><section class="panel"><div class="panel-body"><div class="action-card-head"><span class="action-icon">${icon("board")}</span><div><h3>Miro board</h3><p>Your editable investigation graph</p></div></div><p class="action-description">Preview changes locally, then sync the selected snapshot to your board.</p>${detail.miro_board ? `<a class="board-link" href="${esc(boardUrl(detail.miro_board))}" target="_blank" rel="noopener noreferrer">Open linked board ${icon("external")}</a>` : '<p class="board-empty">No board linked yet. Create one or add its URL in settings.</p>'}${miroRecoveryNotice(detail)}<div class="action-buttons">${button("Preview changes", "miro-preview", "search", "wide", !saved || !detail.miro_board || isBusy())}${button("Sync to Miro", "miro-sync-dialog", "refresh", "", !saved || !detail.miro_board || Boolean(detail.miro_recovery?.pending_count) || isBusy())}${button("Merge duplicate addresses", "address-merge-dialog", "graph", "", isBusy() || !saved)}${button("Sync and reorganize", "miro-organize-dialog", "graph", "wide", !saved || !detail.miro_board || Boolean(detail.miro_recovery?.pending_count) || isBusy())}${button("Create / update Miro frames", "miro-frames-dialog", "layers", "wide", !saved || !detail.miro_board || Boolean(detail.miro_recovery?.pending_count) || isBusy())}<p class="small muted">When the graph is finished, create its frames separately. Run this again after further syncing or rearranging to update the frames.</p>${detail.miro_recovery?.can_recover_frame ? button("Recover interrupted frame", "miro-frame-review", "refresh", "wide", !detail.miro_board || isBusy()) : ""}${detail.miro_recovery?.can_confirm_empty ? button("Recover empty-board sync", "miro-recover-dialog", "refresh", "wide", !detail.miro_board || isBusy()) : ""}${detail.miro_board ? rebuildAction(detail, saved) : button("Create Miro board", "miro-create-dialog", "plus", "wide", isBusy())}</div></div></section><section class="panel"><div class="panel-body local-tools"><div class="action-card-head"><span class="action-icon teal">${icon("download")}</span><div><h3>Local outputs</h3><p>From the selected snapshot</p></div></div>${button("ELK layout preview <span>Layout</span>", "layout", "layers", "", !saved || isBusy())}${button("Compact graph <span>Compare</span>", "compact", "layers", "", !saved || isBusy())}${button("Mermaid chart <span>Graph</span>", "mermaid", "graph", "", !saved || isBusy())}${button("Fetch address transaction counts <span>API lookup</span>", "address-counts", "refresh", "", !saved || isBusy())}<p class="small muted">Missing counts are fetched automatically when tracing or generating a chart, within the saved API/time limits. This lookup can retry missing counts separately.</p>${button("Create CSV export <span>Transaction I/O</span>", "csv", "table", "", !saved || isBusy())}<p class="small muted" style="margin-top:13px;font-size:10px">New exports are saved with the investigation. Archived evidence stays intact.</p></div></section><section class="panel"><div class="panel-body"><div class="action-card-head"><span class="action-icon blue">${icon("shield")}</span><div><h3>Bounded by design</h3><p>Saved defaults for this investigation</p></div></div><dl class="saved-settings"><div><dt>Additional hops</dt><dd>${settings.hops}</dd></div><div><dt>Transactions</dt><dd>${settings.max_transactions}</dd></div><div><dt>API attempts</dt><dd>${settings.max_requests}</dd></div><div><dt>Time limit</dt><dd>${settings.max_seconds}s</dd></div><div><dt>Fee flows</dt><dd>${settings.include_fees ? "Included" : "Hidden"}</dd></div><div><dt>Connectors</dt><dd>${esc(human(settings.connector_style))}</dd></div><div><dt>Context inputs</dt><dd>${settings.group_context_inputs ? "Grouped when isolated" : "Separate"}</dd></div><div><dt>Separate branch hubs</dt><dd>${settings.hub_addresses.length} selected</dd></div><div><dt>Layout attempts</dt><dd>${settings.layout_attempts}</dd></div><div><dt>New Miro items</dt><dd>${settings.max_new_items}</dd></div></dl><div class="settings-divider"></div><p class="small muted" style="font-size:10px;line-height:1.75">Graph paths show UTXO reachability. They do not determine ownership or allocate a hidden value.</p></div></section></aside></div>`;
+
+  const views: [CaseView, string][] = [["collect", "Collect data"], ["plots", "Plot Layouts"], ["boards", "Miro boards"], ["history", "History & downloads"]];
+
+  const content = state.caseView === "plots" ? plotLayoutsPanel(detail, saved)
+    : state.caseView === "boards" ? boardsPanel(detail, saved, artifacts, settings)
+    : state.caseView === "history" ? `<section class="panel"><div class="panel-head"><div><h2>Run history</h2><p>Every continuation preserves the preceding snapshot.</p></div><span class="badge gray">${(detail.runs || []).length} runs</span></div>${detail.runs?.length ? `<div class="table-wrap"><table class="run-list"><thead><tr><th>Run</th><th>Recorded</th><th>Status</th><th>Hop limit</th><th>Transactions</th></tr></thead><tbody>${detail.runs.map((item) => `<tr class="${item.id === run?.id ? "selected" : ""}"><td><button data-run="${esc(item.id)}">${esc(short(item.id, 8))}</button>${item.id === detail.latest_run ? '<div class="muted">Latest</div>' : ""}</td><td><span class="muted">${esc(formatDate(item.created_at))}</span></td><td><span class="badge ${item.status === "error" ? "red" : "gray"}">${esc(human(item.status))}</span></td><td>${esc(item.max_hops ?? "Not recorded")}</td><td>${esc(item.transaction_count ?? "—")}</td></tr>`).join("")}</tbody></table></div>` : '<div class="panel-body small muted">Your first completed or bounded run will appear here.</div>'}</section>${plotDownloadsPanel(detail)}${csvDownloads(artifacts.csv, saved, settings.include_fees)}${localGraph(artifacts.mermaid, saved, settings)}${detail.pegout_searches?.length ? `<details class="tool-details"><summary>Earlier standalone peg-out searches</summary>${pegoutsGraph(detail)}</details>` : ""}${artifacts.connections ? `<details class="tool-details"><summary>Earlier starter-connection snapshot</summary>${connectionsGraph(artifacts.connections, saved)}</details>` : ""}`
+    : collectDataPanel(detail, saved, settings);
+  return `<div class="page-heading case-heading"><div><div class="eyebrow">Investigation workspace</div><h1 id="page-title" tabindex="-1">${esc(detail.name)}</h1><div class="workspace-meta"><span class="badge ${detail.fixture ? "purple" : ""}">${detail.fixture ? "Synthetic data" : "Live Liquid"}</span><span class="badge gray">${(detail.runs || []).length} saved runs</span></div></div><div class="heading-actions">${button("Investigation settings", "case-settings", "settings", "", isBusy())}</div></div>
+    <nav class="case-navigation" aria-label="Investigation tools">${views.map(([view, label]) => `<button type="button" class="case-nav${state.caseView === view ? " active" : ""}" data-action="view-${view}"${state.caseView === view ? ' aria-current="page"' : ""}>${label}</button>`).join("")}</nav>
+    ${last ? resultBanner(last.action, last.result) : ""}
+    <section class="panel"><div class="panel-head"><div><h2>${saved ? "Collected data" : "Ready to collect"}</h2><p>${saved ? "Choose the collected data used for plots and downloads." : "Your starting outputs and limits are saved."}</p></div>${saved ? `<label class="run-picker">Snapshot<select class="input" id="run-picker" aria-label="Saved run snapshot">${runOptions}</select></label>` : '<span class="badge gray">No runs yet</span>'}</div>${saved ? `<div class="run-summary"><div><span>Hops collected</span><strong${run?.collected_hops === undefined ? ' class="text-value"' : ""}>${esc(run?.collected_hops ?? "Not recorded")}</strong><span>Deepest saved transaction hop</span></div><div><span>Tracked transactions</span><strong>${esc(run?.transaction_count ?? "—")}</strong></div><div><span>Unfinished branches</span><strong>${esc(run?.frontier_count ?? "—")}</strong></div><div><span>Run status</span><strong class="text-value">${esc(human(run?.status || "saved"))}</strong></div></div><div class="run-note">${icon("clock")}<span>${esc(formatDate(run?.created_at))}${run?.max_hops !== undefined ? ` · Collection hop limit: ${run.max_hops}` : ""}${run?.stop_reason ? ` · ${esc(human(run.stop_reason))}` : ""}${run?.collected_hops !== undefined ? " · Starting transactions are hop 0; individual branches may stop earlier." : ""}</span></div>` : `<div class="empty-state" style="padding:31px 24px"><div class="empty-icon">${icon("graph")}</div><h2>${detail.seed_count ?? detail.seeds?.length ?? "Your"} starting output${(detail.seed_count ?? detail.seeds?.length) === 1 ? "" : "s"} selected</h2><p>Collect data first, then choose a plotting goal and its Miro board.</p></div>`}</section>
+    <div class="workspace-content">${content}</div>`;
 }
 
 function saveAddressDraft(): void {
@@ -722,7 +1240,7 @@ function selectAddress(row: AddressRow): void {
 async function loadAddresses(offset: number): Promise<void> {
   const detail = state.activeCase;
   if (!detail || isBusy()) return;
-  saveAddressDraft();
+  saveSettingsDraft(); saveAddressDraft();
   const generation = ++pageGeneration;
   state.page = "addresses";
   state.error = "";
@@ -796,9 +1314,8 @@ function addressReviewPage(): string {
   const review = state.addressReview, data = review.data, selected = review.selected;
   const busy = isBusy() || review.loading;
   const options = (detail.runs || []).map(run => `<option value="${esc(run.id)}"${run.id === (state.selectedRun === "latest" ? detail.latest_run : state.selectedRun) ? " selected" : ""}>${esc(run.id)}${run.id === detail.latest_run ? " · Latest" : ""}</option>`).join("");
-  return `<div class="page-heading"><div><div class="eyebrow">${esc(detail.name)}</div><h1 id="page-title" tabindex="-1">Address review</h1><p>Review activity, record your assessment, and choose where future tracing stops.</p></div>${button("Back to investigation", "back-case", "arrow")}</div>
-    ${addressImportPanel(detail.id, busy)}
-    ${nameColorsPanel(detail.id, busy)}
+  return `<div class="page-heading"><div><div class="eyebrow">${esc(detail.name)}</div><h1 id="page-title" tabindex="-1">Address review</h1><p>Review activity, record your assessment, and choose where future tracing stops.</p></div><div class="heading-actions">${button("Import CSV files", "input-import-open", "", "", busy)}${button("Assign colors", "name-colors-open", "", "", busy)}${button("Back to investigation settings", "case-settings", "arrow")}</div></div>
+    <details class="panel" id="advanced-attributions"><summary class="panel-body">Advanced imports: pasted address lists or JSON</summary>${addressImportPanel(detail.id, busy)}</details>
     <div class="address-review-grid"><section class="panel"><div class="panel-head"><div><h2>Saved addresses</h2><p>Selected run, saved reviews, and service assessments</p></div></div>
     <div class="panel-body"><label class="field"><span>Saved run</span><select id="address-run-picker"${disabled(busy)}>${options || '<option value="latest">No saved run yet</option>'}</select></label>
     <form id="address-search-form"><label class="field"><span>Search address or service name</span><input name="address_query" maxlength="256" value="${esc(review.query)}"${disabled(busy)}/></label>
@@ -855,6 +1372,7 @@ function resultBanner(action: string, result: Result): string {
         ["New frames", result.new_frames],
         ["Frames to remove", result.frames_to_remove],
         ["Fee items to remove", result.fee_items_to_remove],
+        ["Run summaries to remove", result.run_notes_to_remove],
       ]
     : action === "address-counts" ? [["Fetched", result.fetched], ["Known", result.known], ["Remaining", result.remaining]] : [];
   return `${addressCountWarning(result)}<div class="alert">${icon("check")}<div><strong>${titles[action] || "Action completed"}</strong><p>${action === "trace" ? `The saved run ${esc(result.run_id || "")} is ready to review and export.` : action === "miro-preview" ? "This is an offline plan. Live sync checks the board before making changes." : action === "miro-rebuild" ? "The rebuilt board is linked to this investigation. The previous board and its comments remain available. Create frames separately when the graph is finished." : action === "miro-create" ? "The board is linked to this investigation. Sync a saved run to add the graph." : action === "miro-recover" ? "The board was verified empty and the unconfirmed initial batch was cleared locally. Choose Sync to Miro to resume the recovered snapshot with individual shape requests. Your saved trace is ready to use." : action === "miro-frame-recover" ? `The interrupted frame was reconciled locally. The failed snapshot is selected. ${result.resume_action === "miro-frames" ? "Choose Create / update Miro frames to finish framing the saved graph." : "Finish Sync to Miro for this snapshot, then choose Create / update Miro frames."}` : action === "miro-frames" ? "Frames now reflect the synced graph. Run Create / update Miro frames again after further changes to the graph." : action === "address-merge" ? "Choose Sync to Miro to refresh labels, or Sync and reorganize to apply the shared-address layout. When the graph is finished, choose Create / update Miro frames." : "The result is saved with this investigation."}</p>${
@@ -870,14 +1388,32 @@ function resultBanner(action: string, result: Result): string {
   }${action === "miro-rebuild" && typeof result.board_id === "string" && typeof result.previous_board_id === "string" ? `<p><a href="${esc(boardUrl(result.board_id))}" target="_blank" rel="noopener noreferrer">Open rebuilt board</a> · <a href="${esc(boardUrl(result.previous_board_id))}" target="_blank" rel="noopener noreferrer">Open previous board</a></p>` : ""}${fallbackNotice(result) ? `<p>${esc(fallbackNotice(result))}</p>` : ""}${layoutMetrics(result.layout_metrics, result.layout_algorithm === "dependency_layers_v1" ? "Dependency layout" : "ELK layout")}${typeof result.conflicts_count === "number" && result.conflicts_count > 0 ? `<p style="margin-top:10px"><strong>${result.conflicts_count} board conflict${result.conflicts_count === 1 ? "" : "s"} preserved.</strong> Review your board and the saved Miro sync report before further changes.</p>` : ""}</div><button class="dismiss" data-action="dismiss-result" aria-label="Dismiss result">${icon("close")}</button></div>`;
 }
 
+type SettingsDraft = {settings: Settings; name: string; board: string};
+const settingsDrafts = new Map<string, SettingsDraft>();
+let renderedSettingsKey = "";
+function settingsKey(): string { return state.page === "case-settings" ? (state.activeCase?.id || "") : "workspace"; }
+function saveSettingsDraft(): void {
+  const form = document.querySelector<HTMLFormElement>("#settings-form");
+  if (!form || !renderedSettingsKey) return;
+  const data = new FormData(form);
+  const previous = settingsDrafts.get(renderedSettingsKey)?.settings || {...defaults, ...(renderedSettingsKey === "workspace" ? state.settings : state.activeCase?.run_defaults)};
+  settingsDrafts.set(renderedSettingsKey, {settings: {...readSettings(form, previous), ...(renderedSettingsKey === "workspace" ? {} : selectLayoutSettings(previous))}, name: String(data.get("name") || ""), board: String(data.get("board") || "")});
+}
+
 function settingsPage(): string {
-  const isCase = state.page === "case-settings";
-  const detail = state.activeCase;
-  const settings = {
-    ...defaults,
-    ...(isCase ? detail?.run_defaults : state.settings),
-  };
-  return `<div class="page-heading"><div><div class="eyebrow">${isCase ? "Investigation preferences" : "Workspace preferences"}</div><h1 id="page-title" tabindex="-1">${isCase ? "Investigation settings" : "Settings"}</h1><p>${isCase ? `Saved preferences for ${esc(detail?.name || "this investigation")}.` : "Defaults for newly created investigations."}</p></div>${button(isCase ? "Back to investigation" : "Back to investigations", isCase ? "back-case" : "dashboard", "", "ghost")}</div><form id="settings-form" class="settings-layout">${isCase ? `<section class="panel"><div class="panel-head"><h2>Investigation details</h2></div><div class="panel-body"><label class="field"><span>Investigation name</span><input name="name" maxlength="120" required value="${esc(detail?.name)}" autocomplete="off"/></label><label class="field"><span>Miro board URL or ID</span><input name="board" value="${esc(detail?.miro_board)}" placeholder="Link an existing board, or leave empty" autocomplete="off"/><small>Board selection is case configuration. API credentials stay in Proton Pass.</small></label></div></section>` : ""}<section class="panel"><div class="panel-head"><div><h2>Run limits &amp; graph display</h2><p>${isCase ? "Applies to future actions in this investigation." : "Existing investigations retain their own saved preferences."}</p></div></div><div class="panel-body">${budgetFields(settings)}${hubAddressFields(settings)}</div></section><section class="panel"><div class="panel-body"><div class="action-card-head"><span class="action-icon teal">${icon("lock")}</span><div><h3>SecretSpec &amp; Proton Pass</h3><p>Managed by your existing local environment</p></div></div><p class="action-description" style="margin-bottom:0">Live Blockstream and Miro actions retrieve credentials through the launching terminal. If Proton Pass needs your attention, its prompt appears there. No API keys are stored in browser settings.</p></div></section><div class="form-actions"><p>${isCase ? "Saved runs and their original evidence remain unchanged." : "These defaults are also used by the terminal interface."}</p><button type="submit" class="btn primary"${disabled(isBusy())}>${icon("check")}Save settings</button></div></form>`;
+  const isCase = state.page === "case-settings", detail = state.activeCase;
+  const draft = settingsDrafts.get(settingsKey());
+  const settings = draft?.settings || {...defaults, ...(isCase ? detail?.run_defaults : state.settings)};
+  return `<div class="page-heading"><div><div class="eyebrow">${isCase ? esc(detail?.name) : "Workspace"}</div><h1 id="page-title" tabindex="-1">${isCase ? "Investigation settings" : "Workspace defaults"}</h1><p>${isCase ? "Data, collection limits, attribution colors, and Miro sync limits for this investigation. Plot appearance is saved in Plot Layouts." : "Collection limits, plot layout preferences, and Miro sync limits copied into new investigations. Existing investigations keep their own settings."}</p></div>${button(isCase ? "Back to investigation" : "Back to investigations", isCase ? "back-case" : "dashboard", "", "ghost")}</div>
+    <nav class="settings-navigation" aria-label="Settings sections">${isCase ? '<a href="#settings-data">Investigation data</a>' : ""}<a href="#settings-trace">Tracing</a>${!isCase ? '<a href="#settings-layout">Plot layouts</a>' : ""}<a href="#settings-miro">Miro</a>${isCase ? '<a href="#settings-colors">Colors</a>' : ""}</nav>
+    ${isCase && detail ? `<div class="settings-layout">${investigationDataPanel(detail)}</div>` : ""}
+    <form id="settings-form" class="settings-layout">
+    ${isCase ? `<section class="panel"><div class="panel-body"><label class="field"><span>Investigation name</span><input name="name" maxlength="120" required value="${esc(draft?.name ?? detail?.name)}" autocomplete="off"/></label></div></section>` : ""}
+    <section class="panel" id="settings-trace"><div class="panel-head"><div><h2>Tracing</h2><p>Saved defaults for each bounded run.</p></div></div><div class="panel-body">${budgetFields(settings)}</div></section>
+    ${!isCase ? `<section class="panel" id="settings-layout"><div class="panel-head"><div><h2>Plot layout defaults</h2><p>Starting values for new investigations. Adjust each investigation separately in Plot Layouts.</p></div></div><div class="panel-body">${graphFields(settings)}</div></section>` : ""}
+    <section class="panel" id="settings-miro"><div class="panel-head"><h2>Miro</h2></div><div class="panel-body">${isCase ? `${button("Manage investigation boards", "view-boards", "board", "", isBusy())}<p class="small muted">Create, link and sync boards in Miro boards.</p>` : ""}${numericField(settings, "max_new_items", "New Miro items", "Maximum new objects and connections per sync.")}<p class="small muted">Live actions use your existing SecretSpec and Proton Pass configuration.</p></div></section>
+    <div class="form-actions settings-save"><p>${isCase ? "Save once to update this investigation." : "Applies to investigations created after saving."}</p><button type="submit" class="btn primary"${disabled(isBusy())}>${icon("check")}Save settings</button></div></form>
+    ${isCase && detail ? `<section class="panel" id="settings-colors"><div class="panel-head"><div><h2>Colors</h2><p>Graph roles and attribution names. Color edits save separately.</p></div>${button("Edit colors", "name-colors-open", "", "", isBusy())}</div></section>${nameColorsPanel(detail.id, isBusy())}` : ""}`;
 }
 
 function saveDraft(): void {
@@ -887,8 +1423,8 @@ function saveDraft(): void {
   state.draft.name = String(data.get("name") || "");
   state.draft.txids = String(data.get("txids") || "");
   state.draft.seeds = String(data.get("seeds") || "");
-  state.draft.board = String(data.get("board") || "");
-  state.draft.settings = readSettings(form);
+  state.draft.blockchain = String(data.get("blockchain") ?? state.draft.blockchain);
+  state.draft.settings = readSettings(form, state.draft.settings);
 }
 
 async function refreshSession(): Promise<void> {
@@ -931,10 +1467,12 @@ async function openCase(id: string): Promise<void> {
   state.addressReview = { query: "", suspectedOnly: false, data: null, selected: null,
     loading: false, name: "", notes: "", enabled: false, pasted: "",
     confidence: "suspected", source: "Investigator designation", observedAt: "", stopTracing: true, hopLimit: "" };
+  resetInputImport(detail.id);
   resetAddressImport(detail.id);
   resetNameColors(detail.id);
   resetChangeOutputs(detail.id);
   state.selectedRun = "latest";
+  state.caseView = "collect";
   state.page = "case";
   state.error = "";
   history.replaceState(null, "", `#case/${encodeURIComponent(id)}`);
@@ -942,6 +1480,7 @@ async function openCase(id: string): Promise<void> {
 }
 
 function navigate(page: Page): void {
+  saveSettingsDraft(); saveAddressDraft();
   resetFrameRecovery();
   dialog.close();
   saveDraft();
@@ -1039,10 +1578,17 @@ async function pollJob(): Promise<void> {
       if (active.action === "change-output-lookup" && active.caseId) changeOutputsLookupComplete(active.caseId, active.id, undefined, job.message || "Transaction lookup canceled.");
       state.error = "";
       toast(job.message || "Calculation canceled. Saved investigation runs are unchanged.");
+      if ((active.action.startsWith("board-") || ["pegouts", "pegouts-preview"].includes(active.action)) && active.caseId && state.activeCase?.id === active.caseId) {
+        try {
+          const detail = await api<Case>(`/api/cases/${encodeURIComponent(active.caseId)}`);
+          if (state.activeCase?.id === active.caseId) state.activeCase = detail;
+        } catch { /* Preserve the cancellation message if refresh is unavailable. */ }
+      }
     } else if (job.status === "failed") {
       if (active.action.startsWith("miro-frame-")) resetFrameRecovery();
       const progress = job.progress || active.progress;
-      const lastStage = progress?.phase
+      const hopLabel = progress && collectionHopLabel(progress);
+      const lastStage = hopLabel ? ` Last reported stage: ${hopLabel}.` : progress?.phase
         ? ` Last reported stage: ${human(progress.phase)}${
             Number.isFinite(progress.completed) && Number.isFinite(progress.total) && progress.total > 0
               ? ` (${progress.completed} / ${progress.total})`
@@ -1053,8 +1599,11 @@ async function pollJob(): Promise<void> {
         (job.message || "The action did not complete. Check the launching terminal.") + lastStage;
       toast(state.error, true);
       if (active.action === "change-output-lookup" && active.caseId) changeOutputsLookupComplete(active.caseId, active.id, undefined, state.error);
-      if (active.action.startsWith("miro-") && active.caseId && state.activeCase?.id === active.caseId) {
-        state.activeCase = await api<Case>(`/api/cases/${encodeURIComponent(active.caseId)}`);
+      if ((active.action.startsWith("miro-") || active.action.startsWith("board-") || ["pegouts", "pegouts-preview"].includes(active.action)) && active.caseId && state.activeCase?.id === active.caseId) {
+        try {
+          const detail = await api<Case>(`/api/cases/${encodeURIComponent(active.caseId)}`);
+          if (state.activeCase?.id === active.caseId) state.activeCase = detail;
+        } catch { /* Keep the original action failure visible if refresh is unavailable. */ }
       }
     } else {
       const result = job.result || {};
@@ -1094,6 +1643,29 @@ async function pollJob(): Promise<void> {
         if (state.activeCase?.id === active.caseId) {
           state.activeCase = detail;
           if (active.action === "trace") state.selectedRun = "latest";
+          if (active.action === "plot") {
+            const draft = currentWorkflow(detail);
+            draft.plot = String(result.preview_id || "");
+            state.caseView = "plots";
+          }
+          if (["board-create", "board-link"].includes(active.action)) {
+            const draft = currentWorkflow(detail);
+            draft.board = String(result.record_id || result.id || "");
+            const board = detail.boards?.find(item => item.id === draft.board);
+            if (board) {
+              const boardDraft = currentBoardDraft(detail, board);
+              boardDraft.recoveryUrl = "";
+              const requested = matchingBoardPlots(detail, board).find(plot => plot.preview_id === draft.boardPlot);
+              if (requested && board.can_sync && !interruptedBoard(board)) boardDraft.plot = requested.preview_id;
+            }
+            draft.boardUrl = "";
+            state.caseView = "boards";
+          }
+          if (["pegouts", "pegouts-preview"].includes(active.action)) {
+            currentPegoutSearch(detail);
+            pegoutDraft.selected = String(result.search_id || result.run_id || "");
+            pegoutDraft.approved = "";
+          }
           if (["miro-recover", "miro-frame-recover", "miro-rebuild"].includes(active.action) && result.run_id && detail.runs?.some(run => run.id === result.run_id)) {
             state.selectedRun = result.run_id;
           }
@@ -1116,8 +1688,10 @@ async function pollJob(): Promise<void> {
               downloads: result.downloads || [],
               preview_url: safeLocalUrl(result.preview_url) || undefined,
               include_fees: result.include_fees ?? detail.run_defaults.include_fees,
+              color_attribution_arrows: result.color_attribution_arrows ?? false,
               group_context_inputs: result.group_context_inputs ?? false,
               hub_addresses: result.hub_addresses ?? [],
+              center_name: result.center_name ?? "",
               connector_style: result.connector_style,
               layout_metrics: result.layout_metrics,
               compaction: result.compaction,
@@ -1133,13 +1707,20 @@ async function pollJob(): Promise<void> {
         toast(
           (
             {
-              trace: "Bounded run saved.",
+              trace: "Collected data saved. Choose Plot Layouts to generate a chart.",
+              plot: "Plot generated from saved collection data.",
+              "board-create": "Miro board created. Select a saved plot to sync.",
+              "board-link": "Miro board linked. Select a saved plot to sync.",
+              "board-sync": "The selected Miro board was updated.",
               "address-counts": "Address transaction counts saved. Regenerate a preview or sync Miro. Run again to fetch any remaining missing counts.",
               "address-inspect": "Address activity saved. Review the history coverage before drawing conclusions.",
               mermaid: result.renderer === "direct_svg" ? "Direct SVG fallback is ready. " + fallbackNotice(result) : "Mermaid chart is ready.",
               layout: result.layout_algorithm === "dependency_layers_v1" ? "Dependency layout fallback is ready. " + fallbackNotice(result) : "ELK layout preview is ready.",
               compact: "Compaction comparison is ready. Review it before applying the layout to Miro.",
               "miro-compact": "The saved compact layout was applied to Miro.",
+              pegouts: result.status === "paused" ? "Peg-out search paused. Review matches so far or resume the saved search." : result.status === "error" ? "Peg-out search saved with an error. Check the launching terminal, then resume." : "Peg-out search saved. Review its coverage and matching paths.",
+              "pegouts-preview": "Peg-out preview is ready.",
+              "miro-pegouts": "Peg-out snapshot publication finished.",
               connections: result.connection_count ? "Starter connection chart is ready." : "No connection found in the saved searched data. Nothing plotted.",
               "miro-connections": "Connection snapshot publication finished. Full trace board unchanged.",
               csv: "CSV export is ready to download.",
@@ -1239,8 +1820,8 @@ function openActionDialog(action: string): void {
   const settings = { ...defaults, ...detail.run_defaults };
   const titles: Record<string, string> = {
     trace: detail.latest_run
-      ? "Continue this investigation"
-      : "Start the first run",
+      ? "Continue collecting transaction data"
+      : "Collect transaction data",
     "miro-sync": "Sync the graph to Miro",
     "miro-frames": "Create / update Miro frames",
     "miro-organize": "Sync and reorganize the Miro graph",
@@ -1250,8 +1831,8 @@ function openActionDialog(action: string): void {
   };
   const descriptions: Record<string, string> = {
     trace: detail.latest_run
-      ? "Continue the latest saved frontier with another bounded allowance. Earlier runs remain available."
-      : "Follow the selected starting outputs within the limits below.",
+      ? "Continue the latest saved frontier with another bounded allowance. Earlier runs remain available. Generate plots separately after collection."
+      : "Follow the selected starting outputs within the limits below. Generate plots separately after collection.",
     "miro-sync":
       "Add the selected saved graph to the linked board. Existing manual arrangements are preserved during normal sync. Create or update frames separately when the graph is finished.",
     "miro-frames":
@@ -1268,7 +1849,7 @@ function openActionDialog(action: string): void {
   const live = action !== "trace" || !detail.fixture;
   const defaultBoardName =
     `${detail.fixture ? "SYNTHETIC DATA · " : ""}${detail.name}`.slice(0, 60);
-  dialog.innerHTML = `<form id="action-form"><header class="dialog-head"><div><h2 id="dialog-title">${titles[action]}</h2><p>${descriptions[action]}</p></div><button type="button" class="dialog-close" data-action="close-dialog" aria-label="Close dialog">${icon("close")}</button></header><div class="dialog-body">${action === "trace" ? `${budgetFields(settings)}<p class="small muted" style="margin:17px 0;line-height:1.7">These limits are saved as the investigation defaults and apply to this bounded run.</p>` : action === "miro-create" ? `<label class="field"><span>Board name</span><input name="board_name" required maxlength="60" value="${esc(defaultBoardName)}"/></label>` : action === "miro-recover" ? `<div class="dialog-board"><span>Linked board</span><a class="board-link" href="${esc(boardUrl(detail.miro_board!))}" target="_blank" rel="noopener noreferrer">Open linked board ${icon("external")}</a><span>${detail.miro_recovery?.pending_count} unconfirmed items</span></div><label class="check-line"><input type="checkbox" name="confirm_empty" required/><span><strong>I inspected this Miro board after the failed sync and it is empty.</strong><small>If any objects are present, cancel and reconcile the pending items individually.</small></span></label>` : `<div class="dialog-board"><span>Linked board</span><strong>${esc(detail.miro_board)}</strong><span style="margin-top:10px">Selected snapshot</span><strong class="mono">${esc(currentRun()?.id || detail.latest_run)}</strong><span style="margin-top:10px">New item budget</span><strong>${settings.max_new_items} items</strong>${compact ? `<span style="margin-top:10px">Saved preview</span><strong class="mono">${esc(compact.preview_id)}</strong><span>${esc(human(compact.connector_style || "straight"))} connectors · ${compact.include_fees ? "Fee flows included" : "Fee flows hidden"}</span>` : ""}</div>`}${live ? `<div class="alert ${["miro-organize", "miro-compact"].includes(action) ? "warning" : ""}">${icon(["miro-organize", "miro-compact"].includes(action) ? "info" : "lock")}<div><strong>${action === "trace" ? "Uses your Blockstream API credits" : action === "miro-recover" ? "Reads Miro and updates local recovery state" : "Changes your Miro workspace"}</strong><p>SecretSpec retrieves credentials through the launching terminal. Complete any Proton Pass prompt there.</p></div></div>` : '<div class="alert">' + icon("shield") + "<div><strong>Offline synthetic data</strong><p>This run uses the investigation’s saved fixture and needs no API credentials.</p></div></div>"}</div><footer class="dialog-footer"><button type="button" class="btn" data-action="close-dialog">Cancel</button><button type="submit" class="btn primary">${icon(action === "trace" ? "play" : action === "miro-create" ? "plus" : "refresh")}${action === "trace" ? "Start bounded run" : action === "miro-create" ? "Create private board" : action === "miro-organize" ? "Sync and reorganize" : action === "miro-compact" ? "Apply compact layout" : action === "miro-frames" ? "Create / update frames" : action === "miro-recover" ? "Verify empty board and recover" : "Sync to Miro"}</button></footer></form>`;
+  dialog.innerHTML = `<form id="action-form"><header class="dialog-head"><div><h2 id="dialog-title">${titles[action]}</h2><p>${descriptions[action]}</p></div><button type="button" class="dialog-close" data-action="close-dialog" aria-label="Close dialog">${icon("close")}</button></header><div class="dialog-body">${action === "trace" ? `${numericField(settings, "hops", "Additional hops for this run", "0 retries the current frontier. This does not change saved defaults.")}${traceSummary(settings)}<p class="small muted">Other collection limits come from Investigation settings.</p><button type="button" class="btn small" data-action="edit-case-settings">Edit investigation settings</button>` : action === "miro-create" ? `<label class="field"><span>Board name</span><input name="board_name" required maxlength="60" value="${esc(defaultBoardName)}"/></label>` : action === "miro-recover" ? `<div class="dialog-board"><span>Linked board</span><a class="board-link" href="${esc(boardUrl(detail.miro_board!))}" target="_blank" rel="noopener noreferrer">Open linked board ${icon("external")}</a><span>${detail.miro_recovery?.pending_count} unconfirmed items</span></div><label class="check-line"><input type="checkbox" name="confirm_empty" required/><span><strong>I inspected this Miro board after the failed sync and it is empty.</strong><small>If any objects are present, cancel and reconcile the pending items individually.</small></span></label>` : `<div class="dialog-board"><span>Linked board</span><strong>${esc(detail.miro_board)}</strong><span style="margin-top:10px">Selected snapshot</span><strong class="mono">${esc(currentRun()?.id || detail.latest_run)}</strong><span style="margin-top:10px">New item budget</span><strong>${settings.max_new_items} items</strong>${compact ? `<span style="margin-top:10px">Saved preview</span><strong class="mono">${esc(compact.preview_id)}</strong><span>${esc(human(compact.connector_style || "straight"))} connectors · ${compact.include_fees ? "Fee flows included" : "Fee flows hidden"}</span>` : ""}</div>`}${live ? `<div class="alert ${["miro-organize", "miro-compact"].includes(action) ? "warning" : ""}">${icon(["miro-organize", "miro-compact"].includes(action) ? "info" : "lock")}<div><strong>${action === "trace" ? "Uses your Blockstream API credits" : action === "miro-recover" ? "Reads Miro and updates local recovery state" : "Changes your Miro workspace"}</strong><p>SecretSpec retrieves credentials through the launching terminal. Complete any Proton Pass prompt there.</p></div></div>` : '<div class="alert">' + icon("shield") + "<div><strong>Offline synthetic data</strong><p>This run uses the investigation’s saved fixture and needs no API credentials.</p></div></div>"}</div><footer class="dialog-footer"><button type="button" class="btn" data-action="close-dialog">Cancel</button><button type="submit" class="btn primary">${icon(action === "trace" ? "play" : action === "miro-create" ? "plus" : "refresh")}${action === "trace" ? "Collect transaction data" : action === "miro-create" ? "Create private board" : action === "miro-organize" ? "Sync and reorganize" : action === "miro-compact" ? "Apply compact layout" : action === "miro-frames" ? "Create / update frames" : action === "miro-recover" ? "Verify empty board and recover" : "Sync to Miro"}</button></footer></form>`;
   dialog.showModal();
 }
 
@@ -1285,6 +1866,31 @@ async function caseAction(action: string): Promise<void> {
 }
 
 async function dispatch(action: string, element?: HTMLElement): Promise<void> {
+  if (action.startsWith("view-") && state.activeCase) {
+    const view = action.slice(5);
+    if (["collect", "plots", "boards", "history"].includes(view)) {
+      saveSettingsDraft(); saveAddressDraft();
+      state.caseView = view as CaseView; state.page = "case"; render();
+      if (view === "plots") void suggestCenterNames().catch(() => {});
+    }
+    return;
+  }
+  if (await workflowAction(action, element)) return;
+  if (await pegoutAction(action)) return;
+  if (action === "address-import-open") action = "input-import-open";
+  if (action === "input-import-open" && state.activeCase && !isBusy()) {
+    saveSettingsDraft(); saveAddressDraft(); state.page = "case-settings";
+  }
+  if (state.activeCase && await inputImportAction(action, {
+      caseId: state.activeCase.id, busy: isBusy(), render,
+      post: (path, body) => api(path, body as Record<string, unknown>),
+      refresh: async () => {
+        const detail = state.activeCase;
+        if (!detail) return;
+        resetAddressImport(detail.id); resetNameColors(detail.id); resetChangeOutputs(detail.id);
+        state.addressReview.selected = null; state.addressReview.data = null;
+      }
+    }, element)) return;
   if (action === "miro-frame-review") {
     const detail = state.activeCase;
     if (!detail?.miro_board || !detail.miro_recovery?.can_recover_frame || isBusy()) return;
@@ -1293,7 +1899,7 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
     if (state.job?.caseId === detail.id && state.job.action === action) frameRecoveryStarted(detail.id, version, state.job.id);
     return;
   }
-  if (action === "change-outputs-open" && state.activeCase && state.page !== "case") {state.page = "case"; render();}
+  if (action === "change-outputs-open" && state.activeCase && !isBusy()) {saveSettingsDraft(); saveAddressDraft(); state.page = "case-settings"; render();}
   if (state.activeCase && await changeOutputsAction(action, {
       caseId: state.activeCase.id, busy: isBusy(), render,
       post: (path, body) => api(path, body as Record<string, unknown>),
@@ -1305,14 +1911,9 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
         return state.job?.id || null;
       }
     }, element)) return;
-  if (action === "name-colors-open" && state.activeCase && state.page !== "addresses") await loadAddresses(0);
+  if (action === "name-colors-open" && state.activeCase && !isBusy()) {saveSettingsDraft(); saveAddressDraft(); if (state.page !== "case-settings") navigate("case-settings");}
   if (state.activeCase && await nameColorsAction(action, {caseId: state.activeCase.id, busy: isBusy(), render,
       post: (path, body) => api(path, body as Record<string, unknown>)}, element)) return;
-  if (action === "address-import-open") {
-    await loadAddresses(0);
-    document.querySelector<HTMLElement>("#address-import-title")?.focus();
-    return;
-  }
   if (state.activeCase && await addressImportAction(action, {
       caseId: state.activeCase.id, busy: isBusy(), render,
       post: (path, body) => api(path, body as Record<string, unknown>),
@@ -1401,7 +2002,7 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
       );
     await startJob(
       "/api/lookup",
-      { source: "live", txids: state.draft.txids },
+      { source: "live", blockchain: state.draft.blockchain, txids: state.draft.txids },
       "lookup",
       true,
     );
@@ -1467,6 +2068,17 @@ app.addEventListener("click", (event) => {
 
 app.addEventListener("change", (event) => {
   const element = event.target as HTMLInputElement | HTMLSelectElement;
+  if (element.closest("#plot-layout-form")) {
+    if (!isBusy()) savePlotLayoutDraft();
+    return;
+  }
+  if (workflowInput(element)) return;
+  if (pegoutInput(element)) return;
+  if (element.id === "input-import-files") {
+    void inputImportFiles(element as HTMLInputElement, render, isBusy()).catch(handleError);
+    return;
+  }
+  if (inputImportInput(element)) {render(); return;}
   if (element.id === "change-outputs-file") {
     void changeOutputsFile(element as HTMLInputElement, render, isBusy()).catch(handleError);
     return;
@@ -1511,6 +2123,17 @@ app.addEventListener("change", (event) => {
 // Keep an in-memory draft while a lookup runs so its completion does not
 // discard names, notes, or limit edits typed in the meantime.
 app.addEventListener("input", (event) => {
+  if ((event.target as HTMLInputElement).name === "center_name" && state.page === "case" && state.caseView === "plots") {
+    clearTimeout(centerNameTimer);
+    centerNameTimer = setTimeout(() => { void suggestCenterNames().catch(() => {}); }, 150);
+  }
+  if ((event.target as Element).closest("#plot-layout-form")) {
+    if (!isBusy()) savePlotLayoutDraft();
+    return;
+  }
+  if (workflowInput(event.target as HTMLInputElement | HTMLSelectElement)) return;
+  if (pegoutInput(event.target as HTMLInputElement | HTMLSelectElement)) return;
+  if (inputImportInput(event.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement)) return;
   if (changeOutputsInput(event.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement)) return;
   if (nameColorsInput(event.target as HTMLInputElement)) return;
   if (addressImportInput(event.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement)) return;
@@ -1525,7 +2148,9 @@ app.addEventListener("submit", (event) => {
   const form = event.target as HTMLFormElement;
   if (isBusy() || !form.reportValidity()) return;
   void (async () => {
-    if (form.id === "address-search-form") {
+    if (form.id === "plot-layout-form") {
+      if (state.activeCase && await persistPlotLayoutSettings(state.activeCase)) toast("Layout settings saved for this investigation.");
+    } else if (form.id === "address-search-form") {
       const data = new FormData(form);
       state.addressReview.query = String(data.get("address_query") || "");
       state.addressReview.suspectedOnly = data.get("suspected_only") === "on";
@@ -1563,7 +2188,7 @@ app.addEventListener("submit", (event) => {
         const created = await api<Case>("/api/cases", {
           name: state.draft.name,
           source: "live",
-          board: state.draft.board,
+          blockchain: state.draft.blockchain,
           seeds,
           settings: state.draft.settings,
         });
@@ -1573,26 +2198,28 @@ app.addEventListener("submit", (event) => {
           name: "",
           txids: "",
           seeds: "",
-          board: "",
+          blockchain: "liquid",
           settings: { ...state.settings },
           reports: [],
           selected: new Set(),
         };
         toast(
-          "Investigation created. Review the first run when you are ready.",
+          "Investigation created. Import your data or start the first run.",
         );
       } finally {
         submitting = false;
         render();
       }
     } else if (form.id === "settings-form") {
-      const settings = readSettings(form);
+      const savedKey = settingsKey();
+      const previous = {...defaults, ...(state.page === "case-settings" ? state.activeCase?.run_defaults : state.settings)};
+      const settings = {...readSettings(form, previous), ...(state.page === "case-settings" ? selectLayoutSettings(previous) : {})};
       const data = new FormData(form);
       if (state.page === "case-settings" && state.activeCase) {
         const caseId = state.activeCase.id;
         await api(`/api/cases/${encodeURIComponent(caseId)}/settings`, {
           name: String(data.get("name") || ""),
-          board: String(data.get("board") || ""),
+          board: state.activeCase.miro_board || "",
           settings,
         });
         state.activeCase = await api<Case>(
@@ -1603,6 +2230,8 @@ app.addEventListener("submit", (event) => {
         state.draft.settings = { ...settings };
       }
       await refreshSession();
+      settingsDrafts.delete(savedKey);
+      renderedSettingsKey = "";
       render();
       toast("Settings saved locally.");
     }
@@ -1616,6 +2245,9 @@ dialog.addEventListener("cancel", () => {
   if (dialogAction === "miro-frame-recover") resetFrameRecovery();
 });
 dialog.addEventListener("click", (event) => {
+  if ((event.target as Element).closest('[data-action="edit-case-settings"]')) {
+    dialog.close(); void dispatch("case-settings").catch(handleError); return;
+  }
   if ((event.target as Element).closest('[data-action="close-dialog"]'))
     dialog.close();
 });
@@ -1647,7 +2279,7 @@ dialog.addEventListener("submit", (event) => {
     body.name = String(data.get("board_name") || "");
     body.max_new_items = Number(data.get("max_new_items"));
   }
-  if (action === "trace") body.settings = readSettings(form, { ...defaults, ...detail.run_defaults });
+  if (action === "trace") body.hops = Number(new FormData(form).get("hops"));
   if (action === "miro-compact") body.preview_id = dialogPreviewId;
   if (action === "address-merge") {
     body.approval_sha256 = dialogMergeApproval;

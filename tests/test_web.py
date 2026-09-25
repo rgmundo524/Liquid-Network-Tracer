@@ -1,4 +1,5 @@
 import http.client
+import fcntl
 import json
 import os
 import pty
@@ -15,7 +16,7 @@ from unittest.mock import patch
 
 from liquid_tracer.cli import verify_export
 from liquid_tracer.common import read_json, save_json
-from liquid_tracer.investigations import create_investigation
+from liquid_tracer.investigations import create_investigation, update_case
 from liquid_tracer.web import LocalServer, worker_command
 
 
@@ -116,6 +117,127 @@ class LocalWebTests(unittest.TestCase):
         self.assertFalse(self.server.root.exists())
         self.assertIn(b"Synthetic UI", self.success("/"))
 
+    def test_plot_settings_route_persists_only_layout_fields_without_jobs(self):
+        _, info = self.create()
+        path, metadata = self.server.case(info["id"])
+        defaults = {**metadata["run_defaults"], "hops": 7, "max_requests": 123, "max_transactions": 87}
+        update_case(path, {"miro_board": "PRESERVE=", "run_defaults": defaults})
+        before = read_json(path / "case.json")
+        settings = {"layout_attempts": 33, "connector_style": "curved", "include_fees": True,
+                    "color_attribution_arrows": True, "group_context_inputs": True,
+                    "center_name": " Treasury ", "hub_addresses": ["G" * 34]}
+        with patch.object(self.server, "start_job") as start, \
+                patch("liquid_tracer.api.Esplora.get", side_effect=AssertionError("No data fetch")), \
+                patch("liquid_tracer.miro.sync", side_effect=AssertionError("No Miro writes")):
+            result = self.success("/api/cases/" + info["id"] + "/plot-settings", {"settings": settings})
+            start.assert_not_called()
+        expected_defaults = {**defaults, **settings, "center_name": "Treasury"}
+        self.assertEqual(result["run_defaults"], expected_defaults)
+        self.assertEqual(read_json(path / "case.json"), {**before, "run_defaults": expected_defaults})
+        reopened = LocalServer(self.server.root, self.assets, port=0)
+        self.addCleanup(reopened.server_close)
+        self.assertEqual(reopened.session()["cases"][0]["run_defaults"], expected_defaults)
+        result = self.success("/api/cases/" + info["id"] + "/plot-settings", {"settings": {"include_fees": False}})
+        self.assertEqual(result["run_defaults"], {**expected_defaults, "include_fees": False})
+        self.assertEqual((result["name"], result["miro_board"], result["blockchain"], result["seeds"]),
+                         (before["name"], before["miro_board"], before["blockchain"], before["seeds"]))
+
+    def test_plot_settings_route_rejects_extra_fields_bad_values_and_active_locks(self):
+        _, info = self.create()
+        path, _ = self.server.case(info["id"])
+        route = "/api/cases/" + info["id"] + "/plot-settings"
+        before = (path / "case.json").read_bytes()
+        invalid = [{}, {"settings": {}, "name": "Wrong"}, {"settings": {}, "board": "OTHER="},
+                   {"settings": None}, {"settings": []}, {"settings": {"max_requests": 3}},
+                   {"settings": {"hops": 10}}, {"settings": {"include_fees": "false"}},
+                   {"settings": {"layout_attempts": True}}, {"settings": {"hub_addresses": ["short"]}}]
+        with patch.object(self.server, "start_job") as start:
+            for body in invalid:
+                with self.subTest(body=body):
+                    self.assertEqual(self.request(route, body)[0], 400)
+                    self.assertEqual((path / "case.json").read_bytes(), before)
+            with (path / "case.lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                status, value, _ = self.request(route, {"settings": {"include_fees": True}})
+                self.assertEqual(status, 400)
+                self.assertIn("operation is active", value["error"])
+            start.assert_not_called()
+        self.assertEqual((path / "case.json").read_bytes(), before)
+
+    def test_run_hop_allowance_preserves_saved_defaults(self):
+        _, case = self.create()
+        path, metadata = self.server.case(case["id"])
+        settings = {**metadata["run_defaults"], "hops": 4, "max_transactions": 83,
+                    "include_fees": True, "group_context_inputs": True, "center_name": "Treasury"}
+        update_case(path, {"run_defaults": settings})
+        before = (path / "case.json").read_bytes()
+        route = "/api/cases/" + case["id"] + "/actions"
+        with patch.object(self.server, "start_job", return_value={"id": "synthetic"}) as start:
+            self.success(route, {"action": "trace", "hops": 2}, 202)
+            arguments = start.call_args.args[0]
+            self.assertEqual(arguments[arguments.index("--hops") + 1], "2")
+            self.assertEqual(arguments[arguments.index("--max-transactions") + 1], "83")
+            self.assertFalse(start.call_args.kwargs["live"])
+            self.assertEqual((path / "case.json").read_bytes(), before)
+            start.reset_mock()
+            for hops in (True, None, -1, 1.5, "2"):
+                with self.subTest(hops=hops):
+                    self.assertEqual(self.request(route, {"action": "trace", "hops": hops})[0], 400)
+            self.assertEqual(self.request(route, {"action": "trace", "hops": 2, "settings": {}})[0], 400)
+            start.assert_not_called()
+        self.assertEqual((path / "case.json").read_bytes(), before)
+
+    def test_liquid_blockchain_lookup_and_case_creation_round_trip_without_board(self):
+        txid = synthetic_txid()
+        with patch.object(self.server, "start_job", return_value={"id": "synthetic"}) as start:
+            self.success("/api/lookup", {"txids": txid, "blockchain": "liquid"}, 202)
+            self.assertEqual(start.call_args.args[0], ["inspect-txs", "--txids", txid])
+            self.assertTrue(start.call_args.kwargs["live"])
+        info = self.success("/api/cases", {"name": "Liquid without board", "seeds": [txid + ":0"],
+                                           "blockchain": "liquid"}, 201)
+        self.assertEqual(info["blockchain"], "liquid")
+        self.assertFalse(info["fixture"])
+        self.assertIsNone(info["miro_board"])
+        path, metadata = self.server.case(info["id"])
+        self.assertEqual(metadata["blockchain"], "liquid")
+        self.assertEqual(read_json(path / "case.json")["blockchain"], "liquid")
+        self.assertEqual(self.success("/api/cases/" + info["id"])["blockchain"], "liquid")
+        self.assertEqual(self.success("/api/session")["cases"][0]["blockchain"], "liquid")
+        legacy = self.success("/api/cases", {"name": "Legacy linked board", "seeds": [txid + ":0"],
+                                             "blockchain": "liquid", "board": "LEGACY="}, 201)
+        self.assertEqual(legacy["miro_board"], "LEGACY=")
+        self.assertEqual(legacy["blockchain"], "liquid")
+
+    def test_unsupported_blockchain_never_starts_lookup_or_creates_case(self):
+        txid = synthetic_txid()
+        with patch.object(self.server, "start_job") as start, \
+                patch("liquid_tracer.web.create_investigation") as create:
+            for blockchain in ("bitcoin", "ethereum", "fixture", "live", "Liquid", " liquid ", "", None, True, [], {}):
+                for route, body in (("/api/lookup", {"txids": txid}),
+                                    ("/api/cases", {"name": "Unsupported", "seeds": [txid + ":0"]})):
+                    with self.subTest(blockchain=blockchain, route=route):
+                        code, response, _ = self.request(route, {**body, "blockchain": blockchain})
+                        self.assertEqual(code, 400)
+                        self.assertIn("Only Liquid", response["error"])
+            start.assert_not_called()
+            create.assert_not_called()
+        self.assertFalse(self.server.root.exists())
+        self.assertEqual(self.server.jobs, {})
+        self.assertIsNone(self.server.active_job)
+
+    def test_legacy_case_summary_defaults_blockchain_without_changing_saved_bytes(self):
+        _, info = self.create()
+        path, metadata = self.server.case(info["id"])
+        metadata.pop("blockchain")
+        save_json(path / "case.json", metadata)
+        before = (path / "case.json").read_bytes()
+        summary = self.success("/api/cases/" + info["id"])
+        self.assertEqual(summary["blockchain"], "liquid")
+        self.assertTrue(summary["fixture"])
+        self.assertEqual(self.success("/api/session")["cases"][0]["blockchain"], "liquid")
+        self.assertEqual(self.server.case_summary(path, metadata)["blockchain"], "liquid")
+        self.assertEqual((path / "case.json").read_bytes(), before)
+
     def test_new_lookups_and_cases_default_to_live_without_fixture_paths(self):
         txid = synthetic_txid()
         with patch.object(self.server, "start_job", return_value={"id": "synthetic"}) as start:
@@ -127,6 +249,7 @@ class LocalWebTests(unittest.TestCase):
                     info = self.success("/api/cases", {
                         "name": "Live investigation", "seeds": [txid + ":0"], **source}, 201)
                     self.assertFalse(info["fixture"])
+                    self.assertEqual(info["blockchain"], "liquid")
                     _, metadata = self.server.case(info["id"])
                     self.assertIsNone(metadata["fixture"])
         self.assertIsNone(self.server.active_job)

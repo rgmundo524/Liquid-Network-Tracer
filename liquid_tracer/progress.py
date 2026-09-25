@@ -11,10 +11,19 @@ from .layout_search_reporting import layout_search_warning, public_search_counts
 
 
 MESSAGES = {
+    "collecting": "Collecting transaction data",
+    "collection_complete": "Transaction data collection finished",
+    "collection_paused": "Transaction data collection paused",
+    "collection_error": "Transaction data collection stopped",
+    "collection_empty": "No eligible outputs remain to collect",
+    "exporting_collection": "Saving collected transaction data and downloads",
+    "pegout_search": "Tracing toward peg-out requests within the selected hop range",
+    "pegout_paths": "Preparing the matching peg-out paths",
     "address_counts": "Fetching address transaction counts",
     "address_counts_ready": "Address transaction counts are ready",
     "address_counts_incomplete": "Some address counts are unavailable; see the lookup summary",
     "optimizing": "Optimizing the saved graph with ELK",
+    "exporting_plot": "Saving plot previews and transaction CSV",
     "compacting": "Compacting address positions and activity components",
     "preflight": "Checking existing Miro items before making changes",
     "layout": "Preparing the graph layout",
@@ -32,11 +41,21 @@ MESSAGES = {
 }
 
 
+COLLECTION_PHASES = {
+    "collecting": "Processing hop {completed} of {total}",
+    "collection_complete": "Collection finished; last processing hop {completed} of {total}",
+    "collection_paused": "Collection paused while processing hop {completed} of {total}",
+    "collection_error": "Collection stopped while processing hop {completed} of {total}",
+    "collection_empty": "No eligible outputs remain to collect",
+}
+
+
 ELK_STAGES = {
     "preparing": "Preparing the graph for ELK",
     "measuring_input": "Measuring the input layout before ELK",
     "calculating": "Calculating the graph layout with ELK",
     "applying": "Validating ELK coordinates and connector routes",
+    "input_order_fallback": "Preferred connector ordering unavailable; retaining ELK geometry for validation",
     "measuring_output": "Measuring the completed ELK layout",
     "memory_measured": "ELK worker memory measurement completed",
     "ready": "ELK layout completed",
@@ -82,6 +101,8 @@ def public_progress(event):
         return None
     value = {"phase": event["phase"], "completed": done, "total": total,
              "message": MESSAGES[event["phase"]]}
+    if value["phase"] in COLLECTION_PHASES:
+        value["message"] = COLLECTION_PHASES[value["phase"]].format(**value)
     if value["phase"] == "optimizing":
         stage = event.get("stage")
         if isinstance(stage, str) and stage in ELK_STAGES:
@@ -149,6 +170,18 @@ def public_progress(event):
     return value
 
 
+def report_progress(progress, phase, completed=0, total=0):
+    """Advisory observers cannot change collection or its saved evidence."""
+    if progress is None:
+        return
+    value = public_progress({"phase": phase, "completed": completed, "total": total})
+    if value is not None:
+        try:
+            progress(value)
+        except Exception:
+            pass
+
+
 class ProgressReporter:
     """Emit to stderr and optionally a disposable, private IPC file.
 
@@ -162,6 +195,7 @@ class ProgressReporter:
         self.previous_phase = None
         self.previous_stage = None
         self.previous_attempt = None
+        self.previous_completed = None
         self.file_time = self.terminal_time = float("-inf")
 
     def __call__(self, event):
@@ -171,11 +205,14 @@ class ProgressReporter:
         now = time.monotonic()
         urgent = (value["phase"] != self.previous_phase or value.get("stage") != self.previous_stage
                   or value.get("attempt_index") != self.previous_attempt
+                  or (value["phase"] == "collecting" and value["completed"] != self.previous_completed)
                   or value["phase"] == "waiting"
-                  or (value["total"] > 0 and value["completed"] == value["total"]))
+                  or (value["phase"] not in COLLECTION_PHASES and value["total"] > 0
+                      and value["completed"] == value["total"]))
         self.previous_phase = value["phase"]
         self.previous_stage = value.get("stage")
         self.previous_attempt = value.get("attempt_index")
+        self.previous_completed = value["completed"]
         if self.path is not None and (urgent or now - self.file_time >= .1):
             temporary = self.path.with_name(self.path.name + ".tmp")
             try:
@@ -187,11 +224,15 @@ class ProgressReporter:
             except OSError:
                 pass
         if urgent or now - self.terminal_time >= 1:
-            counts = f" ({value['completed']}/{value['total']})" if value["total"] else ""
+            counts = (f" ({value['completed']}/{value['total']})"
+                      if value["total"] and value["phase"] not in COLLECTION_PHASES else "")
             wait = f"; retry in {value['retry_after']:g}s" if "retry_after" in value else ""
             elapsed = f"; {value['elapsed_seconds']:g}s elapsed" if "elapsed_seconds" in value else ""
             try:
-                prefix = ("Counts: " if value["phase"].startswith("address_counts") else
+                prefix = ("Collection: " if value["phase"] in COLLECTION_PHASES or value["phase"] == "exporting_collection" else
+                          "Counts: " if value["phase"].startswith("address_counts") else
+                          "Plot: " if value["phase"] == "exporting_plot" else
+                          "Peg-outs: " if value["phase"].startswith("pegout_") else
                           "ELK: " if value["phase"] in ("optimizing", "compacting") else "Miro: ")
                 print(prefix + value["message"] + counts + wait + elapsed, file=sys.stderr, flush=True)
             except (OSError, ValueError):

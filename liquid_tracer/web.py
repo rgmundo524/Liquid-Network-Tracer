@@ -25,7 +25,7 @@ from urllib.parse import quote, unquote, urlsplit
 from .common import TraceError, read_json
 from .inspection import parse_transaction_hashes
 from .investigations import (create_investigation, default_root, load_settings,
-                             read_case, save_settings, update_case, validate_settings)
+                             read_case, save_plot_settings, save_settings, update_case, validate_blockchain, validate_settings)
 from .menu import _command, _environment, _lookup_reports, _project, _seed_values, _trace_arguments
 from .progress import public_progress
 from .layout_search import MAX_LAYOUT_ATTEMPTS, normalize_layout_attempts
@@ -36,7 +36,7 @@ CASE_ID = re.compile(r"[0-9a-f]{32}")
 RUN_ID = re.compile(r"[a-zA-Z0-9]{16}")
 FRAME_REVIEW_ID = re.compile(r"[0-9a-f]{64}")
 MIRO_ITEM_ID = re.compile(r"[a-zA-Z0-9_][a-zA-Z0-9_-]{0,199}")
-ARTIFACT_DIR = re.compile(r"[a-zA-Z0-9]{16}-(?:csv|mermaid|elk|compact|connections)-[0-9a-f]{8}")
+ARTIFACT_DIR = re.compile(r"[a-zA-Z0-9]{16}-(?:csv|mermaid|elk|compact|connections|pegouts|plots)-[0-9a-f]{8}")
 COMPACTION_DIR = re.compile(r"[a-zA-Z0-9]{16}-compact-[0-9a-f]{8}")
 LEGACY_EXPORT_NAMES = {"nodes.csv", "edges.csv", "inputs.csv", "outputs.csv", "spends.csv",
                        "events.csv", "frontier.csv", "export.json", "SHA256SUMS"}
@@ -49,17 +49,69 @@ COMPACTION_NAMES = LAYOUT_NAMES | {"before.html", "before.svg", "before.json", "
 LAYOUT_ALGORITHMS = ("elk_layered_v1", "dependency_layers_v1")
 FALLBACK_REASONS = ("size_limit", "timeout", "mermaid_size_limit", "mermaid_timeout")
 from .connections import FILES as CONNECTION_NAMES, LEGACY_FILES as LEGACY_CONNECTION_NAMES, preview_files
-CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact", "connections"}
+CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact", "connections", "pegouts", "pegouts-preview", "plot"}
+
+
+def collected_hops(state):
+    """Deepest recorded transaction hop, not a promise of complete coverage.
+
+    Only transaction records in the saved trace count. Prefetched responses,
+    co-input context, and an uncollected frontier do not establish hop coverage.
+    Historical snapshots need no migration; an unknown depth stays unknown.
+    """
+    transactions = state.get("transactions")
+    if not isinstance(transactions, dict) or not transactions:
+        return None
+    maximum = 0
+    for transaction in transactions.values():
+        depth = transaction.get("depth") if isinstance(transaction, dict) else None
+        if type(depth) is not int or not 0 <= depth <= 2 ** 53 - 1:
+            return None
+        maximum = max(maximum, depth)
+    return maximum
+
+
+def public_pegout_search(summary):
+    """Expose the saved query and outcome, never archive paths or API errors."""
+    from .pegouts import SEARCH_ID
+    from .pegout_paths import validate_query
+
+    identity = summary.get("search_id", summary.get("id"))
+    if not isinstance(identity, str) or not SEARCH_ID.fullmatch(identity):
+        raise TraceError("Invalid peg-out search identifier")
+    query = summary.get("query", summary)
+    if not isinstance(query, dict) or ("txid" in query) == ("seeds" in query):
+        raise TraceError("Invalid saved peg-out query")
+    origin = "seeds" if "seeds" in query else "txid"
+    fields = {key: query.get(key) for key in (origin, "min_hops", "max_hops")}
+    if validate_query(**fields) != fields:
+        raise TraceError("Invalid saved peg-out query")
+    value = {"id": identity, "search_id": identity, **fields}
+    for key in ("status", "stop_reason"):
+        field = summary.get(key)
+        if field is None or isinstance(field, str) and re.fullmatch(r"[a-z_]{1,64}", field):
+            value[key] = field
+    for key in ("match_count", "transaction_count"):
+        field = summary.get(key)
+        if type(field) is int and 0 <= field <= 2 ** 53 - 1:
+            value[key] = field
+    for key in ("resumable", "recoverable", "complete", "partial"):
+        if type(summary.get(key)) is bool:
+            value[key] = summary[key]
+    created = summary.get("created_at")
+    if isinstance(created, str) and re.fullmatch(r"[0-9TtZz:+. -]{10,40}", created):
+        value["created_at"] = created
+    return value
 
 
 def public_graph_options(options):
     if not isinstance(options, dict):
         return None
     try:
-        settings = validate_settings({key: options[key] for key in ("group_context_inputs", "hub_addresses") if key in options})
+        settings = validate_settings({key: options[key] for key in ("group_context_inputs", "hub_addresses", "center_name", "color_attribution_arrows") if key in options})
     except TraceError:
         return None
-    result = {key: settings[key] for key in ("group_context_inputs", "hub_addresses")}
+    result = {key: settings[key] for key in ("group_context_inputs", "hub_addresses", "center_name", "color_attribution_arrows")}
     # Old artifacts did not record a search budget. Do not claim the current
     # default was used to calculate those saved coordinates.
     if "layout_attempts" in options:
@@ -352,6 +404,7 @@ class LocalServer(ThreadingHTTPServer):
 
     def case_summary(self, case, metadata, detail=False):
         summary = {"id": metadata["case_id"], "name": metadata.get("name") or case.name,
+                   "blockchain": validate_blockchain(metadata.get("blockchain", "liquid")),
                    "created_at": metadata.get("created_at"), "latest_run": metadata.get("latest_run"),
                    "fixture": bool(metadata.get("fixture")), "miro_board": metadata.get("miro_board"),
                    "run_defaults": validate_settings(metadata.get("run_defaults", {})),
@@ -379,6 +432,12 @@ class LocalServer(ThreadingHTTPServer):
                            "stop_reason": state.get("stop_reason"), "created_at": state.get("started_at"),
                            "transaction_count": stats.get("transactions_cumulative", len(state.get("transactions", {}))),
                            "frontier_count": stats.get("frontier_count", 0)}
+                    limits = state.get("limits", {})
+                    if isinstance(limits, dict) and type(limits.get("max_hops")) is int:
+                        run["max_hops"] = limits["max_hops"]
+                    depth = collected_hops(state)
+                    if depth is not None:
+                        run["collected_hops"] = depth
                     runs.append(run)
                     if path.name == summary["latest_run"]:
                         summary["status"] = run["status"]
@@ -391,8 +450,12 @@ class LocalServer(ThreadingHTTPServer):
             from .cli import miro_recovery_status
             from .board_rebuild import rebuild_status
 
+            summary["seeds"] = list(metadata["seeds"]) if isinstance(metadata.get("seeds"), list) else []
             summary["runs"] = sorted(runs, key=lambda run: (run.get("created_at") or "", run["id"]), reverse=True)
             summary["artifacts"] = self.saved_artifacts(case, metadata, {run["id"] for run in runs})
+            summary["pegout_searches"] = self.pegout_searches(case)
+            from .workflow_api import case_workflow
+            summary.update(case_workflow(case))
             summary["miro_recovery"] = miro_recovery_status(case)
             try:
                 rebuild = rebuild_status(case)
@@ -404,6 +467,45 @@ class LocalServer(ThreadingHTTPServer):
                     if key in {"status", "previous_board_id", "board_id", "run_id", "name", "notice"}
                     and isinstance(value, str)}
         return summary
+
+    def pegout_artifact(self, case, preview_id):
+        from .pegouts import reviewed_pegouts, preview_files as pegout_files
+
+        graph, _ = reviewed_pegouts(case, preview_id)
+        directory = safe_path(case, ["previews", preview_id])
+        identity = read_case(case)["case_id"]
+        product = {"preview_id": preview_id, "downloads": []}
+        for name in sorted(pegout_files(directory)):
+            path = safe_path(case, ["previews", preview_id, name])
+            if not path.is_file():
+                continue
+            url = "/files/" + identity + "/previews/" + quote(preview_id) + "/" + quote(name)
+            product["downloads"].append({"name": name, "url": url})
+            if name == "graph.html":
+                product["preview_url"] = url
+        product.update(public_graph_options(graph.get("graph_options", {})) or {})
+        layout = graph.get("layout", {})
+        metrics = public_layout_metrics(layout.get("metrics")) if isinstance(layout, dict) else None
+        if metrics is not None:
+            product["layout_metrics"] = metrics
+        return product
+
+    def pegout_searches(self, case):
+        from .pegouts import list_pegout_searches
+
+        searches = []
+        for summary in list_pegout_searches(case):
+            try:
+                item = public_pegout_search(summary)
+            except (TraceError, ValueError, TypeError, AttributeError):
+                continue
+            if summary.get("preview_id"):
+                try:
+                    item["artifact"] = self.pegout_artifact(case, summary["preview_id"])
+                except (TraceError, RequestError, OSError, ValueError, TypeError, KeyError):
+                    pass  # Search evidence remains resumable when a preview is stale.
+            searches.append(item)
+        return searches
 
     def saved_artifacts(self, case, metadata, runs):
         """Rediscover complete local products without relying on browser memory.
@@ -474,6 +576,11 @@ class LocalServer(ThreadingHTTPServer):
                     exposed_names = selected_names | LAYOUT_DETAIL_NAMES if kind in ("elk", "compact") else selected_names
                     product = self.artifact_links(case, [folder, directory.name], exposed_names)
                     product["include_fees"] = fees
+                    if kind != "csv":
+                        display_options = public_graph_options(options)
+                        if display_options is None:
+                            continue
+                        product.update(display_options)
                     if kind == "connections":
                         report = info["connections"]
                         product.update(preview_id=directory.name, max_hops=report["max_hops"],
@@ -489,10 +596,6 @@ class LocalServer(ThreadingHTTPServer):
                                 or not isinstance(layout, dict) or layout.get("algorithm") not in LAYOUT_ALGORITHMS):
                             continue
                         product["connector_style"] = style
-                        display_options = public_graph_options(options)
-                        if display_options is None:
-                            continue
-                        product.update(display_options)
                         product.update(public_rendering_metadata({
                             "layout_algorithm": layout.get("algorithm"),
                             "fallback_reason": layout.get("fallback_reason")}))
@@ -554,7 +657,8 @@ class LocalServer(ThreadingHTTPServer):
                                "started_at": time.time(),
                                "cancellable": action in CANCELLABLE_ACTIONS,
                                "message": ("Working. Check the launching terminal if Proton Pass needs to unlock."
-                                           if live else "Preparing the graph and checking missing address counts…"
+                                           if live else "Plotting saved collection data…" if action == "plot"
+                                           else "Preparing the graph and checking missing address counts…"
                                            if action in CANCELLABLE_ACTIONS else "Working with saved local evidence…")}
         self.active_job = identity
         # Keep a bounded history for tabs that remain open. Evidence persists in
@@ -674,6 +778,14 @@ class LocalServer(ThreadingHTTPServer):
             pass
 
     def public_result(self, result, action, case, txids):
+        if action in ("plot", "board-create", "board-link", "board-sync"):
+            from .workflow_api import workflow_result
+            return workflow_result(case, result, action)
+        if action in ("pegouts", "pegouts-preview"):
+            value = public_pegout_search(result)
+            if result.get("preview_id"):
+                value["artifact"] = self.pegout_artifact(case, result["preview_id"])
+            return value
         if action in ("miro-frame-review", "miro-frame-recover"):
             from .cli import board_id
 
@@ -725,7 +837,7 @@ class LocalServer(ThreadingHTTPServer):
                   "created", "reused", "name", "visibility", "new_shapes", "new_connectors", "new_frames",
                   "mapped_frames", "frames_to_remove",
                   "mapped_shapes", "mapped_connectors", "new_items", "updated", "deleted", "moved",
-                  "reattached", "dry_run", "reorganize", "presentation_refreshed", "fee_items_to_remove",
+                  "reattached", "dry_run", "reorganize", "presentation_refreshed", "fee_items_to_remove", "run_notes_to_remove",
                   "existing_items", "items", "runs", "max_items", "remote_preflight_required"}
         value = {key: item for key, item in result.items()
                  if key in fields and (item is None or isinstance(item, (str, int, float, bool)))}
@@ -762,7 +874,7 @@ class LocalServer(ThreadingHTTPServer):
             value["connector_style"] = result["connector_style"]
         options = result.get("graph_options", {})
         if isinstance(options, dict):
-            options = {**options, **{key: result[key] for key in ("group_context_inputs", "hub_addresses", "layout_attempts") if key in result}}
+            options = {**options, **{key: result[key] for key in ("group_context_inputs", "hub_addresses", "center_name", "layout_attempts", "color_attribution_arrows") if key in result}}
             display_options = public_graph_options(options)
             if display_options is not None:
                 value.update({key: item for key, item in display_options.items() if key in options})
@@ -809,6 +921,17 @@ class LocalServer(ThreadingHTTPServer):
         kind = parts[1].split("-")[1]
         if (parts[0] == "exports") != (kind == "csv"):
             raise RequestError("File not found", 404)
+        if kind in ("pegouts", "plots"):
+            if kind == "plots":
+                from .plots import reviewed_plot as review, plot_files as files
+            else:
+                from .pegouts import reviewed_pegouts as review, preview_files as files
+
+            directory = safe_path(case, parts[:2])
+            if parts[2] not in files(directory):
+                raise RequestError("File not found", 404)
+            review(case, parts[1])
+            return safe_path(case, parts)
         expected = {"mermaid": PREVIEW_NAMES, "csv": EXPORT_NAMES | LEGACY_EXPORT_NAMES, "elk": LAYOUT_NAMES,
                     "compact": COMPACTION_NAMES, "connections": CONNECTION_NAMES | LEGACY_CONNECTION_NAMES}[kind]
         if kind in ("elk", "compact", "connections"):
@@ -831,6 +954,65 @@ class LocalServer(ThreadingHTTPServer):
         from .cli import miro_recovery_status, resolve_latest, run_path, verify_export
 
         action = body.get("action")
+        if action in ("plot", "board-create", "board-link", "board-sync"):
+            from .workflow_api import workflow_action
+            return workflow_action(self, case, metadata, body)
+        if action in ("pegouts", "pegouts-preview", "miro-pegouts"):
+            from .pegouts import SEARCH_ID, reviewed_pegouts
+            from .cli import board_id
+
+            live = action == "pegouts" and not bool(metadata.get("fixture"))
+            if action == "pegouts":
+                arguments = ["pegouts", "--case", str(case)]
+                if "resume" in body:
+                    if set(body) != {"action", "resume"}:
+                        raise RequestError("Resume uses the saved peg-out origin and hop range.")
+                    identity = body.get("resume")
+                    if not isinstance(identity, str) or not SEARCH_ID.fullmatch(identity):
+                        raise RequestError("Choose a saved peg-out search to resume.")
+                    if not safe_path(case, ["pegouts", identity]).is_dir():
+                        raise RequestError("Peg-out search not found.")
+                    arguments.extend(["--resume", identity])
+                else:
+                    if set(body) not in ({"action", "min_hops", "max_hops"},
+                                         {"action", "txid", "min_hops", "max_hops"}):
+                        raise RequestError("Choose a hop range and, optionally, a different starting transaction.")
+                    if "txid" in body:
+                        txid = body["txid"]
+                        if not isinstance(txid, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", txid.strip()):
+                            raise RequestError("Enter one transaction hash containing 64 hexadecimal characters.")
+                        arguments.extend(["--txid", txid.strip().lower()])
+                    else:
+                        from .pegout_paths import validate_query
+                        if not metadata.get("seeds"):
+                            raise RequestError("This investigation has no saved seed UTXOs. Select seed outputs or use a different starting transaction.")
+                        validate_query(seeds=metadata.get("seeds"))
+                    lower, upper = body.get("min_hops"), body.get("max_hops")
+                    if (type(lower) is not int or type(upper) is not int
+                            or not 0 <= lower <= upper <= 2147483647):
+                        raise RequestError("Enter whole-number hops from 0 to 2147483647, with minimum no greater than maximum.")
+                    arguments.extend(["--min-hops", str(lower), "--max-hops", str(upper)])
+            elif action == "pegouts-preview":
+                identity = body.get("search_id")
+                if set(body) != {"action", "search_id"} or not isinstance(identity, str) or not SEARCH_ID.fullmatch(identity):
+                    raise RequestError("Choose a saved peg-out search to preview.")
+                if not safe_path(case, ["pegouts", identity]).is_dir():
+                    raise RequestError("Peg-out search not found.")
+                arguments = ["pegouts-preview", "--case", str(case), "--search", identity]
+            else:
+                if set(body) != {"action", "preview_id", "board", "confirm_pegouts"} or body.get("confirm_pegouts") is not True:
+                    raise RequestError("Review the peg-out snapshot and confirm publication to a separate Miro board.")
+                graph, _ = reviewed_pegouts(case, body.get("preview_id"))
+                if not graph.get("nodes"):
+                    raise RequestError("This peg-out snapshot has no matching paths to publish.")
+                target = board_id(body.get("board"))
+                if metadata.get("miro_board") and target == board_id(metadata["miro_board"]):
+                    raise RequestError("Choose a separate Miro board; the full-trace board is protected.")
+                settings = validate_settings(metadata.get("run_defaults", {}))
+                arguments = ["pegouts-publish", "--case", str(case), "--preview", body["preview_id"],
+                             "--board", target, "--max-items", str(settings["max_new_items"])]
+                live = True
+            return self.start_job(arguments, action=action, live=live, case=case)
         if action in ("miro-frame-review", "miro-frame-recover"):
             if action == "miro-frame-review":
                 if set(body) != {"action"}:
@@ -880,8 +1062,16 @@ class LocalServer(ThreadingHTTPServer):
         if action == "trace":
             if selected != "latest":
                 raise RequestError("Continue from the latest saved run.")
+            if "hops" in body:
+                if "settings" in body:
+                    raise RequestError("Choose a run hop allowance or legacy settings, not both.")
+                settings = validate_settings({**settings, "hops": body["hops"]})
             arguments, live = _trace_arguments(case, metadata, settings)
-            update_case(case, {"run_defaults": settings})
+            # Current UI actions use saved defaults and a one-run hop allowance.
+            # Keep explicit legacy API settings compatible without rewriting
+            # defaults every time an ordinary run is started.
+            if "settings" in body:
+                update_case(case, {"run_defaults": settings})
         elif action == "connections":
             from .connections import validate_hops
             hops = validate_hops(body.get("connection_hops", 10))
@@ -1108,8 +1298,11 @@ class Handler(BaseHTTPRequestHandler):
             if mutation:
                 # Only reviewed import routes accept larger, bounded text bodies.
                 is_import = (len(parts) == 4 and parts[:2] == ["api", "cases"]
-                             and parts[3] in ("address-import", "name-color-import", "change-output-import"))
-                body = self.body(4 * 1024 * 1024 if is_import else MAX_BODY)
+                             and parts[3] in ("address-import", "name-color-import", "change-output-import", "input-import"))
+                # Three CSVs may each contain 512 KiB; JSON escaping can expand
+                # their representation. Individual source limits still apply.
+                import_limit = 12 * 1024 * 1024 if is_import and parts[3] == "input-import" else 4 * 1024 * 1024
+                body = self.body(import_limit if is_import else MAX_BODY)
                 with self.server.job_lock:
                     if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "cancel":
                         result, status = self.server.cancel_job(parts[2]), 202
@@ -1152,7 +1345,7 @@ class Handler(BaseHTTPRequestHandler):
             content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             self.send(200, path.read_bytes(), content_type, preview=path.suffix in (".html", ".svg"),
                       download=None if path.suffix == ".html" else path.name,
-                      explorer_links=parts[3].split("-")[1] in ("elk", "compact", "connections") and path.suffix in (".html", ".svg"))
+                      explorer_links=parts[3].split("-")[1] in ("elk", "compact", "connections", "pegouts", "plots") and path.suffix in (".html", ".svg"))
         else:
             path = safe_path(self.server.assets, ["index.html"] if parts == [""] else parts)
             if not path.is_file():
@@ -1162,17 +1355,22 @@ class Handler(BaseHTTPRequestHandler):
     def post(self, parts, body):
         if parts == ["api", "settings"]:
             return {"settings": save_settings(self.server.root, body.get("settings"))}, 200
+        if parts in (["api", "lookup"], ["api", "cases"]):
+            try:
+                blockchain = validate_blockchain(body.get("blockchain", "liquid"))
+            except TraceError as error:
+                raise RequestError(str(error)) from None
         if parts == ["api", "lookup"]:
-            if set(body) - {"txids", "source"}:
-                raise RequestError("Transaction lookup accepts transaction IDs only; not fixture files or custom arguments.")
+            if set(body) - {"txids", "source", "blockchain"}:
+                raise RequestError("Transaction lookup accepts transaction IDs and a supported blockchain only; not fixture files or custom arguments.")
             if body.get("source", "live") != "live":
                 raise RequestError("New transaction lookups use live Liquid data.")
             txids = parse_transaction_hashes(body.get("txids"))
             arguments = ["inspect-txs", "--txids", ",".join(txids)]
             return self.server.start_job(arguments, action="lookup", live=True, txids=txids), 202
         if parts == ["api", "cases"]:
-            if set(body) - {"name", "seeds", "board", "settings", "source"}:
-                raise RequestError("New investigations accept a name, starting outputs, board and settings only; not fixture files.")
+            if set(body) - {"name", "seeds", "board", "settings", "source", "blockchain"}:
+                raise RequestError("New investigations accept a name, blockchain, starting outputs, board and settings only; not fixture files.")
             if body.get("source", "live") != "live":
                 raise RequestError("New investigations use live Liquid data.")
             seeds = body.get("seeds")
@@ -1181,7 +1379,7 @@ class Handler(BaseHTTPRequestHandler):
             normalized = _seed_values(" ".join(seeds))
             settings = validate_settings(body.get("settings", load_settings(self.server.root)))
             case = create_investigation(self.server.root, body.get("name"), seeds=normalized,
-                board=body.get("board") or None, run_defaults=settings)
+                board=body.get("board") or None, run_defaults=settings, blockchain=blockchain)
             return self.server.case_summary(case, read_case(case), detail=True), 201
         if len(parts) == 4 and parts[:2] == ["api", "cases"]:
             case, metadata = self.server.case(parts[2])
@@ -1205,6 +1403,17 @@ class Handler(BaseHTTPRequestHandler):
                         notes=body.get("notes", ""), expected_revision=revision), 200
                 except TraceError as error:
                     raise RequestError(str(error)) from None
+            if parts[3] == "input-import":
+                from .input_import import apply_import, preview_import
+
+                if set(body) - {"files", "approve_plan"}:
+                    raise RequestError("CSV import accepts uploaded files and approval only; not file paths.")
+                try:
+                    result = (apply_import(case, body.get("files"), approval_sha256=body["approve_plan"])
+                              if "approve_plan" in body else preview_import(case, body.get("files")))
+                except TraceError as error:
+                    raise RequestError(str(error)) from None
+                return result, 200
             if parts[3] == "change-output-import":
                 from .change_output_import import apply_import, preview_import
 
@@ -1258,6 +1467,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.server.address_merge_preview(case), 200
             if parts[3] in ("addresses", "address", "services"):
                 return self.address_request(parts[3], case, body), 200
+            if parts[3] == "plot-settings":
+                if set(body) != {"settings"}:
+                    raise RequestError("Saving plot settings requires only a settings object.")
+                try:
+                    updated = save_plot_settings(case, body["settings"])
+                except TraceError as error:
+                    raise RequestError(str(error)) from None
+                return self.server.case_summary(case, updated, detail=True), 200
             if parts[3] == "settings":
                 updates = {"name": body.get("name", metadata.get("name")),
                            "miro_board": body.get("board", metadata.get("miro_board")) or None,

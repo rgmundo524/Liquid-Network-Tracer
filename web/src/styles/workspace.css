@@ -270,7 +270,7 @@ select.input {
 .run-summary {
   padding: 24px;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 16px;
 }
 .run-summary span {
@@ -708,6 +708,10 @@ dialog::backdrop {
   .topbar {
     padding: 0 25px;
   }
+  .job-banner {
+    padding-left: 25px;
+    padding-right: 25px;
+  }
   .form-grid,
   .workspace-grid {
     grid-template-columns: minmax(0, 1fr) 265px;
@@ -939,6 +943,7 @@ dialog::backdrop {
     flex-wrap: wrap;
   }
   .run-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     padding: 22px 17px;
   }
   .run-summary strong {
@@ -971,10 +976,19 @@ dialog::backdrop {
     grid-template-columns: 1fr;
   }
   .job-banner {
-    padding: 15px 13px;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    padding: 12px 19px;
     gap: 10px;
   }
+  .job-actions {
+    grid-column: 2;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+  }
   .job-time {
+    margin-left: 0;
     font-size: 9px;
   }
   .job-banner strong {
@@ -1102,3 +1116,86 @@ dialog::backdrop {
 #name-colors-panel input[type="color"] { width: 46px; height: 36px; padding: 2px; vertical-align: middle; }
 #name-colors-panel input[id^="name-colors-hex-"] { width: 110px; margin-left: 8px; font-family: monospace; }
 #name-colors-panel td { vertical-align: middle; }
+
+/* Keep common actions visible and separate tools by task. */
+.case-navigation, .settings-navigation {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 22px;
+  padding: 6px;
+  background: #eaf1ef;
+  border: 1px solid #dce7e2;
+  border-radius: 10px;
+}
+.case-nav, .settings-navigation a {
+  border: 0;
+  background: transparent;
+  padding: 11px 16px;
+  border-radius: 7px;
+  color: #49645e;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+}
+.case-nav.active, .case-nav:hover, .settings-navigation a:hover {
+  background: #fff;
+  color: #20594a;
+}
+.case-nav.active { box-shadow: 0 1px 4px #173e2514; }
+.case-nav:focus-visible, .settings-navigation a:focus-visible, .tool-details summary:focus-visible {
+  outline: 2px solid #28816a;
+  outline-offset: 2px;
+}
+.workspace-grid { margin-top: 22px; }
+.task-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+.settings-summary { color: #647d75; font-size: 12px; line-height: 1.9; margin: 12px 0 18px; }
+.tool-details { border: 1px solid #dce7e2; border-radius: 9px; background: #fff; }
+.tool-details > summary { padding: 15px; cursor: pointer; font-weight: 600; font-size: 12px; color: #426358; }
+.tool-details > .panel { margin: 0; border: 0; }
+.workspace-aside .tool-details { margin-top: 16px; }
+.action-buttons > p, .action-buttons > .tool-details { grid-column: 1 / -1; }
+.workspace-aside .tool-details > :not(summary) { margin: 10px 14px; }
+.settings-layout { max-width: 1000px; }
+.settings-layout .check-line { margin: 18px 0; }
+.settings-layout [id^="settings-"] { scroll-margin-top: 24px; }
+.settings-save { position: sticky; bottom: 12px; padding: 16px 20px; background: #fff; border: 1px solid #dce7e2; border-radius: 10px; box-shadow: 0 5px 25px #183f261a; z-index: 2; }
+.input-import-file-review { margin-top: 14px; padding: 12px; border: 1px solid #dce7e2; border-radius: 8px; }
+.input-import-file-review summary { cursor: pointer; font-size: 12px; line-height: 1.7; }
+@media (max-width: 650px) {
+  .case-navigation, .settings-navigation { gap: 3px; }
+  .case-nav, .settings-navigation a { padding: 10px; }
+  .settings-save { position: static; }
+}
+
+.workspace-content { display: grid; gap: 22px; margin-top: 22px; min-width: 0; }
+.layout-fields { border: 0; padding: 0; margin: 24px 0 16px; min-width: 0; }
+.layout-fields > legend { font-size: 14px; font-weight: 600; color: #36584d; padding: 0 0 16px; }
+.layout-fields .field-row { margin-bottom: 18px; }
+.full-trace-fields { border-top: 1px solid #e0e9e4; padding-top: 16px; }
+.full-trace-fields > legend { padding: 0 12px 0 0; }
+.layout-fields:disabled { opacity: .65; }
+.plot-goals { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 24px; }
+.plot-goal { text-align: left; background: #fff; border: 1px solid #d9e5df; border-radius: 9px; color: #36584d; padding: 17px; cursor: pointer; }
+.plot-goal strong { display: block; font-size: 13px; margin-bottom: 7px; }
+.plot-goal span { display: block; font-size: 11px; color: #6f877e; line-height: 1.7; }
+.plot-goal.selected { border-color: #28816a; background: #edf7f2; box-shadow: inset 0 0 0 1px #28816a; }
+.plot-goal:focus-visible { outline: 2px solid #28816a; outline-offset: 3px; }
+.board-list { display: grid; gap: 18px; }
+.board-card { min-width: 0; border: 1px solid #d9e5df; border-radius: 10px; overflow: hidden; scroll-margin-top: 160px; }
+.board-card.is-target { border-color: #28816a; box-shadow: 0 0 0 1px #28816a; }
+.board-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 20px; background: #f7faf8; border-bottom: 1px solid #e0e9e4; }
+.board-card-head h3 { margin: 0 0 7px; font-size: 15px; overflow-wrap: anywhere; }
+.board-card-head p { color: #6f877e; font-size: 12px; margin: 0; line-height: 1.7; }
+.board-card-head .board-link { flex-shrink: 0; }
+.board-card-body { padding: 20px; display: grid; gap: 16px; }
+.board-card-body > p, .board-card-body > .field { margin: 0; }
+.board-saved-layout { font-size: 12px; line-height: 1.8; color: #6f877e; overflow-wrap: anywhere; }
+.board-saved-layout strong { color: #36584d; }
+.board-original-tools { padding: 0 20px 20px; }
+.board-original-tools > summary { cursor: pointer; margin-bottom: 16px; }
+.board-original-tools .panel { margin: 0 0 16px; }
+@media (max-width: 760px) { .board-card-head { flex-direction: column; } .board-card .task-actions { align-items: stretch; } .board-card .task-actions .btn { justify-content: center; } }
+.workspace-content .panel-body > p { line-height: 1.8; margin-bottom: 16px; }
+@media (max-width: 760px) { .plot-goals { grid-template-columns: 1fr; } }

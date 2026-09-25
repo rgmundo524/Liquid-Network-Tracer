@@ -131,10 +131,10 @@ test('reviewed import applies exact contents and policy only after approval', as
   });
   await open(ctx); await importOpen(ctx); edit('text', `Txid,ChangeVout,Notes\n${txid},0,Assessment`);
   await apply(ctx); assert.equal(calls.length, 1);
-  await preview(ctx); await apply(ctx); assert.equal(calls.length, 2);
+  await preview(ctx); assert.equal(calls.length, 2);
+  assert.doesNotMatch(panel('case A', false), /change-outputs-import-approved/);
   assert.equal(calls[1].path, '/api/cases/case%20A/change-output-import');
-  assert.equal(calls[1].body.policy, 'keep');
-  edit('import-approved', '', true); await apply(ctx);
+  assert.equal(calls[1].body.policy, 'keep'); await apply(ctx);
   assert.deepEqual(calls[2].body, {...calls[1].body, approve_plan: 'review-hash'});
   assert.match(panel('case A', false), /Saved 1 change-output annotation/);
   await apply(ctx); assert.equal(calls.length, 4);
@@ -144,10 +144,9 @@ for (const [id, value, checked] of [['text', 'Changed', false], ['format', 'json
   test(`editing import ${id} invalidates preview and approval`, async () => {
     let calls = 0;
     const ctx = context(async () => {calls += 1; return review();});
-    await importOpen(ctx); await preview(ctx); edit('import-approved', '', true);
+    await importOpen(ctx); await preview(ctx);
     edit(id, value, checked); await apply(ctx);
     assert.equal(calls, 1); assert.equal(nodes.get('#change-outputs-import-apply').disabled, true);
-    assert.equal(nodes.get('#change-outputs-import-approved').checked, false);
   });
 }
 
@@ -155,7 +154,7 @@ test('invalid review escapes errors and notes, cannot apply, and paginates', asy
   const changes = Array.from({length: 101}, (_, index) => ({...review().changes[0], row: index + 2}));
   const ctx = context(async (_path, body) => 'query' in body ? catalog() : review({valid: false, approval_sha256: null,
     changes, unique_transactions: 101, errors: [{row: 2, message: '<script>bad output</script>'}]}));
-  await open(ctx); await importOpen(ctx); await preview(ctx); edit('import-approved', '', true); await apply(ctx);
+  await open(ctx); await importOpen(ctx); await preview(ctx); await apply(ctx);
   let html = panel('case A', false);
   assert.match(html, /&lt;script&gt;bad output&lt;\/script&gt;/);
   assert.match(html, /&lt;script&gt;note&lt;\/script&gt;/);
@@ -168,9 +167,7 @@ test('late preview responses cannot restore approval after newer edits or a case
   const response = deferred(); const ctx = context(() => response.promise);
   const work = preview(ctx); assert.equal(pending(), true);
   edit('text', 'Newer content'); response.resolve(review()); await work;
-  assert.equal(pending(), false);
-  edit('import-approved', '', true); await apply(ctx);
-  assert.equal(nodes.get('#change-outputs-import-approved').checked, false);
+  assert.equal(pending(), false); await apply(ctx);
   const another = deferred(); const work2 = preview(context(() => another.promise));
   reset('case B'); reset('case A'); another.resolve(review()); await work2;
   await open(); await importOpen(context()); assert.doesNotMatch(panel('case A', false), /unique transactions:/);
@@ -214,7 +211,7 @@ test('successful apply stays reported if list refresh fails; approval is consume
     if ('query' in body) {if (calls > 1) throw new Error('Connection interrupted'); return catalog();}
     return 'approve_plan' in body ? {changed: 1} : review();
   });
-  await open(ctx); await importOpen(ctx); await preview(ctx); edit('import-approved', '', true); await apply(ctx);
+  await open(ctx); await importOpen(ctx); await preview(ctx); await apply(ctx);
   assert.match(panel('case A', false), /Saved 1 change-output annotation/);
   assert.match(panel('case A', false), /list could not refresh: Connection interrupted/);
   const count = calls; await apply(ctx); assert.equal(calls, count);
@@ -227,7 +224,7 @@ test('late apply or saved-list responses cannot overwrite a different case', asy
     if ('query' in body) {refreshed = true; return catalog();}
     return review();
   });
-  await preview(ctx); edit('import-approved', '', true); const work = apply(ctx);
+  await preview(ctx); const work = apply(ctx);
   reset('case B'); response.resolve({changed: 1}); await work;
   assert.equal(refreshed, false);
   await open({...context(), caseId: 'case B'}); assert.doesNotMatch(panel('case B', false), /Saved 1/);

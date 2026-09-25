@@ -8,10 +8,12 @@ geometry. They do not add evidence, move objects, or change connections.
 import math
 from bisect import bisect_left
 from collections import Counter, defaultdict
+from .hub_layout import hub_layout_view
 
 
 def _structure(graph):
     """Read optional lineage metadata; old or malformed exports stay neutral."""
+    graph = hub_layout_view(graph)
     metadata = graph.get("branch_structure")
     if (not isinstance(metadata, dict) or type(metadata.get("version")) is not int
             or metadata.get("version") != 1):

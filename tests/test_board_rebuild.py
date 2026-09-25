@@ -93,6 +93,11 @@ class BoardRebuildTests(unittest.TestCase):
         self.refresh.assert_not_called()
         self.remote.assert_not_called()
 
+    def test_rebuild_uses_current_attribution_arrow_preference(self):
+        update_case(self.case, {"run_defaults": {"color_attribution_arrows": True}})
+        self.rebuild()
+        self.assertTrue(self.refresh.call_args.kwargs["color_attribution_arrows"])
+
     def test_missing_token_invalid_options_and_stale_source_never_create(self):
         with patch.dict(os.environ, {}, clear=True), self.assertRaisesRegex(TraceError, "MIRO_ACCESS_TOKEN"):
             self.rebuild()

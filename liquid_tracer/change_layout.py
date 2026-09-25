@@ -12,6 +12,7 @@ from bisect import bisect_left
 from collections import defaultdict
 
 from .common import output_kind
+from .connector_styles import routed_shape
 from .edge_labels import translate_label
 from .input_order import centered_input_positions
 
@@ -300,7 +301,7 @@ def _routes(graph, nodes, original, aligned):
             # Keep the established exception contract used by Miro/compaction.
             reason = "unchecked"
         edge.update(attachment=attachment, route=route, routing_exception=reason,
-                    connector_shape="elbowed" if reason else graph.get("graph_options", {}).get("connector_style", "straight"))
+                    connector_shape=routed_shape(graph.get("graph_options", {}).get("connector_style", "straight"), reason))
         # ELK's horizontal label clearance remains, but this new route needs a
         # fresh midpoint caption position instead of its old ELK coordinates.
         edge.pop("label_layout", None)
@@ -362,7 +363,7 @@ def apply_change_layout(graph):
         graph["layout"]["main_top"] = min(node["y"] - node["height"] / 2 for node in main.values())
         graph["layout"]["main_bottom"] = max(node["y"] + node["height"] / 2 for node in main.values())
         style = graph.get("graph_options", {}).get("connector_style", "straight")
-        graph["layout"]["routing_exceptions"] = sum(bool(edge.get("routing_exception")) and style != "elbowed" for edge in edges.values())
+        graph["layout"]["routing_exceptions"] = sum(edge.get("connector_shape", style) != style for edge in edges.values())
     graph["layout"]["change_outputs"] = {
         "algorithm": "explicit_change_rows_v1", "applied": [proposal["entry"] for proposal in proposals],
         "skipped": skipped, "locked_nodes": sorted({key for proposal in proposals for key in proposal["row"] + proposal["below"]}),

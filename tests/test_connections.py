@@ -13,7 +13,8 @@ from liquid_tracer.connections import (connection_graph, connecting_outpoints, p
 from liquid_tracer.export import build_graph
 from liquid_tracer.investigations import create_investigation, read_case, update_case
 from liquid_tracer.miro import make_plan, validate_plan, _namespace
-from liquid_tracer.services import set_service
+from liquid_tracer.services import load_services, set_service
+from liquid_tracer.name_colors import set_name_colors
 from tests.test_attribution_convergence import graph_state, annotation, tx
 from tests.test_branch_interactions import shared_state, receiving
 from tests.fixtures import output
@@ -201,6 +202,39 @@ class ConnectionPreviewTests(unittest.TestCase):
         with patch("liquid_tracer.miro.publish", side_effect=AssertionError("no board writes")):
             self.assertEqual(publish_connections(self.case, result["preview_id"], "unused")["items"], 0)
         self.assertFalse((self.case/"miro").exists())
+
+    def test_current_arrow_preference_colors_connections_and_invalidates_old_preview(self):
+        set_service(self.case, "SYNTHETIC-c-address", name="Exchange", stop_tracing=False)
+        set_name_colors(self.case, [{"name": "Exchange", "color": "#123456"}],
+                        expected_revision=load_services(self.case)["revision"])
+        original = preview_connections(self.case, max_hops=2)
+        self.assertFalse(original["color_attribution_arrows"])
+        update_case(self.case, {"run_defaults": {"color_attribution_arrows": True}})
+        with self.assertRaisesRegex(TraceError, "changed"):
+            reviewed_connections(self.case, original["preview_id"])
+        result = preview_connections(self.case, max_hops=2)
+        graph, _ = reviewed_connections(self.case, result["preview_id"])
+        self.assertTrue(result["color_attribution_arrows"])
+        self.assertTrue(graph["graph_options"]["color_attribution_arrows"])
+        named = {node["id"] for node in graph["nodes"] if node.get("color_source") == "name"}
+        self.assertTrue(named)
+        attached = [edge for edge in graph["edges"] if {edge["source"], edge["target"]} & named]
+        self.assertEqual(len(attached), 2)
+        self.assertEqual({edge["color"] for edge in attached}, {"#123456"})
+
+    def test_center_group_change_invalidates_review_and_preserves_path_evidence(self):
+        with patch("liquid_tracer.elk_layout.optimize_graph", side_effect=lambda graph, **kw: graph):
+            original = preview_connections(self.case, max_hops=2)
+            previous, _ = reviewed_connections(self.case, original["preview_id"])
+            update_case(self.case, {"run_defaults": {"center_name": "Example Exchange"}})
+            with self.assertRaisesRegex(TraceError, "changed"):
+                reviewed_connections(self.case, original["preview_id"])
+            result = preview_connections(self.case, max_hops=2)
+        graph, _ = reviewed_connections(self.case, result["preview_id"])
+        self.assertEqual(result["center_name"], "Example Exchange")
+        self.assertEqual(graph["graph_options"]["center_name"], "Example Exchange")
+        self.assertEqual(graph["edges"], previous["edges"])
+        self.assertEqual(graph["connections"], previous["connections"])
 
     def test_stale_settings_and_modified_previews_fail_closed(self):
         result = preview_connections(self.case, max_hops=2)

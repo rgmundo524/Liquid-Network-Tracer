@@ -162,6 +162,11 @@ def reusable_elk_preview(graph, directory, connector_style="straight", progress=
                     or saved.get("graph_options", {}).get("layout_attempts") != attempts
                     or _fingerprint(saved) != expected):
                 continue
+            # Older curved previews forced routing exceptions to elbowed pipes.
+            # Recalculate those layouts without invalidating other appearances.
+            if connector_style == "curved" and any(edge.get("connector_shape") != "curved"
+                                                   for edge in saved["edges"]):
+                continue
             report = read_json(path / "layout-report.json")
             if (report.get("run_id") != run_id or report.get("layout") != layout
                     or report.get("node_count") != len(saved["nodes"])

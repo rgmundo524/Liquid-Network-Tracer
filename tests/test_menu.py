@@ -455,6 +455,29 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertEqual(app.screen.case, case)
 
+    async def test_run_settings_shortcut_and_color_editor_preserve_form_edits(self):
+        from textual.widgets import Input
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run") as process:
+            async with app.run_test(size=(110, 55)) as pilot:
+                case = await self.new_case(app, pilot)
+                await self.click(app, pilot, "#run")
+                self.assertFalse(app.screen.query("#max_transactions"))
+                await self.click(app, pilot, "#form-settings")
+                form = app.screen
+                form.query_one("#hops", Input).value = "6"
+                await self.click(app, pilot, "#form-colors")
+                await pilot.press("escape")
+                await pilot.pause()
+                self.assertIs(app.screen, form)
+                self.assertEqual(form.query_one("#hops", Input).value, "6")
+                await self.click(app, pilot, "#submit")
+                self.assertEqual(app.screen.case, case)
+                self.assertEqual(read_case(case)["run_defaults"]["hops"], 6)
+                await self.click(app, pilot, "#run")
+                self.assertEqual(app.screen.query_one("#hops", Input).value, "6")
+                process.assert_not_called()
+
     async def test_arrow_buttons_and_enter_work_without_taking_over_form_controls(self):
         from textual.widgets import Button, Checkbox, Input, Select, TextArea
         app = create_app(self.root)
@@ -492,6 +515,8 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(seeds.cursor_location, (1, 2))
                 self.assertIs(app.focused, seeds)
 
+                await self.click(app, pilot, "#cancel")
+                await self.click(app, pilot, "#settings")
                 connector = app.screen.query_one("#connector-style", Select)
                 connector.focus()
                 await pilot.press("enter", "down", "enter")
@@ -517,15 +542,24 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         with patch("liquid_tracer.menu.subprocess.run") as process:
             async with app.run_test(size=(80, 24)) as pilot:
                 case = await self.new_case(app, pilot, board="")
-                for selector in ("#mermaid", "#csv", "#elk-preview", "#layout"):
+                for selector in ("#mermaid", "#csv", "#elk-preview", "#layout", "#workflow-plot"):
                     self.assertTrue(app.screen.query_one(selector, Button).disabled)
                 run = app.screen.query_one("#run", Button)
                 run.focus()
                 await pilot.press("right")
                 self.assertEqual(app.focused.id, "review")
                 await pilot.press("left", "down")
+                self.assertEqual(app.focused.id, "workflow-boards")
+                await pilot.press("down")
                 self.assertEqual(app.focused.id, "preview")
                 await pilot.press("down")
+                self.assertEqual(app.focused.id, "pegouts")
+                self.assertFalse(app.focused.disabled)
+                await pilot.press("down")
+                self.assertEqual(app.focused.id, "addresses-review")
+                await pilot.press("down")
+                self.assertEqual(app.focused.id, "name-colors")
+                await pilot.press("left")
                 self.assertEqual(app.focused.id, "addresses-import")
                 await pilot.press("down")
                 self.assertEqual(app.focused.id, "change-outputs")
@@ -605,7 +639,8 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(restarted.screen.case, case)
                 snapshot = {p.relative_to(case): p.read_bytes() for p in case.rglob("*") if p.is_file()}
                 await self.click(restarted, pilot, "#preview")
-                self.assertEqual(restarted.screen.query_one("#board", Input).value, "DEMO=")
+                self.assertEqual(restarted.screen.metadata["miro_board"], "DEMO=")
+                self.assertFalse(restarted.screen.query("#board"))
                 await self.click(restarted, pilot, "#submit")
                 await self.finish_action(restarted, pilot)
                 self.assertEqual(snapshot, {p.relative_to(case): p.read_bytes() for p in case.rglob("*") if p.is_file()})
@@ -618,7 +653,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 state = read_json(case / "runs" / second / "trace.json")
                 self.assertEqual(state["parent_run"], first)
                 self.assertEqual(state["limits"]["max_hops"], 3)
-                self.assertEqual(read_case(case)["run_defaults"]["hops"], 2)
+                self.assertEqual(read_case(case)["run_defaults"]["hops"], 1)
                 self.assertEqual(original, {p.relative_to(first_path): p.read_bytes() for p in first_path.rglob("*") if p.is_file()})
         self.assertEqual(len(commands), 3)
         self.assertTrue(all(command[command.index("--case") + 1] == str(case) for command in commands))
@@ -898,10 +933,14 @@ finally:
                 app.screen.query_one("#max_requests", Input).value = "12"
                 self.assertFalse(app.screen.query_one("#include-fees", Checkbox).value)
                 app.screen.query_one("#include-fees", Checkbox).value = True
+                self.assertFalse(app.screen.query_one("#color-attribution-arrows", Checkbox).value)
+                app.screen.query_one("#color-attribution-arrows", Checkbox).value = True
                 self.assertFalse(app.screen.query_one("#group-context-inputs", Checkbox).value)
                 app.screen.query_one("#group-context-inputs", Checkbox).value = True
                 self.assertEqual(app.screen.query_one("#hub-addresses", TextArea).text, "")
                 app.screen.query_one("#hub-addresses", TextArea).text = f" {hub_address}\n{hub_address} "
+                self.assertEqual(app.screen.query_one("#center-name", Input).value, "")
+                app.screen.query_one("#center-name", Input).value = "  Treasury Group  "
                 self.assertEqual(app.screen.query_one("#connector-style", Select).value, "straight")
                 app.screen.query_one("#connector-style", Select).value = "curved"
                 await self.click(app, pilot, "#submit")
@@ -909,30 +948,44 @@ finally:
                 self.assertEqual(load_settings(self.root)["hops"], 3)
                 self.assertEqual(load_settings(self.root)["layout_attempts"], 75)
                 self.assertIs(load_settings(self.root)["include_fees"], True)
+                self.assertIs(load_settings(self.root)["color_attribution_arrows"], True)
                 self.assertIs(load_settings(self.root)["group_context_inputs"], True)
                 self.assertEqual(load_settings(self.root)["hub_addresses"], [hub_address])
+                self.assertEqual(load_settings(self.root)["center_name"], "Treasury Group")
                 case = await self.new_case(app, pilot)
                 self.assertEqual(read_case(case)["run_defaults"]["max_requests"], 12)
                 self.assertEqual(read_case(case)["run_defaults"]["layout_attempts"], 75)
                 self.assertEqual(read_case(case)["run_defaults"]["connector_style"], "curved")
                 self.assertIs(read_case(case)["run_defaults"]["include_fees"], True)
+                self.assertIs(read_case(case)["run_defaults"]["color_attribution_arrows"], True)
                 self.assertIs(read_case(case)["run_defaults"]["group_context_inputs"], True)
                 self.assertEqual(read_case(case)["run_defaults"]["hub_addresses"], [hub_address])
+                self.assertEqual(read_case(case)["run_defaults"]["center_name"], "Treasury Group")
+                self.assertIn("Center named group: Treasury Group", str(app.screen.query_one("#case-summary", Static).render()))
                 self.assertIn("Transaction fee flows: included", str(app.screen.query_one("#case-summary", Static).render()))
                 self.assertIn("Isolated context inputs: grouped", str(app.screen.query_one("#case-summary", Static).render()))
+                self.assertIn("Color arrows by attribution: on", str(app.screen.query_one("#case-summary", Static).render()))
                 await self.click(app, pilot, "#run")
+                self.assertFalse(app.screen.query("#color-attribution-arrows"))
+                self.assertIs(app.screen.read_limits()["color_attribution_arrows"], True)
                 self.assertIs(app.screen.read_limits()["group_context_inputs"], True)
                 self.assertEqual(app.screen.read_limits()["layout_attempts"], 75)
                 self.assertFalse(app.screen.query("#layout_attempts"))
                 self.assertEqual(app.screen.read_limits()["hub_addresses"], [hub_address])
                 self.assertFalse(app.screen.query("#hub-addresses"))
+                self.assertFalse(app.screen.query("#center-name"))
+                self.assertEqual(app.screen.read_limits()["center_name"], "Treasury Group")
                 await self.click(app, pilot, "#cancel")
                 await self.click(app, pilot, "#case-settings")
                 self.assertTrue(app.screen.query_one("#include-fees", Checkbox).value)
+                self.assertTrue(app.screen.query_one("#color-attribution-arrows", Checkbox).value)
+                app.screen.query_one("#color-attribution-arrows", Checkbox).value = False
                 self.assertTrue(app.screen.query_one("#group-context-inputs", Checkbox).value)
                 app.screen.query_one("#group-context-inputs", Checkbox).value = False
                 self.assertEqual(app.screen.query_one("#hub-addresses", TextArea).text, hub_address)
                 app.screen.query_one("#hub-addresses", TextArea).text = ""
+                self.assertEqual(app.screen.query_one("#center-name", Input).value, "Treasury Group")
+                app.screen.query_one("#center-name", Input).value = ""
                 self.assertEqual(app.screen.query_one("#connector-style", Select).value, "curved")
                 app.screen.query_one("#connector-style", Select).value = "elbowed"
                 app.screen.query_one("#include-fees", Checkbox).value = False
@@ -950,8 +1003,12 @@ finally:
                 self.assertEqual(saved["run_defaults"]["connector_style"], "elbowed")
                 self.assertEqual(load_settings(self.root)["connector_style"], "curved")
                 self.assertIs(saved["run_defaults"]["include_fees"], False)
+                self.assertIs(saved["run_defaults"]["color_attribution_arrows"], False)
+                self.assertIs(load_settings(self.root)["color_attribution_arrows"], True)
                 self.assertIs(saved["run_defaults"]["group_context_inputs"], False)
                 self.assertEqual(saved["run_defaults"]["hub_addresses"], [])
+                self.assertEqual(saved["run_defaults"]["center_name"], "")
+                self.assertEqual(load_settings(self.root)["center_name"], "Treasury Group")
                 self.assertEqual(load_settings(self.root)["hub_addresses"], [hub_address])
                 self.assertIs(load_settings(self.root)["group_context_inputs"], True)
                 self.assertIn("Transaction fee flows: hidden", str(app.screen.query_one("#case-summary", Static).render()))
@@ -966,12 +1023,13 @@ finally:
                 await pilot.pause()
                 await self.click(restarted, pilot, "#case-settings")
                 self.assertFalse(restarted.screen.query_one("#include-fees", Checkbox).value)
+                self.assertFalse(restarted.screen.query_one("#color-attribution-arrows", Checkbox).value)
                 self.assertFalse(restarted.screen.query_one("#group-context-inputs", Checkbox).value)
                 self.assertEqual(restarted.screen.query_one("#connector-style", Select).value, "elbowed")
                 self.assertEqual(restarted.screen.query_one("#layout_attempts", Input).value, "100")
                 process.assert_not_called()
 
-    async def test_new_case_fee_checkbox_and_legacy_settings_ignore_later_global_defaults(self):
+    async def test_new_case_inherits_defaults_and_legacy_settings_ignore_later_changes(self):
         from textual.widgets import Checkbox, Input, Static
         case = create_investigation(self.root, "Legacy defaults")
         metadata = read_case(case)
@@ -983,9 +1041,10 @@ finally:
         with patch("liquid_tracer.menu.subprocess.run") as process:
             async with app.run_test(size=(110, 55)) as pilot:
                 await self.click(app, pilot, "#new")
-                self.assertTrue(app.screen.query_one("#include-fees", Checkbox).value)
-                self.assertEqual(app.screen.query_one("#hops", Input).value, "9")
-                app.screen.query_one("#include-fees", Checkbox).value = False
+                self.assertTrue(app.screen.settings["include_fees"])
+                self.assertEqual(app.screen.settings["hops"], 9)
+                self.assertFalse(app.screen.query("#include-fees"))
+                self.assertFalse(app.screen.query("#hops"))
                 await self.click(app, pilot, "#cancel")
                 await self.click(app, pilot, "#continue")
                 await pilot.press("enter")
@@ -1032,7 +1091,8 @@ finally:
                 await pilot.pause()
                 self.assertFalse(app.screen.query_one("#layout", Button).disabled)
                 await self.click(app, pilot, "#layout")
-                self.assertEqual(app.screen.query_one("#board", Input).value, "DEMO=")
+                self.assertEqual(app.screen.metadata["miro_board"], "DEMO=")
+                self.assertFalse(app.screen.query("#board"))
                 self.assertEqual(app.focused.id, "cancel")
                 self.assertIn("replaces their current positions", str(app.screen.query_one("#layout-notice", Static).render()))
                 self.assertIn("hidden", str(app.screen.query_one("#fee-status", Static).render()))
@@ -1197,7 +1257,8 @@ finally:
                 self.assertIn("https://miro.com/app/board/CREATED=/",
                               str(restarted.screen.query_one("#case-summary", Static).render()))
                 await self.click(restarted, pilot, "#preview")
-                self.assertEqual(restarted.screen.query_one("#board", Input).value, "CREATED=")
+                self.assertEqual(restarted.screen.metadata["miro_board"], "CREATED=")
+                self.assertFalse(restarted.screen.query("#board"))
                 await pilot.press("enter")
                 await pilot.pause()
                 process.assert_not_called()

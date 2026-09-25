@@ -21,12 +21,15 @@ def _emit(report, event):
 
 def _request(request, index):
     # A larger search preserves the previous seeds and their profile choices.
-    profile = "balanced" if len(request["children"]) <= 300 and index == 1 else "flow_weighted"
-    # Keep the first and every odd attempt unconstrained. Boundary ordering is
-    # another candidate within the existing budget, independent of placement
-    # profile and worker completion order.
+    ordered = bool(request.get("branchNodeOrder")) and not request.get("centerNodeOrder") and index % 2 == 1
+    profile = ("balanced" if len(request["children"]) <= 300
+               and index == (2 if request.get("branchNodeOrder") else 1)
+               and not request.get("centerNodeOrder") else "flow_weighted")
+    # Start with coherent local branches, including a one-attempt search.
+    # Alternate with unconstrained ELK so genuine joins can choose a better
+    # arrangement. The stable prefix and configured attempt budget are retained.
     return {**request, "branchProfile": profile,
-            "boundaryOrdering": bool(request.get("branchNodeOrder")) and index % 2 == 0}
+            "boundaryOrdering": ordered}
 
 
 def _batch(request, jobs, worker, progress_for_attempt, worker_count, total_heap_mb, heap_mb):

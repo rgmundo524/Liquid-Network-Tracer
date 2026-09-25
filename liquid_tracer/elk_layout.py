@@ -19,6 +19,7 @@ from concurrent.futures import CancelledError
 from pathlib import Path
 
 from .common import TraceError
+from .connector_styles import routed_shape
 from .elk_errors import ELK_FATAL_FAILURE_CODES, ElkWorkerFailure
 from .elk_parallel import POLL_SECONDS, iter_attempts
 from .processes import defer_cancellation_during_spawn
@@ -33,6 +34,9 @@ from .layout_search import LAYOUT_SEARCH_VERSION, layout_seeds, normalize_layout
 from .branch_layout import (BRANCH_LAYOUT_VERSION, edge_priorities, organization_metrics,
                             compact_context_inputs, hub_nodes)
 from .branch_boundaries import branch_order, boundary_metrics
+from .named_group_layout import (CORE_STRAIGHTNESS, center_order, center_metrics, group_structure)
+from .transaction_neighborhoods import neighborhood_order, neighborhood_metrics
+from .hub_layout import hub_plan, hub_layout_view
 
 
 ALGORITHM = "elk_layered_v1"
@@ -339,6 +343,11 @@ def _worker(graph, seeds, progress=None, *, heap_mb=None, cancel_event=None):
                or candidate.get("branchBoundary", False) != expected_boundary
                for candidate in result["candidates"]):
             raise ValueError("invalid branch boundary ordering result")
+        if any(candidate.get("inputOrderPolicy") == "geometry"
+               and candidate.get("inputOrderFallback") == "traced_first_order_not_preserved"
+               for candidate in result["candidates"]):
+            _report_progress(progress, "Preferred connector ordering unavailable; retaining ELK geometry for validation",
+                             stage="input_order_fallback")
         peak_rss_mb = renderer_peak_rss_mb(errors)
         if peak_rss_mb is not None:
             _report_progress(progress, f"Measured ELK worker peak RAM: {peak_rss_mb:,} MiB",
@@ -359,15 +368,18 @@ def _worker(graph, seeds, progress=None, *, heap_mb=None, cancel_event=None):
 
 
 def _request_graph(graph):
+    original = graph
+    graph = hub_layout_view(graph)
+    # Source-first layering keeps independent hub spenders in a vertical
+    # column even when some output branches terminate earlier than others.
+    hub_layering = ({"elk.layered.layering.strategy": "LONGEST_PATH_SOURCE"}
+                    if hub_plan(graph)["hubs"] else {})
     nodes = {node["id"]: node for node in graph["nodes"]}
     fee_ids = {key for key, item in graph.get("fee_items", {}).items() if item["endpoint"] == "shapes"}
     main = {key: node for key, node in nodes.items() if key not in fee_ids}
-    hubs = hub_nodes(graph) & main.keys()
-    # A selected busy address gets its own entry lane, preserving a single
-    # identity. Its incoming funds remain explicit return connections. Other
-    # nodes keep their recorded transaction-dependency partitions unchanged.
-    hub_column = min((node["column"] for node in main.values()), default=0) - 1
-    columns = {key: hub_column if key in hubs else node["column"] for key, node in main.items()}
+    # Explicit hubs restart presentation depth. The temporary view retains
+    # every object and connector; original dependency columns remain saved.
+    columns = {key: node["column"] for key, node in main.items()}
     children, port_map = {}, {}
     for key, node in sorted(main.items()):
         children[key] = {"id": key, "width": node["width"], "height": node["height"], "ports": [],
@@ -375,6 +387,9 @@ def _request_graph(graph):
                                            "elk.portConstraints": "FIXED_SIDE"}}
     edge_values = []
     priorities = edge_priorities(graph)
+    centered = group_structure(graph)
+    for key in centered["edges"]:
+        priorities[key] = max(priorities[key], CORE_STRAIGHTNESS)
     main_edges = sorted((edge for edge in graph["edges"] if edge["source"] in main and edge["target"] in main),
                         key=lambda edge: edge["id"])
     for index, edge in enumerate(main_edges):
@@ -402,7 +417,9 @@ def _request_graph(graph):
             item["labels"] = [{"id": "label:" + edge["id"], "text": "caption", **caption_size(edge),
                                "layoutOptions": {"elk.edgeLabels.placement": "CENTER"}}]
         edge_values.append(item)
-    ordered_nodes = branch_order(graph)
+    ordered_nodes = neighborhood_order(graph, branch_order(graph))
+    centered_order = center_order(graph, ordered_nodes, centered)
+    center_metadata = {"centerNodeOrder": centered_order} if centered_order is not None else {}
     boundary_order = ({"branchNodeOrder": [key for key in ordered_nodes if key in main]}
                       if ordered_nodes is not None else {})
     return {"id": "liquid-layout", "layoutOptions": {
@@ -416,18 +433,27 @@ def _request_graph(graph):
         "elk.layered.nodePlacement.strategy": "BRANDES_KOEPF",
         "elk.layered.nodePlacement.favorStraightEdges": "true",
         "elk.layered.edgeLabels.sideSelection": "ALWAYS_UP", "elk.spacing.edgeLabel": "7",
-        "elk.padding": "[top=0,left=0,bottom=0,right=0]"},
+        "elk.padding": "[top=0,left=0,bottom=0,right=0]", **hub_layering},
         "children": list(children.values()), "edges": edge_values,
         "branchOrganization": BRANCH_LAYOUT_VERSION,
         **boundary_order,
+        **center_metadata,
         "inputPortOrders": {key: [port_map[edge_id][1] for edge_id in order]
-                            for key, order in input_orders(graph).items()}}, port_map, fee_ids
+                            for key, order in input_orders(original).items()}}, port_map, fee_ids
 
 
 def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
     input_policy = candidate.get("inputOrderPolicy", "traced_first")
     if input_policy not in ("traced_first", "geometry"):
         raise TraceError("ELK returned an invalid input ordering policy")
+    input_fallback = candidate.get("inputOrderFallback")
+    if "inputOrderFallback" in candidate and (
+            input_policy != "geometry" or input_fallback != "traced_first_order_not_preserved"):
+        raise TraceError("ELK returned an invalid input ordering fallback")
+    if "inputOrderRejected" in candidate and (
+            "inputOrderFallback" in candidate or candidate.get("inputOrderPolicy") != "traced_first"
+            or candidate["inputOrderRejected"] != "traced_first_order_not_preserved"):
+        raise TraceError("ELK returned an invalid rejected input ordering alternative")
     boundary_ordering = candidate.get("branchBoundary", False)
     if type(boundary_ordering) is not bool:
         raise TraceError("ELK returned an invalid branch boundary ordering policy")
@@ -505,7 +531,7 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
             edge["label_layout"] = {**label, "route_signature": route_signature([(p["x"], p["y"]) for p in route])}
         returns = b["x"] <= a["x"] or segment_hits_node(a, b, source) or segment_hits_node(a, b, target)
         reason = "return" if returns else ("fee" if target["id"] in fee_ids else None)
-        edge.update(attachment=attachment, route=route, connector_shape="elbowed" if reason else connector_style,
+        edge.update(attachment=attachment, route=route, connector_shape=routed_shape(connector_style, reason),
                     routing_exception=reason)
     # A bounded sweep finds straight-line obstructions. If it reaches its work
     # limit, retain ELK's routed paths for the unchecked edges conservatively.
@@ -525,22 +551,29 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
         edge, node = edges[ei], node_values[ni - len(edges)]
         if (not edge["routing_exception"] and node["id"] not in (edge["source"], edge["target"])
                 and segment_hits_node(edge["route"][0], edge["route"][-1], node)):
-            edge.update(connector_shape="elbowed", routing_exception="obstacle")
+            edge.update(connector_shape=routed_shape(connector_style, "obstacle"), routing_exception="obstacle")
     if routing_checks_truncated:
         for edge in edges:
             if not edge["routing_exception"]:
-                edge.update(connector_shape="elbowed", routing_exception="unchecked")
-    exceptions = sum(bool(edge["routing_exception"]) and connector_style != "elbowed" for edge in edges)
-    # Enforce the recorded transaction dependency order even for merged-address
-    # display cycles. ELK partitions may route backwards but cannot reverse TXs.
+                edge.update(connector_shape=routed_shape(connector_style, "unchecked"), routing_exception="unchecked")
+    exceptions = sum(edge["connector_shape"] != connector_style for edge in edges)
+    # Preserve every dependency except a verified vin routed through a selected
+    # hub. That exact relation returns to the hub before starting its new tree.
+    hub_layout = hub_plan(graph)
+    columns = hub_layout["columns"]
     for node in nodes.values():
         if node["kind"] != "transaction":
             continue
-        for vin in node.get("details", {}).get("transaction", {}).get("vin", []):
+        for index, vin in enumerate(node.get("details", {}).get("transaction", {}).get("vin", [])):
             parent = nodes.get("tx:" + str(vin.get("txid", "")))
             if (parent and not vin.get("is_pegin") and not vin.get("is_coinbase")
-                    and parent["column"] < node["column"] and parent["x"] >= node["x"]):
+                    and (node["id"], index) not in hub_layout["cut_inputs"]
+                    and columns.get(parent["id"], parent["column"]) < columns.get(node["id"], node["column"])
+                    and parent["x"] >= node["x"]):
                 raise TraceError("ELK could not preserve transaction order; no Miro changes were made")
+    for hub, children in hub_layout["roots"].items():
+        if any(nodes[hub]["x"] >= nodes[child]["x"] for child in children):
+            raise TraceError("ELK could not preserve separate hub tree order; no Miro changes were made")
     main = [nodes[key] for key in main_ids]
     shift = -260 if fees else 0
     result["layout"] = {"algorithm": ALGORITHM, "version": ELK_VERSION, "direction": "left_to_right",
@@ -548,18 +581,22 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
                         "main_bottom": max((node["y"] + node["height"] / 2 for node in main), default=320),
                         "fee_row_y": -100 if fees else None,
                         "cycle_groups": copy.deepcopy(graph.get("layout", {}).get("cycle_groups", [])),
-                        "annotations": {"legend": {"x": 700, "y": -160 + shift}, "run": {"x": 700, "y": -480 + shift}},
+                        "annotations": {"legend": {"x": 700, "y": -160 + shift}},
                         "routing_exceptions": exceptions, "routing_checks_truncated": routing_checks_truncated,
                         "input_order": input_order_metadata(graph, input_policy),
                         "branch_organization": {"version": BRANCH_LAYOUT_VERSION,
                                                  "profile": candidate.get("branchProfile", "balanced"),
                                                  "boundary_ordering": boundary_ordering,
                                                  "hubs": sorted(hub_nodes(graph)),
-                                                 "hub_rule": "separate_entry_lane_with_return_connections"},
+                                                 "hub_rule": "restart_tree_depth_with_return_connections",
+                                                 "hub_roots": hub_layout["roots"],
+                                                 "hub_columns": hub_layout["columns"]},
                         "horizontal_spacing": copy.deepcopy(candidate.get("horizontal_spacing", {})),
                         "edge_labels": {"version": LABEL_LAYOUT_VERSION, "estimated": True,
                                         "font_size": FONT_SIZE, "placement": "center_above",
                                         "reserved_count": len(label_map), "miro_positions_exact": False}}
+    if input_fallback is not None:
+        result["layout"]["input_order"]["fallback_reason"] = input_fallback
     result.setdefault("graph_options", {})["connector_style"] = connector_style
     result["connector_attachment"] = "transaction_ports_v2"
     result["presentation_version"] = max(6, graph.get("presentation_version", 0))
@@ -571,6 +608,8 @@ def _validate_graph(graph, connector_style):
         raise TraceError("Connector style must be straight, elbowed, or curved")
     if not isinstance(graph, dict) or not isinstance(graph.get("nodes"), list) or not isinstance(graph.get("edges"), list):
         raise TraceError("Cannot optimize an invalid graph")
+    if "_hub_layout_view" in graph or "_hub_layout_plan" in graph:
+        raise TraceError("Cannot optimize an internal layout view")
     nodes = {}
     for node in graph["nodes"]:
         if (not isinstance(node, dict) or not isinstance(node.get("id"), str) or node["id"] in nodes
@@ -654,9 +693,9 @@ def fallback_graph(graph, connector_style="straight", reason="size_limit"):
                 lane = min(source["y"] - source["height"] / 2, target["y"] - target["height"] / 2) - 80
                 route = [a, {"x": departure, "y": a["y"]}, {"x": departure, "y": lane},
                          {"x": arrival, "y": lane}, {"x": arrival, "y": b["y"]}, b]
-        edge.update(route=route, connector_shape="elbowed" if exception else connector_style,
+        edge.update(route=route, connector_shape=routed_shape(connector_style, exception),
                     routing_exception=exception)
-        exceptions += bool(exception) and connector_style != "elbowed"
+        exceptions += edge["connector_shape"] != connector_style
     main = [node for key, node in nodes.items() if key not in fee_ids]
     shift = -260 if fee_ids else 0
     notice = (f"{descriptions[reason]}. Using the full dependency layout for "
@@ -668,7 +707,7 @@ def fallback_graph(graph, connector_style="straight", reason="size_limit"):
                         "fee_row_y": graph.get("layout", {}).get("fee_row_y", -100 if fee_ids else None),
                         "cycle_groups": copy.deepcopy(graph.get("layout", {}).get("cycle_groups", [])),
                         "annotations": copy.deepcopy(graph.get("layout", {}).get("annotations", {
-                            "legend": {"x": 700, "y": -160 + shift}, "run": {"x": 700, "y": -480 + shift}})),
+                            "legend": {"x": 700, "y": -160 + shift}})),
                         "fallback_reason": reason, "fallback_notice": notice,
                         "placement": "complete_graph_v1",
                         "routing_exceptions": exceptions, "routing_checks_truncated": False,
@@ -680,6 +719,20 @@ def fallback_graph(graph, connector_style="straight", reason="size_limit"):
     result["connector_attachment"] = "transaction_ports_v2"
     result["presentation_version"] = max(6, graph.get("presentation_version", 0))
     return result
+
+
+def _validate_rejected_pairs(candidates):
+    # Keep temporary pairing references scoped here so raw worker geometry can
+    # be released as the caller consumes each candidate.
+    for candidate in candidates:
+        if "inputOrderRejected" not in candidate:
+            continue
+        same_seed = [other for other in candidates if other.get("seed") == candidate.get("seed")]
+        partners = [other for other in same_seed if "inputOrderRejected" not in other
+                    and other.get("inputOrderPolicy") == "geometry"
+                    and other.get("inputOrderFallback") == "traced_first_order_not_preserved"]
+        if len(same_seed) != 2 or len(partners) != 1:
+            raise TraceError("ELK returned an unpaired rejected input ordering alternative")
 
 
 def optimize_graph(graph, connector_style="straight", progress=None, *, layout_attempts=None):
@@ -721,7 +774,9 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
                              stage="attempt_failed", attempted_count=index, successful_count=successful_count,
                              failed_count=len(failed_attempts), failure_code=candidates.failure_code)
             continue
-        candidate_count += len(candidates)
+        # A rejected optional rerun must travel with its same-seed geometry
+        # fallback. Validate both layouts below before retaining either result.
+        _validate_rejected_pairs(candidates)
         while candidates:
             candidate = candidates.pop(0)
             _report_progress(report, "Validating ELK coordinates and routes", stage="applying")
@@ -733,6 +788,10 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
                 align_near_horizontal_endpoints(result)
             except (KeyError, TypeError, ValueError, OverflowError) as exc:
                 raise TraceError("ELK returned an invalid layout; no Miro changes were made") from exc
+            if "inputOrderRejected" in candidate:
+                del candidate, result
+                continue
+            candidate_count += 1
             _report_progress(report, "Measuring completed ELK layout", stage="measuring_output")
             metrics = layout_metrics(result)
             main = {"nodes": [node for node in result["nodes"] if node["id"] not in fee_ids],
@@ -742,19 +801,28 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
             miro_estimate = layout_metrics(main, midpoint_elbows=True)
             organization = organization_metrics(main)
             result["layout"]["branch_organization"]["travel"] = organization
+            neighborhoods = neighborhood_metrics(result)
+            result["layout"]["branch_organization"]["neighborhoods"] = neighborhoods
             boundaries = boundary_metrics(result)
             result["layout"]["branch_organization"]["boundaries"] = boundaries
+            centered = center_metrics(result)
+            if graph.get("graph_options", {}).get("center_name"):
+                result["layout"]["named_group"] = centered
             # Compare native ELK routes with a simple board-routing estimate. A
             # forced semantic slot order must not win merely because ELK can draw
             # bends that Miro cannot receive. Branch separation follows every
-            # collision gate; traced-first and shorter travel break later ties.
+            # collision gate. Local forks and transaction proximity matter even
+            # within one seed lineage; historical date/port order is secondary.
             score = (score_metrics["node_overlaps"], score_metrics["node_intersections"],
                      miro_estimate["node_intersections"], score_metrics["crossings"], miro_estimate["crossings"],
                      endpoint_metrics["endpoint_order_inversions"], endpoint_metrics["coincident_ports"],
                      score_metrics["connector_overlaps"], miro_estimate["connector_overlaps"],
+                     centered["alignment_deviation"], centered["center_offset"],
                      boundaries["interleavings"], boundaries["boundary_depth"], boundaries["interbranch_travel"],
-                     result["layout"]["input_order"]["policy"] != "traced_first",
-                     organization["weighted_vertical_travel"] + score_metrics["edge_length"], score_metrics["edge_length"])
+                     neighborhoods["flow_order_inversions"], neighborhoods["sibling_interleavings"],
+                     neighborhoods["transaction_distance"], neighborhoods["transaction_center_drift"],
+                     organization["weighted_vertical_travel"] + score_metrics["edge_length"], score_metrics["edge_length"],
+                     result["layout"]["input_order"]["policy"] != "traced_first")
             if best is None or score < best[0]:
                 best = (score, result, metrics, candidate["seed"])
             # Drop the current candidate and its graph views before requesting
@@ -788,23 +856,38 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
         compacted_estimate = layout_metrics(compacted, midpoint_elbows=True)
         original_ports, compacted_ports = attachment_order_metrics(result), attachment_order_metrics(compacted)
         original_boundaries, compacted_boundaries = boundary_metrics(result), boundary_metrics(compacted)
+        original_neighbors, compacted_neighbors = neighborhood_metrics(result), neighborhood_metrics(compacted)
+        original_center, compacted_center = center_metrics(result), center_metrics(compacted)
         def routing_quality(value):
             return (value["node_intersections"], value["crossings"], value["connector_overlaps"])
         safe_boundaries = all(compacted_boundaries[key] <= original_boundaries[key]
                               for key in ("interleavings", "boundary_depth", "interbranch_travel"))
+        safe_neighbors = all(compacted_neighbors[key] <= original_neighbors[key]
+                             for key in ("flow_order_inversions", "sibling_interleavings", "transaction_distance"))
         safe = (not original_estimate["truncated"] and not compacted_estimate["truncated"]
                 and routing_quality(compacted_estimate) <= routing_quality(original_estimate)
                 and compacted_ports["endpoint_order_inversions"] <= original_ports["endpoint_order_inversions"]
                 and compacted_ports["coincident_ports"] <= original_ports["coincident_ports"]
-                and safe_boundaries)
+                and all(compacted_center[key] <= original_center[key]
+                        for key in ("alignment_deviation", "center_offset"))
+                and safe_boundaries and safe_neighbors)
         if safe:
             result = compacted
         else:
             result["layout"]["branch_organization"]["context_compaction_rejected"] = (
-                "branch_boundary_quality" if not safe_boundaries else "attachment_routing_estimate")
+                "branch_boundary_quality" if not safe_boundaries else
+                "transaction_neighborhood_quality" if not safe_neighbors else "attachment_routing_estimate")
     else:
         result = compacted
+    # Clearance repair is allowed to use extra space. A distance-reduction or
+    # footprint gate here would keep context shapes trapped on existing lines.
+    from .context_clearance import repair_context_clearance
+    _report_progress(report, "Clearing connector space around context inputs", stage="applying")
+    repair_context_clearance(result)
     result["layout"]["branch_organization"]["boundaries"] = boundary_metrics(result)
+    result["layout"]["branch_organization"]["neighborhoods"] = neighborhood_metrics(result)
+    if graph.get("graph_options", {}).get("center_name"):
+        result["layout"]["named_group"] = center_metrics(result)
     after = layout_metrics(result)
     result["layout"]["metrics"] = {"before": before, "after": after, "estimated": True,
                                     "attempt_count": attempts, "candidate_count": candidate_count, "selected_seed": seed,

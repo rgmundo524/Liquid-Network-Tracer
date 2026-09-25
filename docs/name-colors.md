@@ -24,9 +24,36 @@ assignments. These settings are per investigation, not global.
 | Unspent | Orange, `#fdba74` | `unspent_endpoint` |
 | Events, fees and unspendable outputs | Pink, `#ea94bb` | `event` |
 
-Only fills are configured here. Connector colors, border colors, border widths,
-node shapes, and convergence detection are unchanged. Shared-address highlights
+These palettes configure node fills. The optional **Color arrows by attribution**
+setting also uses imported-name colors for arrows, as described below. Border colors,
+border widths, node shapes, and convergence detection are unchanged. Shared-address highlights
 remain border-only; the removed SHARED ADDRESS node text is not restored.
+
+## Color arrows by attribution
+
+In **Investigation settings**, enable **Color arrows by attribution** and save.
+This option is off by default and is saved separately for each investigation.
+Assign the desired name colors using **Assign name colors**, then regenerate a
+preview or use normal **Sync to Miro**. No new tracing run or graph reorganization
+is required.
+
+Both arrows entering a named Liquid address and arrows leaving it use that
+address's assigned name color. For example, a transaction receiving from a blue
+service and paying a green service has a blue input arrow and a green output
+arrow. Colors apply to the adjacent address connections; they do not spread
+through subsequent transactions or imply an allocation of funds.
+
+Selected seed circles keep their seed color, while their arrows can show the
+assigned attribution color. Arrows without an assigned name color, or with
+conflicting name colors, retain their normal traced/context color. Traced and
+context arrows retain their existing widths. Turning the option off restores
+the normal arrow colors on the next preview or sync. Manually edited Miro
+connector styles remain protected by the usual sync conflict checks.
+
+The setting applies to Miro, Mermaid, basic SVG, and ELK previews. Current previews
+and normal sync use the current setting; archived runs retain their saved
+presentation. Changing it requires a new compact preview before applying a
+reviewed layout. The saved setting key is `run_defaults.color_attribution_arrows`.
 
 ## Priority and imported names
 
@@ -60,9 +87,10 @@ Address,Name,confidence,stop_tracing,hop_limit,source,notes
 
 ## Import name-group colors
 
-After importing or saving the address attributions, open **Assign name colors**
-and choose **Import name colors**. Select a UTF-8 CSV or JSON file, or paste its
-contents. This assigns a color to each name group, including all capitalization
+Choose **Import CSV files** and select a UTF-8 name-color CSV. You can include
+the attribution and change-output CSVs in the same batch; new attribution names
+are processed before colors automatically. JSON and pasted contents remain
+available through the advanced name-color importer. This assigns a color to each name group, including all capitalization
 variants, without editing the address attributions themselves.
 
 ```csv
@@ -79,17 +107,18 @@ names with those in your investigation. JSON uses an array of objects with
 case-insensitive. Colors must be six-digit hex values including `#`; short hex,
 color names, and CSS expressions are rejected.
 
-1. Choose **Preview import** to review each name's current color, requested color,
+1. Preview the selected files to review each name's current color, requested color,
    and proposed action.
-2. Existing assignments are kept by default. Select **Replace existing colors**
+2. Existing assignments are kept by default. Choose the replacement policy
    and preview again to overwrite them. A blank CSV color or JSON `null` clears
    an existing assignment only with this replacement policy.
-3. Review the preview, check the review checkbox, and apply the import.
+3. Review the preview, then choose **Apply reviewed name colors**.
 4. Regenerate a preview or choose **Sync to Miro** to update the graph.
 
-Names must already exist in the attribution list or saved color assignments.
+Names must exist in the attribution list, saved color assignments, or the
+attribution CSV being applied in the same batch.
 Unknown names are reported as errors so a typo cannot silently create an unused
-group. Import the attribution first if the name is new. Identical duplicate
+group. Include the attribution CSV if the name is new. Identical duplicate
 rows are combined; different colors for the same case-insensitive name are an
 error. Any invalid row blocks the entire import. There is no partial save.
 
@@ -142,7 +171,17 @@ edit a live board.
 Run archives retain their own presentation snapshot. Current previews and normal
 sync use current case settings. Palette changes invalidate a reviewed compact
 preview, so regenerate it before applying. Miro, Mermaid, basic SVG, and ELK SVG
-share the resolved node fills; legends show configured hex values for custom
-roles. Graph JSON retains the settings snapshot, and node CSV includes displayed
+share the resolved node fills. Legends show a colored circle, a short label, and
+a brief definition for each graph role and each assigned attribution name used
+in the displayed graph. The circles use the actual configured colors. Longer
+evidence notes are separate from the color key in local previews.
+
+Normal **Sync to Miro** updates the existing generated legend. If it needs more
+space, it grows upward with clearance from the graph. Manually edited legend
+content, font size, or dimensions are preserved. Large color keys use additional
+legend pages; obsolete generated pages are removed on a later sync. These pages
+do not change tracing or activity groups.
+
+Graph JSON retains the settings snapshot, and node CSV includes displayed
 color and `color_source` (`role_palette` for a role override, `name` for a name
 assignment). Existing tracing roles and evidence remain unchanged.

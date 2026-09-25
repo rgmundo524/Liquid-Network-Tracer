@@ -151,13 +151,49 @@ class ContextGroupTests(unittest.TestCase):
         self.assertEqual(group["details"]["input_count"], 4)
         self.assertEqual(len(group["details"]["members"]), 4)
 
-    def test_large_group_grows_for_input_ports_and_id_is_stable(self):
+    def test_large_group_stays_compact_and_id_is_stable(self):
         graph = self.graph(21, continuing=(20,))
         result = group_context_inputs(graph, enabled=True)
         group, = summaries(result)
-        self.assertEqual(group["height"], 21 * 18)
+        self.assertEqual((group["width"], group["height"]), (240, 160))
+        self.assertIn("Details in local export", group["label"])
+        inputs = [edge for edge in result["edges"] if edge["source"] == group["id"]]
+        self.assertEqual(len(inputs), 20)
+        self.assertTrue(all(edge["caption_display"] == "details_only" for edge in inputs))
+        self.assertTrue(all("caption_display" not in edge for edge in result["edges"]
+                            if edge["source"] != group["id"]))
+        restored = copy.deepcopy(result["edges"])
+        for edge in restored:
+            if "original_source" in edge:
+                edge["source"] = edge.pop("original_source")
+                edge.pop("caption_display", None)
+        self.assertEqual(restored, graph["edges"])
         fewer = group_context_inputs(self.graph(), enabled=True)
         self.assertEqual(group["id"], summaries(fewer)[0]["id"])
+
+    def test_eight_input_summary_retains_visible_input_captions(self):
+        graph = self.graph(9, continuing=(8,))
+        result = group_context_inputs(graph, enabled=True)
+        group, = summaries(result)
+        self.assertEqual(group["details"]["input_count"], 8)
+        self.assertEqual((group["width"], group["height"]), (240, 160))
+        self.assertIn("Details in local export", group["label"])
+        self.assertTrue(all("caption_display" not in edge for edge in result["edges"]))
+        source = mermaid_source(result)
+        for index in range(9):
+            self.assertIn(f"vin {index}", source)
+
+    def test_ninth_grouped_input_only_changes_caption_presentation(self):
+        graph = self.graph(10, continuing=(9,))
+        result = group_context_inputs(graph, enabled=True)
+        group, = summaries(result)
+        self.assertEqual(group["details"]["input_count"], 9)
+        by_id = {edge["id"]: edge for edge in graph["edges"]}
+        for edge in result["edges"]:
+            for field in ("label", "quantity", "outpoint", "details"):
+                self.assertEqual(edge.get(field), by_id[edge["id"]].get(field))
+            self.assertEqual(edge.get("caption_display"),
+                             "details_only" if edge["source"] == group["id"] else None)
 
     def test_idempotent_and_member_order_is_deterministic(self):
         graph = self.graph()

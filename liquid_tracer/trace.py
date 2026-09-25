@@ -9,6 +9,7 @@ from . import __version__
 from .common import (HEX64, StopRun, TraceError, digest, match_labels, now,
                      output_kind, parse_outpoint, save_json)
 from .services import ServiceScope, is_service_stop
+from .progress import report_progress
 
 TERMINAL = {"spent", "fee", "pegout", "provably_unspendable"}
 
@@ -51,7 +52,7 @@ def validate_transaction(data, txid):
             raise TraceError("Malformed explicit output value")
 
 
-def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None):
+def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, *, progress=None):
     """Hop 0 = selected seed output; one hop = its spending transaction.
 
     Every spendable child output is a candidate. Other inputs are context, never
@@ -231,12 +232,33 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None):
 
     current = None
     stop_reason = None
+    # This is the frontier being processed, not the deepest prefetched child or
+    # an estimate of remaining requests. A resumed service scope can revisit a
+    # shallower hop. The heap already supplies the next hop without a scan of
+    # the growing evidence graph on every output.
+    had_frontier = bool(queue)
+    current_hop = min(limits.max_hops, queue[0][0]) if queue else 0
+
+    def report_hop(depth):
+        nonlocal current_hop
+        depth = min(limits.max_hops, depth)
+        if depth != current_hop:
+            current_hop = depth
+            report_progress(progress, "collecting", current_hop, limits.max_hops)
+
+    if had_frontier:
+        report_progress(progress, "collecting", current_hop, limits.max_hops)
     try:
         save()
         while queue:
             api.budget.check()
             if count >= limits.max_outpoints:
                 raise StopRun("outpoint_limit")
+            pending_depth, pending_key = queue[0]
+            pending = state["outputs"][pending_key]
+            if (pending_depth == scope.depth(pending) and pending["status"] == "pending"
+                    and not scope.blocked(pending_key)):
+                report_hop(pending_depth)
             prepare_frontier()
             depth, key = heapq.heappop(queue)
             current = state["outputs"][key]
@@ -253,6 +275,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None):
                 current = None
                 save()
                 continue
+            report_hop(depth)
             kind = output_kind(output)
             current["labels"] = match_labels(labels, key, output)
             if kind != "spendable":
@@ -324,4 +347,10 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None):
         state["stop_reason"] = stop_reason
         state["finished_at"] = now()
         save()
+        phase = {"bounded_complete": "collection_complete", "paused": "collection_paused",
+                 "error": "collection_error"}.get(state["status"], "collection_error")
+        if not had_frontier and state["status"] == "bounded_complete":
+            report_progress(progress, "collection_empty", 0, 0)
+        else:
+            report_progress(progress, phase, current_hop, limits.max_hops)
     return state

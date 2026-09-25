@@ -15,7 +15,8 @@ from .graph_markers import node_border
 from .connector_styles import stroke_width
 from .common import TraceError, save_json
 from .layout_search_reporting import layout_search_warning
-from .export import COLORS, edge_color, legend_lines
+from .export import COLORS, edge_color, edge_marker_id, legend_lines
+from .legend import LEGEND_CSS, legend_html
 from .edge_labels import (FONT_SIZE, LINE_HEIGHT, PADDING_Y, caption_box, caption_text,
                           validate_label_layout)
 
@@ -48,12 +49,16 @@ def layout_title(graph):
     return "ELK layout"
 
 
-def layout_notice(graph):
+def layout_notice(graph, *, include_named_group=True):
     layout = graph.get("layout", {})
     if layout.get("algorithm") == "dependency_layers_v1":
         return (str(layout.get("fallback_notice") or "Dependency layout; ELK optimization was not applied.")
                 + " Miro routes may differ. Crossing counts are estimates.")
     notice = LAYOUT_NOTICE
+    input_order = layout.get("input_order", {})
+    if (isinstance(input_order, dict) and input_order.get("policy") == "geometry"
+            and input_order.get("fallback_reason") == "traced_first_order_not_preserved"):
+        notice += " Preferred connector ordering was unavailable; valid ELK geometry was retained."
     search_warning = (layout_search_warning(layout.get("metrics"))
                       or layout_search_warning(layout.get("search")))
     if search_warning:
@@ -61,6 +66,17 @@ def layout_notice(graph):
     changes = layout.get("change_outputs")
     if changes:
         notice += f" Change rows: {len(changes.get('applied', []))} aligned; {len(changes.get('skipped', []))} skipped."
+    group = layout.get("named_group")
+    name = graph.get("graph_options", {}).get("center_name", "")
+    if include_named_group and isinstance(group, dict) and name:
+        count = group.get("matched_addresses", 0)
+        if count:
+            notice += (f" Center named group '{name}': {count} address objects and "
+                       f"{group.get('connecting_transactions', 0)} connecting transactions prioritized for alignment.")
+        else:
+            notice += f" Center named group '{name}': no eligible address objects in this graph."
+        if group.get("excluded_hubs"):
+            notice += f" {group['excluded_hubs']} selected branch hubs retain their separate placement."
     return notice
 
 
@@ -263,7 +279,7 @@ def drawing_bounds(nodes, edges):
 
 def _svg(graph, nodes, edges, *, banner=True):
     notice = ("Dependency layout fallback · Full graph retained; crossing optimization skipped."
-              if graph.get("layout", {}).get("fallback_reason") else layout_notice(graph))
+              if graph.get("layout", {}).get("fallback_reason") else layout_notice(graph, include_named_group=False))
     left, top, right, bottom = drawing_bounds(nodes, edges)
     margin = 180
     x, y = left - margin, top - margin
@@ -276,19 +292,20 @@ def _svg(graph, nodes, edges, *, banner=True):
              '.explorer-link:focus-visible > g '
              '{ filter:drop-shadow(0 0 5px #0f766e); }</style>',
              '<defs>']
-    for key, color in (("traced", COLORS["traced_edge"]), ("context", COLORS["context_edge"])):
-        lines.append(f'<marker id="arrow-{key}" markerWidth="9" markerHeight="7" refX="8" refY="3.5" '
+    markers = {edge_marker_id(edge): edge_color(edge) for edge in edges}
+    for key, color in sorted(markers.items()):
+        lines.append(f'<marker id="{key}" markerWidth="9" markerHeight="7" refX="8" refY="3.5" '
                      f'orient="auto" markerUnits="userSpaceOnUse"><path d="M 0 0 L 9 3.5 L 0 7 Z" fill="{color}"/></marker>')
     lines.extend(['</defs>', f'<rect x="{_fmt(x)}" y="{_fmt(y)}" width="{_fmt(width)}" height="{_fmt(height)}" fill="white"/>',
                   *([f'<text x="{_fmt(left)}" y="{_fmt(top - 100)}" font-family="sans-serif" font-size="15" fill="#475569">'
                      + _escape(notice) + '</text>'] if banner else []), '<g id="edges" fill="none">'])
     for index, edge in enumerate(edges):
-        marker = "context" if edge.get("role", "").startswith("context") else "traced"
-        caption = _text(caption_text(edge))
+        marker = edge_marker_id(edge)
+        caption = _text(caption_text(edge, display=False))
         lines.append(f'<path id="edge-{index}" data-edge-id="{_escape(edge["id"])}" '
                      f'data-source="{_escape(edge["source"])}" data-target="{_escape(edge["target"])}" '
                      f'data-appearance="{edge["connector_shape"]}" d="{_path(edge["points"], edge["connector_shape"] == "curved")}" '
-                     f'stroke="{edge_color(edge.get("role", ""))}" stroke-width="{stroke_width(edge.get("role", ""))}" marker-end="url(#arrow-{marker})">'
+                     f'stroke="{edge_color(edge)}" stroke-width="{stroke_width(edge.get("role", ""))}" marker-end="url(#{marker})">'
                      f'<title>{_escape(caption)}</title></path>')
     lines.append('</g><g id="nodes" font-family="sans-serif" text-anchor="middle" fill="#172033">')
     for index, node in enumerate(nodes):
@@ -406,6 +423,7 @@ details {{ margin-top:8px; }} summary {{ cursor:pointer; }} li {{ margin:4px 0; 
 .chart {{ overflow:auto; background:white; }} .chart svg {{ display:block; max-width:none; }}
 body:has(#chart:target) header {{ display:none; }}
 #chart:target svg {{ width:100%; height:auto; }}
+{LEGEND_CSS}
 </style></head><body><header><div class="summary"><div><h1>Liquid trace · {_escape(layout_title(graph))}</h1>
 <p>Run {_escape(graph.get('run_id', ''))} · {len(graph['nodes'])} nodes · {len(graph['edges'])} links · Fees {fees}{simulated}</p>
 <p>{_escape(layout_notice(graph))}</p><p>Scroll to explore; use your browser zoom to adjust the scale. Select Explorer on a transaction or address to open Blockstream in a new tab.</p>
@@ -413,7 +431,8 @@ body:has(#chart:target) header {{ display:none; }}
 <a href="layout-report.json" download>Layout report</a>{detail_link}</p></div>{_metrics_table(metrics, layout_title(graph))}</div>
 {register_html(graph)}
 {change_details}
-<details><summary>Legend and evidence notes</summary><p>{_escape(graph.get('notice', ''))}</p>
+{legend_html(graph)}
+<details><summary>Detailed evidence notes</summary><p>{_escape(graph.get('notice', ''))}</p>
 <p>Before uses the saved graph's baseline layout, not live Miro positions. Collision counts exclude label boxes and Miro's automatic curves.
 Counts prefixed with ≥ are lower bounds because the comparison limit was reached.</p><ul>{legend}</ul></details></header>
 <main id="chart" class="chart">{inline_svg}</main>

@@ -81,6 +81,7 @@ class MenuNameColorTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(115, 65)) as pilot:
                 app.created(self.case); await pilot.pause()
                 await self.click(app, pilot, '#addresses-import')
+                await self.click(app, pilot, '#input-import-advanced-attributions')
                 app.screen.query_one('#import-text', TextArea).text = 'Address,Name\nSYNTHETIC-one,BTSE\nSYNTHETIC-two,btse\n'
                 await pilot.pause(); await self.click(app, pilot, '#import-preview')
                 app.screen.query_one('#import-approved', Checkbox).value = True

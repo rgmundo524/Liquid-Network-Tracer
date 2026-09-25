@@ -24,7 +24,7 @@ function empty(caseId: string) {
   return {caseId, open: false, pending: false, message: '', query: '', offset: 0, catalog: null as Catalog | null,
     txid: '', selection: null as number | null, notes: '', lookup: null as Lookup | null,
     lookupJob: null as string | null, version: 0,
-    importing: false, text: '', filename: '', format: 'auto', policy: 'keep', approved: false,
+    importing: false, text: '', filename: '', format: 'auto', policy: 'keep',
     review: null as Review | null, importOffset: 0, importVersion: 0};
 }
 let state = empty('');
@@ -32,11 +32,9 @@ export function resetChangeOutputs(caseId: string): void {state = empty(caseId);
 export function changeOutputsPending(): boolean {return state.pending;}
 
 function invalidateImport(): void {
-  state.importVersion += 1; state.review = null; state.approved = false; state.importOffset = 0;
+  state.importVersion += 1; state.review = null; state.importOffset = 0;
   const apply = document.querySelector<HTMLButtonElement>('#change-outputs-import-apply');
   if (apply) apply.disabled = true;
-  const approved = document.querySelector<HTMLInputElement>('#change-outputs-import-approved');
-  if (approved) {approved.checked = false; approved.disabled = true;}
   const review = document.querySelector('#change-outputs-import-review');
   if (review) review.textContent = 'Preview again before applying.';
 }
@@ -59,10 +57,7 @@ export function changeOutputsInput(element: HTMLInputElement | HTMLSelectElement
     const value = element.value === '' ? null : Number(element.value);
     if (value !== null && !state.lookup?.outputs.some(row => row.selectable && row.vout === value)) return true;
     state.selection = value;
-  } else if (id === 'change-outputs-import-approved') {
-    state.approved = Boolean(state.review?.valid && (element as HTMLInputElement).checked);
-    const apply = document.querySelector<HTMLButtonElement>('#change-outputs-import-apply');
-    if (apply) apply.disabled = !state.approved || state.pending;
+
   } else if (id === 'change-outputs-text') {state.text = element.value; state.filename = ''; invalidateImport();}
   else if (id === 'change-outputs-format') {state.format = element.value; invalidateImport();}
   else if (id === 'change-outputs-replace') {
@@ -114,8 +109,7 @@ function importPanel(locked: boolean): string {
   ${review.errors.length ? `<div class="alert error"><div><strong>Fix these errors before applying.</strong>${review.errors.map(error => `<p>Row ${esc(error.row)}: ${esc(error.message)}</p>`).join('')}</div></div>` : ''}
   <div class="table-wrap"><table><thead><tr><th>Row</th><th>Transaction</th><th>Existing change</th><th>Requested change</th><th>Notes</th><th>Action</th></tr></thead><tbody>${review.changes.slice(state.importOffset, state.importOffset + 100).map(row => `<tr><td>${esc(row.row)}</td><td class="mono">${esc(row.txid)}</td><td>${esc(voutText(row.previous))}</td><td>${esc(voutText(row.vout))}</td><td>${esc(row.notes)}${row.previous_notes && row.previous_notes !== row.notes ? `<small class="muted"><br>Previously: ${esc(row.previous_notes)}</small>` : ''}</td><td>${esc(row.action)}</td></tr>`).join('')}</tbody></table></div>
   <div class="form-actions"><span>Rows ${review.changes.length ? state.importOffset + 1 : 0}–${Math.min(state.importOffset + 100, review.changes.length)} of ${review.changes.length}</span><button class="btn" data-action="change-outputs-import-prev"${off(locked || state.importOffset === 0)}>Previous</button><button class="btn" data-action="change-outputs-import-next"${off(locked || state.importOffset + 100 >= review.changes.length)}>Next</button></div>` : ''}</div>
-  <label class="check-line"><input type="checkbox" id="change-outputs-import-approved"${state.approved ? ' checked' : ''}${off(locked || !review?.valid)}/><span>I reviewed the change outputs, replacements, and cleared annotations.</span></label>
-  <div class="form-actions"><button class="btn primary" id="change-outputs-import-apply" data-action="change-outputs-import-apply"${off(locked || !state.approved || !review?.valid)}>Apply reviewed change outputs</button></div></section>`;
+  <div class="form-actions"><button class="btn primary" id="change-outputs-import-apply" data-action="change-outputs-import-apply"${off(locked || !review?.valid)}>Apply reviewed change outputs</button></div></section>`;
 }
 
 export function changeOutputsPanel(caseId: string, busy: boolean): string {
@@ -135,7 +129,7 @@ export function changeOutputsPanel(caseId: string, busy: boolean): string {
   <div class="table-wrap"><table><thead><tr><th>Transaction</th><th>Change</th><th>Notes</th><th>Actions</th></tr></thead><tbody>${(catalog?.rows || []).map((row, index) => `<tr><td class="mono">${esc(row.txid)}</td><td>${esc(voutText(row.vout))}</td><td>${esc(row.notes)}</td><td><button class="btn" data-action="change-outputs-edit" data-change-index="${index}"${off(locked)}>Edit</button> <button class="btn" data-action="change-outputs-clear" data-change-index="${index}"${off(locked)}>Clear</button></td></tr>`).join('')}</tbody></table></div>
   ${catalog && !catalog.total ? '<p class="address-note">No matching change outputs saved.</p>' : ''}
   <div class="form-actions"><span>${esc(catalog?.total || 0)} saved annotations. Page ${Math.floor(state.offset / 100) + 1}.</span><button class="btn" data-action="change-outputs-prev"${off(locked || state.offset === 0)}>Previous</button><button class="btn" data-action="change-outputs-next"${off(locked || !catalog || state.offset + 100 >= catalog.total)}>Next</button></div>
-  <div class="settings-divider"></div>${importPanel(locked)}<p class="address-note">${esc(REFRESH)}</p><p role="status">${esc(state.message)}</p></div></section>`;
+  <div class="settings-divider"></div><div class="form-actions"><button class="btn" data-action="input-import-open"${off(locked)}>Import CSV files</button></div><details id="advanced-change-outputs"><summary>Advanced imports: paste change outputs or import JSON</summary>${importPanel(locked)}</details><p class="address-note">${esc(REFRESH)}</p><p role="status">${esc(state.message)}</p></div></section>`;
 }
 
 async function loadCatalog(owner: typeof state, context: Context): Promise<void> {
@@ -172,7 +166,7 @@ async function importAction(action: string, context: Context): Promise<void> {
   }
   if (!['change-outputs-import-preview', 'change-outputs-import-apply'].includes(action)) return;
   const applying = action.endsWith('-apply');
-  if (applying && (!state.approved || !state.review?.valid || !state.review.approval_sha256)) {
+  if (applying && (!state.review?.valid || !state.review.approval_sha256)) {
     state.message = 'Preview and review the import before applying.'; context.render(); return;
   }
   if (new TextEncoder().encode(state.text).length > MAX_BYTES) {

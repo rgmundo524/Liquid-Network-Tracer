@@ -226,6 +226,9 @@ class TransactionCSVTests(unittest.TestCase):
             (directory/"transactions.csv").unlink()
             write_csv(directory/"nodes.csv", node_csv_rows(graph), NODE_CSV_FIELDS)
             write_csv(directory/"edges.csv", graph["edges"], ("id", "source", "target"))
+            # A historical snapshot predates the optional modern detail pages.
+            for name in ("details.html", "details.json"):
+                (directory / name).unlink(missing_ok=True)
             (directory/"SHA256SUMS").write_text("".join(digest((directory/name).read_bytes()) + "  " + name + "\n"
                 for name in sorted(LEGACY_FILES - {"SHA256SUMS"})))
             self.assertEqual(reviewed_connections(case, result["preview_id"]), (graph, plan))

@@ -70,7 +70,7 @@ class ReuseTests(unittest.TestCase):
         before = copy.deepcopy(shuffled)
         self.assertEqual(self.reuse(shuffled), self.saved)
         self.assertEqual(shuffled, before)
-        for change in ('run', 'namespace', 'color', 'label', 'edge', 'view', 'width', 'stop'):
+        for change in ('run', 'namespace', 'color', 'label', 'edge', 'view', 'width', 'stop', 'center_name'):
             graph = copy.deepcopy(self.original)
             if change == 'run': graph['run_id'] = '0' * 16
             elif change == 'namespace': graph['namespace']['case_id'] = '0' * 32
@@ -80,6 +80,7 @@ class ReuseTests(unittest.TestCase):
             elif change == 'view': graph['graph_options']['view'] = 'starter_connections'
             elif change == 'width': graph['nodes'][0]['width'] += 1
             elif change == 'stop': graph['service_controls']['revision'] += 1
+            elif change == 'center_name': graph['graph_options']['center_name'] = 'Example Exchange'
             with self.subTest(change=change): self.assertIsNone(self.reuse(graph))
         self.assertIsNone(self.reuse(style='curved'))
 
@@ -92,6 +93,26 @@ class ReuseTests(unittest.TestCase):
         alternate = self.path.with_name(self.path.name.replace('-elk-', '-connections-'))
         self.path.rename(alternate)
         self.assertIsNone(self.reuse())
+
+    def test_curved_preview_rejects_old_pipe_exceptions_without_rewriting_cache(self):
+        saved = copy.deepcopy(self.saved)
+        saved['graph_options']['connector_style'] = 'curved'
+        for edge in saved['edges']:
+            edge['connector_shape'] = 'curved'
+        save_json(self.path / 'graph.json', saved)
+        before = {path: path.read_bytes() for path in self.path.iterdir() if path.is_file()}
+        self.assertEqual(self.reuse(style='curved'), saved)
+        self.assertEqual(before, {path: path.read_bytes() for path in before})
+
+        saved['edges'][0].update(connector_shape='elbowed', routing_exception='return')
+        save_json(self.path / 'graph.json', saved)
+        before = {path: path.read_bytes() for path in self.path.iterdir() if path.is_file()}
+        self.assertIsNone(self.reuse(style='curved'))
+        self.assertEqual(before, {path: path.read_bytes() for path in before})
+
+        # Straight mode may still use elbowed exceptions, and remains reusable.
+        save_json(self.path / 'graph.json', self.saved)
+        self.assertEqual(self.reuse(), self.saved)
 
     def test_corrupt_geometry_and_stale_report_are_ignored(self):
         altered = copy.deepcopy(self.saved); altered['nodes'][0]['x'] = float('nan')

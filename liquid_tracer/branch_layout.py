@@ -7,9 +7,10 @@ claims or changes to the graph's evidence. ELK still routes every connection.
 
 import math
 from collections import defaultdict
+from .hub_layout import hub_layout_view, hub_plan
 
 
-BRANCH_LAYOUT_VERSION = 2
+BRANCH_LAYOUT_VERSION = 6
 
 
 def hub_nodes(graph):
@@ -25,6 +26,7 @@ def edge_priorities(graph):
     in the graph, but do not become forward transaction dependencies. An explicit
     change designation has priority over ordinary continuation preferences.
     """
+    graph = hub_layout_view(graph)
     nodes = {node["id"]: node for node in graph["nodes"]}
     producers = defaultdict(list)
     priorities = {}
@@ -97,6 +99,8 @@ def compact_context_inputs(graph):
     fee_ids = {key for key, item in graph.get("fee_items", {}).items()
                if item.get("endpoint") == "shapes"}
     locked = set(graph.get("layout", {}).get("change_outputs", {}).get("locked_nodes", []))
+    from .named_group_layout import group_structure
+    locked.update(group_structure(graph)["core"])
     eligible = set()
     for key, node in nodes.items():
         incident = adjacent[key]
@@ -115,7 +119,8 @@ def compact_context_inputs(graph):
         # The existing compactor uses bounded spatial queries and refuses
         # uncertain moves; its budget never removes or limits graph objects.
         moved, _ = _compact_addresses(nodes, edges, points, adjacent, fee_ids, bounds,
-                                       budget, lambda *_: None, set(nodes) - eligible)
+                                       budget, lambda *_: None, set(nodes) - eligible,
+                                       layout_columns=hub_plan(graph)["columns"])
         truncated = budget.truncated
     main = [node for key, node in nodes.items() if key not in fee_ids]
     layout = graph.setdefault("layout", {})
