@@ -65,6 +65,15 @@ and Miro sync use the same selection. These choices belong to the generated
 layout, like its hop range. To change them, generate another layout and select
 it for the managed board. Plotting does not fetch fresh spend observations.
 
+**Include context addresses** adds other input addresses and spendable sibling
+outputs around the transactions already on matching paths. It is off by default.
+Context uses thinner arrows and is marked `CONTEXT` in the transaction CSV. The
+extra addresses do not create traced links, change hop counts or endpoint matches,
+or cause earlier/later transactions to be added. No fee outputs or additional
+event outputs are included as context. A shared address keeps one circle, with
+each traced or context UTXO retaining its own arrow. The saved layout records
+this choice for both SVG export and Miro sync. Generate a new layout to change it.
+
 Set layout attempts, connector appearance, attribution arrow coloring, and
 named-group centering here. **Full trace** also supports **Separate branch hubs**,
 **Group isolated context inputs**, and **Include transaction fee flows**. These

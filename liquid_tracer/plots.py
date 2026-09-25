@@ -81,8 +81,8 @@ def validate_layout_settings(value):
 def _effective_settings(settings, goal):
     result = validate_layout_settings(settings)
     if goal != "full":
-        # Filtered goals retain exact qualifying I/O only. Full-trace display
-        # preferences must not add context addresses, fees, or hub branches.
+        # Peg-out context is selected explicitly by its query. Full-trace
+        # preferences must not add fees, grouped context inputs, or hub branches.
         result.update(include_fees=False, group_context_inputs=False, hub_addresses=[])
     return result
 
@@ -142,7 +142,8 @@ def _source(case, run_id):
     return state, settings, fingerprints
 
 
-def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_unspendable=False):
+def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_unspendable=False,
+           include_context=False):
     from .connections import validate_hops
     from .pegout_paths import validate_query
     if not isinstance(goal, str) or goal not in GOALS:
@@ -151,9 +152,14 @@ def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_un
         raise TraceError("Additional endpoint options must be true or false")
     if goal != "pegouts" and (include_unspent or include_unspendable):
         raise TraceError("Additional endpoint options apply only to peg-out paths plots")
+    if type(include_context) is not bool:
+        raise TraceError("Include context addresses must be true or false")
+    if goal != "pegouts" and include_context:
+        raise TraceError("Include context addresses applies only to peg-out paths plots")
     if goal == "pegouts":
         return validate_query(seeds=state["seeds"], min_hops=min_hops, max_hops=max_hops,
-                              include_unspent=include_unspent, include_unspendable=include_unspendable)
+                              include_unspent=include_unspent, include_unspendable=include_unspendable,
+                              include_context=include_context)
     if goal == "connections":
         return {"max_hops": validate_hops(max_hops)}
     return {}
@@ -221,7 +227,7 @@ def _summary(graph, preview_id, *, reviewable=True, reason=None):
 
 
 def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, include_unspent=False,
-                 include_unspendable=False, open_browser=False, progress=None):
+                 include_unspendable=False, include_context=False, open_browser=False, progress=None):
     """Create any supported plot from a verified collection archive, offline."""
     from .cli import open_preview
     from .elk_layout import optimize_graph
@@ -233,7 +239,7 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
     with _locked(case):
         state, settings, fingerprints = _source(case, run_id)
         query = _query(goal, state, min_hops, max_hops, include_unspent=include_unspent,
-                       include_unspendable=include_unspendable)
+                       include_unspendable=include_unspendable, include_context=include_context)
         settings = _effective_settings(settings, goal)
         graph = _graph(state, goal, query, settings)
         graph["graph_options"].update({key: deepcopy(settings[key]) for key in LAYOUT_SETTINGS})
@@ -253,7 +259,7 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
             report.update(connection_count=graph["connections"]["connection_count"], status=graph["connections"]["status"])
         elif goal == "pegouts":
             report.update(match_count=graph["pegouts"]["match_count"], status=graph["pegouts"]["status"])
-            for key in ("endpoint_count", "endpoint_counts"):
+            for key in ("endpoint_count", "endpoint_counts", "context_edge_count"):
                 if key in graph["pegouts"]:
                     report[key] = deepcopy(graph["pegouts"][key])
         graph["plot"] = report
@@ -326,7 +332,7 @@ def _snapshot(case, preview_id):
         if (canonical(graph.get("graph_options", {}).get("pegout_query")) != canonical(query)
                 or canonical(pegouts.get("query")) != canonical(query)
                 or any(canonical(report.get(key)) != canonical(pegouts.get(key))
-                       for key in ("match_count", "endpoint_count", "endpoint_counts", "status"))):
+                       for key in ("match_count", "endpoint_count", "endpoint_counts", "context_edge_count", "status"))):
             raise TraceError("Saved endpoint options disagree with the graph; regenerate the plot")
     _snapshot_settings(graph)
     return graph, plan
@@ -347,7 +353,8 @@ def _review_source(case, graph, source_cache=None):
     query = report.get("query", {})
     expected = _query(report["goal"], state, query.get("min_hops", 0), query.get("max_hops", 10),
                       include_unspent=query.get("include_unspent", False),
-                      include_unspendable=query.get("include_unspendable", False))
+                      include_unspendable=query.get("include_unspendable", False),
+                      include_context=query.get("include_context", False))
     settings = _snapshot_settings(graph)
     if settings is not None:
         from .export import PRESENTATION_VERSION

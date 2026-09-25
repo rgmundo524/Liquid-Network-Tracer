@@ -85,8 +85,9 @@ type Plot = {
   preview_id: string; goal: PlotGoal; run_id: string; min_hops: number; max_hops: number | null;
   created_at: string; status: string; node_count: number; edge_count: number; transaction_count: number;
   match_count?: number; connection_count?: number; source_max_hops?: number; source_run_status?: string;
-  query?: {include_unspent?: boolean; include_unspendable?: boolean};
+  query?: {include_unspent?: boolean; include_unspendable?: boolean; include_context?: boolean};
   endpoint_count?: number; endpoint_counts?: {pegout: number; unspent: number; unspendable: number};
+  context_edge_count?: number;
   source_stop_reason?: string; notice?: string; coverage_notice?: string; reviewable: boolean; reason?: string; empty?: boolean; artifact?: Artifact;
   layout_settings?: LayoutSettings & {presentation_version?: number};
 };
@@ -255,7 +256,7 @@ let dialogPreviewId = "";
 let dialogRebuild: { caseId: string; sourceBoard: string; runId: string } | null = null;
 let submitting = false;
 let pageGeneration = 0;
-let workflowDraft = {caseId: "", goal: "full" as PlotGoal, minHops: "0", maxHops: "10", includeUnspent: false, includeUnspendable: false, plot: "", board: "", boardPlot: "", boardGoal: "full" as PlotGoal, boardName: "", boardUrl: "", recoveryUrl: ""};
+let workflowDraft = {caseId: "", goal: "full" as PlotGoal, minHops: "0", maxHops: "10", includeUnspent: false, includeUnspendable: false, includeContext: false, plot: "", board: "", boardPlot: "", boardGoal: "full" as PlotGoal, boardName: "", boardUrl: "", recoveryUrl: ""};
 let pegoutDraft = {caseId: "", custom: false, txid: "", minHops: "0", maxHops: "10", selected: "", board: "", approved: ""};
 
 const esc = (value: unknown): string =>
@@ -881,7 +882,7 @@ function goalName(goal: string): string {
 }
 
 function currentWorkflow(detail: Case): typeof workflowDraft {
-  if (workflowDraft.caseId !== detail.id) workflowDraft = {caseId: detail.id, goal: "full", minHops: "0", maxHops: "10", includeUnspent: false, includeUnspendable: false, plot: "", board: "", boardPlot: "", boardGoal: "full", boardName: "", boardUrl: "", recoveryUrl: ""};
+  if (workflowDraft.caseId !== detail.id) workflowDraft = {caseId: detail.id, goal: "full", minHops: "0", maxHops: "10", includeUnspent: false, includeUnspendable: false, includeContext: false, plot: "", board: "", boardPlot: "", boardGoal: "full", boardName: "", boardUrl: "", recoveryUrl: ""};
   return workflowDraft;
 }
 
@@ -949,7 +950,11 @@ function plotEndpointScope(plot: Plot): string {
 function plotEndpointLabel(plot: Plot | undefined): string {
   if (plot?.goal !== "pegouts") return "";
   const count = plot.endpoint_count ?? plot.match_count;
-  return ` · ${plotEndpointScope(plot)}${count === undefined ? "" : ` · ${count} endpoints`}`;
+  return ` · ${plotEndpointScope(plot)}${count === undefined ? "" : ` · ${count} endpoints`} · ${plotContextScope(plot)}`;
+}
+
+function plotContextScope(plot: Plot): string {
+  return plot.query?.include_context ? "Context addresses included" : "Paths only";
 }
 
 function plotEndpointSummary(plot: Plot | undefined): string {
@@ -957,7 +962,9 @@ function plotEndpointSummary(plot: Plot | undefined): string {
   const counts = plot.endpoint_counts;
   const matches = counts ? `${counts.pegout} peg-out requests · ${counts.unspent} unspent UTXOs · ${counts.unspendable} unspendable outputs`
     : plot.match_count === undefined ? "" : `${plot.match_count} peg-out requests`;
-  return `<p class="small muted">Endpoint types: ${esc(plotEndpointScope(plot))}.${matches ? ` Results: ${esc(matches)}.` : ""}</p>`;
+  const contextCount = plot.query?.include_context && plot.context_edge_count !== undefined
+    ? ` ${plot.context_edge_count} context connections, excluded from endpoint counts.` : "";
+  return `<p class="small muted">Endpoint types: ${esc(plotEndpointScope(plot))}.${matches ? ` Results: ${esc(matches)}.` : ""}</p><p class="small muted">Saved layout: ${plotContextScope(plot)}.${contextCount}</p>`;
 }
 
 function plotChoiceLabel(plot: Plot): string {
@@ -969,7 +976,10 @@ function plotEndpointFields(draft: typeof workflowDraft): string {
   return `<fieldset class="layout-fields"${disabled(isBusy())}><legend>Additional endpoints</legend>
     <label class="check-line"><input id="workflow-include-unspent" type="checkbox"${draft.includeUnspent ? " checked" : ""}/><span>Include unspent UTXOs</span></label>
     <label class="check-line"><input id="workflow-include-unspendable" type="checkbox"${draft.includeUnspendable ? " checked" : ""}/><span>Include unspendable outputs</span></label>
-    <p class="small muted">Peg-out requests are always included. Unspent means observed unspent in the selected collection run. Unchecked outputs and outputs stopped only by a hop limit are not counted as unspent. These choices are saved with each generated layout.</p></fieldset>`;
+    <p class="small muted">Peg-out requests are always included. Unspent means observed unspent in the selected collection run. Unchecked outputs and outputs stopped only by a hop limit are not counted as unspent. These choices are saved with each generated layout.</p></fieldset>
+    <fieldset class="layout-fields"${disabled(isBusy())}><legend>Context display</legend>
+    <label class="check-line"><input id="workflow-include-context" type="checkbox"${draft.includeContext ? " checked" : ""}/><span>Include context addresses</span></label>
+    <p class="small muted">Show other input addresses and sibling output addresses of displayed transactions. Context adds no tracing or fetching and is excluded from endpoint match counts. Generate a layout to save this choice; existing layouts stay unchanged.</p></fieldset>`;
 }
 
 function savedLayoutSummary(plot: Plot): string {
@@ -1022,6 +1032,7 @@ function workflowInput(element: HTMLInputElement | HTMLSelectElement): boolean {
   if (element.id === "workflow-board-goal" && plotGoals.some(goal => goal.id === element.value)) draft.boardGoal = element.value as PlotGoal;
   else if (element.id === "workflow-include-unspent") draft.includeUnspent = (element as HTMLInputElement).checked;
   else if (element.id === "workflow-include-unspendable") draft.includeUnspendable = (element as HTMLInputElement).checked;
+  else if (element.id === "workflow-include-context") draft.includeContext = (element as HTMLInputElement).checked;
   else if (fields[element.id]) draft[fields[element.id]] = element.id === "workflow-board-plot" && !element.value ? "unselected" : element.value;
   else return false;
   if (["workflow-plot-picker", "workflow-board-goal", "workflow-board-plot"].includes(element.id)) render();
@@ -1062,6 +1073,7 @@ async function workflowAction(action: string, element?: HTMLElement): Promise<bo
     if (draft.goal === "pegouts") {
       if (draft.includeUnspent) body.include_unspent = true;
       if (draft.includeUnspendable) body.include_unspendable = true;
+      if (draft.includeContext) body.include_context = true;
     }
     const generation = pageGeneration;
     if (!await persistPlotLayoutSettings(detail) || state.activeCase?.id !== detail.id || generation !== pageGeneration) return true;
