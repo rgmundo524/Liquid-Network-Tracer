@@ -37,7 +37,7 @@ are shown together:
 | --- | --- |
 | Full investigation / Full trace | The saved investigation graph, using the current display settings. |
 | Starter connections | Verified paths between the starting transactions, within the selected maximum hops. |
-| Paths to peg-outs | Verified paths from selected seed UTXOs to peg-out requests, within an inclusive hop range. |
+| Paths to peg-outs | Verified paths from selected seed UTXOs to peg-out requests, optionally also unspent UTXOs and unspendable outputs, within an inclusive hop range. |
 
 Plotting is offline. It reads the selected collection run and saved address
 statistics, creates a separate local preview, and makes no Blockstream or Miro
@@ -49,6 +49,21 @@ UTXOs retain their separate connectors and transaction CSV rows. Unknown
 addresses remain separate by outpoint, and peg-out request diamonds remain
 separate even when their Bitcoin destinations match. Only verified saved
 spends establish qualifying paths; sharing a circle does not create a new spend.
+
+Under this goal, **Include unspent UTXOs** and **Include unspendable outputs**
+add those endpoint types while retaining peg-outs. Both are off by default.
+The selected hop range and current attribution stop/hop limits apply to every
+path. Unspent endpoints require a saved unspent observation for the exact UTXO;
+unchecked, stopped, or hop-limited outputs do not qualify merely because no
+spending transaction was collected. A saved spending input overrides an older
+unspent observation. This is the state observed in the selected run, not a live
+balance. Unspendable event diamonds remain separate by output, and fee outputs
+are excluded.
+
+The saved plot records its endpoint choices and counts by type, so the ELK SVG
+and Miro sync use the same selection. These choices belong to the generated
+layout, like its hop range. To change them, generate another layout and select
+it for the managed board. Plotting does not fetch fresh spend observations.
 
 Set layout attempts, connector appearance, attribution arrow coloring, and
 named-group centering here. **Full trace** also supports **Separate branch hubs**,

@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 
-from liquid_tracer.common import TraceError, canonical, digest, read_json, save_json
+from liquid_tracer.common import LBTC, TraceError, canonical, digest, read_json, save_json
 from liquid_tracer.investigations import create_investigation, read_case, update_case
 from liquid_tracer.plots import FILES, list_plots, preview_plot, reviewed_plot
 from liquid_tracer.services import set_service
@@ -132,6 +132,89 @@ class PlotTests(unittest.TestCase):
                 self.assertEqual(plan["connectors"], [])
                 self.assertIn("No matching activity", Path(result["html"]).read_text())
         self.layout.assert_not_called()
+
+    def test_optional_endpoints_roundtrip_snapshot_exports_and_shared_board_identity(self):
+        state = graph_state((("a:0", "b"),), seeds=("a:0",))
+        state["outputs"][tx("b") + ":0"].update(status="unspent_at_observation",
+                observed_spend={"spent": False}, spend_observation_id=1)
+        pegout = add_pegout(state, tx("b"))
+        state["transactions"][tx("b")]["data"]["vout"].extend([
+            {"scriptpubkey": "6a", "scriptpubkey_type": "op_return", "asset": LBTC, "value": 10},
+            {"scriptpubkey": "", "scriptpubkey_type": "fee", "asset": LBTC, "value": 1}])
+        self.state, self.archive = saved_case(self.case, state)
+        before = self.bytes(self.archive)
+        default = preview_plot(self.case, "pegouts", min_hops=1, max_hops=1)
+        _, default_plan = reviewed_plot(self.case, default["preview_id"])
+        self.assertNotIn("include_unspent", default["query"])
+        self.assertNotIn("include_unspendable", default["query"])
+        result = preview_plot(self.case, "pegouts", min_hops=1, max_hops=1,
+                              include_unspent=True, include_unspendable=True)
+        graph, plan = reviewed_plot(self.case, result["preview_id"])
+        self.assertEqual(result["endpoint_count"], 3)
+        self.assertEqual(result["endpoint_counts"], {"pegout": 1, "unspent": 1, "unspendable": 1})
+        self.assertEqual(result["match_count"], 1)
+        self.assertEqual(result["query"], {"seeds": state["seeds"], "min_hops": 1, "max_hops": 1,
+                                          "include_unspent": True, "include_unspendable": True})
+        self.assertEqual(graph["graph_options"]["pegout_query"], result["query"])
+        self.assertEqual([item["outpoint"] for item in graph["pegouts"]["matches"]], [pegout])
+        self.assertEqual(plan["namespace"], default_plan["namespace"])
+        expected = {"out:" + tx("a") + ":0", "in:" + tx("b") + ":0",
+                    *("out:" + tx("b") + ":" + str(index) for index in range(3))}
+        self.assertEqual({edge["id"] for edge in graph["edges"]}, expected)
+        directory = Path(result["directory"])
+        self.assertEqual(read_json(directory / "plot.json"), graph["plot"])
+        with (directory / "transactions.csv").open(newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        self.assertEqual(len(rows), len(expected))
+        svg = ET.fromstring((directory / "graph.svg").read_bytes())
+        self.assertEqual({node.get("data-node-id") for node in svg.iter() if node.get("data-node-id")},
+                         {node["id"] for node in graph["nodes"]})
+        self.assertEqual(before, self.bytes(self.archive))
+        self.assertTrue(all(item["reviewable"] for item in list_plots(self.case)))
+
+    def test_endpoint_only_result_is_nonempty_without_counting_a_pegout(self):
+        state = graph_state((("a:0", "b"),), seeds=("a:0",))
+        state["outputs"][tx("b") + ":0"].update(status="unspent_at_observation",
+                observed_spend={"spent": False}, spend_observation_id=1)
+        self.state, self.archive = saved_case(self.case, state)
+        result = preview_plot(self.case, "pegouts", include_unspent=True)
+        graph, plan = reviewed_plot(self.case, result["preview_id"])
+        self.assertEqual(result["status"], "endpoints_found")
+        self.assertEqual(result["match_count"], 0)
+        self.assertEqual(result["endpoint_count"], 1)
+        self.assertEqual(result["endpoint_counts"], {"pegout": 0, "unspent": 1, "unspendable": 0})
+        self.assertFalse(result["empty"])
+        self.assertEqual(graph["pegouts"]["matches"], [])
+        self.assertEqual(len(plan["connectors"]), 3)
+
+    def test_endpoint_options_reject_nonboolean_values_and_nonpegout_goals(self):
+        for key in ("include_unspent", "include_unspendable"):
+            for value in (None, 0, 1, "true", [], {}):
+                with self.subTest(option=key, value=value), self.assertRaises(TraceError):
+                    preview_plot(self.case, "pegouts", **{key: value})
+            for goal in ("full", "connections"):
+                with self.subTest(option=key, goal=goal), self.assertRaises(TraceError):
+                    preview_plot(self.case, goal, **{key: True})
+
+    def test_changed_saved_endpoint_query_or_counts_are_rejected_even_when_rehashed(self):
+        result = preview_plot(self.case, "pegouts", include_unspent=True)
+        directory = Path(result["directory"])
+        original = read_json(directory / "graph.json")
+        for change in ("flag", "count", "counts", "status"):
+            graph = deepcopy(original)
+            if change == "flag":
+                graph["plot"]["query"]["include_unspendable"] = True
+            elif change == "count":
+                graph["plot"]["endpoint_count"] += 1
+            elif change == "counts":
+                graph["plot"]["endpoint_counts"]["unspent"] += 1
+            else:
+                graph["plot"]["status"] = "endpoints_found"
+            save_json(directory / "graph.json", graph)
+            save_json(directory / "plot.json", graph["plot"])
+            self.rehash_preview(directory)
+            with self.subTest(change=change), self.assertRaisesRegex(TraceError, "endpoint options"):
+                reviewed_plot(self.case, result["preview_id"])
 
     def test_partial_collection_reports_coverage_without_claiming_search_complete(self):
         state = deepcopy(self.state)

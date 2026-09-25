@@ -1226,6 +1226,92 @@ test('plot views explain missing collection, retain all goals, and reject invali
   assert.equal(view.calls.length, 1);
 });
 
+test('peg-out endpoints default off and optional booleans are submitted only for this goal', async () => {
+  for (const goal of ['full', 'connections', 'pegouts']) {
+    for (const [includeUnspent, includeUnspendable] of [[false, false], [true, false], [false, true], [true, true]]) {
+      const view = await harness(path => path.endsWith('/actions') ? {id: 'plotjob', status: 'running'} : undefined);
+      view.state.activeCase = workflowCase();
+      await view.dispatch('view-plots');
+      assert.doesNotMatch(view.workspace(), /id="workflow-include-(?:unspent|unspendable)"/);
+      await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+      for (const id of ['unspent', 'unspendable']) {
+        const input = view.workspace().match(new RegExp(`<input id="workflow-include-${id}"[^>]*>`))?.[0];
+        assert.ok(input);
+        assert.doesNotMatch(input, /checked/);
+      }
+      assert.match(view.workspace(), /Peg-out requests are always included/);
+      assert.match(view.workspace(), /observed unspent in the selected collection run/);
+      assert.match(view.workspace(), /Unchecked outputs and outputs stopped only by a hop limit are not counted as unspent/);
+      view.workflowInput({id: 'workflow-include-unspent', checked: includeUnspent});
+      view.workflowInput({id: 'workflow-include-unspendable', checked: includeUnspendable});
+      await view.dispatch('plot-goal', {dataset: {goal}});
+      if (goal !== 'pegouts') assert.doesNotMatch(view.workspace(), /id="workflow-include-(?:unspent|unspendable)"/);
+      await view.dispatch('workflow-plot');
+      assert.deepEqual(view.calls.at(-1).body, {action: 'plot', goal, run_id: 'saved1',
+        min_hops: 0, max_hops: goal === 'full' ? 0 : 10,
+        ...(goal === 'pegouts' && includeUnspent ? {include_unspent: true} : {}),
+        ...(goal === 'pegouts' && includeUnspendable ? {include_unspendable: true} : {})});
+      assert.equal(view.state.job.live, false);
+      assert.equal(view.calls.filter(call => call.body).length, 1, 'endpoint choices do not update settings or collect data');
+    }
+  }
+});
+
+test('endpoint drafts survive tab and goal changes without leaking into another investigation', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase();
+  await view.dispatch('view-plots');
+  await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+  view.workflowInput({id: 'workflow-include-unspent', checked: true});
+  view.workflowInput({id: 'workflow-include-unspendable', checked: true});
+  await view.dispatch('view-boards');
+  await view.dispatch('view-plots');
+  await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
+  await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+  for (const id of ['unspent', 'unspendable']) assert.match(view.workspace(), new RegExp(`id="workflow-include-${id}"[^>]*checked`));
+  view.workflowInput({id: 'workflow-include-unspent', checked: false});
+  await view.dispatch('view-plots');
+  assert.doesNotMatch(view.workspace(), /id="workflow-include-unspent"[^>]*checked/);
+  view.state.activeCase = workflowCase({id: 'other'});
+  await view.dispatch('view-plots');
+  await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+  for (const id of ['unspent', 'unspendable']) assert.doesNotMatch(view.workspace(), new RegExp(`id="workflow-include-${id}"[^>]*checked`));
+  assert.equal(view.calls.length, 1);
+});
+
+test('saved endpoint scope and counts remain visible in plot, download, and board selection', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'syncjob', status: 'running'} : undefined);
+  const terminal = workflowPlot('pegouts', 'terminal', {query: {include_unspent: true, include_unspendable: true},
+    match_count: 0, endpoint_count: 3, endpoint_counts: {pegout: 0, unspent: 2, unspendable: 1}});
+  view.state.activeCase = workflowCase({plots: [terminal, workflowPlot('pegouts', 'earlier', {match_count: 2})],
+    boards: [workflowBoard('pegouts', 'terminal-board', {preview_id: 'terminal'})]});
+  for (const page of ['plots', 'history', 'boards']) {
+    await view.dispatch('view-' + page);
+    const html = view.workspace();
+    assert.match(html, /Peg-outs \+ unspent UTXOs \+ unspendable outputs · 3 endpoints/);
+    assert.match(html, /0 peg-out requests · 2 unspent UTXOs · 1 unspendable outputs/);
+    const picker = html.match(/<select id="workflow-(?:plot-picker|board-plot)"[^>]*>[\s\S]*?<\/select>/)?.[0];
+    assert.ok(picker);
+    assert.match(picker, /value="terminal"[^>]*>[^<]*Peg-outs \+ unspent UTXOs \+ unspendable outputs · 3 endpoints/);
+    assert.match(picker, /value="earlier"[^>]*>[^<]*Peg-outs · 2 endpoints/);
+  }
+  assert.doesNotMatch(view.workspace().match(/<button[^>]*data-action="workflow-board-sync"[^>]*>/)[0], /disabled/);
+  await view.dispatch('workflow-board-sync');
+  assert.deepEqual(view.calls.at(-1).body, {action: 'board-sync', record_id: 'terminal-board', preview_id: 'terminal', reorganize: false});
+});
+
+test('historical peg-out layouts keep their peg-out-only summary regardless of current choices', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'old', {match_count: 2})]});
+  await view.dispatch('view-plots');
+  await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+  view.workflowInput({id: 'workflow-include-unspent', checked: true});
+  view.workflowInput({id: 'workflow-include-unspendable', checked: true});
+  await view.dispatch('view-history');
+  assert.match(view.workspace(), /Endpoint types: Peg-outs\. Results: 2 peg-out requests\./);
+  assert.doesNotMatch(view.workspace(), /Endpoint types: Peg-outs \+|0 unspent UTXOs|0 unspendable outputs/);
+});
+
 test('central board manager creates or links boards before collection for each goal', async () => {
   for (const goal of ['full', 'connections', 'pegouts']) {
     for (const method of ['create', 'link']) {

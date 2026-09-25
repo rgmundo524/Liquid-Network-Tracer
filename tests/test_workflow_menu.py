@@ -9,7 +9,7 @@ from unittest.mock import patch
 from liquid_tracer.common import TraceError, save_json
 from liquid_tracer.investigations import create_investigation, read_case
 from liquid_tracer.menu import create_app
-from liquid_tracer.workflow_menu import boards_screen, plot_arguments, plot_screen
+from liquid_tracer.workflow_menu import _endpoint_summary, boards_screen, plot_arguments, plot_screen
 
 HAS_TEXTUAL = importlib.util.find_spec("textual") is not None
 
@@ -33,6 +33,25 @@ class PlotCommandTests(unittest.TestCase):
                 ("pegouts", "run", "3", "2"), ("connections", "run", "0", "-1")]:
             with self.subTest(goal=goal, run=run, minimum=minimum, maximum=maximum), self.assertRaises(TraceError):
                 plot_arguments("case", goal, run, minimum, maximum)
+
+    def test_optional_endpoints_are_pegout_only_and_never_enable_live_collection(self):
+        arguments, live = plot_arguments("case", "pegouts", "run", include_unspent=True, include_unspendable=True)
+        self.assertFalse(live)
+        self.assertEqual(arguments[-3:], ["--include-unspent", "--include-unspendable", "--open"])
+        for key in ("include_unspent", "include_unspendable"):
+            for value in (None, 1, "true"):
+                with self.subTest(option=key, value=value), self.assertRaises(TraceError):
+                    plot_arguments("case", "pegouts", "run", **{key: value})
+            for goal in ("full", "connections"):
+                with self.subTest(option=key, goal=goal), self.assertRaises(TraceError):
+                    plot_arguments("case", goal, "run", **{key: True})
+
+    def test_saved_plot_summary_identifies_selected_endpoint_types_even_with_no_matches(self):
+        self.assertEqual(_endpoint_summary({"goal": "pegouts", "match_count": 2}), "2 peg-outs")
+        self.assertEqual(_endpoint_summary({"goal": "pegouts", "match_count": 0,
+            "query": {"include_unspent": True, "include_unspendable": True},
+            "endpoint_counts": {"pegout": 0, "unspent": 3, "unspendable": 0}}),
+            "0 peg-outs, 3 unspent UTXOs, 0 unspendable outputs")
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "Install the optional tui extra")
@@ -107,6 +126,41 @@ class WorkflowMenuTests(unittest.IsolatedAsyncioTestCase):
             await self.click(app, pilot, "#plot-go")
             self.assertEqual(app.result, (["plot", "--case", str(self.case), "--goal", "pegouts", "--run", run,
                                           "--min-hops", "2", "--max-hops", "10", "--open"], False))
+
+    async def test_terminal_options_are_visible_only_for_pegouts_and_default_off(self):
+        from textual.widgets import Checkbox, Select
+        run = "saved-run"
+        save_json(self.case / "runs" / run / "trace.json", {})
+        save_json(self.case / "case.json", {**read_case(self.case), "latest_run": run})
+        app = self.app_for(plot_screen)
+        async with app.run_test(size=(110, 55)) as pilot:
+            self.assertFalse(app.screen.query_one("#plot-endpoints").display)
+            unspent = app.screen.query_one("#plot-include-unspent", Checkbox)
+            unspendable = app.screen.query_one("#plot-include-unspendable", Checkbox)
+            self.assertFalse(unspent.value)
+            self.assertFalse(unspendable.value)
+            app.screen.query_one("#plot-goal", Select).value = "pegouts"
+            await pilot.pause()
+            self.assertTrue(app.screen.query_one("#plot-endpoints").display)
+            unspent.value = unspendable.value = True
+            await self.click(app, pilot, "#plot-go")
+            self.assertEqual(app.result[0][-3:], ["--include-unspent", "--include-unspendable", "--open"])
+            self.assertFalse(app.result[1])
+
+    async def test_hidden_terminal_options_do_not_leak_into_other_goals(self):
+        from textual.widgets import Checkbox, Select
+        run = "saved-run"
+        save_json(self.case / "runs" / run / "trace.json", {})
+        save_json(self.case / "case.json", {**read_case(self.case), "latest_run": run})
+        app = self.app_for(plot_screen)
+        async with app.run_test(size=(110, 55)) as pilot:
+            app.screen.query_one("#plot-goal", Select).value = "pegouts"
+            app.screen.query_one("#plot-include-unspent", Checkbox).value = True
+            app.screen.query_one("#plot-goal", Select).value = "connections"
+            await pilot.pause()
+            self.assertFalse(app.screen.query_one("#plot-endpoints").display)
+            await self.click(app, pilot, "#plot-go")
+            self.assertNotIn("--include-unspent", app.result[0])
 
     def board_rows(self):
         return [{"id": "board-full", "name": "Full graph", "goal": "full", "board_id": "FULL=",

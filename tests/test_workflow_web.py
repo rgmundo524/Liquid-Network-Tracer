@@ -95,6 +95,49 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertEqual(self.request(route + "/actions", {**body, "preview_id": empty["preview_id"]})[0], 400)
             start.assert_not_called()
 
+    def test_plot_endpoint_options_are_optional_strict_booleans_and_pegout_only(self):
+        case, route, run = self.collected()
+        body = {"action": "plot", "goal": "pegouts", "run_id": run, "min_hops": 0, "max_hops": 10}
+        with patch.object(self.server, "start_job", return_value={"id": "plot"}) as start:
+            self.success(route + "/actions", {**body, "include_unspent": True, "include_unspendable": True}, 202)
+            self.assertEqual(start.call_args.args[0], ["plot", "--case", str(case), "--goal", "pegouts", "--run", run,
+                "--min-hops", "0", "--max-hops", "10", "--include-unspent", "--include-unspendable"])
+            self.assertFalse(start.call_args.kwargs["live"])
+            self.success(route + "/actions", {**body, "include_unspent": False, "include_unspendable": False}, 202)
+            self.assertNotIn("--include-unspent", start.call_args.args[0])
+            self.assertNotIn("--include-unspendable", start.call_args.args[0])
+            start.reset_mock()
+            for key in ("include_unspent", "include_unspendable"):
+                for value in (None, 0, 1, "true", [], {}):
+                    with self.subTest(option=key, value=value):
+                        self.assertEqual(self.request(route + "/actions", {**body, key: value})[0], 400)
+                for goal in ("full", "connections"):
+                    self.assertEqual(self.request(route + "/actions", {**body, "goal": goal, key: True})[0], 400)
+            start.assert_not_called()
+
+    def test_terminal_only_plot_exposes_selected_endpoints_and_can_sync_to_pegout_board(self):
+        case, route, _ = self.collected()
+        state = graph_state((("a:0", "b"),), seeds=("a:0",))
+        state["outputs"]["b" * 64 + ":0"].update(status="unspent_at_observation",
+                observed_spend={"spent": False}, spend_observation_id=1)
+        saved_case(case, state)
+        plot = preview_plot(case, "pegouts", include_unspent=True)
+        board = link_board(case, "pegouts", "Endpoints", "ENDPOINTS=")
+        detail = self.success(route)
+        listed = detail["plots"][0]
+        self.assertEqual(listed["status"], "endpoints_found")
+        self.assertEqual(listed["match_count"], 0)
+        self.assertEqual(listed["endpoint_count"], 1)
+        self.assertEqual(listed["endpoint_counts"], {"pegout": 0, "unspent": 1, "unspendable": 0})
+        self.assertIs(listed["query"]["include_unspent"], True)
+        self.assertNotIn("include_unspendable", listed["query"])
+        self.assertTrue(listed["reviewable"])
+        self.assertIn(b"svg", self.success(listed["artifact"]["preview_url"]).lower())
+        with patch.object(self.server, "start_job", return_value={"id": "sync"}) as start:
+            self.success(route + "/actions", {"action": "board-sync", "record_id": board["id"],
+                "preview_id": plot["preview_id"], "reorganize": True}, 202)
+            self.assertEqual(start.call_args.args[0][0], "investigation-board-sync")
+
     def test_contract_rejects_arbitrary_fields_ranges_and_unreviewed_plots(self):
         _, route, run = self.collected()
         body = {"action": "plot", "goal": "full", "run_id": run, "min_hops": 0, "max_hops": 10}
@@ -147,6 +190,25 @@ class WorkflowWebTests(unittest.TestCase):
                 self.assertNotIn("layout_settings", result)
                 self.assertNotIn("/private/source", json.dumps(result))
 
+    def test_public_endpoint_options_and_counts_omit_unknown_or_malformed_fields(self):
+        from liquid_tracer.workflow_api import public_plot
+
+        case, _, _ = self.collected()
+        plot = preview_plot(case, "pegouts", include_unspent=True)
+        for invalid in (None, [], {**plot["query"], "private_path": "/private/source"},
+                        {**plot["query"], "include_unspent": 1}):
+            with self.subTest(query=invalid):
+                result = public_plot({**plot, "query": invalid})
+                self.assertNotIn("query", result)
+                self.assertNotIn("/private/source", json.dumps(result))
+        for invalid in (None, [], {**plot["endpoint_counts"], "private_path": "/private/source"},
+                        {**plot["endpoint_counts"], "unspent": True}):
+            with self.subTest(counts=invalid):
+                result = public_plot({**plot, "endpoint_counts": invalid})
+                self.assertNotIn("endpoint_counts", result)
+                self.assertNotIn("endpoint_count", result)
+                self.assertNotIn("/private/source", json.dumps(result))
+
     def test_busy_plot_registry_does_not_hide_the_investigation_or_expose_paths(self):
         _, route, _ = self.collected()
         with patch("liquid_tracer.plots.list_plots", side_effect=TraceError("private/path")), \
@@ -175,6 +237,16 @@ class WorkflowWebTests(unittest.TestCase):
         self.assertEqual(results[1]["board_id"], "PEG=")
         self.assertEqual(len(results[2]["boards"]), 2)
         self.assertEqual(read_case(case)["miro_board"], "MAIN=")
+
+    def test_cli_plot_forwards_optional_terminal_endpoints(self):
+        case, _, _ = self.collected()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(main(["plot", "--case", str(case), "--goal", "pegouts",
+                "--include-unspent", "--include-unspendable"]), 0)
+        result = json.loads(output.getvalue())
+        self.assertIs(result["query"]["include_unspent"], True)
+        self.assertIs(result["query"]["include_unspendable"], True)
 
     def test_worker_board_result_has_no_local_paths_or_supplied_links(self):
         case, _, _ = self.collected()

@@ -92,7 +92,8 @@ def legend_notes(graph=None):
         if not isinstance(query, dict):
             raise TraceError("Peg-out legend requires its reviewed search query")
         query = validate_query(query.get("txid"), query.get("min_hops"), query.get("max_hops"),
-                               seeds=query.get("seeds"))
+                               seeds=query.get("seeds"), include_unspent=query.get("include_unspent", False),
+                               include_unspendable=query.get("include_unspendable", False))
         if "seeds" in query:
             count = len({seed.split(":")[0] for seed in query["seeds"]})
             origin = (f"Peg-out search: {len(query['seeds'])} selected seed UTXO(s) "
@@ -113,6 +114,18 @@ def legend_notes(graph=None):
         if graph.get("address_mode") == "merged":
             notes.append("One circle per full address per network; each UTXO keeps its own arrows. "
                          "Sharing a circle does not establish a spend between unrelated outputs.")
+        if query.get("include_unspent") or query.get("include_unspendable"):
+            endpoints = ["peg-out requests"]
+            if query.get("include_unspent"):
+                endpoints.append("unspent UTXOs")
+            if query.get("include_unspendable"):
+                endpoints.append("provably unspendable outputs")
+            notes.append("Selected endpoints: " + ", ".join(endpoints) + ". The same hop range and trace boundaries apply to each.")
+            if query.get("include_unspent"):
+                notes.append("Unspent means observed unspent in the selected saved run, not a live balance. "
+                             "Unchecked and hop-limited outputs do not qualify.")
+            if query.get("include_unspendable"):
+                notes.append("Unspendable diamonds identify outputs whose scripts cannot be spent. Fee outputs are excluded.")
     return notes
 
 

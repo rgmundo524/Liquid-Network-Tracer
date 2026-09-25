@@ -13,10 +13,26 @@ GOAL_NAMES = dict((value, label) for label, value in GOALS)
 ERRORS = (TraceError, ValueError, OSError, KeyError, TypeError)
 
 
-def plot_arguments(case, goal, run, minimum="0", maximum="10"):
+def _endpoint_summary(plot):
+    if plot.get("goal") != "pegouts":
+        return ""
+    query, counts = plot.get("query", {}), plot.get("endpoint_counts", {})
+    labels = [f"{counts.get('pegout', plot.get('match_count', 0))} peg-outs"]
+    if query.get("include_unspent"):
+        labels.append(f"{counts.get('unspent', 0)} unspent UTXOs")
+    if query.get("include_unspendable"):
+        labels.append(f"{counts.get('unspendable', 0)} unspendable outputs")
+    return ", ".join(labels)
+
+
+def plot_arguments(case, goal, run, minimum="0", maximum="10", *, include_unspent=False, include_unspendable=False):
     """Validate terminal fields; plotting always uses an explicit saved run."""
     if goal not in GOAL_NAMES:
         raise TraceError("Choose a plotting goal")
+    if type(include_unspent) is not bool or type(include_unspendable) is not bool:
+        raise TraceError("Additional endpoint options must be true or false")
+    if goal != "pegouts" and (include_unspent or include_unspendable):
+        raise TraceError("Additional endpoint options apply only to peg-out paths plots")
     if not isinstance(run, str) or not run:
         raise TraceError("Collect transaction data first, then choose a saved run")
     arguments = ["plot", "--case", str(case), "--goal", goal, "--run", run]
@@ -25,12 +41,16 @@ def plot_arguments(case, goal, run, minimum="0", maximum="10"):
         if not 0 <= lower <= upper <= 2147483647:
             raise TraceError("Use whole-number hops from 0 to 2147483647; minimum cannot exceed maximum")
         arguments += ["--min-hops", str(lower), "--max-hops", str(upper)]
+    if include_unspent:
+        arguments.append("--include-unspent")
+    if include_unspendable:
+        arguments.append("--include-unspendable")
     return arguments + ["--open"], False
 
 
 def plot_screen(base, button, case):
     from textual.containers import Horizontal, Vertical, VerticalScroll
-    from textual.widgets import Footer, Header, Input, Label, Select, Static
+    from textual.widgets import Checkbox, Footer, Header, Input, Label, Select, Static
 
     class PlotScreen(base):
         def compose(self):
@@ -55,6 +75,11 @@ def plot_screen(base, button, case):
                         yield Input(value="0", id="plot-min-hops", type="integer")
                     yield Label("Maximum transaction hops, inclusive")
                     yield Input(value="10", id="plot-max-hops", type="integer")
+                with Vertical(id="plot-endpoints"):
+                    yield Checkbox("Include unspent UTXOs", id="plot-include-unspent")
+                    yield Checkbox("Include unspendable outputs", id="plot-include-unspendable")
+                    yield Static("Peg-outs are always included. Unspent means recorded as unspent in this saved collection; "
+                                 "it is not a live balance check. Fee outputs are excluded.", markup=False)
                 yield Static("Hop limits filter the saved data. They do not collect additional transactions. "
                              "A starting transaction is hop 0. Missing matches may reflect incomplete coverage.", markup=False)
                 yield Static("", id="workflow-error", markup=False)
@@ -72,6 +97,8 @@ def plot_screen(base, button, case):
             self.query_one("#plot-range").styles.height = "auto"
             self.query_one("#plot-minimum").display = goal == "pegouts"
             self.query_one("#plot-minimum").styles.height = "auto"
+            self.query_one("#plot-endpoints").display = goal == "pegouts"
+            self.query_one("#plot-endpoints").styles.height = "auto"
 
         def on_select_changed(self, event):
             if event.select.id == "plot-goal":
@@ -85,10 +112,13 @@ def plot_screen(base, button, case):
                 self.action_back()
             elif event.button.id == "plot-go":
                 try:
-                    self.dismiss(plot_arguments(case, self.query_one("#plot-goal", Select).value,
+                    goal = self.query_one("#plot-goal", Select).value
+                    self.dismiss(plot_arguments(case, goal,
                         self.query_one("#plot-run", Select).value,
                         self.query_one("#plot-min-hops", Input).value,
-                        self.query_one("#plot-max-hops", Input).value))
+                        self.query_one("#plot-max-hops", Input).value,
+                        include_unspent=goal == "pegouts" and self.query_one("#plot-include-unspent", Checkbox).value,
+                        include_unspendable=goal == "pegouts" and self.query_one("#plot-include-unspendable", Checkbox).value))
                 except ERRORS as error:
                     self.query_one("#workflow-error", Static).update(str(error))
 
@@ -172,7 +202,9 @@ def boards_screen(base, button, case):
                     if row and plot.get("goal") == row.get("goal") and plot.get("reviewable")
                     and (not resuming or plot["preview_id"] == row.get("preview_id"))]
                 self.query_one("#workflow-preview", Select).set_options([
-                    (f"{plot['run_id']} | {plot['preview_id']}", plot["preview_id"]) for plot in compatible])
+                    (f"{plot['run_id']} | {plot['preview_id']}" +
+                     (" | " + _endpoint_summary(plot) if plot.get("goal") == "pegouts" else ""),
+                     plot["preview_id"]) for plot in compatible])
                 if resuming and compatible:
                     self.query_one("#workflow-preview", Select).value = compatible[0]["preview_id"]
                 self.query_one("#workflow-board-status", Static).update(
@@ -191,6 +223,7 @@ def boards_screen(base, button, case):
                 self.query_one("#workflow-preview-status", Static).update(
                     f"Saved run: {plot['run_id']}\nCollection status: {plot.get('source_run_status', 'unknown')}; "
                     f"hop ceiling: {plot.get('source_max_hops', 'unknown')}."
+                    + ("\nEndpoints: " + _endpoint_summary(plot) if plot.get("goal") == "pegouts" else "")
                     + (" No matching activity to publish." if plot.get("empty") else "") if ready else
                     "Choose a compatible saved plot. If none are listed, return to Plot saved data.")
 

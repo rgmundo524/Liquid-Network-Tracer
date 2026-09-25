@@ -106,3 +106,21 @@ class LegendTests(unittest.TestCase):
         layout_html(graph, b'<svg xmlns="http://www.w3.org/2000/svg"/>', {})
         mermaid_html(graph, b'<svg xmlns="http://www.w3.org/2000/svg"/>')
         self.assertEqual(graph, before)
+
+    def test_optional_endpoint_legend_preserves_pegout_only_notes(self):
+        from liquid_tracer.pegout_paths import pegout_graph, validate_query
+        from tests.test_attribution_convergence import graph_state
+
+        state = graph_state(seeds=("a:0",))
+        default = pegout_graph(state, validate_query(seeds=state["seeds"]))
+        unchanged = copy.deepcopy(default)
+        unchanged["pegouts"]["query"].update(include_unspent=False, include_unspendable=False)
+        self.assertEqual(legend_notes(default), legend_notes(unchanged))
+        expanded = pegout_graph(state, validate_query(seeds=state["seeds"], include_unspent=True,
+                                                      include_unspendable=True))
+        notes = " ".join(legend_notes(expanded))
+        self.assertIn("Selected endpoints: peg-out requests, unspent UTXOs, provably unspendable outputs", notes)
+        self.assertIn("not a live balance", notes)
+        self.assertIn("Unchecked and hop-limited outputs do not qualify", notes)
+        self.assertIn("Fee outputs are excluded", notes)
+        self.assertNotIn("Selected endpoints:", " ".join(legend_notes(default)))
