@@ -142,13 +142,18 @@ def _source(case, run_id):
     return state, settings, fingerprints
 
 
-def _query(goal, state, min_hops, max_hops):
+def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_unspendable=False):
     from .connections import validate_hops
     from .pegout_paths import validate_query
     if not isinstance(goal, str) or goal not in GOALS:
         raise TraceError("Choose the full investigation, starter connections, or peg-out paths plot")
+    if type(include_unspent) is not bool or type(include_unspendable) is not bool:
+        raise TraceError("Additional endpoint options must be true or false")
+    if goal != "pegouts" and (include_unspent or include_unspendable):
+        raise TraceError("Additional endpoint options apply only to peg-out paths plots")
     if goal == "pegouts":
-        return validate_query(seeds=state["seeds"], min_hops=min_hops, max_hops=max_hops)
+        return validate_query(seeds=state["seeds"], min_hops=min_hops, max_hops=max_hops,
+                              include_unspent=include_unspent, include_unspendable=include_unspendable)
     if goal == "connections":
         return {"max_hops": validate_hops(max_hops)}
     return {}
@@ -215,7 +220,8 @@ def _summary(graph, preview_id, *, reviewable=True, reason=None):
     return result
 
 
-def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, open_browser=False, progress=None):
+def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, include_unspent=False,
+                 include_unspendable=False, open_browser=False, progress=None):
     """Create any supported plot from a verified collection archive, offline."""
     from .cli import open_preview
     from .elk_layout import optimize_graph
@@ -226,7 +232,8 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, open_b
     case = _ordinary(case)
     with _locked(case):
         state, settings, fingerprints = _source(case, run_id)
-        query = _query(goal, state, min_hops, max_hops)
+        query = _query(goal, state, min_hops, max_hops, include_unspent=include_unspent,
+                       include_unspendable=include_unspendable)
         settings = _effective_settings(settings, goal)
         graph = _graph(state, goal, query, settings)
         graph["graph_options"].update({key: deepcopy(settings[key]) for key in LAYOUT_SETTINGS})
@@ -246,6 +253,9 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, open_b
             report.update(connection_count=graph["connections"]["connection_count"], status=graph["connections"]["status"])
         elif goal == "pegouts":
             report.update(match_count=graph["pegouts"]["match_count"], status=graph["pegouts"]["status"])
+            for key in ("endpoint_count", "endpoint_counts"):
+                if key in graph["pegouts"]:
+                    report[key] = deepcopy(graph["pegouts"][key])
         graph["plot"] = report
         destination = _ordinary(case / "previews" / (state["run_id"] + "-plots-" + uuid.uuid4().hex[:8]))
         if progress:
@@ -310,6 +320,14 @@ def _snapshot(case, preview_id):
     validate_plan(plan)
     if plot_plan(graph) != plan:
         raise TraceError("Saved plot and its Miro plan disagree")
+    if report["goal"] == "pegouts":
+        query = report["query"]
+        pegouts = graph.get("pegouts", {})
+        if (canonical(graph.get("graph_options", {}).get("pegout_query")) != canonical(query)
+                or canonical(pegouts.get("query")) != canonical(query)
+                or any(canonical(report.get(key)) != canonical(pegouts.get(key))
+                       for key in ("match_count", "endpoint_count", "endpoint_counts", "status"))):
+            raise TraceError("Saved endpoint options disagree with the graph; regenerate the plot")
     _snapshot_settings(graph)
     return graph, plan
 
@@ -327,7 +345,9 @@ def _review_source(case, graph, source_cache=None):
             state = {key: state[key] for key in ("seeds", "source")}
             source_cache[run_id] = state, fingerprints
     query = report.get("query", {})
-    expected = _query(report["goal"], state, query.get("min_hops", 0), query.get("max_hops", 10))
+    expected = _query(report["goal"], state, query.get("min_hops", 0), query.get("max_hops", 10),
+                      include_unspent=query.get("include_unspent", False),
+                      include_unspendable=query.get("include_unspendable", False))
     settings = _snapshot_settings(graph)
     if settings is not None:
         from .export import PRESENTATION_VERSION

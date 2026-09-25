@@ -22,6 +22,18 @@ def add_pegout(state, txid):
     return f"{txid}:{index}"
 
 
+def add_unspendable(state, txid):
+    rows = state["transactions"][txid]["data"]["vout"]
+    index = len(rows)
+    rows.append({"scriptpubkey": "6a", "scriptpubkey_type": "op_return", "value": 0, "asset": LBTC})
+    return f"{txid}:{index}"
+
+
+def mark_unspent(state, key, observation_id=7):
+    state["outputs"][key].update(status="unspent_at_observation",
+                                observed_spend={"spent": False}, spend_observation_id=observation_id)
+
+
 def report(state, minimum=0, maximum=10, origin=None):
     return pegout_graph(state, validate_query(origin or tx("a"), minimum, maximum))["pegouts"]
 
@@ -37,6 +49,173 @@ def set_address(state, key, address):
 
 
 class PegoutPathTests(unittest.TestCase):
+    def test_optional_endpoint_query_flags_are_strict_and_preserve_disabled_queries(self):
+        legacy = validate_query(tx("a"))
+        self.assertEqual(validate_query(tx("a"), include_unspent=False, include_unspendable=False), legacy)
+        self.assertEqual(validate_query(tx("a"), include_unspent=True), {**legacy, "include_unspent": True})
+        self.assertEqual(validate_query(seeds=[tx("a") + ":0"], include_unspendable=True),
+                         {"seeds": [tx("a") + ":0"], "min_hops": 0, "max_hops": 10,
+                          "include_unspendable": True})
+        for field in ("include_unspent", "include_unspendable"):
+            for value in (None, 0, 1, "true", [], {}):
+                with self.subTest(field=field, value=value), self.assertRaises(TraceError):
+                    validate_query(tx("a"), **{field: value})
+                with self.subTest(graph_field=field, value=value), self.assertRaises(TraceError):
+                    pegout_graph(graph_state(), {**legacy, field: value})
+
+    def test_optional_endpoints_keep_pegout_report_and_exact_observation_evidence(self):
+        state = graph_state((("a:0", "b"),), seeds=("a:0",))
+        unspent = tx("b") + ":0"
+        mark_unspent(state, unspent, "saved-observation")
+        unspendable = add_unspendable(state, tx("b"))
+        pegout = add_pegout(state, tx("b"))
+        data = state["transactions"][tx("b")]["data"]
+        fee = tx("b") + ":" + str(len(data["vout"]))
+        data["vout"].append({"scriptpubkey": "", "scriptpubkey_type": "fee", "value": 1, "asset": LBTC})
+        before = deepcopy(state)
+        ordinary = pegout_graph(state, validate_query(seeds=state["seeds"]))
+        self.assertEqual(pegout_graph(state, {**validate_query(seeds=state["seeds"]),
+                                              "include_unspent": False, "include_unspendable": False}), ordinary)
+        self.assertNotIn("endpoint_matches", ordinary["pegouts"])
+        self.assertNotIn("endpoint_count", ordinary["pegouts"])
+        self.assertNotIn("observed unspent", ordinary["notice"])
+        query = validate_query(seeds=state["seeds"], include_unspent=True, include_unspendable=True)
+        graph = pegout_graph(state, query)
+        result = graph["pegouts"]
+        self.assertEqual(result["matches"], ordinary["pegouts"]["matches"])
+        self.assertEqual(result["match_count"], 1)
+        self.assertEqual(result["status"], "pegouts_found")
+        self.assertEqual(result["endpoint_counts"], {"pegout": 1, "unspent": 1, "unspendable": 1})
+        self.assertEqual(result["endpoint_count"], 3)
+        by_key = {match["outpoint"]: match for match in result["endpoint_matches"]}
+        self.assertEqual({key: row["kind"] for key, row in by_key.items()},
+                         {pegout: "pegout", unspent: "unspent", unspendable: "unspendable"})
+        self.assertEqual(by_key[unspent]["observed_spend"], {"spent": False})
+        self.assertEqual(by_key[unspent]["spend_observation_id"], "saved-observation")
+        self.assertEqual(by_key[unspent]["trace"], state["outputs"][unspent])
+        self.assertEqual(by_key[unspendable]["output"], data["vout"][1])
+        self.assertIsNone(by_key[unspendable]["trace"])
+        self.assertTrue(all(match["hops"] == [1] for match in by_key.values()))
+        self.assertEqual({edge["id"] for edge in graph["edges"]},
+                         {"out:" + state["seeds"][0], "in:" + tx("b") + ":0",
+                          "out:" + unspent, "out:" + unspendable, "out:" + pegout})
+        self.assertNotIn("out:" + fee, {edge["id"] for edge in graph["edges"]})
+        self.assertEqual(graph["fee_items"], {})
+        self.assertIn("status at observation", result["scope"])
+        self.assertIn("Unspendable endpoints", result["scope"])
+        validate_plan(make_plan(graph))
+        self.assertEqual(state, before)
+
+    def test_endpoint_bounds_and_service_limits_keep_only_successful_paths(self):
+        state = graph_state((("a:0", "b"), ("b:0", "c"), ("a:1", "d")), seeds=("a:0",))
+        at_one = add_unspendable(state, tx("b"))
+        at_two = tx("c") + ":0"
+        mark_unspent(state, at_two)
+        mark_unspent(state, tx("d") + ":0")
+        query = validate_query(seeds=state["seeds"], min_hops=1, max_hops=1,
+                               include_unspent=True, include_unspendable=True)
+        at_boundary = pegout_graph(state, query)
+        self.assertEqual([(row["outpoint"], row["hops"]) for row in at_boundary["pegouts"]["endpoint_matches"]],
+                         [(at_one, [1])])
+        self.assertEqual(at_boundary["pegouts"]["status"], "endpoints_found")
+        self.assertEqual(at_boundary["pegouts"]["outpoints"], state["seeds"])
+        deeper = pegout_graph(state, {**query, "min_hops": 2, "max_hops": 2})
+        self.assertEqual([(row["outpoint"], row["hops"]) for row in deeper["pegouts"]["endpoint_matches"]],
+                         [(at_two, [2])])
+        capped = annotation(stop=False)
+        capped["hop_limit"] = 1
+        state["labels"] = [capped]
+        limited = pegout_graph(state, {**query, "max_hops": 10})
+        self.assertEqual([row["outpoint"] for row in limited["pegouts"]["endpoint_matches"]], [at_one])
+        state["labels"] = [annotation(stop=True, address="SYNTHETIC-b-address")]
+        stopped = pegout_graph(state, {**query, "max_hops": 10})
+        self.assertEqual([row["outpoint"] for row in stopped["pegouts"]["endpoint_matches"]], [at_one])
+        state["labels"] = [annotation(stop=True)]
+        empty = pegout_graph(state, {**query, "max_hops": 10})
+        self.assertEqual(empty["pegouts"]["endpoint_count"], 0)
+        self.assertEqual(empty["pegouts"]["status"], "no_endpoints_found")
+        self.assertEqual(empty["nodes"], [])
+
+    def test_original_archive_spends_override_stale_unspent_on_excluded_branches(self):
+        for recorded_link in (False, True):
+            links = (("a:0", "b"), ("b:0", "c")) if recorded_link else (("a:0", "b"),)
+            raw = () if recorded_link else (("b:0", "c"),)
+            state = graph_state(links, raw_links=raw, seeds=("a:0", "b:1"))
+            stale, current = tx("b") + ":0", tx("b") + ":1"
+            mark_unspent(state, stale)
+            mark_unspent(state, current)
+            before = deepcopy(state)
+            graph = pegout_graph(state, validate_query(seeds=[tx("a") + ":0"], max_hops=1,
+                                                       include_unspent=True))
+            with self.subTest(recorded_link=recorded_link):
+                self.assertEqual([row["outpoint"] for row in graph["pegouts"]["endpoint_matches"]], [current])
+                self.assertEqual({edge["outpoint"] for edge in graph["edges"]}, {tx("a") + ":0", current})
+                shared = next(node for node in graph["nodes"] if node["id"] == "liquid:address:SYNTHETIC-b-address")
+                self.assertEqual(shared["details"]["unspent_endpoints"], [current])
+                self.assertEqual({row["outpoint"] for row in shared["details"]["occurrences"]}, {current})
+                self.assertEqual(state, before)
+
+    def test_unspent_requires_saved_observation_and_not_only_a_terminal_status(self):
+        invalid = [{"status": status} for status in ("hop_limit", "attribution_hop_limit", "suspected_service_stop",
+                                                    "held_behind_service", "unconfirmed", "pending")]
+        invalid.extend({"spend_observation_id": value} for value in (None, False, True, 0, -1, "", "  "))
+        invalid.extend({"observed_spend": value} for value in (None, {}, {"spent": True}, {"spent": 0}))
+        for change in invalid:
+            state = graph_state(seeds=("a:0",))
+            mark_unspent(state, state["seeds"][0])
+            state["outputs"][state["seeds"][0]].update(change)
+            with self.subTest(change=change):
+                graph = pegout_graph(state, validate_query(seeds=state["seeds"], include_unspent=True))
+                self.assertEqual(graph["pegouts"]["endpoint_count"], 0)
+                self.assertEqual(graph["nodes"], [])
+        for change in ({"vout": True}, {"vout": 1}, {"txid": tx("b")}, {"outpoint": tx("b") + ":0"}):
+            state = graph_state(seeds=("a:0",))
+            mark_unspent(state, state["seeds"][0])
+            state["outputs"][state["seeds"][0]].update(change)
+            with self.subTest(inconsistent=change), self.assertRaises(TraceError):
+                pegout_graph(state, validate_query(seeds=state["seeds"], include_unspent=True))
+
+    def test_hop_zero_endpoint_selection_excludes_other_outputs_and_no_implicit_kinds(self):
+        state = graph_state(seeds=("a:0", "a:1"))
+        for key in state["seeds"]:
+            mark_unspent(state, key)
+        unspendable = add_unspendable(state, tx("a"))
+        selected = [state["seeds"][0], unspendable]
+        query = validate_query(seeds=selected, max_hops=0, include_unspent=True, include_unspendable=True)
+        graph = pegout_graph(state, query)
+        self.assertEqual({row["outpoint"] for row in graph["pegouts"]["endpoint_matches"]}, set(selected))
+        self.assertTrue(all(row["hops"] == [0] for row in graph["pegouts"]["endpoint_matches"]))
+        self.assertEqual({edge["id"] for edge in graph["edges"]}, {"out:" + key for key in selected})
+        for option, expected in (("include_unspent", state["seeds"][0]), ("include_unspendable", unspendable)):
+            filtered = pegout_graph(state, validate_query(seeds=selected, max_hops=0, **{option: True}))
+            self.assertEqual([row["outpoint"] for row in filtered["pegouts"]["endpoint_matches"]], [expected])
+        state["transactions"][tx("a")]["data"]["status"] = {"confirmed": False}
+        self.assertEqual(pegout_graph(state, query)["pegouts"]["endpoint_count"], 0)
+        state["include_unconfirmed"] = True
+        self.assertEqual(pegout_graph(state, query)["pegouts"]["endpoint_count"], 2)
+
+    def test_multiple_unspent_utxos_keep_exact_arrows_while_addresses_are_merged(self):
+        state = graph_state((("a:0", "b"),), seeds=("a:0", "b:1"))
+        endpoints = {tx("b") + ":0", tx("b") + ":1"}
+        for key in endpoints:
+            mark_unspent(state, key)
+        query = validate_query(seeds=[tx("a") + ":0"], include_unspent=True)
+        graph = pegout_graph(state, query)
+        self.assertEqual(graph["pegouts"]["endpoint_count"], 2)
+        self.assertEqual(graph["pegouts"]["match_count"], 0)
+        node = next(node for node in graph["nodes"] if node["id"] == "liquid:address:SYNTHETIC-b-address")
+        self.assertEqual({row["outpoint"] for row in node["details"]["occurrences"]}, endpoints)
+        self.assertEqual(set(node["details"]["unspent_endpoints"]), endpoints)
+        self.assertEqual(node["role"], "unspent_endpoint")
+        self.assertEqual({edge["id"] for edge in graph["edges"] if edge["target"] == node["id"]},
+                         {"out:" + key for key in endpoints})
+        validate_plan(make_plan(graph))
+        for key in endpoints:
+            set_address(state, key, None)
+        unknown = pegout_graph(state, query)
+        self.assertEqual({node["id"] for node in unknown["nodes"] if node.get("role") == "unspent_endpoint"},
+                         {"liquid:outpoint:" + key for key in endpoints})
+
     def test_validate_selected_seed_outputs_preserves_legacy_query_shape(self):
         seeds = ["  " + tx("b").upper() + ":01 ", tx("a") + ":0", tx("b") + ":1"]
         before = list(seeds)

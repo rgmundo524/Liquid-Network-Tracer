@@ -138,6 +138,21 @@ the investigation's originally selected seed UTXOs and excludes unselected
 siblings. It reads the saved collection run without fetching more transactions.
 Use **Miro boards** to initialize and maintain a separate board for this goal.
 
+Select **Include unspent UTXOs** and/or **Include unspendable outputs** to also
+plot paths to those endpoints. Peg-outs remain included. The same inclusive hop
+range, selected seeds, and current attribution stop/hop limits apply to every
+endpoint type. Unspent requires a saved observation that the exact UTXO was
+unspent; unchecked outputs and branches paused at a hop limit do not qualify.
+It describes the selected collection run, not the current live balance. A saved
+spending transaction overrides an older unspent observation. Unspendable outputs
+appear as separate event diamonds; fees are excluded.
+
+Each saved layout records these choices and reports counts by endpoint type.
+Regenerate the layout to change them, then sync that layout to its managed board
+or download its ELK SVG. The endpoint choices do not change collection or fetch
+new observations. The CLI equivalents are `plot --goal pegouts --include-unspent`
+and `--include-unspendable`.
+
 Peg-out layouts use one circle per full address per network while retaining
 every qualifying UTXO connector and CSV row. Regenerate an older layout to
 combine repeated address circles. If its Miro board uses the older per-UTXO

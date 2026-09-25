@@ -31,6 +31,23 @@ def public_board(value):
 
 def public_plot(value):
     result = _fields(value, PLOT_FIELDS)
+    if value.get("goal") == "pegouts":
+        from .pegout_paths import validate_query
+        query = value.get("query")
+        if isinstance(query, dict):
+            try:
+                normalized = validate_query(**query)
+                if normalized == query:
+                    result["query"] = normalized
+            except (TraceError, TypeError):
+                pass
+        counts = value.get("endpoint_counts")
+        if (isinstance(counts, dict) and set(counts) == {"pegout", "unspent", "unspendable"}
+                and all(type(count) is int and count >= 0 for count in counts.values())
+                and type(value.get("endpoint_count")) is int
+                and value["endpoint_count"] == sum(counts.values())):
+            result["endpoint_counts"] = dict(counts)
+            result["endpoint_count"] = value["endpoint_count"]
     if "layout_settings" in value:
         from .plots import validate_layout_settings
         try:
@@ -97,10 +114,16 @@ def workflow_action(server, case, metadata, body):
     action = body["action"]
     live = False
     if action == "plot":
-        if set(body) != {"action", "goal", "run_id", "min_hops", "max_hops"}:
+        required = {"action", "goal", "run_id", "min_hops", "max_hops"}
+        endpoint_options = {"include_unspent", "include_unspendable"}
+        if not required <= set(body) or set(body) - required - endpoint_options:
             raise RequestError("Choose a saved collection, plotting goal, and hop range.")
         if not isinstance(body.get("goal"), str) or body["goal"] not in GOALS:
             raise RequestError("Choose full trace, starter connections, or peg-out paths.")
+        if any(type(body.get(key, False)) is not bool for key in endpoint_options):
+            raise RequestError("Additional endpoint options must be true or false.")
+        if body["goal"] != "pegouts" and any(body.get(key, False) for key in endpoint_options):
+            raise RequestError("Additional endpoint options apply only to peg-out paths plots.")
         lower, upper = body.get("min_hops"), body.get("max_hops")
         if type(lower) is not int or type(upper) is not int or not 0 <= lower <= upper <= 2147483647:
             raise RequestError("Enter whole-number hops from 0 to 2147483647, with minimum no greater than maximum.")
@@ -110,6 +133,9 @@ def workflow_action(server, case, metadata, body):
         verify_export(run_path(case, selected))
         arguments = ["plot", "--case", str(case), "--goal", body["goal"], "--run", selected,
                      "--min-hops", str(lower), "--max-hops", str(upper)]
+        for key in ("include_unspent", "include_unspendable"):
+            if body.get(key):
+                arguments.append("--" + key.replace("_", "-"))
     elif action in ("board-create", "board-link"):
         expected = {"action", "goal", "name"} | ({"board"} if action == "board-link" else set())
         if set(body) != expected and not (action == "board-link" and set(body) == expected | {"record_id"}):
