@@ -44,6 +44,12 @@ statistics, creates a separate local preview, and makes no Blockstream or Miro
 requests. Missing address statistics stay unavailable until collected separately.
 Changing the plotting goal does not alter seeds or collected evidence.
 
+**Paths to peg-outs** uses one circle per full address per network. Repeated
+UTXOs retain their separate connectors and transaction CSV rows. Unknown
+addresses remain separate by outpoint, and peg-out request diamonds remain
+separate even when their Bitcoin destinations match. Only verified saved
+spends establish qualifying paths; sharing a circle does not create a new spend.
+
 Set layout attempts, connector appearance, attribution arrow coloring, and
 named-group centering here. **Full trace** also supports **Separate branch hubs**,
 **Group isolated context inputs**, and **Include transaction fee flows**. These
@@ -102,6 +108,12 @@ new board is not required each time a chart is regenerated. Obsolete generated
 items are removed only after checking them for analyst changes or unrelated
 connections. If those checks find changes, sync stops so you can preserve that
 work first. Unrelated board objects remain untouched.
+
+Older peg-out boards used separate address circles for each UTXO. To adopt
+shared address circles, generate a new **Paths to peg-outs** layout and create
+or link a different board for its first sync. The old board can still sync its
+compatible saved layouts. Later layouts using shared addresses can update the
+new board normally; this transition does not require collecting data again.
 
 Board creation and sync use the existing SecretSpec/Proton Pass credentials.
 Linking a board records its destination locally without contacting Miro. If an

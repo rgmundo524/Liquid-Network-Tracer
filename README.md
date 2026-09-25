@@ -138,6 +138,13 @@ the investigation's originally selected seed UTXOs and excludes unselected
 siblings. It reads the saved collection run without fetching more transactions.
 Use **Miro boards** to initialize and maintain a separate board for this goal.
 
+Peg-out layouts use one circle per full address per network while retaining
+every qualifying UTXO connector and CSV row. Regenerate an older layout to
+combine repeated address circles. If its Miro board uses the older per-UTXO
+nodes, create or link a different peg-out board for the regenerated layout;
+the original board and saved layouts remain available. No new collection is
+needed for this display change.
+
 For a 10-hop view, first collect enough evidence to cover that depth and check
 whether a budget or stop rule limited coverage. Missing matches in saved data
 do not prove that no peg-out exists. A request is not confirmation of its Bitcoin

@@ -110,6 +110,9 @@ def legend_notes(graph=None):
             "Peg-out diamonds are Liquid requests, not confirmation of Bitcoin payouts.",
             coverage + "Stopped, unconfirmed or unsearched branches may contain undiscovered peg-outs; no result does not prove absence.",
         ])
+        if graph.get("address_mode") == "merged":
+            notes.append("One circle per full address per network; each UTXO keeps its own arrows. "
+                         "Sharing a circle does not establish a spend between unrelated outputs.")
     return notes
 
 

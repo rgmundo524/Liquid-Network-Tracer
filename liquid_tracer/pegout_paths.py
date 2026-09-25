@@ -202,11 +202,11 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
         reduced["seeds"] = sorted(set(query["seeds"]) & (outpoints | endpoints))
     else:
         reduced["seeds"] = sorted(key for key in outpoints | endpoints if key.startswith(query["txid"] + ":"))
-    graph = build_graph(reduced, merge_addresses=False, include_fees=False,
-                        color_attribution_arrows=color_attribution_arrows, center_name=center_name)
     edge_ids = {"out:" + key for key in outpoints | endpoints}
     edge_ids.update(f"in:{state['links'][key]['spending_txid']}:{state['links'][key]['vin']}" for key in outpoints)
-    graph["edges"] = [edge for edge in graph["edges"] if edge["id"] in edge_ids]
+    graph = build_graph(reduced, merge_addresses=True, include_fees=False,
+                        color_attribution_arrows=color_attribution_arrows, center_name=center_name,
+                        edge_ids=edge_ids)
     node_ids = {edge[field] for edge in graph["edges"] for field in ("source", "target")}
     graph["nodes"] = [node for node in graph["nodes"] if node["id"] in node_ids]
     graph["fee_items"] = {}
@@ -223,7 +223,8 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
     graph["graph_options"].update(view="pegout_paths", pegout_query=deepcopy(query))
     graph["notice"] = (f"{len(matches)} peg-out request(s) found within {query['min_hops']} to {query['max_hops']} "
                        "transaction hops, inclusive; " + origin_notice + scope +
-                       " One circle per connecting UTXO. Every displayed edge belongs to a qualifying path; "
+                       " One circle per full address per network; UTXO occurrences and connectors remain separate. "
+                       "Every displayed edge belongs to a qualifying path; "
                        "their union may also form routes outside the selected range. "
                        "UTXO reachability does not prove ownership or allocate confidential values.")
     return graph
