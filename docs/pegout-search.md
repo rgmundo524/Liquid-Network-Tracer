@@ -1,7 +1,7 @@
 # Trace to peg-outs
 
 This guide describes the older standalone search and its recovery commands.
-For the shared **Collect data → Plot views → Miro boards** workflow, use
+For the shared **Collect data → Plot Layouts → Miro boards** workflow, use
 [the investigation workflow guide](investigation-workflow.md). Its peg-out plots
 read saved collection data, and its boards can be updated with later plots.
 
@@ -37,8 +37,11 @@ budgets. CLI flags can override those budgets for one invocation. Stop rules,
 attribution hop limits, and the investigation's confirmation policy apply.
 Address reuse and other inputs do not create traversal links.
 
-Only paths reaching matching requests appear in the plot, with separate circles
-for individual UTXOs. All fetched evidence is retained in the search archive.
+Only paths reaching matching requests appear in the plot, with one circle per
+full address per network. Each UTXO keeps its own input and output connectors;
+unknown addresses stay separate by outpoint, and each peg-out request keeps its
+own diamond even when destinations repeat. Sharing a circle does not establish
+a spend between unrelated outputs. All fetched evidence is retained in the search archive.
 Every displayed connector belongs to a qualifying path; combining those paths
 visually can also form longer or shorter routes outside the chosen range. The
 JSON report records the qualifying hop counts for each request.
@@ -92,6 +95,10 @@ board**. The main investigation board and boards with existing full-trace or
 starter-connection mappings are protected. The saved item budget applies.
 Repeating the same publication reuses acknowledged items; a different snapshot
 needs a different board.
+
+To replace an older preview with duplicate address circles, refresh its preview
+from the saved search and publish it to a different board. Existing snapshots
+and their boards retain their original presentation.
 
 ```sh
 python3 -m liquid_tracer pegouts-publish --case CASE_DIRECTORY --preview PREVIEW_ID --board BOARD_ID --max-items 750

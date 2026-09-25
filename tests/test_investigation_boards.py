@@ -26,9 +26,10 @@ class InvestigationBoardTests(unittest.TestCase):
         environment.start()
         self.addCleanup(environment.stop)
 
-    def source(self, goal="pegouts", run="one", extended=False):
+    def source(self, goal="pegouts", run="one", extended=False, address_mode="merged"):
         value = graph(run, extended)
         value["namespace"]["case_id"] = read_case(self.case)["case_id"]
+        value["namespace"]["address_mode"] = address_mode
         value["plot"] = {"goal": goal}
         return value, make_plan(value)
 
@@ -156,6 +157,56 @@ class InvestigationBoardTests(unittest.TestCase):
             with self.assertRaisesRegex(TraceError, "different goal"):
                 sync_board(self.case, board["id"], "wrong-preview", token="test", transport=remote)
         remote.assert_not_called()
+
+    def test_incompatible_pegout_address_modes_preserve_board_and_registry(self):
+        for old, new, message in (
+                ("outpoint_occurrences", "merged", "create or link a different Miro board"),
+                ("merged", "outpoint_occurrences", "Select a regenerated Paths to peg-outs layout")):
+            with self.subTest(old=old, new=new):
+                board = link_board(self.case, "pegouts", old, "pegout-" + old)
+                remote = AnnotationMiro()
+                with patch("liquid_tracer.plots.reviewed_plot", return_value=self.source(address_mode=old)):
+                    sync_board(self.case, board["id"], "saved-old", token="test", transport=remote, interval=0)
+                state_path = self.case / board["state_file"]
+                before_state, before_registry = state_path.read_bytes(), self.registry.read_bytes()
+                before_remote, before_calls = copy.deepcopy(remote.items), len(remote.calls)
+                for reorganize in (False, True):
+                    with patch("liquid_tracer.plots.reviewed_plot", return_value=self.source(address_mode=new)):
+                        with self.assertRaisesRegex(TraceError, message):
+                            sync_board(self.case, board["id"], "saved-new", reorganize=reorganize,
+                                       token="test", transport=remote, interval=0)
+                    self.assertEqual(state_path.read_bytes(), before_state)
+                    self.assertEqual(self.registry.read_bytes(), before_registry)
+                    self.assertEqual(remote.items, before_remote)
+                    self.assertEqual(len(remote.calls), before_calls)
+
+    def test_old_pegout_board_keeps_compatible_layout_and_new_board_uses_merged_mode(self):
+        old_board = link_board(self.case, "pegouts", "Original paths", "old-pegout-board")
+        old_remote = AnnotationMiro()
+        old_source = self.source(address_mode="outpoint_occurrences")
+        with patch("liquid_tracer.plots.reviewed_plot", return_value=old_source):
+            sync_board(self.case, old_board["id"], "saved-old", token="test", transport=old_remote, interval=0)
+            old_writes = len(old_remote.writes)
+            sync_board(self.case, old_board["id"], "saved-old", token="test", transport=old_remote, interval=0)
+        self.assertEqual(len(old_remote.writes), old_writes)
+        old_state_path = self.case / old_board["state_file"]
+        old_mapping = old_state_path.read_bytes()
+        old_items = copy.deepcopy(old_remote.items)
+        listed_old = next(item for item in list_boards(self.case) if item["id"] == old_board["id"])
+        self.assertTrue(listed_old["can_sync"])
+        self.assertIn("older per-output address layout", listed_old["notice"])
+        self.assertEqual(old_state_path.read_bytes(), old_mapping)
+
+        new_board = link_board(self.case, "pegouts", "Shared address paths", "new-pegout-board")
+        new_remote = AnnotationMiro()
+        with patch("liquid_tracer.plots.reviewed_plot", return_value=self.source()):
+            sync_board(self.case, new_board["id"], "saved-new", token="test", transport=new_remote, interval=0)
+        self.assertEqual(read_json(self.case / new_board["state_file"])["namespace"]["address_mode"], "merged")
+        self.assertTrue(new_remote.writes)
+        self.assertEqual(old_state_path.read_bytes(), old_mapping)
+        self.assertEqual(old_remote.items, old_items)
+        listed_new = next(item for item in list_boards(self.case) if item["id"] == new_board["id"])
+        self.assertNotIn("notice", listed_new)
 
     def test_empty_plot_cannot_clear_or_touch_an_existing_board(self):
         board = link_board(self.case, "pegouts", "Paths", "pegout-board")

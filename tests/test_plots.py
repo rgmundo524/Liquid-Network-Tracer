@@ -1,7 +1,9 @@
 """Shared saved-evidence plotting, offline boundaries, and reviewed artifacts."""
 from copy import deepcopy
+import csv
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 
@@ -87,6 +89,37 @@ class PlotTests(unittest.TestCase):
         graph, _ = reviewed_plot(self.case, result["preview_id"])
         self.assertEqual([match["outpoint"] for match in graph["pegouts"]["matches"]], [selected])
         self.assertEqual(graph["pegouts"]["outpoints"], [tx("a") + ":0"])
+
+    def test_pegout_artifacts_share_one_address_without_collapsing_utxo_rows(self):
+        state = graph_state((("a:0", "c"), ("a:1", "d")), seeds=("a:0", "a:1"),
+                            raw_links=(("a:2", "c"),))
+        endpoints = {add_pegout(state, tx("c")), add_pegout(state, tx("d"))}
+        self.state, self.archive = saved_case(self.case, state)
+        before = self.bytes(self.archive)
+        result = preview_plot(self.case, "pegouts", max_hops=1)
+        graph, plan = reviewed_plot(self.case, result["preview_id"])
+        directory = Path(result["directory"])
+        addresses = [node for node in graph["nodes"] if node["kind"] == "address"]
+        self.assertEqual(len(addresses), 1)
+        address = addresses[0]
+        self.assertEqual(address["id"], "liquid:address:SYNTHETIC-a-address")
+        self.assertEqual({item["outpoint"] for item in address["details"]["occurrences"]},
+                         {tx("a") + ":0", tx("a") + ":1"})
+        self.assertEqual({row["outpoint"] for row in graph["pegouts"]["matches"]}, endpoints)
+        self.assertEqual(graph["namespace"]["address_mode"], "merged")
+        self.assertEqual(sum(item["key"] == address["id"] for item in plan["shapes"]), 1)
+        self.assertEqual(len(plan["connectors"]), 6)
+        with (directory / "transactions.csv").open(newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        self.assertEqual(len(rows), len(graph["edges"]))
+        shared_rows = {(row["Transaction Hash"], row["Direction"], row["Number of I/O"])
+                       for row in rows if row["Address Hash"] == "SYNTHETIC-a-address"}
+        self.assertEqual(shared_rows, {(tx("a"), "OUT", "0"), (tx("a"), "OUT", "1"),
+                                       (tx("c"), "IN", "0"), (tx("d"), "IN", "0")})
+        svg = ET.fromstring((directory / "graph.svg").read_bytes())
+        self.assertEqual(sum(item.get("data-node-id") == address["id"] for item in svg.iter()), 1)
+        self.assertIn("Sharing a circle does not establish a spend", (directory / "graph.html").read_text())
+        self.assertEqual(before, self.bytes(self.archive))
 
     def test_empty_results_remain_reviewable_with_no_layout_or_miro_objects(self):
         for goal in ("connections", "pegouts"):

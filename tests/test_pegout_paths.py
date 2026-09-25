@@ -4,6 +4,7 @@ import random
 import unittest
 
 from liquid_tracer.common import LBTC, TraceError
+from liquid_tracer.export import COLORS, build_graph, short_address
 from liquid_tracer.miro import make_plan, validate_plan
 from liquid_tracer.pegout_paths import pegout_graph, validate_query
 from tests.fixtures import output
@@ -23,6 +24,16 @@ def add_pegout(state, txid):
 
 def report(state, minimum=0, maximum=10, origin=None):
     return pegout_graph(state, validate_query(origin or tx("a"), minimum, maximum))["pegouts"]
+
+
+def set_address(state, key, address):
+    """Keep synthetic funding and spending evidence consistent."""
+    parent, index = key.rsplit(":", 1)
+    state["transactions"][parent]["data"]["vout"][int(index)]["scriptpubkey_address"] = address
+    for record in state["transactions"].values():
+        for vin in record["data"]["vin"]:
+            if vin.get("txid") == parent and vin.get("vout") == int(index):
+                vin["prevout"]["scriptpubkey_address"] = address
 
 
 class PegoutPathTests(unittest.TestCase):
@@ -271,17 +282,121 @@ class PegoutPathTests(unittest.TestCase):
         self.assertEqual(graph["nodes"], [])
         self.assertEqual(graph["edges"], [])
 
-    def test_parallel_utxos_and_shared_address_keep_separate_circles(self):
+    def test_parallel_utxos_share_address_circle_but_keep_exact_connectors(self):
         state = graph_state((("a:0", "b"), ("a:1", "b")), seeds=("a:0",))
-        add_pegout(state, tx("b"))
-        graph = pegout_graph(state, validate_query(tx("a")))
-        self.assertEqual(len([node for node in graph["nodes"] if node["kind"] == "address"]), 2)
-        self.assertEqual(len(graph["edges"]), 5)
+        endpoint = add_pegout(state, tx("b"))
         before = deepcopy(state)
+        graph = pegout_graph(state, validate_query(tx("a")))
+        addresses = [node for node in graph["nodes"] if node["kind"] == "address"]
+        self.assertEqual(len(addresses), 1)
+        self.assertEqual(addresses[0]["id"], "liquid:address:SYNTHETIC-a-address")
+        self.assertEqual({row["outpoint"] for row in addresses[0]["details"]["occurrences"]},
+                         {tx("a") + ":0", tx("a") + ":1"})
+        edges = {edge["id"]: edge for edge in graph["edges"]}
+        self.assertEqual(set(edges), {"out:" + tx("a") + ":0", "out:" + tx("a") + ":1",
+                                     "in:" + tx("b") + ":0", "in:" + tx("b") + ":1", "out:" + endpoint})
+        for index in (0, 1):
+            key = tx("a") + ":" + str(index)
+            incoming, outgoing = edges[f"in:{tx('b')}:{index}"], edges["out:" + key]
+            self.assertEqual(incoming["source"], addresses[0]["id"])
+            self.assertEqual(outgoing["target"], addresses[0]["id"])
+            self.assertEqual(incoming["outpoint"], key)
+            self.assertEqual(incoming["details"]["vin"]["vout"], index)
+            self.assertEqual((incoming["label"], outgoing["label"]), (f"vin {index}", f"vout {index}"))
+        self.assertEqual(graph["address_mode"], "merged")
+        self.assertEqual(graph["namespace"]["address_mode"], "merged")
         validate_plan(make_plan(graph))
+        self.assertEqual(state, before)
         state["links"] = dict(reversed(list(state["links"].items())))
+        state["transactions"] = dict(reversed(list(state["transactions"].items())))
         self.assertEqual(pegout_graph(state, validate_query(tx("a"))), graph)
         self.assertEqual(state, before)
+
+    def test_repeated_address_across_hops_does_not_duplicate_node_or_shorten_paths(self):
+        state = graph_state((("a:0", "b"), ("b:0", "c")), seeds=("a:0",))
+        address = "SYNTHETIC-shared-across-hops"
+        for name in ("a", "b"):
+            set_address(state, tx(name) + ":0", address)
+        endpoint = add_pegout(state, tx("c"))
+        before = deepcopy(state)
+        graph = pegout_graph(state, validate_query(seeds=state["seeds"], min_hops=2, max_hops=2))
+        self.assertEqual([node["id"] for node in graph["nodes"] if node["kind"] == "address"],
+                         ["liquid:address:" + address])
+        self.assertEqual([(row["outpoint"], row["hops"]) for row in graph["pegouts"]["matches"]],
+                         [(endpoint, [2])])
+        self.assertEqual(len(graph["edges"]), 5)
+        self.assertEqual(report(state, 0, 1)["match_count"], 0)
+        validate_plan(make_plan(graph))
+        self.assertEqual(state, before)
+
+    def test_excluded_siblings_and_context_cannot_pollute_a_shared_address(self):
+        state = graph_state((("a:0", "b"), ("b:1", "c")), raw_links=(("d:0", "b"),),
+                            seeds=("a:0", "b:0"))
+        shared = "SYNTHETIC-shared-path-and-context"
+        kept = tx("b") + ":1"
+        excluded = {tx("b") + ":0", tx("d") + ":0"}
+        for key in [kept, *excluded]:
+            set_address(state, key, shared)
+        for number, key in enumerate(sorted(excluded)):
+            label = annotation(stop=True, name=f"Excluded occurrence {number}")
+            label.update(kind="outpoint", value=key)
+            state["labels"].append(label)
+        state["outputs"][tx("b") + ":0"].update(status="unspent_at_observation",
+                observed_spend={"spent": False}, spend_observation_id=1)
+        endpoint = add_pegout(state, tx("c"))
+        before = deepcopy(state)
+        graph = pegout_graph(state, validate_query(seeds=state["seeds"], max_hops=2),
+                             color_attribution_arrows=True)
+        shared_node = next(node for node in graph["nodes"] if node["id"] == "liquid:address:" + shared)
+        self.assertEqual({row["outpoint"] for row in shared_node["details"]["occurrences"]}, {kept})
+        self.assertEqual(shared_node["role"], "candidate")
+        self.assertEqual(shared_node["color"], COLORS["candidate"])
+        self.assertNotIn("Excluded occurrence", shared_node["label"])
+        self.assertNotIn("STOP TRACING", shared_node["label"])
+        self.assertNotIn("Unspent", shared_node["label"])
+        self.assertNotIn("address_attributions", shared_node["details"])
+        self.assertEqual({edge["outpoint"] for edge in graph["edges"]},
+                         {tx("a") + ":0", kept, endpoint})
+        # Display filtering must not rewrite the archived transaction context.
+        for node in graph["nodes"]:
+            if node["kind"] == "transaction":
+                self.assertEqual(node["details"]["transaction"], state["transactions"][node["id"][3:]]["data"])
+        self.assertEqual(state, before)
+
+    def test_unknown_addresses_and_same_destination_requests_remain_distinct(self):
+        state = graph_state((("a:0", "b"), ("a:1", "b")), seeds=("a:0", "a:1"))
+        for index in (0, 1):
+            set_address(state, f"{tx('a')}:{index}", None)
+        endpoints = {add_pegout(state, tx("b")), add_pegout(state, tx("b"))}
+        graph = pegout_graph(state, validate_query(seeds=state["seeds"]))
+        self.assertEqual({node["id"] for node in graph["nodes"] if node["kind"] == "address"},
+                         {f"liquid:outpoint:{tx('a')}:0", f"liquid:outpoint:{tx('a')}:1"})
+        self.assertEqual({node["id"] for node in graph["nodes"] if node["kind"] == "event"},
+                         {"event:" + key for key in endpoints})
+        self.assertEqual(graph["pegouts"]["match_count"], 2)
+        self.assertEqual(len(graph["edges"]), 6)
+        validate_plan(make_plan(graph))
+
+    def test_same_short_label_does_not_merge_different_full_addresses(self):
+        state = graph_state((("a:0", "b"), ("a:1", "b")), seeds=("a:0", "a:1"))
+        addresses = ["SYNTHETIC-one-full-address-shared-end", "SYNTHETIC-other-full-address-shared-end"]
+        self.assertEqual(short_address(addresses[0]), short_address(addresses[1]))
+        for index, address in enumerate(addresses):
+            set_address(state, f"{tx('a')}:{index}", address)
+        add_pegout(state, tx("b"))
+        graph = pegout_graph(state, validate_query(seeds=state["seeds"]))
+        self.assertEqual({node["id"] for node in graph["nodes"] if node["kind"] == "address"},
+                         {"liquid:address:" + address for address in addresses})
+
+    def test_edge_selection_preserves_network_separation_and_original_indices(self):
+        state = graph_state(seeds=("a:0",))
+        data = state["transactions"][tx("a")]["data"]
+        data["vin"] = [{"txid": tx("d"), "vout": 2, "prevout": deepcopy(data["vout"][0]), "is_pegin": True}]
+        kept = {f"in:{tx('a')}:0", f"out:{tx('a')}:0"}
+        graph = build_graph(state, edge_ids=kept)
+        self.assertEqual({node["id"] for node in graph["nodes"] if node["kind"] == "address"},
+                         {"bitcoin:address:SYNTHETIC-a-address", "liquid:address:SYNTHETIC-a-address"})
+        self.assertEqual({edge["id"] for edge in graph["edges"]}, kept)
 
     def test_miro_legend_preserves_search_scope_without_copying_arbitrary_notice(self):
         from liquid_tracer.export import build_graph

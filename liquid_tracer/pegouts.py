@@ -211,7 +211,7 @@ def search_pegouts(case, txid=None, min_hops=0, max_hops=10, *, resume=None,
             state["service_controls"] = {k: v for k, v in controls.items() if k != "history"}
             state["include_unconfirmed"] = bool(baseline and baseline.get("include_unconfirmed", False))
             state["investigation"] = {"case_id": metadata["case_id"], "name": metadata.get("name"), "miro_board": None}
-            state["address_mode"] = "outpoint_occurrences"
+            state["address_mode"] = "merged"
             api.run_id = state["run_id"]
             directory = _search_path(case, state["run_id"])
             directory.mkdir(parents=True, exist_ok=False)

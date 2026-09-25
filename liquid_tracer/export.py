@@ -146,8 +146,16 @@ def _unspent_endpoints(state):
 
 
 def build_graph(state, merge_addresses=True, include_fees=False, *, group_context_inputs=False, hub_addresses=None,
-                color_attribution_arrows=None, center_name=None):
+                color_attribution_arrows=None, center_name=None, edge_ids=None):
+    """Build display nodes, optionally limited to exact input/output edges.
+
+    Apply a path's edge selection before shared-address aggregation so excluded
+    context cannot contribute occurrences, labels, or display priority. Original
+    transaction evidence and vin/vout indices remain intact.
+    """
     from .investigations import validate_settings
+    if edge_ids is not None:
+        edge_ids = frozenset(edge_ids)
     if center_name is None:
         center_name = state.get("graph_options", {}).get("center_name", "")
     center_name = validate_settings({"center_name": center_name})["center_name"]
@@ -226,6 +234,8 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
                           None if simulated else explorer + "/tx/" + txid, COLORS[role])
         nodes[txnode]["role"] = role
         for index, vin in enumerate(tx["vin"]):
+            if edge_ids is not None and f"in:{txid}:{index}" not in edge_ids:
+                continue
             key = f"{vin.get('txid', txid)}:{vin.get('vout', index)}"
             network = "bitcoin" if vin.get("is_pegin") else "liquid"
             prevout = vin.get("prevout") or {}
@@ -241,6 +251,8 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
                           "details": {"vin": vin, "validated_trace_link": link if traced else None}})
         for index, output in enumerate(tx["vout"]):
             key = f"{txid}:{index}"
+            if edge_ids is not None and "out:" + key not in edge_ids:
+                continue
             if output_kind(output) == "fee":
                 fee_items["event:" + key] = {"endpoint": "shapes", "txid": txid, "vout": index}
                 fee_items["out:" + key] = {"endpoint": "connectors", "source": txnode, "target": "event:" + key}
