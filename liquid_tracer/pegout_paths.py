@@ -211,12 +211,16 @@ def _paths(state, query):
         raise TraceError("Peg-out search needs complete, consistent saved spend evidence") from exc
 
 
-def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=None):
+def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=None,
+                 group_context_inputs=False):
     """Filter a copied graph to the union of all qualifying bounded paths."""
     from .export import build_graph
+    from .context_groups import group_context_inputs as group_inputs
     from .layout import arrange
     from .miro_frames import activity_frames
 
+    if type(group_context_inputs) is not bool:
+        raise TraceError("Context input grouping must be enabled or disabled")
     if not isinstance(query, dict):
         raise TraceError("Choose selected seed outputs or a transaction and an inclusive peg-out hop range")
     query = validate_query(query.get("txid"), query.get("min_hops", 0), query.get("max_hops", 10),
@@ -313,4 +317,9 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
                        + path_notice +
                        "their union may also form routes outside the selected range. "
                        "UTXO reachability does not prove ownership or allocate confidential values.")
+    if query.get("include_context") and group_context_inputs:
+        # Group after final filtering and arrangement so summary dimensions and
+        # notices survive, while eligibility sees every displayed occurrence.
+        graph = group_inputs(graph, enabled=True)
+        graph["activity_frames"] = activity_frames(graph)
     return graph

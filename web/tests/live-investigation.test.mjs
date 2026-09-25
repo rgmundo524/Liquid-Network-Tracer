@@ -1124,9 +1124,10 @@ test('saving a filtered layout preserves full-trace options and reloads saved pr
   view.state.activeCase = detail;
   await view.dispatch('view-plots');
   await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
-  const disabledFields = view.workspace().match(/<fieldset[^>]*\bdisabled[^>]*>[\s\S]*?<\/fieldset>/)?.[0];
-  assert.ok(disabledFields);
-  for (const key of ['include_fees', 'group_context_inputs', 'hub_addresses']) assert.ok(disabledFields.includes(`name="${key}"`));
+  const disabledFields = view.workspace().match(/<fieldset[^>]*\bdisabled[^>]*>[\s\S]*?<\/fieldset>/g) || [];
+  for (const key of ['include_fees', 'group_context_inputs', 'hub_addresses']) {
+    assert.ok(disabledFields.some(fieldset => fieldset.includes(`name="${key}"`)), key);
+  }
   view.plotForm({layout_attempts: '61', connector_style: 'curved', center_name: 'Saved Treasury',
     color_attribution_arrows_present: '1', color_attribution_arrows: 'on'});
   await view.dispatch('plot-settings-save');
@@ -1314,6 +1315,101 @@ test('context addresses default off, describe display only, and submit only for 
   }
 });
 
+const contextGroupingFields = view => view.workspace().match(/<fieldset class="layout-fields context-grouping-fields"[^>]*>[\s\S]*?<\/fieldset>/)?.[0];
+
+test('peg-out context grouping depends on context display and preserves edits across toggles and goals', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase();
+  await view.dispatch('view-plots');
+  assert.doesNotMatch(contextGroupingFields(view), /disabled/);
+  view.plotForm({group_context_inputs_present: '1', group_context_inputs: 'on'});
+  await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+  view.elements.delete('#plot-layout-form');
+  assert.match(contextGroupingFields(view), /disabled/);
+  assert.match(contextGroupingFields(view), /name="group_context_inputs"[^>]*checked/);
+  assert.match(view.workspace(), /Enable Include context addresses above/);
+
+  view.workflowInput({id: 'workflow-include-context', checked: true});
+  assert.doesNotMatch(contextGroupingFields(view), /disabled/);
+  assert.match(contextGroupingFields(view), /Shared or named addresses and context outputs stay separate/);
+  // No input event is dispatched before the context toggle; it must snapshot the form itself.
+  view.plotForm({layout_attempts: '47', connector_style: 'curved', center_name: 'Draft treasury',
+    group_context_inputs_present: '1'});
+  view.workflowInput({id: 'workflow-include-context', checked: false});
+  view.elements.delete('#plot-layout-form');
+  assert.match(contextGroupingFields(view), /disabled/);
+  assert.doesNotMatch(contextGroupingFields(view), /name="group_context_inputs"[^>]*checked/);
+  assert.match(view.workspace(), /name="layout_attempts"[^>]*value="47"/);
+  assert.match(view.workspace(), /value="Draft treasury"/);
+  assert.match(view.workspace(), /value="curved" selected/);
+  view.workflowInput({id: 'workflow-include-context', checked: true});
+  assert.doesNotMatch(contextGroupingFields(view), /disabled|name="group_context_inputs"[^>]*checked/);
+
+  view.plotForm({group_context_inputs_present: '1', group_context_inputs: 'on'});
+  await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
+  view.elements.delete('#plot-layout-form');
+  assert.match(contextGroupingFields(view), /disabled/);
+  assert.match(contextGroupingFields(view), /name="group_context_inputs"[^>]*checked/);
+  for (const goal of ['full', 'pegouts']) {
+    await view.dispatch('plot-goal', {dataset: {goal}});
+    assert.doesNotMatch(contextGroupingFields(view), /disabled/);
+    assert.match(contextGroupingFields(view), /name="group_context_inputs"[^>]*checked/);
+    assert.match(view.workspace(), /value="Draft treasury"/);
+  }
+  assert.equal(view.calls.length, 1, 'draft changes neither save nor queue work');
+});
+
+test('peg-out generation saves both grouped and separate context preferences using the existing layout setting', async () => {
+  for (const grouped of [true, false]) {
+    const detail = workflowCase({run_defaults: {...defaults, group_context_inputs: !grouped}});
+    const view = await harness((path, body) => {
+      if (path.endsWith('/plot-settings')) {
+        detail.run_defaults = {...detail.run_defaults, ...body.settings};
+        return detail;
+      }
+      if (path.endsWith('/actions')) return {id: 'plotjob', status: 'running'};
+    });
+    view.state.activeCase = detail;
+    await view.dispatch('view-plots');
+    await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+    view.workflowInput({id: 'workflow-include-context', checked: true});
+    view.plotForm({group_context_inputs_present: '1', ...(grouped ? {group_context_inputs: 'on'} : {})});
+    await view.dispatch('workflow-plot');
+    const writes = view.calls.filter(call => call.body);
+    assert.deepEqual(writes.map(call => call.path), ['/api/cases/case1/plot-settings', '/api/cases/case1/actions']);
+    assert.equal(writes[0].body.settings.group_context_inputs, grouped);
+    assert.deepEqual(writes[1].body, {action: 'plot', goal: 'pegouts', run_id: 'saved1', min_hops: 0,
+      max_hops: 10, include_context: true});
+    assert.equal(view.workflowInput({id: 'workflow-include-context', checked: false}), false);
+    assert.equal(view.currentWorkflow(detail).includeContext, true, 'busy jobs cannot change context scope');
+  }
+});
+
+test('saved context grouping labels use each plot snapshot across plot, download, and Miro board views', async () => {
+  for (const grouped of [true, false]) {
+    const view = await harness();
+    const layout_settings = {layout_attempts: 25, connector_style: 'curved', include_fees: false,
+      color_attribution_arrows: false, center_name: '', hub_addresses: [], group_context_inputs: grouped};
+    const plot = workflowPlot('pegouts', 'saved-context', {query: {include_context: true}, layout_settings});
+    view.state.activeCase = workflowCase({run_defaults: {...defaults, group_context_inputs: !grouped}, plots: [plot],
+      boards: [workflowBoard('pegouts', 'context-board', {preview_id: plot.preview_id})]});
+    await view.dispatch('view-plots');
+    await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+    view.workflowInput({id: 'workflow-include-context', checked: true});
+    for (const page of ['plots', 'history', 'boards']) {
+      await view.dispatch('view-' + page);
+      const html = view.workspace(), expected = grouped ? 'grouped' : 'separate';
+      assert.match(html, new RegExp(`Saved layout: Context addresses included · isolated inputs ${expected}\\.`));
+      const picker = html.match(/<select id="workflow-(?:plot-picker|board-plot)"[^>]*>[\s\S]*?<\/select>/)?.[0];
+      assert.match(picker, new RegExp(`Context addresses included · isolated inputs ${expected}`));
+      if (page === 'plots') assert.match(html, new RegExp(`Isolated context inputs ${expected}\\.`));
+      if (page === 'boards') assert.match(html.match(/<div class="board-list"[\s\S]*?<\/div>/)?.[0],
+        new RegExp(`Context addresses included · isolated inputs ${expected}`));
+    }
+    assert.equal(view.calls.length, 1, 'different draft settings do not rewrite or regenerate the saved plot');
+  }
+});
+
 test('saved context scope and separate connection counts appear across plots, downloads, and boards', async () => {
   const view = await harness(path => path.endsWith('/actions') ? {id: 'syncjob', status: 'running'} : undefined);
   const contextual = workflowPlot('pegouts', 'contextual', {query: {include_context: true},
@@ -1323,7 +1419,7 @@ test('saved context scope and separate connection counts appear across plots, do
   for (const page of ['plots', 'history', 'boards']) {
     await view.dispatch('view-' + page);
     const html = view.workspace();
-    assert.match(html, /Saved layout: Context addresses included\. 5 context connections, excluded from endpoint counts\./);
+    assert.match(html, /Saved layout: Context addresses included · isolated inputs separate\. 5 context connections, excluded from endpoint counts\./);
     assert.match(html, /Results: 2 peg-out requests\./);
     const picker = html.match(/<select id="workflow-(?:plot-picker|board-plot)"[^>]*>[\s\S]*?<\/select>/)?.[0];
     assert.ok(picker);
@@ -1346,8 +1442,8 @@ test('context toggles do not change the scope of a selected saved layout', async
     for (const page of ['plots', 'history']) {
       await view.dispatch('view-' + page);
       const html = view.workspace();
-      assert.match(html, new RegExp(`Saved layout: ${savedContext ? 'Context addresses included' : 'Paths only'}\\.`));
-      assert.doesNotMatch(html, new RegExp(`Saved layout: ${savedContext ? 'Paths only' : 'Context addresses included'}\\.`));
+      assert.match(html, new RegExp(`Saved layout: ${savedContext ? 'Context addresses included · isolated inputs separate' : 'Paths only'}\\.`));
+      assert.doesNotMatch(html, new RegExp(`Saved layout: ${savedContext ? 'Paths only' : 'Context addresses included · isolated inputs separate'}\\.`));
       assert.doesNotMatch(html, /undefined context connections|NaN context connections/);
     }
     assert.equal(view.calls.length, 1, 'changing context display neither regenerates nor updates saved plots');

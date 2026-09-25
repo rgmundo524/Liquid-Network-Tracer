@@ -23,7 +23,8 @@ def _endpoint_summary(plot):
     if query.get("include_unspendable"):
         labels.append(f"{counts.get('unspendable', 0)} unspendable outputs")
     if query.get("include_context"):
-        labels.append("context addresses included")
+        labels.append("context addresses included" +
+                      (" (isolated inputs grouped)" if plot.get("layout_settings", {}).get("group_context_inputs") else ""))
     return ", ".join(labels)
 
 
@@ -91,7 +92,8 @@ def plot_screen(base, button, case):
                                  "it is not a live balance check. Fee outputs are excluded.", markup=False)
                     yield Checkbox("Include context addresses", id="plot-include-context")
                     yield Static("Show other input addresses and spendable sibling outputs around the selected path transactions. "
-                                 "Context does not extend the trace or add matching endpoints.", markup=False)
+                                 "Context does not extend the trace or add matching endpoints. Grouping follows the saved "
+                                 "Group isolated context inputs layout setting.", markup=False)
                 yield Static("Hop limits filter the saved data. They do not collect additional transactions. "
                              "A starting transaction is hop 0. Missing matches may reflect incomplete coverage.", markup=False)
                 yield Static("", id="workflow-error", markup=False)
