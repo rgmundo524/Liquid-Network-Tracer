@@ -24,6 +24,14 @@ attribution hop limits, and the confirmation policy still apply. For a chart
 covering up to 10 hops, collect enough data to cover that depth before plotting.
 Choosing 10 in a plotting form does not fetch missing transactions.
 
+During collection, the header's progress bar shows **Processing hop N of M**.
+The target is the run's cumulative hop limit, including additional hops on a
+continuation. Starting outputs are hop 0. Progress reflects the hop currently
+being processed, not a time estimate or a guarantee that every branch has
+reached that hop. A continuation can revisit earlier unfinished branches.
+If collection stops early, the bar keeps the actual processing hop instead of
+filling to the target. Address-count lookup and saving use their own stages.
+
 The **Collected data** summary shows **Hops collected** for the selected snapshot,
 separately from its configured collection hop limit. This is the deepest recorded
 transaction hop, with starting transactions at hop 0. Some branches may stop
