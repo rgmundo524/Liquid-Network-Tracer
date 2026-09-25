@@ -76,9 +76,20 @@ this choice for both SVG export and Miro sync. Generate a new layout to change i
 
 Set layout attempts, connector appearance, attribution arrow coloring, and
 named-group centering here. **Full trace** also supports **Separate branch hubs**,
-**Group isolated context inputs**, and **Include transaction fee flows**. These
-three controls are disabled for filtered goals, which retain their saved values
-for the next full trace.
+**Group isolated context inputs**, and **Include transaction fee flows**.
+**Group isolated context inputs** is also available for **Paths to peg-outs**
+when **Include context addresses** is enabled. It combines at least two eligible
+external input addresses used only by one transaction into a context summary.
+Traced, shared, attributed, and otherwise protected addresses remain separate,
+as do sibling outputs. Every input retains its exact UTXO connector and CSV row;
+the full member addresses stay available in local details. Endpoint matches,
+hop limits, and trace evidence are unchanged.
+
+Grouping is saved as an investigation layout preference and captured with each
+generated layout. Disabling context or choosing Starter connections preserves
+the preference without applying it. Separate branch hubs and fee flows remain
+Full trace-only. Regenerate the plot and use **Sync and reorganize** to apply its
+grouped layout to a managed board.
 
 **Save layout settings** persists the preferences with this investigation, even
 before collection. **Generate** saves pending layout edits before generating the

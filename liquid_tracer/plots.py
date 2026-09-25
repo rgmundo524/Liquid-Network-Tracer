@@ -78,12 +78,14 @@ def validate_layout_settings(value):
     return deepcopy(result)
 
 
-def _effective_settings(settings, goal):
+def _effective_settings(settings, goal, query=None):
     result = validate_layout_settings(settings)
     if goal != "full":
-        # Peg-out context is selected explicitly by its query. Full-trace
-        # preferences must not add fees, grouped context inputs, or hub branches.
-        result.update(include_fees=False, group_context_inputs=False, hub_addresses=[])
+        # Filtered plots never add fee flows or hub branches. Context grouping
+        # applies only when a peg-out query explicitly includes local context.
+        result.update(include_fees=False, hub_addresses=[])
+        if goal != "pegouts" or not (query or {}).get("include_context"):
+            result["group_context_inputs"] = False
     return result
 
 
@@ -93,7 +95,7 @@ def _snapshot_settings(graph):
         return None  # Older snapshots retain their original strict review.
     settings = validate_layout_settings(report["layout_settings"])
     if (report.get("settings_sha256") != digest(canonical(settings))
-            or _effective_settings(settings, report["goal"]) != settings
+            or _effective_settings(settings, report["goal"], report.get("query")) != settings
             or graph.get("presentation_version") != settings["presentation_version"]):
         raise TraceError("Saved layout settings disagree with their snapshot; regenerate the plot")
     options = graph.get("graph_options", {})
@@ -173,7 +175,7 @@ def _graph(state, goal, query, settings):
     if goal == "connections":
         return connection_graph(state, query["max_hops"], **options)
     if goal == "pegouts":
-        return pegout_graph(state, query, **options)
+        return pegout_graph(state, query, group_context_inputs=settings["group_context_inputs"], **options)
     return build_graph(state, merge_addresses=True, **options,
                        **{key: settings[key] for key in ("include_fees", "group_context_inputs", "hub_addresses")})
 
@@ -240,7 +242,7 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
         state, settings, fingerprints = _source(case, run_id)
         query = _query(goal, state, min_hops, max_hops, include_unspent=include_unspent,
                        include_unspendable=include_unspendable, include_context=include_context)
-        settings = _effective_settings(settings, goal)
+        settings = _effective_settings(settings, goal, query)
         graph = _graph(state, goal, query, settings)
         graph["graph_options"].update({key: deepcopy(settings[key]) for key in LAYOUT_SETTINGS})
         if graph["nodes"]:

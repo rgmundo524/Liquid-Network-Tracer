@@ -55,6 +55,9 @@ class PlotCommandTests(unittest.TestCase):
             "0 peg-outs, 3 unspent UTXOs, 0 unspendable outputs")
         self.assertEqual(_endpoint_summary({"goal": "pegouts", "match_count": 1,
             "query": {"include_context": True}}), "1 peg-outs, context addresses included")
+        self.assertEqual(_endpoint_summary({"goal": "pegouts", "match_count": 1,
+            "query": {"include_context": True}, "layout_settings": {"group_context_inputs": True}}),
+            "1 peg-outs, context addresses included (isolated inputs grouped)")
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "Install the optional tui extra")

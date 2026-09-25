@@ -341,6 +341,66 @@ class PlotTests(unittest.TestCase):
                 self.assertFalse(graph["include_fees"])
                 self.assertFalse(any(node["kind"] == "context_group" for node in graph["nodes"]))
 
+    def test_context_grouping_effective_settings_follow_goal_and_saved_query(self):
+        from liquid_tracer.plots import _effective_settings, _settings, _snapshot_settings
+
+        update_case(self.case, {"run_defaults": {"include_fees": True, "group_context_inputs": True,
+                                                "hub_addresses": ["H" * 34]}})
+        preferences = _settings(read_case(self.case))
+        for goal in ("full", "connections", "pegouts"):
+            for query in (None, {}, {"include_context": False}, {"include_context": True}):
+                with self.subTest(goal=goal, query=query):
+                    settings = _effective_settings(preferences, goal, query)
+                    expected_grouping = goal == "full" or (goal == "pegouts" and bool(query and query.get("include_context")))
+                    self.assertEqual(settings["group_context_inputs"], expected_grouping)
+                    self.assertEqual(settings["include_fees"], goal == "full")
+                    self.assertEqual(settings["hub_addresses"], ["H" * 34] if goal == "full" else [])
+                    graph = {"plot": {"goal": goal, "query": query, "layout_settings": settings,
+                                       "settings_sha256": digest(canonical(settings))},
+                             "graph_options": deepcopy(settings), "presentation_version": settings["presentation_version"]}
+                    self.assertEqual(_snapshot_settings(graph), settings)
+        self.assertTrue(preferences["include_fees"])
+        self.assertTrue(preferences["group_context_inputs"])
+        self.assertEqual(preferences["hub_addresses"], ["H" * 34])
+
+    def test_pegout_grouping_roundtrips_original_csv_and_preserves_older_context_layout(self):
+        state = graph_state((("a:0", "c"),), seeds=("a:0",), raw_links=(("e:0", "c"), ("f:0", "c")))
+        add_pegout(state, tx("c"))
+        self.state, self.archive = saved_case(self.case, state)
+        before = self.bytes(self.archive)
+        original = preview_plot(self.case, "pegouts", min_hops=1, max_hops=1, include_context=True)
+        old_graph, old_plan = reviewed_plot(self.case, original["preview_id"])
+        old_directory = Path(original["directory"])
+        old_bytes = self.bytes(old_directory)
+        self.assertFalse(original["layout_settings"]["group_context_inputs"])
+        update_case(self.case, {"run_defaults": {"group_context_inputs": True, "include_fees": True,
+                                                "hub_addresses": ["H" * 34]}})
+        result = preview_plot(self.case, "pegouts", min_hops=1, max_hops=1, include_context=True)
+        graph, plan = reviewed_plot(self.case, result["preview_id"])
+        summary, = [node for node in graph["nodes"] if node["kind"] == "context_group"]
+        self.assertEqual(summary["details"]["address_count"], 2)
+        self.assertTrue(result["layout_settings"]["group_context_inputs"])
+        self.assertTrue(graph["graph_options"]["group_context_inputs"])
+        self.assertFalse(result["layout_settings"]["include_fees"])
+        self.assertEqual(result["layout_settings"]["hub_addresses"], [])
+        self.assertEqual(graph["pegouts"], old_graph["pegouts"])
+        self.assertEqual(plan["namespace"], old_plan["namespace"])
+        self.assertEqual(len(plan["connectors"]), len(old_plan["connectors"]))
+        with (Path(result["directory"]) / "transactions.csv").open(newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        with (old_directory / "transactions.csv").open(newline="") as stream:
+            self.assertEqual(rows, list(csv.DictReader(stream)))
+        grouped_rows = [row for row in rows if row["Address Hash"] in {"SYNTHETIC-e-address", "SYNTHETIC-f-address"}]
+        self.assertEqual({(row["Address Hash"], row["Direction"], row["Number of I/O"]) for row in grouped_rows},
+                         {("SYNTHETIC-e-address", "IN", "1"), ("SYNTHETIC-f-address", "IN", "2")})
+        self.assertTrue(all("CONTEXT" in row["Address Flags"] for row in grouped_rows))
+        self.assertEqual(reviewed_plot(self.case, original["preview_id"]), (old_graph, old_plan))
+        self.assertEqual(self.bytes(old_directory), old_bytes)
+        update_case(self.case, {"run_defaults": {"group_context_inputs": False}})
+        self.assertEqual(reviewed_plot(self.case, result["preview_id"]), (graph, plan))
+        self.assertTrue(all(item["reviewable"] for item in list_plots(self.case)))
+        self.assertEqual(self.bytes(self.archive), before)
+
     def test_legacy_plot_without_settings_snapshot_keeps_strict_review(self):
         result = preview_plot(self.case, "full")
         directory = Path(result["directory"])

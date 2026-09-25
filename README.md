@@ -117,7 +117,7 @@ The browser and terminal interfaces share the same `cases/`, defaults, run histo
 
 **Investigation settings** collects this case's tracing limits, Miro sync budget, and colors. Its **Investigation data** section contains CSV imports, address review, change outputs, and input CSV exports. **Workspace defaults** sets collection, plot layout, and Miro sync defaults copied into future investigations; existing cases keep their saved settings. Both scopes persist across restarts. Changing the hop allowance in a run dialog applies only to that run. Imports use **Preview → Apply**; changing a file or import option requires a fresh preview. Imported data and color edits save through their own controls; **Save settings** saves the investigation preferences.
 
-**Plot Layouts** edits this investigation's layout attempts, connector appearance, attribution arrow coloring, named-group centering, separate branch hubs, isolated context grouping, and fee-flow visibility. The same controls in **Workspace defaults** set the starting values for new investigations. **Save layout settings** persists these preferences with the investigation, including before its first collection; **Generate** also saves pending layout edits before plotting. Unsaved edits survive tab navigation in the current browser session. Separate branch hubs, isolated context grouping, and fee flows apply to **Full trace** only; filtered goals preserve those preferences without applying them. Existing saved layouts and Miro boards keep their appearance until you generate and sync a new layout.
+**Plot Layouts** edits this investigation's layout attempts, connector appearance, attribution arrow coloring, named-group centering, separate branch hubs, isolated context grouping, and fee-flow visibility. The same controls in **Workspace defaults** set the starting values for new investigations. **Save layout settings** persists these preferences with the investigation, including before its first collection; **Generate** also saves pending layout edits before plotting. Unsaved edits survive tab navigation in the current browser session. Separate branch hubs and fee flows apply to **Full trace** only. Isolated context grouping also applies to **Paths to peg-outs** when **Include context addresses** is enabled. Other filtered layouts preserve the grouping preference without applying it. Existing saved layouts and Miro boards keep their appearance until you generate and sync a new layout.
 
 The task tabs are **Collect data**, **Plot Layouts**, **Miro boards**, and **History & downloads**. The selected saved snapshot stays selected across tabs. **Collect data** contains collection actions; use the tabs to move to plotting and the investigation heading to open settings. The main plotting workflow is fully offline; collection is the separate fetching phase. A plot is generated once for both its ELK SVG download and Miro publication. Older ELK and Mermaid tools can still fetch missing address counts before local rendering. Miro board creation and sync contact Miro and require its access token. Linking and listing boards are local actions.
 
@@ -160,6 +160,15 @@ distances, or add endpoint matches. This uses the saved transaction I/O without
 fetching earlier or later activity. Fee outputs and additional event outputs
 remain excluded. The setting is off by default and saved with each layout;
 the CLI equivalent is `plot --goal pegouts --include-context`.
+
+With context enabled, select **Group isolated context inputs** to summarize two
+or more eligible external input addresses used only by one displayed transaction.
+Traced, shared, attributed, and otherwise protected addresses stay individual;
+sibling output addresses are not grouped. Every input keeps its own connector,
+UTXO reference, and transaction CSV row, and the original addresses remain in
+local details. Grouping uses the saved investigation preference and is captured
+with the generated layout. Regenerate and choose **Sync and reorganize** to apply
+the grouped arrangement to a managed board.
 
 Peg-out layouts use one circle per full address per network while retaining
 every qualifying UTXO connector and CSV row. Regenerate an older layout to

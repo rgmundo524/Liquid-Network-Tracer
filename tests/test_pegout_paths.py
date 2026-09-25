@@ -196,6 +196,81 @@ class PegoutPathTests(unittest.TestCase):
         self.assertEqual(graph["pegouts"]["context_edge_count"], 2)
         self.assertEqual(state, before)
 
+    def test_context_grouping_is_strict_optional_and_requires_context(self):
+        state = graph_state((("a:0", "b"),), raw_links=(("c:0", "b"), ("d:0", "b")), seeds=("a:0",))
+        add_pegout(state, tx("b"))
+        query = validate_query(seeds=state["seeds"])
+        for value in (None, 0, 1, "true", [], {}):
+            with self.subTest(value=value), self.assertRaisesRegex(TraceError, "Context input grouping"):
+                pegout_graph(state, query, group_context_inputs=value)
+        for include_context in (False, True):
+            current = {**query, "include_context": include_context}
+            original = pegout_graph(state, current)
+            self.assertEqual(pegout_graph(state, current, group_context_inputs=False), original)
+            if not include_context:
+                self.assertEqual(pegout_graph(state, current, group_context_inputs=True), original)
+
+    def test_grouped_context_preserves_endpoint_paths_and_every_input_connector(self):
+        state = graph_state((("a:0", "b"),), raw_links=(("c:0", "b"), ("d:0", "b")), seeds=("a:0",))
+        add_pegout(state, tx("b"))
+        add_unspendable(state, tx("b"))
+        mark_unspent(state, tx("b") + ":0")
+        query = validate_query(seeds=state["seeds"], min_hops=1, max_hops=1, include_context=True,
+                               include_unspent=True, include_unspendable=True)
+        before = deepcopy(state)
+        ordinary = pegout_graph(state, query)
+        graph = pegout_graph(state, query, group_context_inputs=True)
+        summary, = [node for node in graph["nodes"] if node["kind"] == "context_group"]
+        self.assertEqual(summary["id"], "context-group:" + tx("b"))
+        self.assertEqual((summary["width"], summary["height"]), (240, 160))
+        self.assertEqual((summary["details"]["address_count"], summary["details"]["input_count"]), (2, 2))
+        members = {node["id"]: node for node in summary["details"]["members"]}
+        self.assertEqual(set(members), {"liquid:address:SYNTHETIC-c-address", "liquid:address:SYNTHETIC-d-address"})
+        originals = {node["id"]: node for node in ordinary["nodes"]}
+        self.assertEqual(members, {key: originals[key] for key in members})
+        restored = deepcopy(graph["edges"])
+        grouped_edges = []
+        for edge in restored:
+            if "original_source" in edge:
+                grouped_edges.append(edge["id"])
+                self.assertEqual(edge["source"], summary["id"])
+                edge["source"] = edge.pop("original_source")
+        self.assertEqual(set(grouped_edges), {f"in:{tx('b')}:1", f"in:{tx('b')}:2"})
+        self.assertEqual(restored, ordinary["edges"])
+        self.assertEqual(graph["pegouts"], ordinary["pegouts"])
+        self.assertEqual(graph["namespace"], ordinary["namespace"])
+        self.assertEqual(graph["branch_structure"], ordinary["branch_structure"])
+        self.assertEqual(graph["address_convergences"], ordinary["address_convergences"])
+        self.assertTrue(graph["graph_options"]["group_context_inputs"])
+        self.assertIn("not an ownership group", graph["notice"])
+        frame_shapes = {key for frame in graph["activity_frames"]["activities"] for key in frame["shape_keys"]}
+        self.assertEqual(frame_shapes, {node["id"] for node in graph["nodes"]})
+        self.assertTrue(frame_shapes.isdisjoint(members))
+        plan = make_plan(graph)
+        validate_plan(plan)
+        self.assertEqual(plan["namespace"], make_plan(ordinary)["namespace"])
+        self.assertEqual(len(plan["connectors"]), len(ordinary["edges"]))
+        self.assertEqual(state, before)
+
+    def test_context_grouping_keeps_named_shared_change_and_output_addresses_individual(self):
+        state = graph_state((("a:0", "b"), ("b:0", "c")), seeds=("a:0",),
+                            raw_links=(("d:0", "b"), ("e:0", "b"), ("f:0", "b"),
+                                       ("9:0", "b"), ("9:1", "c"), ("8:0", "b"), ("a:1", "b")))
+        state["labels"] = [annotation(address="SYNTHETIC-f-address")]
+        state["service_controls"] = {"change_outputs": {tx("8"): {"vout": 0}}}
+        add_pegout(state, tx("c"))
+        query = validate_query(seeds=state["seeds"], min_hops=2, max_hops=2, include_context=True)
+        ordinary = pegout_graph(state, query)
+        graph = pegout_graph(state, query, group_context_inputs=True)
+        summary, = [node for node in graph["nodes"] if node["kind"] == "context_group"]
+        self.assertEqual({node["details"]["address"] for node in summary["details"]["members"]},
+                         {"SYNTHETIC-d-address", "SYNTHETIC-e-address"})
+        ids = {node["id"] for node in graph["nodes"]}
+        self.assertTrue({"liquid:address:SYNTHETIC-" + name + "-address"
+                         for name in ("a", "b", "c", "f", "9", "8")} <= ids)
+        self.assertEqual(graph["pegouts"], ordinary["pegouts"])
+        self.assertEqual([match["hops"] for match in graph["pegouts"]["matches"]], [[2]])
+
     def test_optional_endpoints_keep_pegout_report_and_exact_observation_evidence(self):
         state = graph_state((("a:0", "b"),), seeds=("a:0",))
         unspent = tx("b") + ":0"
