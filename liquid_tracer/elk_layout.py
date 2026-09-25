@@ -19,6 +19,7 @@ from concurrent.futures import CancelledError
 from pathlib import Path
 
 from .common import TraceError
+from .connector_styles import routed_shape
 from .elk_errors import ELK_FATAL_FAILURE_CODES, ElkWorkerFailure
 from .elk_parallel import POLL_SECONDS, iter_attempts
 from .processes import defer_cancellation_during_spawn
@@ -530,7 +531,7 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
             edge["label_layout"] = {**label, "route_signature": route_signature([(p["x"], p["y"]) for p in route])}
         returns = b["x"] <= a["x"] or segment_hits_node(a, b, source) or segment_hits_node(a, b, target)
         reason = "return" if returns else ("fee" if target["id"] in fee_ids else None)
-        edge.update(attachment=attachment, route=route, connector_shape="elbowed" if reason else connector_style,
+        edge.update(attachment=attachment, route=route, connector_shape=routed_shape(connector_style, reason),
                     routing_exception=reason)
     # A bounded sweep finds straight-line obstructions. If it reaches its work
     # limit, retain ELK's routed paths for the unchecked edges conservatively.
@@ -550,12 +551,12 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
         edge, node = edges[ei], node_values[ni - len(edges)]
         if (not edge["routing_exception"] and node["id"] not in (edge["source"], edge["target"])
                 and segment_hits_node(edge["route"][0], edge["route"][-1], node)):
-            edge.update(connector_shape="elbowed", routing_exception="obstacle")
+            edge.update(connector_shape=routed_shape(connector_style, "obstacle"), routing_exception="obstacle")
     if routing_checks_truncated:
         for edge in edges:
             if not edge["routing_exception"]:
-                edge.update(connector_shape="elbowed", routing_exception="unchecked")
-    exceptions = sum(bool(edge["routing_exception"]) and connector_style != "elbowed" for edge in edges)
+                edge.update(connector_shape=routed_shape(connector_style, "unchecked"), routing_exception="unchecked")
+    exceptions = sum(edge["connector_shape"] != connector_style for edge in edges)
     # Preserve every dependency except a verified vin routed through a selected
     # hub. That exact relation returns to the hub before starting its new tree.
     hub_layout = hub_plan(graph)
@@ -692,9 +693,9 @@ def fallback_graph(graph, connector_style="straight", reason="size_limit"):
                 lane = min(source["y"] - source["height"] / 2, target["y"] - target["height"] / 2) - 80
                 route = [a, {"x": departure, "y": a["y"]}, {"x": departure, "y": lane},
                          {"x": arrival, "y": lane}, {"x": arrival, "y": b["y"]}, b]
-        edge.update(route=route, connector_shape="elbowed" if exception else connector_style,
+        edge.update(route=route, connector_shape=routed_shape(connector_style, exception),
                     routing_exception=exception)
-        exceptions += bool(exception) and connector_style != "elbowed"
+        exceptions += edge["connector_shape"] != connector_style
     main = [node for key, node in nodes.items() if key not in fee_ids]
     shift = -260 if fee_ids else 0
     notice = (f"{descriptions[reason]}. Using the full dependency layout for "

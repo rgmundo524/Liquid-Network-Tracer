@@ -99,6 +99,39 @@ class ElkMiroTests(unittest.TestCase):
         with self.assertRaisesRegex(TraceError, "layout ports"):
             validate_plan(resigned(invalid))
 
+    def test_reorganize_upgrades_old_curved_return_elbows_without_recreating_connectors(self):
+        from liquid_tracer.elk_layout import fallback_graph
+        from liquid_tracer.export import build_graph
+        from tests.test_layout import chain, state_from
+
+        state = state_from(chain(3))
+        state["ancestor_runs"] = []
+        current = fallback_graph(build_graph(state), connector_style="curved")
+        old = copy.deepcopy(current)
+        returns = [edge for edge in old["edges"] if edge.get("routing_exception") == "return"]
+        self.assertTrue(returns)
+        for edge in old["edges"]:
+            if edge.get("routing_exception"):
+                edge["connector_shape"] = "elbowed"
+        self.sync(old)
+        key = returns[0]["id"]
+        self.item(key)["captions"][0]["content"] = "Analyst observation"
+        self.item(key)["style"]["strokeColor"] = "#123456"
+        ids = {edge["id"]: self.item(edge["id"])["id"] for edge in current["edges"]}
+        self.sync(current)
+        self.assertEqual(self.item(key)["shape"], "elbowed")
+        report = self.sync(current, reorganize=True)
+        self.assertEqual(report["created"], 0)
+        self.assertIn("connector_shapes", report["layout_snapshot"])
+        for edge in current["edges"]:
+            remote = self.item(edge["id"])
+            self.assertEqual(remote["id"], ids[edge["id"]])
+            self.assertEqual(remote["shape"], "curved")
+            for field, node in (("startItem", "source"), ("endItem", "target")):
+                self.assertEqual(remote[field]["id"], self.item(edge[node])["id"])
+        self.assertEqual(self.item(key)["captions"][0]["content"], "Analyst observation")
+        self.assertEqual(self.item(key)["style"]["strokeColor"], "#123456")
+
     def test_invalid_ports_and_topology_fail_before_any_board_writes(self):
         mutations = [
             lambda item: item["attachment"]["endItem"]["position"].update(x="100%"),
