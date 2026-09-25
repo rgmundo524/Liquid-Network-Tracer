@@ -52,6 +52,25 @@ from .connections import FILES as CONNECTION_NAMES, LEGACY_FILES as LEGACY_CONNE
 CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact", "connections", "pegouts", "pegouts-preview", "plot"}
 
 
+def collected_hops(state):
+    """Deepest recorded transaction hop, not a promise of complete coverage.
+
+    Only transaction records in the saved trace count. Prefetched responses,
+    co-input context, and an uncollected frontier do not establish hop coverage.
+    Historical snapshots need no migration; an unknown depth stays unknown.
+    """
+    transactions = state.get("transactions")
+    if not isinstance(transactions, dict) or not transactions:
+        return None
+    maximum = 0
+    for transaction in transactions.values():
+        depth = transaction.get("depth") if isinstance(transaction, dict) else None
+        if type(depth) is not int or not 0 <= depth <= 2 ** 53 - 1:
+            return None
+        maximum = max(maximum, depth)
+    return maximum
+
+
 def public_pegout_search(summary):
     """Expose the saved query and outcome, never archive paths or API errors."""
     from .pegouts import SEARCH_ID
@@ -416,6 +435,9 @@ class LocalServer(ThreadingHTTPServer):
                     limits = state.get("limits", {})
                     if isinstance(limits, dict) and type(limits.get("max_hops")) is int:
                         run["max_hops"] = limits["max_hops"]
+                    depth = collected_hops(state)
+                    if depth is not None:
+                        run["collected_hops"] = depth
                     runs.append(run)
                     if path.name == summary["latest_run"]:
                         summary["status"] = run["status"]
