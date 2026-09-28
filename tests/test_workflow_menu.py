@@ -9,12 +9,30 @@ from unittest.mock import patch
 from liquid_tracer.common import TraceError, save_json
 from liquid_tracer.investigations import create_investigation, read_case
 from liquid_tracer.menu import create_app
-from liquid_tracer.workflow_menu import _endpoint_summary, boards_screen, plot_arguments, plot_screen
+from liquid_tracer.workflow_menu import _compatible_plot, _endpoint_summary, boards_screen, plot_arguments, plot_screen
 
 HAS_TEXTUAL = importlib.util.find_spec("textual") is not None
 
 
 class PlotCommandTests(unittest.TestCase):
+    def test_update_layout_requires_target_and_live_read_credentials(self):
+        arguments, live = plot_arguments("case", "full", "saved-run", layout_mode="update", board_record_id="board-test")
+        self.assertTrue(live)
+        self.assertEqual(arguments[-5:], ["--layout-mode", "update", "--board-record-id", "board-test", "--open"])
+        for mode, board in (("bad", None), ("fresh", "board-test"), ("update", None), ("update", "")):
+            with self.subTest(mode=mode, board=board), self.assertRaises(TraceError):
+                plot_arguments("case", "full", "saved-run", layout_mode=mode, board_record_id=board)
+
+    def test_board_layout_choices_follow_mode_and_target(self):
+        board = {"id": "board-a", "board_id": "A=", "goal": "full"}
+        plot = {"preview_id": "plot-a", "goal": "full", "reviewable": True, "layout_mode": "fresh"}
+        self.assertFalse(_compatible_plot(plot, board))
+        self.assertTrue(_compatible_plot(plot, {**board, "creation_preview_id": "plot-a"}))
+        update = {**plot, "layout_mode": "update", "board_record_id": "board-a", "board_id": "A="}
+        self.assertTrue(_compatible_plot(update, board))
+        self.assertFalse(_compatible_plot(update, {**board, "id": "board-b"}))
+        self.assertFalse(_compatible_plot(update, {**board, "board_id": "B="}))
+
     def test_every_goal_uses_the_selected_saved_run_without_live_credentials(self):
         for goal in ("full", "connections", "pegouts"):
             arguments, live = plot_arguments(Path("case with spaces"), goal, "saved-run", "2", "10")
@@ -132,6 +150,35 @@ class WorkflowMenuTests(unittest.IsolatedAsyncioTestCase):
             await self.click(app, pilot, "#plot-go")
             self.assertEqual(app.result, (["plot", "--case", str(self.case), "--goal", "pegouts", "--run", run,
                                           "--min-hops", "2", "--max-hops", "10", "--open"], False))
+
+    async def test_update_layout_selects_matching_board_and_read_credentials(self):
+        from textual.widgets import Select
+        run = "saved-run"
+        save_json(self.case / "runs" / run / "trace.json", {})
+        save_json(self.case / "case.json", {**read_case(self.case), "latest_run": run})
+        with patch("liquid_tracer.investigation_boards.list_boards", return_value=self.board_rows()):
+            app = self.app_for(plot_screen)
+            async with app.run_test(size=(110, 55)) as pilot:
+                app.screen.query_one("#plot-mode", Select).value = "update"
+                await pilot.pause()
+                app.screen.query_one("#plot-board", Select).value = "board-full"
+                await self.click(app, pilot, "#plot-go")
+                self.assertTrue(app.result[1])
+                self.assertEqual(app.result[0][-5:],
+                                 ["--layout-mode", "update", "--board-record-id", "board-full", "--open"])
+
+    async def test_create_and_sync_selects_fresh_plot_without_prior_board(self):
+        from textual.widgets import Input, Select
+        plots = [{**self.plot_rows()[0], "layout_mode": "fresh"}]
+        with patch("liquid_tracer.investigation_boards.list_boards", return_value=[]), \
+                patch("liquid_tracer.plots.list_plots", return_value=plots):
+            app = self.app_for(boards_screen)
+            async with app.run_test(size=(110, 55)) as pilot:
+                app.screen.query_one("#workflow-name", Input).value = "New board"
+                app.screen.query_one("#workflow-create-preview", Select).value = "full-plot"
+                await self.click(app, pilot, "#workflow-create-sync")
+                self.assertEqual(app.result, (["investigation-board-create-sync", "--case", str(self.case),
+                    "--preview", "full-plot", "--name", "New board", "--max-items", "750"], True))
 
     async def test_terminal_options_are_visible_only_for_pegouts_and_default_off(self):
         from textual.widgets import Checkbox, Select

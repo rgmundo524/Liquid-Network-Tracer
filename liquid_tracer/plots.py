@@ -1,8 +1,8 @@
 """Reviewed plotting goals over shared, immutable investigation evidence.
 
-Collecting evidence is a separate operation. This module only reads verified
-main-run archives and current saved display/trace controls; it never fetches
-transactions or address statistics.
+Collecting evidence is a separate operation. This module reads verified
+main-run archives and saved display/trace controls. Board updates additionally
+read the selected Miro board; neither mode fetches transactions or statistics.
 """
 from contextlib import contextmanager
 from copy import deepcopy
@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import uuid
 
+from .api import http
 from .common import TraceError, canonical, digest, now, read_json, save_json
 
 GOALS = frozenset({"full", "connections", "pegouts"})
@@ -112,6 +113,31 @@ def _snapshot_settings(graph):
     return settings
 
 
+def _snapshot_board(graph, plan):
+    """Keep board-aware reviews bound to the selected target and capture."""
+    report = graph["plot"]
+    mode = report.get("layout_mode")
+    if mode is None:
+        if "board_layout" in graph or "board_layout" in plan:
+            raise TraceError("Saved board layout is missing its mode; regenerate the plot")
+        return  # Older immutable plot snapshots keep their original behavior.
+    if mode not in ("fresh", "update"):
+        raise TraceError("Invalid saved layout mode; regenerate the plot")
+    if mode == "fresh":
+        if (any(key in report for key in ("board_record_id", "board_id", "board_name"))
+                or "board_layout" in graph or "board_layout" in plan):
+            raise TraceError("A fresh layout cannot be bound to an existing board")
+        return
+    if (not isinstance(report.get("board_record_id"), str)
+            or not isinstance(report.get("board_id"), str)
+            or not isinstance(report.get("board_name"), str)
+            or not isinstance(graph.get("board_layout"), dict)
+            or plan.get("board_layout") != graph["board_layout"]
+            or graph["board_layout"].get("board_id") != report["board_id"]
+            or report.get("update_counts") != graph["board_layout"].get("counts", {})):
+        raise TraceError("Saved board layout does not match its target; regenerate the plot")
+
+
 def _source(case, run_id):
     from .address_counts import apply_saved_counts
     from .cli import resolve_latest, run_path, verify_export
@@ -171,12 +197,13 @@ def _graph(state, goal, query, settings):
     from .connections import connection_graph
     from .export import build_graph
     from .pegout_paths import pegout_graph
+    from .plot_scope import project_full_scope
     options = {key: settings[key] for key in ("color_attribution_arrows", "center_name")}
     if goal == "connections":
         return connection_graph(state, query["max_hops"], **options)
     if goal == "pegouts":
         return pegout_graph(state, query, group_context_inputs=settings["group_context_inputs"], **options)
-    return build_graph(state, merge_addresses=True, **options,
+    return build_graph(project_full_scope(state), merge_addresses=True, **options,
                        **{key: settings[key] for key in ("include_fees", "group_context_inputs", "hub_addresses")})
 
 
@@ -188,6 +215,8 @@ def plot_plan(graph):
     plan = {"schema_version": 2, "run_id": graph["run_id"], "shapes": [], "connectors": [],
             "namespace": deepcopy(graph["namespace"]), "run": deepcopy(graph.get("run", {})),
             "graph_options": deepcopy(graph.get("graph_options", {}))}
+    if "board_layout" in graph:
+        plan["board_layout"] = deepcopy(graph["board_layout"])
     plan["sha256"] = digest(canonical(plan))
     return plan
 
@@ -229,14 +258,21 @@ def _summary(graph, preview_id, *, reviewable=True, reason=None):
 
 
 def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, include_unspent=False,
-                 include_unspendable=False, include_context=False, open_browser=False, progress=None):
-    """Create any supported plot from a verified collection archive, offline."""
+                 include_unspendable=False, include_context=False, open_browser=False, progress=None,
+                 layout_mode="fresh", board_record_id=None, token=None, transport=http,
+                 interval=.02, workers=4):
+    """Plot saved evidence afresh, or review additions against a selected live board."""
     from .cli import open_preview
     from .elk_layout import optimize_graph
     from .layout_preview import export_layout
     from .mermaid import mermaid_source
     from .miro import validate_plan
     from .transaction_csv import write_transaction_csv
+    if layout_mode not in ("fresh", "update"):
+        raise TraceError("Choose a fresh layout or an update to an existing Miro board")
+    if (layout_mode == "fresh" and board_record_id is not None
+            or layout_mode == "update" and not isinstance(board_record_id, str)):
+        raise TraceError("Choose a target Miro board only when preparing an update layout")
     case = _ordinary(case)
     with _locked(case):
         state, settings, fingerprints = _source(case, run_id)
@@ -245,13 +281,29 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
         settings = _effective_settings(settings, goal, query)
         graph = _graph(state, goal, query, settings)
         graph["graph_options"].update({key: deepcopy(settings[key]) for key in LAYOUT_SETTINGS})
-        if graph["nodes"]:
+        board_fields = {"layout_mode": layout_mode}
+        if layout_mode == "update":
+            from .board_layout import capture, prepare_graph
+            from .investigation_boards import board_for_plot, _board_plan, _check_legacy_removals
+            record = board_for_plot(case, board_record_id, goal)
+            board_plan = _board_plan(plot_plan(graph), record)
+            state_path = case / record["state_file"]
+            _check_legacy_removals(board_plan, record, state_path)
+            snapshot = capture(record["board_id"], state_path, board_plan["namespace"],
+                               token=token, transport=transport, interval=interval,
+                               workers=workers, progress=progress)
+            graph = prepare_graph(graph, snapshot, connector_style=settings["connector_style"],
+                                  layout_attempts=settings["layout_attempts"], progress=progress)
+            board_fields.update(board_record_id=record["id"], board_id=record["board_id"],
+                                board_name=record["name"],
+                                update_counts=deepcopy(graph["board_layout"].get("counts", {})))
+        elif graph["nodes"]:
             graph = optimize_graph(graph, connector_style=settings["connector_style"],
                                    layout_attempts=settings["layout_attempts"], progress=progress)
         coverage = _coverage(state)
         graph["notice"] = coverage["coverage_notice"] + " " + graph["notice"]
         report = {"schema_version": 1, "case_id": state["case_id"], "run_id": state["run_id"],
-                  "goal": goal, "query": query, "created_at": now(), **coverage, **fingerprints,
+                  "goal": goal, "query": query, "created_at": now(), **coverage, **fingerprints, **board_fields,
                   "layout_settings": deepcopy(settings), "settings_sha256": digest(canonical(settings)),
                   "min_hops": query.get("min_hops", 0), "max_hops": query.get("max_hops"),
                   "node_count": len(graph["nodes"]), "edge_count": len(graph["edges"]),
@@ -337,6 +389,7 @@ def _snapshot(case, preview_id):
                        for key in ("match_count", "endpoint_count", "endpoint_counts", "context_edge_count", "status"))):
             raise TraceError("Saved endpoint options disagree with the graph; regenerate the plot")
     _snapshot_settings(graph)
+    _snapshot_board(graph, plan)
     return graph, plan
 
 

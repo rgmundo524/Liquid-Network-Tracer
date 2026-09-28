@@ -1,7 +1,7 @@
 """An investigation's named Miro boards and their durable plot bindings.
 
-Board creation and publication are independent. Old mappings are discovered
-without migration; new boards each keep an isolated, reusable sync mapping.
+Fresh plot creation and publication share a durable, resumable board entry.
+Old mappings are discovered without migration; each board keeps its own sync map.
 """
 
 import copy
@@ -212,7 +212,7 @@ def link_board(case, goal, name, board, *, record_id=None):
         return _display(case, record)
 
 
-def create_board(case, goal, name=None, *, team_id=None, transport=http):
+def create_board(case, goal, name=None, *, team_id=None, transport=http, creation_preview_id=None, token=None):
     """Create a private named board once, journaling intent before its POST."""
     goal = _goal(goal)
     case, metadata, path = _paths(case)
@@ -220,16 +220,20 @@ def create_board(case, goal, name=None, *, team_id=None, transport=http):
     body = board_options(name, team_id, "private")
     with _lock(case):
         registry = _read(path, read_case(case))
-        record = next((item for item in registry["boards"] if item["goal"] == goal and item["name"] == name), None)
+        record = next((item for item in registry["boards"] if item["goal"] == goal and (
+            item.get("creation_preview_id") == creation_preview_id if creation_preview_id is not None
+            else item["name"] == name)), None)
         if record and record.get("board_id"):
             return {**_display(case, record), "created": False, "reused": True}
         if record and record["status"] == "pending_creation":
             raise TraceError(UNCERTAIN)
-        token = os.getenv("MIRO_ACCESS_TOKEN")
-        if not token or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in token):
+        token = token or os.getenv("MIRO_ACCESS_TOKEN")
+        if not isinstance(token, str) or not token or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in token):
             raise TraceError("MIRO_ACCESS_TOKEN is missing or malformed; load its raw value through SecretSpec")
         if record is None:
             record = _new(goal, name)
+            if creation_preview_id is not None:
+                record["creation_preview_id"] = creation_preview_id
             registry["boards"].append(record)
         record.update(status="pending_creation", attempted_at=now(), creation_request=body)
         save_json(path, registry)
@@ -299,8 +303,65 @@ def _check_pegout_address_mode(plan, record, state_path):
                          "Miro board. The existing board stays unchanged.")
 
 
+def board_for_plot(case, record_id, goal):
+    """Resolve a maintained target without changing its registry or mapping."""
+    record = next((item for item in list_boards(case) if item["id"] == record_id), None)
+    if record is None or not record["can_sync"]:
+        raise TraceError("Select a linked managed board; historical snapshots remain read-only")
+    if record["goal"] != goal:
+        raise TraceError("The selected board has a different plotting goal")
+    if record.get("pending_count") or record.get("status") in ("interrupted", "syncing"):
+        raise TraceError("Finish or reconcile this board's interrupted sync before preparing another layout")
+    return record
+
+
+def _check_legacy_removals(plan, record, state_path):
+    """Older full-board maps lack the per-object authority for scope pruning."""
+    if not record.get("legacy"):
+        return
+    state = load_state(state_path, {})
+    desired = {item["key"] for endpoint in ("shapes", "connectors") for item in plan[endpoint]}
+    absent = {key for key, item in state.get("items", {}).items()
+              if item.get("endpoint") in ("shapes", "connectors") and key not in desired}
+    if not absent:
+        return
+    from .miro import _fee_removals
+    # Fee, annotation and context replacement paths carry their own older
+    # proofs. A live snapshot alone must never grant new deletion authority.
+    supported = _fee_removals(plan, state)
+    if absent - supported.keys():
+        raise TraceError("This older full-trace board can receive additions and attribution updates, "
+                         "but its saved mapping cannot safely remove out-of-scope graph objects. "
+                         "Generate a fresh layout and use Create and sync for a new board. "
+                         "The existing board remains unchanged.")
+
+
+def create_and_sync(case, preview_id, name=None, *, team_id=None, max_items=750, transport=http,
+                    token=None, interval=.02, progress=None, workers=4):
+    """Create one private board per reviewed fresh plot, then resume its publication."""
+    from .miro import sync
+    from .plots import reviewed_plot
+
+    case, _, _ = _paths(case)
+    graph, plan = reviewed_plot(case, preview_id)
+    if graph["plot"].get("layout_mode", "fresh") != "fresh" or "board_layout" in plan:
+        raise TraceError("This layout updates an existing board; use Update board for its selected target")
+    if not graph.get("nodes"):
+        raise TraceError("This plot has no matching paths; no Miro board was created")
+    # Complete local validation and the full new-board budget before POSTing.
+    # A unique nonexistent state path keeps this dry run independent of any board.
+    sync(plan, "new-board-preflight", case / "miro" / ("preflight-" + uuid.uuid4().hex + ".json"),
+         max_items=max_items, dry_run=True, reorganize=True, interval=interval, workers=workers, progress=progress)
+    record = create_board(case, graph["plot"]["goal"], name, team_id=team_id, transport=transport,
+                          creation_preview_id=preview_id, token=token)
+    result = sync_board(case, record["id"], preview_id, max_items=max_items, transport=transport,
+                        token=token, interval=interval, workers=workers, progress=progress)
+    return {**result, "board_id": record["board_id"], "board_url": record["board_url"],
+            "created_board": record["created"], "reused_board": record["reused"]}
+
+
 def sync_board(case, record_id, preview_id, *, reorganize=False, max_items=750, **kwargs):
-    """Refresh the selected board from one verified offline plot."""
+    """Apply a reviewed fresh publication or a board-bound incremental layout."""
     from .plots import reviewed_plot
     from .miro import sync
 
@@ -312,10 +373,30 @@ def sync_board(case, record_id, preview_id, *, reorganize=False, max_items=750, 
         graph, plan = reviewed_plot(case, preview_id)
         if graph.get("plot", {}).get("goal") != record["goal"]:
             raise TraceError("The selected plot has a different goal from this board")
-        if not graph.get("nodes"):
+        layout_mode = graph["plot"].get("layout_mode")
+        if layout_mode == "update":
+            if (graph["plot"].get("board_record_id") != record_id
+                    or graph["plot"].get("board_id") != record["board_id"] or "board_layout" not in plan):
+                raise TraceError("This update layout belongs to a different board; regenerate it for this target")
+            if reorganize:
+                raise TraceError("An update layout preserves the existing board; generate a fresh layout for a new board to reorganize")
+        if not graph.get("nodes") and layout_mode != "update":
             raise TraceError("This plot has no matching paths; the existing Miro board will remain unchanged")
         plan = _board_plan(plan, record)
         state_path = case / record["state_file"]
+        if layout_mode == "fresh":
+            if record.get("creation_preview_id") != preview_id:
+                raise TraceError("A fresh layout creates its own board; use Create and sync, or generate an update layout for this board")
+            current = load_state(state_path, {})
+            completed = (plan["sha256"] in current.get("runs", {}).get(graph["run_id"], {}).get("plan_sha256s", [])
+                         and not current.get("active_run_id") and not _pending(current))
+            if current.get("items") and record.get("preview_id") != preview_id:
+                raise TraceError("This board already contains a different layout; generate an update layout")
+            # First publication follows the reviewed coordinates. Repeating an
+            # acknowledged publication must preserve subsequent manual movement.
+            reorganize = not completed
+        if layout_mode == "update":
+            _check_legacy_removals(plan, record, state_path)
         _check_pegout_address_mode(plan, record, state_path)
         # Validate item budgets and lineage before changing the publication record.
         sync(plan, record["board_id"], state_path, max_items=max_items, dry_run=True, reorganize=reorganize)

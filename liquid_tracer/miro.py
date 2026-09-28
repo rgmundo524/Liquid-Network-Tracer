@@ -19,7 +19,7 @@ from . import legend_miro, miro_legend_updates
 from .edge_labels import FONT_SIZE as CAPTION_FONT_SIZE, caption_text
 from .connector_styles import stroke_width
 from .name_colors import color_text
-from . import presentation_items, context_group_miro, plot_miro
+from . import presentation_items, context_group_miro, plot_miro, board_layout
 from .address_counts import caption as count_caption
 from .graph_markers import node_border
 from .miro_http import MiroHTTP
@@ -81,7 +81,7 @@ def make_plan(graph):
         connector["context_evidence"] = context_group_miro.evidence(edge)
         connectors.append(connector)
     plan = {"schema_version": 2 if incremental else 1, "run_id": graph["run_id"], "shapes": shapes, "connectors": connectors}
-    for key in ("layout", "fee_items", "include_fees", "connector_attachment", "graph_options", "address_convergences"):
+    for key in ("layout", "fee_items", "include_fees", "connector_attachment", "graph_options", "address_convergences", "board_layout"):
         if key in graph:
             plan[key] = copy.deepcopy(graph[key])
     if "fee_items" in graph:
@@ -97,6 +97,7 @@ def make_plan(graph):
     shapes.extend(legend_shapes[1:])
     plan["presentation_items"] = {**annotation_catalog, **legend_catalog}
     plan["context_group_items"] = context_group_miro.catalog(graph)
+    board_layout.finalize_plan(plan)
     if "activity_frames" in graph:
         plan["activity_frames"] = copy.deepcopy(graph["activity_frames"])
         plan["frames"] = frame_bodies(plan["activity_frames"], {
@@ -151,6 +152,7 @@ def validate_plan(plan):
     _fee_catalog(plan)
     context_group_miro.validate(plan)
     plot_miro.validate(plan)
+    board_layout.validate(plan)
     if "activity_frames" in plan:
         seeds = plan.get("run", {}).get("seeds")
         starts = ({"tx:" + seed.rpartition(":")[0] for seed in seeds
@@ -1239,7 +1241,13 @@ def _create_items(plan, state, journal, requests, base, headers, positions, mapp
             records = {pending["key"]: _record_pending(pending, item_id, response)}
         # Atomically record the entire acknowledged batch before its connector
         # IDs can be used. Invalid response matching never saves partial guesses.
+        acknowledged_bodies = ({body["id"]: body for body in normalized}
+                               if job["endpoint"] == "items/bulk" else {response["id"]: response})
         journal.commit(sets=[(("items", key), record) for key, record in records.items()] +
+                       ([(("board_layout_sync", "items", record["id"]), board_layout._descriptor(acknowledged_bodies[record["id"]]))
+                         for record in records.values()] +
+                        [(("board_layout_sync", "mapped", key), board_layout.mapped_record(record))
+                         for key, record in records.items()] if plan.get("board_layout") else []) +
                        [(("pending_creation_detaches", key), detaches[record["id"]])
                         for key, record in records.items() if record["id"] in detaches],
                        deletes=[("pending_creations", pending["key"]) for pending in batch])
@@ -1386,6 +1394,8 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
     https://developers.miro.com/reference/rate-limiting
     """
     validate_plan(plan)
+    if plan.get("board_layout") and reorganize:
+        raise TraceError("Board update layouts preserve existing positions; sync without reorganizing")
     _require_inline_counts(plan)
     if not frames_only:
         _require_no_run_notes(plan)
@@ -1416,7 +1426,7 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
         _check_frame_operation(plan, current, frames_only)
         removals = {} if frames_only else _fee_removals(plan, current)
         frame_removals = _frame_removals(plan, current) if frames_only else {}
-        if not reorganize and any(proof.get("kind") == "context_group_replacement" for proof in removals.values()):
+        if not reorganize and not plan.get("board_layout") and any(proof.get("kind") == "context_group_replacement" for proof in removals.values()):
             raise TraceError("Changing context grouping on an existing board replaces generated objects; "
                              "choose Sync and reorganize to apply this layout change. Ordinary sync preserves manual positions and ports.")
         report = {"dry_run": dry_run, "board_url": "https://miro.com/app/board/" + urllib.parse.quote(board_id, safe="") + "/",
@@ -1488,11 +1498,18 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
                                                          progress=status_progress, quota=quota))
         # Resume only acknowledged creation detaches before ordinary frame
         # preflight. This never replays POST or changes a parent frame.
-        if state.get("pending_creation_detaches"):
+        if state.get("pending_creation_detaches") and not plan.get("board_layout"):
             with SyncState(state_path, state) as recovery_journal:
                 finish_creation_detaches(state, recovery_journal, requests, base, headers)
         # The complete live preflight must succeed before new sync writes.
         remote = preflight(requests, base, headers, state, {**removals, **preflight_frame_removals}, progress=status_progress)
+        board_live = None
+        if plan.get("board_layout") and not frames_only:
+            board_live, _ = board_layout.read_live(requests, base, headers, state, remote)
+            board_layout.check_live(plan, state, board_live)
+            if state.get("pending_creation_detaches"):
+                with SyncState(state_path, state) as recovery_journal:
+                    finish_creation_detaches(state, recovery_journal, requests, base, headers)
         live_frame_records = {key: record for key, record in state["items"].items()
                               if record["endpoint"] == "frames" and key in remote}
         live_frame_ids = {record["id"] for record in live_frame_records.values()}
@@ -1514,11 +1531,13 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
         if projection_removals:
             from .address_migration import _inventory
             plot_miro.check_remote(state, remote, projection_removals,
-                                   _inventory(requests, base, headers))
+                                   _inventory(requests, base, headers), allow_moved=bool(plan.get("board_layout")),
+                                   context_removals=context_removals)
         if context_removals:
             from .address_migration import _inventory
             context_group_miro.check_remote(state, remote, context_removals,
-                                           _inventory(requests, base, headers))
+                                           _inventory(requests, base, headers), projection_removals=projection_removals,
+                                           allow_organization=bool(plan.get("board_layout")))
         annotation_removals = {state["items"][key]["id"] for key in removals if key.startswith((presentation_items.PREFIX, "run:"))}
         if annotation_removals:
             from .address_migration import _inventory
@@ -1541,12 +1560,18 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
                     if remote[item["key"]].get(field, {}).get("id") != state["items"][record[logical]]["id"]:
                         raise TraceError("Miro connector endpoints changed; repair the connection before framing. No board writes made.")
         else:
-            legend_updates = miro_legend_updates.resize_updates(plan, state, remote, removals)
+            legend_updates = {} if plan.get("board_layout") else miro_legend_updates.resize_updates(plan, state, remote, removals)
             if reorganize:
                 context_resizes = context_group_miro.resize_updates(plan, state, remote, removals)
             placement_remote = {key: {**body, **legend_updates.get(key, {}), **context_resizes.get(key, {})}
                                 for key, body in remote.items()}
-            positions, shift_x = _placements(plan, state, placement_remote, removals, reorganize)
+            if plan.get("board_layout"):
+                positions = {item["key"]: _bounds(placement_remote[item["key"]], item["key"])[:2]
+                             if item["key"] in state["items"] and item["key"] not in removals
+                             else _bounds(item["body"], item["key"])[:2] for item in plan["shapes"]}
+                shift_x = 0
+            else:
+                positions, shift_x = _placements(plan, state, placement_remote, removals, reorganize)
             if not reorganize:
                 positions.update({key: (change["position"]["x"], change["position"]["y"])
                                   for key, change in legend_updates.items()})
@@ -1570,7 +1595,7 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
                             raise TraceError("Miro connector endpoints were changed for " + key + "; restore or repair this connection before syncing. No board writes made.")
                 patch, managed, intent, item_conflicts = _merge_fields(record, item["body"], remote[key], key)
                 annotation = plan.get("presentation_items", {}).get(key)
-                if (reorganize or annotation or key in legend_updates) and endpoint == "shapes":
+                if not plan.get("board_layout") and (reorganize or annotation or key in legend_updates) and endpoint == "shapes":
                     x, y = positions[key]
                     if any(float(remote[key]["position"][field]) != value for field, value in (("x", x), ("y", y))):
                         patch["position"] = {"x": x, "y": y, "origin": "center"}
@@ -1578,7 +1603,7 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
                     patch["geometry"] = copy.deepcopy(legend_updates[key]["geometry"])
                 if key in context_resizes:
                     patch["geometry"] = copy.deepcopy(context_resizes[key]["geometry"])
-                if annotation and annotation["kind"] == "attribution":
+                if annotation and annotation["kind"] == "attribution" and not plan.get("board_layout"):
                     geometry = presentation_items.note_geometry(item["body"], remote[key])
                     if any(float(remote[key]["geometry"][axis]) != geometry[axis] for axis in geometry):
                         patch["geometry"] = geometry
@@ -1674,6 +1699,8 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
         # _recover_updates refreshed these records from live evidence. Save those
         # changes alongside the new edit journal before dispatching mutations.
         initial_sets.extend((("items", key), record) for key, record in recovered_records.items())
+        if board_live is not None:
+            initial_sets.append((("board_layout_sync",), board_layout.checkpoint(plan, board_live, remote, state, updates)))
         journal.commit(sets=initial_sets)
         mapped_ids = {record["id"] for record in state["items"].values()}
         if not frames_only:
@@ -1690,7 +1717,8 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
             del state["items"][key]
             mapped_ids.remove(record["id"])
             del pending_deletions[key]
-            journal.commit(deletes=[("items", key), ("pending_deletions", key)])
+            journal.commit(deletes=[("items", key), ("pending_deletions", key)] +
+                           ([("board_layout_sync", "items", record["id"]), ("board_layout_sync", "mapped", key)] if plan.get("board_layout") else []))
             report["deleted"] += 1
             status_progress.emit("removing", report["deleted"], len(removals), "Removing obsolete generated items")
         status_progress.emit("updating", 0, len(updates), "Applying changes while preserving manual edits")
@@ -1740,7 +1768,9 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
             # PATCHes and refreshed baselines still persist before continuing.
             if patch or changed:
                 state["pending_updates"].pop(key, None)
-                journal.commit(sets=[(("items", key), record)], deletes=[("pending_updates", key)])
+                journal.commit(sets=[(("items", key), record)] +
+                               ([(("board_layout_sync", "items", record["id"]), board_layout._descriptor(response))]
+                                if patch and plan.get("board_layout") else []), deletes=[("pending_updates", key)])
             checked += 1
             status_progress.emit("updating", checked, len(updates), "Applying changes while preserving manual edits")
         # Native frame children must be detached and acknowledged before a
@@ -1837,6 +1867,8 @@ def publish(plan, board_id, state_path, max_items=750, token=None, transport=htt
     remote item may exist even if its response was lost. Reconcile via CLI.
     """
     validate_plan(plan)
+    if plan.get("board_layout"):
+        raise TraceError("Board update layouts require registered board sync")
     _require_inline_counts(plan)
     _require_no_run_notes(plan)
     count = len(plan["shapes"]) + len(plan["connectors"]) + len(plan.get("frames", []))
