@@ -44,6 +44,8 @@ def _explorer_url(graph, node):
 
 def layout_title(graph):
     layout = graph.get("layout", {})
+    if layout.get("algorithm") == "board_incremental_v1":
+        return "Miro board update layout"
     if layout.get("algorithm") == "dependency_layers_v1":
         return "Dependency layout fallback" if layout.get("fallback_reason") else "Dependency layout"
     return "ELK layout"
@@ -51,6 +53,9 @@ def layout_title(graph):
 
 def layout_notice(graph, *, include_named_group=True):
     layout = graph.get("layout", {})
+    if layout.get("algorithm") == "board_incremental_v1":
+        return ("Existing objects retain their indexed Miro positions. ELK arranges new objects in a separate area. "
+                + str(layout.get("existing_routing_notice", "")))
     if layout.get("algorithm") == "dependency_layers_v1":
         return (str(layout.get("fallback_notice") or "Dependency layout; ELK optimization was not applied.")
                 + " Miro routes may differ. Crossing counts are estimates.")

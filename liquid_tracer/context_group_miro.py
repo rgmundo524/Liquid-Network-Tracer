@@ -184,6 +184,26 @@ def removals(plan, state):
     connectors = {item["key"]: item for item in plan["connectors"]}
     result = {}
 
+    def scoped_retirement(key):
+        # A revised board projection can omit old inputs altogether. Ordinary
+        # group toggles must still prove every original input is restored.
+        # Only the matching captured board and generated projection authorize
+        # this relaxation; remote checks continue to protect investigator work.
+        from . import board_layout, plot_miro
+
+        snapshot = board_layout.validate(plan)
+        projection = plot_miro.validate(plan)
+        record = state["items"].get(key)
+        proof = record.get("projection_proof", {}) if record else {}
+        captured = (snapshot or {}).get("mapped", {}).get(key, {})
+        return bool(snapshot and projection and record
+                    and snapshot["board_id"] == state.get("board_id")
+                    and snapshot["namespace"] == state.get("namespace") == plan.get("namespace")
+                    and proof.get("projection") == projection
+                    and proof.get("endpoint") == record["endpoint"]
+                    and captured.get("id") == record["id"]
+                    and captured.get("endpoint") == record["endpoint"])
+
     def retire(key, group, *, geometry=None, shape=None):
         record = state["items"].get(key)
         if record is None:
@@ -206,8 +226,20 @@ def removals(plan, state):
     for key, old in old_groups.items():
         new = desired_groups.get(key)
         changed = new is None or _identity(old) != _identity(new)
+        scoped = changed and scoped_retirement(key)
         for edge_key, expected in old["inputs"].items():
             item = connectors.get(edge_key)
+            record = state["items"].get(edge_key)
+            if record and (record.get("source") != key or record.get("target") != old["target"]):
+                raise TraceError("Saved context-summary input disagrees with its membership proof")
+            if item is None and scoped:
+                # The ordinary projection pass already removes absent edges
+                # from this working mapping, including acknowledged retries.
+                # If an edge remains, require its own matching creation proof.
+                if record and not scoped_retirement(edge_key):
+                    raise TraceError("An omitted context input has no matching board projection proof")
+                retire(edge_key, old)
+                continue
             if not item or any(item.get("context_evidence", {}).get(field) != expected[field]
                                for field in ("source", "target", "outpoint")):
                 raise TraceError("Cannot restore context summary: original input evidence is missing or changed")
@@ -216,9 +248,6 @@ def removals(plan, state):
                     raise TraceError("Context-summary restoration would change an original address")
                 if shapes[item["source"]]["body"]["data"]["shape"] != "circle":
                     raise TraceError("Context-summary restoration requires original address circles")
-            record = state["items"].get(edge_key)
-            if record and (record.get("source") != key or record.get("target") != old["target"]):
-                raise TraceError("Saved context-summary input disagrees with its membership proof")
             if changed:
                 retire(edge_key, old)
         if changed:
@@ -242,13 +271,18 @@ def removals(plan, state):
     return result
 
 
-def check_remote(state, remote, removals, inventory):
+def check_remote(state, remote, removals, inventory, *, projection_removals=None, allow_organization=False):
     """Refuse destructive presentation replacement when analyst work is visible."""
     from .miro import _editable, _fields, _get, _same
     shape_ids = {state["items"][key]["id"] for key, proof in removals.items()
                  if proof["endpoint"] == "shapes"}
     connector_ids = {state["items"][key]["id"] for key, proof in removals.items()
                      if proof["endpoint"] == "connectors"}
+    # The projection checker validates omitted edges before this checker runs.
+    # A retiring connector from that same update is not an analyst attachment.
+    connector_ids.update(state["items"][key]["id"] for key, proof in (projection_removals or {}).items()
+                         if proof.get("kind") == "board_projection" and proof.get("endpoint") == "connectors"
+                         and key in state["items"] and state["items"][key]["endpoint"] == "connectors")
     for body in inventory.values():
         ends = [(body.get(field) or {}).get("id") for field in ("startItem", "endItem")]
         if shape_ids.intersection(ends) and body["id"] not in connector_ids:
@@ -271,6 +305,10 @@ def check_remote(state, remote, removals, inventory):
             continue
         if body.get("data", {}).get("shape") != proof["shape"]:
             raise TraceError("Context object shape was manually changed; no board writes made")
+        if allow_organization:
+            # A board-aware update reviewed these current organizational
+            # changes before authorizing retirement of generated objects.
+            continue
         if (body.get("parent") or {}).get("id"):
             raise TraceError("Move retiring context objects out of frames/groups before changing grouping")
         try:

@@ -656,7 +656,9 @@ class LocalServer(ThreadingHTTPServer):
                                "case_id": case_id, "live": bool(live),
                                "started_at": time.time(),
                                "cancellable": action in CANCELLABLE_ACTIONS,
-                               "message": ("Working. Check the launching terminal if Proton Pass needs to unlock."
+                               "message": ("Reading the Miro board before arranging new objects. Check the launching terminal if Proton Pass needs to unlock."
+                                           if live and action == "plot" else
+                                           "Working. Check the launching terminal if Proton Pass needs to unlock."
                                            if live else "Plotting saved collection data…" if action == "plot"
                                            else "Preparing the graph and checking missing address counts…"
                                            if action in CANCELLABLE_ACTIONS else "Working with saved local evidence…")}
@@ -778,7 +780,7 @@ class LocalServer(ThreadingHTTPServer):
             pass
 
     def public_result(self, result, action, case, txids):
-        if action in ("plot", "board-create", "board-link", "board-sync"):
+        if action in ("plot", "board-create", "board-create-sync", "board-link", "board-sync"):
             from .workflow_api import workflow_result
             return workflow_result(case, result, action)
         if action in ("pegouts", "pegouts-preview"):
@@ -954,7 +956,7 @@ class LocalServer(ThreadingHTTPServer):
         from .cli import miro_recovery_status, resolve_latest, run_path, verify_export
 
         action = body.get("action")
-        if action in ("plot", "board-create", "board-link", "board-sync"):
+        if action in ("plot", "board-create", "board-create-sync", "board-link", "board-sync"):
             from .workflow_api import workflow_action
             return workflow_action(self, case, metadata, body)
         if action in ("pegouts", "pegouts-preview", "miro-pegouts"):

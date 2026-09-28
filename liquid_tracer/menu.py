@@ -1392,7 +1392,7 @@ def create_app(root=None):
             elif getattr(self, "current_action", None) in ("investigation-board-create", "investigation-board-link"):
                 message = ("Board saved. Open Miro boards to choose a saved plot and sync it."
                            if status == 0 else "Board setup did not complete. Open Miro boards to check its saved status before retrying.")
-            elif getattr(self, "current_action", None) == "investigation-board-sync":
+            elif getattr(self, "current_action", None) in ("investigation-board-sync", "investigation-board-create-sync"):
                 message = ("Selected board synced" + (" and reorganized." if self.reorganizing else ".")
                            if status == 0 else "Board sync stopped. Check its saved status and terminal result before retrying.")
             elif getattr(self, "current_action", None) == "miro-merge-addresses":

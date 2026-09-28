@@ -4,13 +4,14 @@ import contextlib
 import csv
 import io
 import json
+import os
 import unittest
 from unittest.mock import patch
 
 from liquid_tracer.cli import main
-from liquid_tracer.common import TraceError, save_json
+from liquid_tracer.common import TraceError, canonical, save_json
 from liquid_tracer.investigations import read_case, update_case
-from liquid_tracer.investigation_boards import link_board
+from liquid_tracer.investigation_boards import create_board, link_board
 from liquid_tracer.plots import preview_plot
 from liquid_tracer.services import set_service
 from tests import test_web
@@ -18,6 +19,7 @@ from tests.test_attribution_convergence import graph_state
 from tests.test_connections import saved_case
 from tests.test_pegout_paths import add_pegout
 from tests.test_input_order import input_order_state
+from tests.test_layout import txid
 
 
 class WorkflowWebTests(unittest.TestCase):
@@ -39,6 +41,12 @@ class WorkflowWebTests(unittest.TestCase):
         layout.start()
         self.addCleanup(layout.stop)
         return case, "/api/cases/" + detail["id"], state["run_id"]
+
+    def created_for(self, case, plot, target="CREATED="):
+        with patch.dict(os.environ, {"MIRO_ACCESS_TOKEN": "synthetic-token"}):
+            return create_board(case, plot["goal"], "Synthetic new board",
+                creation_preview_id=plot["preview_id"],
+                transport=lambda *args: (201, {}, canonical({"id": target})))
 
     def test_real_case_payload_lists_goals_coverage_artifacts_and_separate_boards(self):
         case, route, run = self.collected()
@@ -77,7 +85,7 @@ class WorkflowWebTests(unittest.TestCase):
     def test_board_actions_use_one_contract_and_goal_bound_sync(self):
         case, route, _ = self.collected()
         plot = preview_plot(case, "pegouts")
-        board = link_board(case, "pegouts", "Cashouts", "PEG=")
+        board = self.created_for(case, plot, "PEG=")
         with patch.object(self.server, "start_job", return_value={"id": "board"}) as start:
             self.success(route + "/actions", {"action": "board-create", "goal": "pegouts", "name": "Cashouts"}, 202)
             self.assertTrue(start.call_args.kwargs["live"])
@@ -94,6 +102,94 @@ class WorkflowWebTests(unittest.TestCase):
             empty = preview_plot(case, "pegouts", max_hops=0)
             self.assertEqual(self.request(route + "/actions", {**body, "preview_id": empty["preview_id"]})[0], 400)
             start.assert_not_called()
+
+    def test_update_plot_requires_a_matching_board_and_requests_read_credentials(self):
+        case, route, run = self.collected()
+        board = link_board(case, "full", "Manual arrangement", "MANUAL=")
+        other = link_board(case, "pegouts", "Different goal", "OTHER=")
+        body = {"action": "plot", "goal": "full", "run_id": run, "min_hops": 0, "max_hops": 10,
+                "layout_mode": "update", "board_record_id": board["id"]}
+        with patch.object(self.server, "start_job", return_value={"id": "update"}) as start:
+            self.success(route + "/actions", body, 202)
+            self.assertEqual(start.call_args.args[0][-4:],
+                             ["--layout-mode", "update", "--board-record-id", board["id"]])
+            self.assertTrue(start.call_args.kwargs["live"])
+            self.assertEqual(start.call_args.kwargs["action"], "plot")
+            start.reset_mock()
+            for changes in ({"board_record_id": other["id"]}, {"board_record_id": "missing"},
+                            {"board_record_id": None}, {"layout_mode": "fresh"}, {"layout_mode": []}):
+                with self.subTest(changes=changes):
+                    self.assertEqual(self.request(route + "/actions", {**body, **changes})[0], 400)
+            start.assert_not_called()
+
+    def test_create_and_sync_uses_a_fresh_reviewed_plot(self):
+        case, route, _ = self.collected()
+        plot = preview_plot(case, "full")
+        body = {"action": "board-create-sync", "preview_id": plot["preview_id"], "name": "New assessment"}
+        with patch.object(self.server, "start_job", return_value={"id": "create-sync"}) as start:
+            self.success(route + "/actions", body, 202)
+            self.assertEqual(start.call_args.args[0], ["investigation-board-create-sync", "--case", str(case),
+                "--preview", plot["preview_id"], "--name", "New assessment", "--max-items", "750"])
+            self.assertTrue(start.call_args.kwargs["live"])
+            start.reset_mock()
+            self.assertEqual(self.request(route + "/actions", {**body, "board": "EXISTING="})[0], 400)
+            with patch("liquid_tracer.plots.reviewed_plot", return_value=({"plot": {"layout_mode": "update"}}, {})):
+                self.assertEqual(self.request(route + "/actions", body)[0], 400)
+            start.assert_not_called()
+
+    def test_update_sync_allows_removal_only_plot_but_rejects_other_target_or_reorganization(self):
+        case, route, _ = self.collected()
+        board = link_board(case, "full", "Manual arrangement", "MANUAL=")
+        other = link_board(case, "full", "Other arrangement", "OTHER=")
+        graph = {"nodes": [], "plot": {"goal": "full", "layout_mode": "update",
+                 "board_record_id": board["id"], "board_id": board["board_id"]}}
+        body = {"action": "board-sync", "record_id": board["id"], "preview_id": "synthetic", "reorganize": False}
+        with patch("liquid_tracer.plots.reviewed_plot", return_value=(graph, {})), \
+                patch.object(self.server, "start_job", return_value={"id": "sync"}) as start:
+            self.success(route + "/actions", body, 202)
+            self.assertNotIn("--reorganize", start.call_args.args[0])
+            start.reset_mock()
+            for changes in ({"record_id": other["id"]}, {"reorganize": True}):
+                self.assertEqual(self.request(route + "/actions", {**body, **changes})[0], 400)
+            start.assert_not_called()
+
+    def test_fresh_plot_cannot_overwrite_linked_board(self):
+        case, route, _ = self.collected()
+        board = link_board(case, "full", "Manual arrangement", "MANUAL=")
+        plot = preview_plot(case, "full")
+        with patch.object(self.server, "start_job") as start:
+            self.assertEqual(self.request(route + "/actions", {"action": "board-sync", "record_id": board["id"],
+                "preview_id": plot["preview_id"], "reorganize": True})[0], 400)
+            start.assert_not_called()
+
+    def test_update_counts_expose_only_the_validated_summary(self):
+        from liquid_tracer.workflow_api import public_plot
+        counts = {"new_nodes": 3, "retained_nodes": 4, "removed_nodes": 1,
+                  "new_connectors": 2, "removed_connectors": 0}
+        plot = {"layout_mode": "update", "board_record_id": "synthetic", "board_id": "BOARD=",
+                "board_name": "Manual", "update_counts": counts, "board_layout": {"private": "hidden"}}
+        self.assertEqual(public_plot(plot)["update_counts"], counts)
+        self.assertNotIn("board_layout", public_plot(plot))
+        for invalid in (None, [], {**counts, "new_nodes": True}, {**counts, "removed_nodes": -1},
+                        {**counts, "private_path": "/private/case"}):
+            with self.subTest(value=invalid):
+                self.assertNotIn("update_counts", public_plot({**plot, "update_counts": invalid}))
+        self.assertNotIn("update_counts", public_plot({**plot, "layout_mode": "fresh"}))
+
+    def test_cli_forwards_layout_binding_and_create_sync_without_live_requests(self):
+        case, _, _ = self.collected()
+        with contextlib.redirect_stdout(io.StringIO()), \
+                patch("liquid_tracer.plots.preview_plot", return_value={}) as plotted:
+            self.assertEqual(main(["plot", "--case", str(case), "--goal", "full", "--layout-mode", "update",
+                                   "--board-record-id", "synthetic-board"]), 0)
+            self.assertEqual(plotted.call_args.kwargs["layout_mode"], "update")
+            self.assertEqual(plotted.call_args.kwargs["board_record_id"], "synthetic-board")
+        with contextlib.redirect_stdout(io.StringIO()), \
+                patch("liquid_tracer.investigation_boards.create_and_sync", return_value={}) as synced:
+            self.assertEqual(main(["investigation-board-create-sync", "--case", str(case),
+                "--preview", "synthetic-preview", "--name", "New board", "--max-items", "120"]), 0)
+            self.assertEqual(synced.call_args.args, (case, "synthetic-preview", "New board"))
+            self.assertEqual(synced.call_args.kwargs["max_items"], 120)
 
     def test_plot_endpoint_options_are_optional_strict_booleans_and_pegout_only(self):
         case, route, run = self.collected()
@@ -125,7 +221,7 @@ class WorkflowWebTests(unittest.TestCase):
                 observed_spend={"spent": False}, spend_observation_id=1)
         saved_case(case, state)
         plot = preview_plot(case, "pegouts", include_unspent=True)
-        board = link_board(case, "pegouts", "Endpoints", "ENDPOINTS=")
+        board = self.created_for(case, plot, "ENDPOINTS=")
         detail = self.success(route)
         listed = detail["plots"][0]
         self.assertEqual(listed["status"], "endpoints_found")
@@ -166,7 +262,7 @@ class WorkflowWebTests(unittest.TestCase):
     def test_saved_layout_settings_remain_available_and_syncable_after_preference_change(self):
         case, route, _ = self.collected()
         plot = preview_plot(case, "full")
-        board = link_board(case, "full", "Original layout", "ORIGINAL=")
+        board = self.created_for(case, plot, "ORIGINAL=")
         update_case(case, {"run_defaults": {"include_fees": True, "connector_style": "elbowed"}})
         detail = self.success(route)
         listed = detail["plots"][0]
@@ -291,6 +387,16 @@ class WorkflowWebTests(unittest.TestCase):
         case, route, _ = self.collected()
         state = input_order_state(12, continuing=(11,))
         state["ancestor_runs"] = []
+        # A saved collection has a verified seed-to-child path. The shared
+        # layout fixture deliberately omits trace roles; supply them here so
+        # current attribution scope still reaches the child's context inputs.
+        parent, child = txid("input-order-parent-11"), txid("input-order-child")
+        state["seeds"] = [parent + ":0"]
+        state["links"] = {parent + ":0": {"spending_txid": child, "vin": 11}}
+        for depth, key in enumerate((parent, child)):
+            state["transactions"][key]["depth"] = depth
+            state["outputs"][key + ":0"] = {"outpoint": key + ":0", "txid": key, "vout": 0,
+                "depth": depth, "status": "spent" if depth == 0 else "hop_limit"}
         state, archive = saved_case(case, state)
         update_case(case, {"run_defaults": {"group_context_inputs": True, "layout_attempts": 1}})
         before = {path.name: path.read_bytes() for path in archive.iterdir() if path.is_file()}

@@ -216,6 +216,9 @@ def parser():
     plot.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     plot.add_argument("--goal", choices=("full", "connections", "pegouts"), required=True)
     plot.add_argument("--run", default="latest")
+    plot.add_argument("--layout-mode", choices=("fresh", "update"), default="fresh",
+                      help="Create a fresh layout, or preserve a selected Miro board and arrange additions separately")
+    plot.add_argument("--board-record-id", help="Investigation board record to read for an update layout")
     plot.add_argument("--min-hops", type=int, default=0)
     plot.add_argument("--max-hops", type=int, default=10)
     plot.add_argument("--include-unspent", action="store_true",
@@ -242,6 +245,12 @@ def parser():
     managed_sync.add_argument("--preview", required=True)
     managed_sync.add_argument("--reorganize", action="store_true")
     managed_sync.add_argument("--max-items", type=int, default=750)
+    managed_create_sync = commands.add_parser("investigation-board-create-sync",
+        help="Create a private Miro board and sync a reviewed fresh plot")
+    managed_create_sync.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    managed_create_sync.add_argument("--preview", required=True)
+    managed_create_sync.add_argument("--name", required=True)
+    managed_create_sync.add_argument("--max-items", type=int, default=750)
     connections = commands.add_parser("connections", help="Plot only saved directed paths between starting transactions")
     connections.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     connections.add_argument("--run", default="latest")
@@ -1262,6 +1271,7 @@ def main(argv=None, *, progress=None):
                 min_hops=args.min_hops, max_hops=args.max_hops,
                 include_unspent=args.include_unspent, include_unspendable=args.include_unspendable,
                 include_context=args.include_context,
+                layout_mode=args.layout_mode, board_record_id=args.board_record_id,
                 open_browser=args.open_browser, progress=progress), indent=2))
         elif args.command == "investigation-boards":
             from .investigation_boards import list_boards
@@ -1277,6 +1287,10 @@ def main(argv=None, *, progress=None):
             from .investigation_boards import sync_board
             print(json.dumps(sync_board(args.case, args.record, args.preview,
                 reorganize=args.reorganize, max_items=args.max_items, progress=progress), indent=2))
+        elif args.command == "investigation-board-create-sync":
+            from .investigation_boards import create_and_sync
+            print(json.dumps(create_and_sync(args.case, args.preview, args.name,
+                max_items=args.max_items, progress=progress), indent=2))
         elif args.command == "connections":
             from .connections import preview_connections
             print(json.dumps(preview_connections(args.case, args.run, args.hops,

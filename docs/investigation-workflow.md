@@ -3,8 +3,9 @@
 An investigation owns one set of saved collection runs and can have several Miro
 boards. Each board has a name and a plotting goal. Use the same collected data
 to make a full investigation chart, starter-connection chart, and peg-out chart.
-In the browser, the usual sequence is **Collect data → Plot Layouts → Download ELK
-SVG or sync with Miro**. Generate one plot, then choose its output destination.
+In the browser, the sequence is **Collect data → Plot Layouts → Miro boards**.
+Upload investigation CSVs before collection, then update them as your analysis
+develops. Choose the destination workflow before generating each layout.
 
 Create a new investigation with its name, blockchain, and selected starting
 outputs. **Liquid Network** is currently the only supported blockchain. The
@@ -49,14 +50,24 @@ are shown together:
 
 | Goal | What it plots |
 | --- | --- |
-| Full investigation / Full trace | The saved investigation graph, using the current display settings. |
+| Full investigation / Full trace | Saved activity reachable under the current stop/hop rules, using the current display settings. |
 | Starter connections | Verified paths between the starting transactions, within the selected maximum hops. |
 | Paths to peg-outs | Verified paths from selected seed UTXOs to peg-out requests, optionally also unspent UTXOs and unspendable outputs, within an inclusive hop range. |
 
-Plotting is offline. It reads the selected collection run and saved address
-statistics, creates a separate local preview, and makes no Blockstream or Miro
-requests. Missing address statistics stay unavailable until collected separately.
-Changing the plotting goal does not alter seeds or collected evidence.
+Choose **New board** for a fresh full arrangement, or **Update existing board**
+and a destination with the same plotting goal. Both modes use the selected
+collection run and current attribution, colors, and change-output rules.
+New-board plotting is offline. Update plotting also reads Miro's current items,
+connectors and positions; it does not write to the board. Neither mode fetches
+transactions or address statistics. Missing data must be collected separately.
+Changing a plotting goal or tracing rule never modifies the archived evidence.
+
+An update preserves retained nodes at their indexed Miro positions. ELK arranges
+only new graph nodes in a clear area beyond the board's current contents, and
+new connections link that section to existing objects. After syncing, you can
+manually merge that section into the investigation's working arrangement.
+Full-trace plots also reapply current stop/hop rules: tightening them excludes
+branches; loosening them restores only activity already in the saved evidence.
 
 **Paths to peg-outs** uses one circle per full address per network. Repeated
 UTXOs retain their separate connectors and transaction CSV rows. Unknown
@@ -102,8 +113,8 @@ hop limits, and trace evidence are unchanged.
 Grouping is saved as an investigation layout preference and captured with each
 generated layout. Disabling context or choosing Starter connections preserves
 the preference without applying it. Separate branch hubs and fee flows remain
-Full trace-only. Regenerate the plot and use **Sync and reorganize** to apply its
-grouped layout to a managed board.
+Full trace-only. Generate an update layout and choose **Update board** to apply
+grouping changes. Replaced context objects join the newly arranged additions.
 
 **Save layout settings** persists the preferences with this investigation, even
 before collection. **Generate** saves pending layout edits before generating the
@@ -116,8 +127,10 @@ downloading or syncing. A plot with no matching paths does not prove that no con
 peg-out exists outside the saved coverage. A peg-out request does not establish
 which Bitcoin transaction paid it.
 
-A plot with no matching activity remains available to review, but its Miro sync
-is disabled. It does not clear an existing board.
+A fresh plot with no matching activity cannot create a board. An empty update
+can remove a managed projection excluded by the revised rules, subject to the
+same ownership and manual-content checks as other removals. It does not clear
+unrelated board content.
 
 Each newly generated layout captures its display settings. Changing preferences
 later leaves that saved layout available for download and sync with its original
@@ -131,9 +144,9 @@ Downloading returns that plot's SVG immediately. **Sync with Miro** opens the
 board manager with the same saved plot selected. Neither action requires you to
 generate another plot.
 
-Miro publication uses the saved graph and layout. Normal sync preserves retained
-objects' current positions, while **Sync and reorganize** applies the saved
-layout. Miro chooses its connector routes, so the board's appearance can differ
+Miro publication uses the saved graph and layout. **Create & sync** publishes a
+fresh layout to a new private board. **Update board** applies the preview bound
+to that existing board. Miro chooses connector routes, so exact bends can differ
 from the ELK SVG.
 
 ### Manage boards
@@ -144,14 +157,15 @@ board, including historical boards. Each block has its own name, goal, status,
 Miro link, and saved layout information. Managed boards also have their own
 compatible layout picker and sync controls.
 
-1. Choose a goal and a board name.
-2. Choose **Create Miro board** to create a private board, or paste an existing
-   board URL or ID and choose **Link existing board**. You can initialize a board
-   before generating a plot. Creating a board does not publish it.
-3. Choose a compatible saved plot in that board's block. The plot's goal must
-   match the board's goal.
-4. Review that plot, then choose **Sync to Miro** or **Sync and reorganize** in
-   the same block.
+1. For a new graph, select a reviewed **New board** layout and enter a board name.
+2. Choose **Create & sync**. Creation and initial publication are one action.
+   If publication is interrupted, retry the same layout to resume that board.
+   A different fresh layout creates a separate board, even if its name matches.
+3. To maintain a board, choose **Prepare update** in its block, or select it under
+   **Update existing board** in Plot Layouts. Generate and review the update.
+4. Choose **Update board** in the same block. Existing positions stay intact;
+   additions arrive in the separate ELK-arranged area and connect to retained
+   objects. A provided board can first be linked, then used for an update layout.
 
 Changing one board's layout selection does not change another board's selection,
 including boards with the same goal. Draft choices survive tab navigation;
@@ -159,13 +173,20 @@ reopening the application restores each board's saved plot binding. Interrupted
 syncs stay bound to their recorded plot until recovered. A background operation
 temporarily disables other write actions, while all board blocks remain visible.
 
-Normal sync retains existing item positions. Reorganize applies the selected
-plot's layout to the managed graph. Each board keeps its own saved Miro item
-mapping. Later collection runs can produce new plots for the same board, so a
-new board is not required each time a chart is regenerated. Obsolete generated
-items are removed only after checking them for analyst changes or unrelated
-connections. If those checks find changes, sync stops so you can preserve that
-work first. Unrelated board objects remain untouched.
+Each board keeps its own saved item mapping. The update is checked against a new
+board inventory before writes. If you move or edit board content after preparing
+the layout, regenerate it; the program will not apply stale positions. Its own
+acknowledged partial-sync changes are tracked for safe retries. Obsolete managed
+items are removed when the new tracing rules exclude them, including nodes
+previously moved by hand. Manual text/style changes or unrelated attachments
+can block removal so that work can be preserved. Unrelated objects stay intact.
+Older plots retain their legacy sync controls separately.
+
+Original full-trace boards from before the board registry can still receive
+additions and content updates. If a revised layout would remove their older
+objects, the program stops because those mappings lack the creation records
+needed for safe retirement. Use a **New board** layout and **Create & sync**
+for that revised graph; the original board remains available.
 
 Older peg-out boards used separate address circles for each UTXO. To adopt
 shared address circles, generate a new **Paths to peg-outs** layout and create
@@ -229,17 +250,17 @@ liquid-trace plot --case CASE_DIRECTORY --goal connections --run latest --max-ho
 liquid-trace plot --case CASE_DIRECTORY --goal pegouts --run latest --min-hops 0 --max-hops 10 --open
 ```
 
-Create or link a goal-specific board and list the registry:
+Create and publish the reviewed fresh layout, or link a provided board:
 
 ```sh
-liquid-live investigation-board-create --case CASE_DIRECTORY --goal pegouts --name "Peg-out paths"
+liquid-live investigation-board-create-sync --case CASE_DIRECTORY --preview PREVIEW_ID --name "Peg-out paths" --max-items 750
 liquid-trace investigation-board-link --case CASE_DIRECTORY --goal connections --name "Starter connections" --board BOARD_ID
 liquid-trace investigation-boards --case CASE_DIRECTORY
 ```
 
-Use the board record ID and plot preview ID returned by those commands:
+Use the board record ID to prepare an update, then apply its returned preview ID:
 
 ```sh
+liquid-live plot --case CASE_DIRECTORY --goal full --run latest --layout-mode update --board-record-id BOARD_RECORD_ID --open
 liquid-live investigation-board-sync --case CASE_DIRECTORY --record BOARD_RECORD_ID --preview PREVIEW_ID --max-items 750
-liquid-live investigation-board-sync --case CASE_DIRECTORY --record BOARD_RECORD_ID --preview PREVIEW_ID --max-items 750 --reorganize
 ```

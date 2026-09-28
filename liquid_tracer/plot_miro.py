@@ -98,13 +98,16 @@ def removals(plan, state):
     return result
 
 
-def check_remote(state, remote, removals, inventory):
+def check_remote(state, remote, removals, inventory, *, allow_moved=False, context_removals=None):
     from .miro import _editable, _fields, _get, _same
 
     retiring_shapes = {state["items"][key]["id"] for key in removals
                        if state["items"][key]["endpoint"] == "shapes"}
     retiring_connectors = {state["items"][key]["id"] for key in removals
                            if state["items"][key]["endpoint"] == "connectors"}
+    retiring_connectors.update(state["items"][key]["id"] for key, proof in (context_removals or {}).items()
+                               if proof.get("kind") == "context_group_replacement" and proof.get("endpoint") == "connectors"
+                               and state["items"].get(key, {}).get("endpoint") == "connectors")
     for item in inventory.values():
         if (any((item.get(field) or {}).get("id") in retiring_shapes for field in ("startItem", "endItem"))
                 and item["id"] not in retiring_connectors):
@@ -126,11 +129,18 @@ def check_remote(state, remote, removals, inventory):
                 if not _same(body.get(field), expected, (field,)):
                     raise TraceError("An obsolete plot connector has edited routing; preserve it before syncing")
             continue
-        if body.get("data", {}).get("shape") != proof.get("shape") or (body.get("parent") or {}).get("id"):
-            raise TraceError("An obsolete plot object has an edited shape or frame/group parent; preserve it before syncing")
+        if body.get("data", {}).get("shape") != proof.get("shape"):
+            raise TraceError("An obsolete plot object has an edited shape; preserve it before syncing")
+        if allow_moved:
+            # A captured update explicitly reviewed these organization edits.
+            # The enclosing preflight verifies the same live geometry again.
+            continue
+        if (body.get("parent") or {}).get("id"):
+            raise TraceError("An obsolete plot object has an edited frame/group parent; preserve it before syncing")
         try:
+            # Board-aware scope updates deliberately allow investigator moves.
             if any(not math.isclose(float(body["position"][axis]), float(proof["position"][axis]), abs_tol=.01)
-                   for axis in ("x", "y")):
+                                      for axis in ("x", "y")):
                 raise TraceError("An obsolete plot object was manually moved; preserve its position before syncing")
             geometry = body["geometry"]
             values = [float(geometry[axis]) for axis in ("width", "height")]
