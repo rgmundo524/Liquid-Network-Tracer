@@ -98,14 +98,53 @@ function layoutCandidate(result, seed, branchProfile, inputOrderPolicy, branchBo
   };
 }
 
-// Only these fixed codes and adapter-owned values leave a failed worker.
-// ELK errors can contain graph IDs, labels, paths or whole parser excerpts.
+// Keep the safe failure record separate from the bounded private trace. The
+// supervisor stores the latter locally; it must never enter normal summaries.
 const diagnostic = {version: 1, stage: 'read_request'};
+let engineVersion = null;
+const engineBuild = 'non_minified';
+// This controls captured frames, not V8's actual call-stack capacity.
+Error.stackTraceLimit = 64;
+
+function failureTrace(error, code) {
+  let truncated = false;
+  const property = (value, key) => {
+    try { return value?.[key]; } catch { truncated = true; return undefined; }
+  };
+  const boundedText = (value, limit) => {
+    if (typeof value !== 'string') return '';
+    if (value.length > limit) truncated = true;
+    return value.slice(0, limit);
+  };
+  const errors = [];
+  const seen = new Set();
+  let current = error;
+  while (current !== null && current !== undefined && errors.length < 4 && !seen.has(current)) {
+    seen.add(current);
+    const rawStack = boundedText(property(current, 'stack'), 8192);
+    const lines = rawStack.split('\n');
+    if (lines.length > 65) truncated = true;
+    errors.push({
+      name: boundedText(property(current, 'name'), 128),
+      message: boundedText(typeof current === 'string' ? current : property(current, 'message'), 1024),
+      stack: lines.slice(0, 65).join('\n'),
+    });
+    current = property(current, 'cause');
+  }
+  if (current !== null && current !== undefined) truncated = true;
+  return {...diagnostic, code, engine_version: engineVersion, engine_build: engineBuild,
+    runtime: {node: process.versions.node, v8: process.versions.v8,
+      platform: process.platform, arch: process.arch}, errors, truncated};
+}
+
 function failureCode(error) {
   if (diagnostic.stage === 'load_engine') return 'elk_worker_setup';
   if (['read_request', 'validate_request'].includes(diagnostic.stage)) return 'elk_invalid_request';
-  const message = typeof error?.message === 'string' ? error.message : '';
-  const name = typeof error?.name === 'string' ? error.name : '';
+  const readText = key => {
+    try { return typeof error?.[key] === 'string' ? error[key] : ''; } catch { return ''; }
+  };
+  const message = readText('message');
+  const name = readText('name');
   const signature = `${name}\n${message}`;
   if (['Invalid ordered layout ports', 'Missing ordered layout node', 'ELK did not preserve input port order'].includes(message)) return 'elk_input_order';
   // Exceptions while inspecting or encoding returned geometry must remain
@@ -182,8 +221,12 @@ try {
   // Load and construct inside the diagnostic boundary so setup failures do
   // not expose module paths or get retried as stochastic seed failures.
   diagnostic.stage = 'load_engine';
-  const {default: ELK} = await import('elkjs/lib/elk.bundled.js');
-  const elk = new ELK();
+  const {default: enginePackage} = await import('elkjs/package.json', {with: {type: 'json'}});
+  engineVersion = typeof enginePackage.version === 'string' ? enginePackage.version.slice(0, 128) : null;
+  const {default: ELK} = await import('elkjs/lib/elk-api.js');
+  const {Worker} = await import('elkjs/lib/elk-worker.js');
+  // Same pinned engine and algorithms, with readable function names on failure.
+  const elk = new ELK({workerFactory: url => new Worker(url)});
   if (typeof elk.layout !== 'function') throw new Error('Invalid layout engine');
   diagnostic.stage = 'validate_request';
   const candidates = [];
@@ -278,7 +321,24 @@ try {
     // A missing measurement leaves the Python scheduler in serial mode.
   }
 } catch (error) {
-  // Do not echo user graph input, parser excerpts, paths, or environment values.
-  process.stderr.write(`LIQUID_ELK_FAILURE ${JSON.stringify({...diagnostic, code: failureCode(error)})}\n`);
+  const code = failureCode(error);
+  process.stderr.write(`LIQUID_ELK_FAILURE ${JSON.stringify({...diagnostic, code})}\n`);
+  try {
+    const trace = failureTrace(error, code);
+    // Python also treats these Unicode characters as line separators. Escape
+    // them so the structured record always occupies one stderr line.
+    const encodeTrace = () => JSON.stringify(trace).replace(/[\u0085\u2028\u2029]/g,
+      character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
+    let encoded = encodeTrace();
+    // Bound encoded bytes too, including escaped control characters/Unicode.
+    while (Buffer.byteLength(encoded, 'utf8') > 64 * 1024) {
+      trace.truncated = true;
+      for (const entry of trace.errors) entry.stack = entry.stack.slice(0, Math.floor(entry.stack.length / 2));
+      encoded = encodeTrace();
+    }
+    process.stderr.write(`LIQUID_ELK_TRACE ${encoded}\n`);
+  } catch {
+    // A diagnostic failure must never hide the original safe failure record.
+  }
   process.exitCode = 1;
 }

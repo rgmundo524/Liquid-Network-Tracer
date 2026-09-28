@@ -50,6 +50,16 @@ def request_graph(west=("w1", "w0")):
                        "layoutOptions": {"elk.layered.priority.straightness": "8"}}]}
 
 
+def install_fake_engine(root, engine):
+    """Keep mock algorithms independent of the non-minified ELK adapter import."""
+    package = root / "node_modules" / "elkjs"
+    module = package / "lib" / "elk-api.js"
+    module.parent.mkdir(parents=True)
+    (package / "package.json").write_text(json.dumps({"version": "0.12.0"}))
+    module.write_text(engine)
+    (module.parent / "elk-worker.js").write_text("exports.Worker = class Worker {};\n")
+
+
 @unittest.skipUnless(NODE, "Node is not installed")
 class WorkerPortCandidateTests(unittest.TestCase):
     def run_worker(self, graph, seeds, *, engine=MUTATING_ELK):
@@ -57,12 +67,12 @@ class WorkerPortCandidateTests(unittest.TestCase):
             root = Path(temporary)
             worker = root / "run.mjs"
             shutil.copyfile(ROOT / "layout" / "run.mjs", worker)
-            module = root / "node_modules" / "elkjs" / "lib" / "elk.bundled.js"
-            module.parent.mkdir(parents=True)
-            module.write_text(engine)
+            install_fake_engine(root, engine)
             result = subprocess.run([NODE, str(worker)],
                                     input=json.dumps({"graph": graph, "seeds": seeds}),
                                     text=True, capture_output=True, timeout=15, check=True)
+        self.assertNotIn("LIQUID_ELK_TRACE", result.stderr)
+        self.assertNotIn("LIQUID_ELK_FAILURE", result.stderr)
         return json.loads(result.stdout)["candidates"]
 
     def test_first_geometry_survives_mutating_rerun_without_evidence(self):

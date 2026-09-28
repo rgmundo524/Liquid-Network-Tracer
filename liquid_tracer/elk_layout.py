@@ -21,6 +21,7 @@ from pathlib import Path
 from .common import TraceError
 from .connector_styles import routed_shape
 from .elk_errors import ELK_FATAL_FAILURE_CODES, ElkWorkerFailure
+from .elk_diagnostics import report_location, save_failure_report
 from .elk_parallel import POLL_SECONDS, iter_attempts
 from .processes import defer_cancellation_during_spawn
 from .render_runtime import renderer_failure, renderer_failure_code, renderer_heap_mb, renderer_peak_rss_mb
@@ -328,10 +329,17 @@ def _worker(graph, seeds, progress=None, *, heap_mb=None, cancel_event=None):
         if process.returncode:
             detail = renderer_failure(errors, process.returncode, "ELK", heap_mb)
             failure_code = renderer_failure_code(errors, process.returncode, "ELK")
-            message = f"{detail} Graph: {graph_size}. No Miro changes were made"
+            diagnostic_path = save_failure_report(
+                errors, graph=graph, seeds=seeds, failure_code=failure_code,
+                returncode=process.returncode, heap_mb=heap_mb,
+                elapsed_seconds=time.monotonic() - started, engine_version=ELK_VERSION)
+            location = (report_location([diagnostic_path]) if diagnostic_path else
+                        " The local diagnostic report could not be saved.")
+            message = f"{detail} Graph: {graph_size}. No Miro changes were made.{location}"
             if failure_code in ELK_FATAL_FAILURE_CODES:
                 raise TraceError(message)
-            raise ElkWorkerFailure(message, failure_code=failure_code, returncode=process.returncode)
+            raise ElkWorkerFailure(message, failure_code=failure_code, returncode=process.returncode,
+                                   diagnostic_path=diagnostic_path)
         result = json.loads(output)
         if not isinstance(result, dict) or result.get("version") != ELK_VERSION or not isinstance(result.get("candidates"), list):
             raise ValueError("invalid worker response")
@@ -765,10 +773,13 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
     candidate_count = 0
     successful_count = 0
     failed_attempts = []
+    diagnostic_paths = []
     execution = {}
     for index, seed, candidates in iter_attempts(request, seeds, _worker, attempt_progress, execution):
         report = attempt_progress(index, seed)
         if isinstance(candidates, ElkWorkerFailure):
+            if candidates.diagnostic_path:
+                diagnostic_paths.append(candidates.diagnostic_path)
             failed_attempts.append({"attempt_index": index, "seed": seed, "failure_code": candidates.failure_code})
             _report_progress(report, "ELK layout attempt failed; retaining completed layouts and continuing the search",
                              stage="attempt_failed", attempted_count=index, successful_count=successful_count,
@@ -839,7 +850,8 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
         if not guidance and "worker_killed" in failure_codes:
             guidance = " A worker was killed; memory exhaustion is possible but unconfirmed."
         raise TraceError(f"All {attempts} ELK layout attempts failed; no valid layout was produced. "
-                         f"Failure categories: {codes}.{guidance} No Miro changes were made")
+                         f"Failure categories: {codes}.{guidance} No Miro changes were made."
+                         + report_location(diagnostic_paths))
     _, result, after, seed = best
     _report_progress(report, "Packing nearby transaction context", stage="applying")
     # Moving a circle closer can put Miro's midpoint elbow through a different
