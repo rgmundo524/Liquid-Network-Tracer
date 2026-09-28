@@ -272,6 +272,15 @@ def _elk_failure_diagnostic(stderr):
 
 def renderer_failure_code(stderr, returncode, engine="ELK"):
     """Return an allowlisted cause code, including worker exceptions when available."""
+    if engine == "ELK":
+        # Private stack traces may mention arbitrary graph text or unrelated
+        # error categories. Only the safe record and native crash text classify
+        # failures; messages in a captured cause must not enable a heap retry.
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        if isinstance(stderr, str):
+            stderr = "\n".join(line for line in stderr.splitlines()
+                               if not line.startswith("LIQUID_ELK_TRACE "))
     excerpt = _stderr_excerpt(stderr).lower()
     # Fatal runtime signatures take precedence over a caught worker exception.
     if any(marker in excerpt for marker in ("javascript heap out of memory", "reached heap limit",

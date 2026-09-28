@@ -5,6 +5,7 @@ import random
 import shutil
 import signal
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -60,6 +61,10 @@ def synthetic_candidate(request, seeds, **kwargs):
 
 
 class LayoutGeometryTests(unittest.TestCase):
+    def setUp(self):
+        temporary = self.enterContext(tempfile.TemporaryDirectory())
+        self.enterContext(patch.dict(os.environ, {"XDG_STATE_HOME": temporary}))
+
     def test_request_reserves_full_caption_with_no_private_text_in_worker(self):
         graph = crossing_graph()
         edge = graph["edges"][0]

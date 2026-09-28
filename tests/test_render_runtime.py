@@ -122,6 +122,14 @@ class MemoryBudgetTests(unittest.TestCase):
 
 
 class RendererDiagnosticTests(unittest.TestCase):
+    def test_private_trace_cannot_override_failure_classification(self):
+        stderr = ('LIQUID_ELK_FAILURE {"version":1,"code":"elk_illegal_state"}\n'
+                  'LIQUID_ELK_TRACE {"version":1,"errors":[{"message":"PRIVATE out of memory",'
+                  '"stack":"maximum call stack size exceeded"}]}\n')
+        self.assertEqual(renderer_failure_code(stderr, 1), "elk_illegal_state")
+        self.assertNotIn("PRIVATE", renderer_failure(stderr, 1, "ELK", 1024))
+        self.assertEqual(renderer_failure_code(stderr + "FATAL ERROR: Reached heap limit", -6), "heap_exhausted")
+
     def test_structured_engine_error_reports_only_safe_code_and_context(self):
         stderr = "PRIVATE-CASE-ID\nLIQUID_ELK_FAILURE " + json.dumps({
             "version": 1, "code": "elk_illegal_state", "stage": "traced_first_layout", "seed": 19,
