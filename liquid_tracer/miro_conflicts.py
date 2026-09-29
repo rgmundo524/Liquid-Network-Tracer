@@ -77,14 +77,14 @@ def _differences(saved, current, path, missing):
 
 def editable_report(state, remote, removals):
     """Identify all changed editable fields using the existing sync predicate."""
-    from .miro import _MISSING, _editable, _fields, _get, _same
+    from .miro import _MISSING, _comparison_editable, _fields, _get, _same
 
     items, truncated = [], False
     for key in removals:
         record, body = state["items"][key], remote.get(key)
         if body is None:
             continue
-        actual = _editable(body, record["endpoint"])
+        actual = _comparison_editable(body, record["endpoint"], record["managed"])
         changes = []
         item_truncated = False
         changed = False
