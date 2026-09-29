@@ -1971,6 +1971,90 @@ test('failed and canceled managed-board jobs refresh persisted cards without los
   assert.equal(switched.calls.filter(call => call.path === '/api/cases/case1').length, 0);
 });
 
+function miroConflictReport(overrides = {}) {
+  return {kind: 'miro_edit_conflicts', board_id: 'board/with?special&characters', truncated: false,
+    items: [{key: 'context:<group>', item_id: 'item/with?special&characters', kind: 'shape',
+      object_url: 'javascript:alert("unsafe")', changes: [
+        {field: 'data.content', saved: {present: true, value: '<p>Address & notes</p>', type: 'string'},
+          current: {present: true, value: '<img src=x onerror="alert(1)">', type: 'string'}},
+        {field: 'style.fillColor', saved: {present: true, value: '#ffffff', type: 'string'},
+          current: {present: true, value: '#ff0000', type: 'string'}},
+        {field: 'data.empty', saved: {present: false}, current: {present: true, value: '', type: 'string'}},
+      ], truncated: false}], ...overrides};
+}
+
+test('Miro conflict failure keeps escaped saved/current differences through refresh and links directly to the object', async () => {
+  const report = miroConflictReport();
+  report.items[0].changes.push({field: 'data.longText',
+    saved: {present: true, value: '[Excerpt starting at character 100] saved text', truncated: true},
+    current: {present: true, value: '[Excerpt starting at character 100] edited text', truncated: true}});
+  const view = await harness(path => path === '/api/jobs/job'
+    ? {status: 'failed', message: 'Miro objects differ from the last sync.', edit_conflicts: report}
+    : path === '/api/cases/case1' ? workflowCase() : undefined);
+  view.state.activeCase = workflowCase(); view.state.page = 'case';
+  view.state.job = {id: 'job', action: 'plot-sync', caseId: 'case1', progress: {phase: 'syncing'}};
+  await view.pollJob();
+  assert.match(view.state.error, /Miro objects differ from the last sync/);
+  assert.match(view.app.innerHTML, /Locate the Miro changes/);
+  assert.match(view.app.innerHTML, /Last synced value/);
+  assert.match(view.app.innerHTML, /Current Miro value/);
+  assert.match(view.app.innerHTML, /&lt;p&gt;Address &amp; notes&lt;\/p&gt;/);
+  assert.match(view.app.innerHTML, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
+  assert.match(view.app.innerHTML, /context:&lt;group&gt;/);
+  assert.match(view.app.innerHTML, /Not set/);
+  assert.match(view.app.innerHTML, /Empty string/);
+  assert.match(view.app.innerHTML, /Excerpt only; not the complete value/);
+  assert.match(view.app.innerHTML, /Use excerpts to locate a change, not to replace the complete object text/);
+  assert.match(view.app.innerHTML, /href="https:\/\/miro\.com\/app\/board\/board%2Fwith%3Fspecial%26characters\/\?moveToWidget=item%2Fwith%3Fspecial%26characters" target="_blank" rel="noopener noreferrer"/);
+  assert.doesNotMatch(view.app.innerHTML, /<img|javascript:|<group>|<p>Address/);
+  assert.match(view.app.innerHTML, /regenerate the board update, and retry/);
+  assert.ok(view.calls.some(call => call.path === '/api/cases/case1'));
+  view.render();
+  assert.match(view.app.innerHTML, /Locate the Miro changes/);
+  await view.dispatch('dismiss-error');
+  assert.equal(view.state.editConflicts, null);
+  assert.doesNotMatch(view.app.innerHTML, /Locate the Miro changes/);
+});
+
+test('Miro conflict reports are isolated from other investigations and cleared before a new action', async () => {
+  const report = miroConflictReport();
+  const view = await harness(path => path === '/api/jobs/job'
+    ? {status: 'failed', message: 'Old case conflict.', edit_conflicts: report}
+    : path === '/api/cases/case2' ? workflowCase({id: 'case2'})
+    : path === '/api/lookup' ? {id: 'new-job', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase({id: 'case2'}); view.state.page = 'case';
+  view.state.job = {id: 'job', action: 'board-sync', caseId: 'case1'};
+  await view.pollJob();
+  assert.equal(view.state.editConflicts, null);
+  assert.doesNotMatch(view.app.innerHTML, /Locate the Miro changes|context:&lt;group&gt;/);
+  view.state.editConflicts = {caseId: 'case1', report};
+  view.render();
+  assert.doesNotMatch(view.app.innerHTML, /Locate the Miro changes/);
+  await view.dispatch('open-case', {dataset: {id: 'case2'}});
+  assert.equal(view.state.editConflicts, null);
+  view.state.error = 'Previous failure';
+  view.state.editConflicts = {caseId: 'case2', report};
+  view.state.draft.txids = txid;
+  await view.dispatch('lookup');
+  assert.equal(view.state.editConflicts, null);
+  assert.doesNotMatch(view.app.innerHTML, /Locate the Miro changes/);
+});
+
+test('generic or malformed failed-job reports leave the existing error UI intact', async () => {
+  for (const edit_conflicts of [undefined, {}, {kind: 'miro_edit_conflicts', board_id: 'board', items: [null, {}]}]) {
+    const view = await harness(path => path === '/api/jobs/job'
+      ? {status: 'failed', message: 'Original action failure.', edit_conflicts}
+      : path === '/api/cases/case1' ? workflowCase() : undefined);
+    view.state.activeCase = workflowCase(); view.state.page = 'case';
+    view.state.job = {id: 'job', action: 'board-sync', caseId: 'case1'};
+    await view.pollJob();
+    assert.equal(view.state.error, 'Original action failure.');
+    assert.match(view.app.innerHTML, /Unable to complete the action/);
+    assert.match(view.app.innerHTML, /Original action failure\./);
+    assert.doesNotMatch(view.app.innerHTML, /Locate the Miro changes/);
+  }
+});
+
 test('original full trace tools stay inside their own board card and archived cards remain viewable', async () => {
   const view = await harness();
   view.state.activeCase = workflowCase({miro_board: 'miro-original', boards: [workflowBoard('full', 'original'),

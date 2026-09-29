@@ -1106,7 +1106,7 @@ def csv_run(case, run_id="latest", out=None, include_fees=None):
     return result
 
 
-def main(argv=None, *, progress=None):
+def main(argv=None, *, progress=None, diagnostics=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     progress = progress if progress is not None else ProgressReporter()
     try:
@@ -1383,6 +1383,12 @@ def main(argv=None, *, progress=None):
         return 130
     except (TraceError, OSError, ValueError, KeyError) as error:
         print("Error: " + str(error), file=sys.stderr)
+        from .miro_conflicts import from_error, print_report
+        report = from_error(error)
+        if report is not None:
+            print_report(report, file=sys.stderr)
+            if diagnostics is not None:
+                diagnostics(report)
         return 1
 
 

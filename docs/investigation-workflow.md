@@ -188,6 +188,17 @@ previously moved by hand. Manual text/style changes or unrelated attachments
 can block removal so that work can be preserved. Unrelated objects stay intact.
 Older plots retain their legacy sync controls separately.
 
+If text or style differences block context regrouping or removal of an excluded
+object, the failure details identify the affected Miro objects. **Open object in
+Miro** takes you to each item; the report lists the changed fields and their
+last-synced and current values. Text formatting is shown explicitly, so a small
+formatting change is not hidden. The terminal prints the same diagnostic details.
+The report does not revert anything. For an accidental edit, restore the listed
+saved value in Miro, then generate the board update again to capture that change.
+Long values use labeled excerpts around the difference; use them to locate the
+change, not to replace an object's complete text.
+If the edit matters, preserve it before replacing the generated object.
+
 Original full-trace boards from before the board registry can still receive
 additions and content updates. If a revised layout would remove their older
 objects, the program stops because those mappings lack the creation records
