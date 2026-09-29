@@ -99,7 +99,8 @@ def removals(plan, state):
 
 
 def check_remote(state, remote, removals, inventory, *, allow_moved=False, context_removals=None):
-    from .miro import _editable, _fields, _get, _same
+    from .miro import _same
+    from .miro_conflicts import MiroEditConflict, editable_report
 
     retiring_shapes = {state["items"][key]["id"] for key in removals
                        if state["items"][key]["endpoint"] == "shapes"}
@@ -112,13 +113,13 @@ def check_remote(state, remote, removals, inventory, *, allow_moved=False, conte
         if (any((item.get(field) or {}).get("id") in retiring_shapes for field in ("startItem", "endItem"))
                 and item["id"] not in retiring_connectors):
             raise TraceError("A board connector attaches to an obsolete plot object; preserve that attachment before syncing. No board writes made.")
+    report = editable_report(state, remote, {**(context_removals or {}), **removals})
+    if report:
+        raise MiroEditConflict('An obsolete plot object has manual text/style edits; open the affected objects below to review the changed fields. No board writes made.', report)
     for key, proof in removals.items():
         record, body = state["items"][key], remote.get(key)
         if body is None:  # Only an attempted, journaled DELETE permits absence.
             continue
-        actual = _editable(body, record["endpoint"])
-        if any(not _same(_get(actual, path), value, path) for path, value in _fields(record["managed"])):
-            raise TraceError("An obsolete plot object has manual text/style edits; preserve them before syncing. No board writes made.")
         if record["endpoint"] == "connectors":
             if record["id"] not in inventory:
                 raise TraceError("Connector inventory is incomplete; no board writes made")

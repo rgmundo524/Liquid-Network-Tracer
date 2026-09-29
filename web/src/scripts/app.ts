@@ -164,6 +164,14 @@ type Result = RenderingMetadata & {
   board_url?: string;
   [key: string]: unknown;
 };
+type MiroConflictValue = { present: boolean; value?: string; type?: string; truncated?: boolean };
+type MiroEditConflictReport = {
+  kind: "miro_edit_conflicts";
+  board_id: string;
+  items: { key: string; item_id: string; kind: string; truncated?: boolean;
+    changes: { field: string; saved: MiroConflictValue; current: MiroConflictValue }[] }[];
+  truncated?: boolean;
+};
 type Job = {
   id: string;
   status: "running" | "cancelling" | "canceled" | "succeeded" | "failed";
@@ -175,6 +183,7 @@ type Job = {
   progress?: JobProgress;
   cancellable?: boolean;
   started_at?: number;
+  edit_conflicts?: MiroEditConflictReport;
 };
 type ServiceRule = { address: string; name: string; notes: string; enabled: boolean; updated_at: string;
   confidence?: string; source?: string; observed_at?: string; stop_tracing?: boolean; hop_limit?: number | null };
@@ -238,6 +247,7 @@ const state = {
   },
   job: null as ActiveJob | null,
   error: "",
+  editConflicts: null as { caseId: string; report: MiroEditConflictReport } | null,
   results: new Map<string, { action: string; result: Result }>(),
   artifacts: new Map<string, RunArtifacts>(),
   draft: {
@@ -580,7 +590,7 @@ function render(focus = false): void {
     "case-settings": "Investigation settings",
     addresses: "Address review",
   };
-  app.innerHTML = `<div class="layout">${sidebar()}<div class="main-shell"><header class="workspace-header"><div class="topbar"><div class="breadcrumb">${icon("folder")}<span>Workspace</span>${icon("chevron")}<strong>${esc(names[state.page])}</strong></div><div class="topbar-right"><span class="local-pill">${icon("lock")} LOCAL SESSION</span><span class="avatar" aria-label="Investigation workspace">LT</span></div></div>${jobBanner()}</header><main id="main" class="content" tabindex="-1">${state.error ? `<div class="alert error" role="alert">${icon("info")}<div><strong>Unable to complete the action</strong><p>${esc(state.error)}</p></div><button class="dismiss" data-action="dismiss-error" aria-label="Dismiss error">${icon("close")}</button></div>` : ""}${state.page === "dashboard" ? dashboard() : state.page === "new" ? newCase() : state.page === "case" ? workspace() : state.page === "addresses" ? addressReviewPage() : settingsPage()}</main></div></div>`;
+  app.innerHTML = `<div class="layout">${sidebar()}<div class="main-shell"><header class="workspace-header"><div class="topbar"><div class="breadcrumb">${icon("folder")}<span>Workspace</span>${icon("chevron")}<strong>${esc(names[state.page])}</strong></div><div class="topbar-right"><span class="local-pill">${icon("lock")} LOCAL SESSION</span><span class="avatar" aria-label="Investigation workspace">LT</span></div></div>${jobBanner()}</header><main id="main" class="content" tabindex="-1">${state.error ? `<div class="alert error" role="alert">${icon("info")}<div><strong>Unable to complete the action</strong><p>${esc(state.error)}</p></div><button class="dismiss" data-action="dismiss-error" aria-label="Dismiss error">${icon("close")}</button></div>` : ""}${miroEditConflictsPanel()}${state.page === "dashboard" ? dashboard() : state.page === "new" ? newCase() : state.page === "case" ? workspace() : state.page === "addresses" ? addressReviewPage() : settingsPage()}</main></div></div>`;
   workspaceHeaderObserver?.disconnect();
   const header = document.querySelector(".workspace-header");
   if (header) workspaceHeaderObserver?.observe(header);
@@ -621,6 +631,37 @@ function newCase(): string {
 
 function boardUrl(board: string): string {
   return `https://miro.com/app/board/${encodeURIComponent(board)}/`;
+}
+
+function miroEditConflictsPanel(): string {
+  const failure = state.editConflicts;
+  if (!state.error || !failure || state.activeCase?.id !== failure.caseId ||
+      !["case", "case-settings", "addresses"].includes(state.page)) return "";
+  const report = failure.report;
+  if (report?.kind !== "miro_edit_conflicts" || typeof report.board_id !== "string" ||
+      !report.board_id || !Array.isArray(report.items)) return "";
+  const value = (entry: MiroConflictValue): string => {
+    if (!entry?.present) return '<span class="muted">Not set</span>';
+    if (typeof entry.value !== "string") return '<span class="muted">Value unavailable</span>';
+    const type = ["number", "boolean", "null", "json"].includes(entry.type || "") ? `<span class="small muted">${esc(entry.type)} value</span>` : "";
+    return `${entry.value === "" ? '<span class="muted">Empty string</span>' : `<pre>${esc(entry.value.slice(0, 1000))}</pre>`}${type}${entry.truncated || entry.value.length > 1000 ? '<span class="small muted">Excerpt only; not the complete value</span>' : ""}`;
+  };
+  const objects = report.items.slice(0, 20).map((item, index) => {
+    if (!item || typeof item.key !== "string" || typeof item.item_id !== "string" ||
+        !item.item_id || !Array.isArray(item.changes)) return "";
+    const changes = item.changes.slice(0, 20).filter(change => change && typeof change.field === "string" &&
+      typeof change.saved?.present === "boolean" && typeof change.current?.present === "boolean");
+    if (!changes.length) return "";
+    let url = "";
+    try {
+      // Construct the link from IDs. Never render an API-supplied object_url.
+      url = `${boardUrl(report.board_id)}?moveToWidget=${encodeURIComponent(item.item_id)}`;
+    } catch { /* Invalid identifier encoding must not hide the field differences. */ }
+    const kind = ["shape", "connector", "frame"].includes(item.kind) ? item.kind : "object";
+    return `<article class="miro-edit-conflict"><div class="panel-head"><div><h3>Affected ${kind} ${index + 1}</h3><p>Object ID: <code>${esc(item.item_id)}</code></p><p>Graph key: <code>${esc(item.key)}</code></p></div>${url ? `<a class="btn small" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open object in Miro ${icon("external")}</a>` : ""}</div><div class="table-wrap"><table><thead><tr><th scope="col">Changed field</th><th scope="col">Last synced value</th><th scope="col">Current Miro value</th></tr></thead><tbody>${changes.map(change => `<tr><th scope="row"><code>${esc(change.field)}</code></th><td>${value(change.saved)}</td><td>${value(change.current)}</td></tr>`).join("")}</tbody></table></div>${item.truncated || item.changes.length > 20 ? '<p class="artifact-note">Additional differences for this object were omitted.</p>' : ""}</article>`;
+  }).join("");
+  if (!objects) return "";
+  return `<section class="panel miro-edit-conflicts" aria-labelledby="miro-edit-conflicts-title"><div class="panel-head"><div><h2 id="miro-edit-conflicts-title">Locate the Miro changes</h2><p>These objects differ from their last synced values.</p></div></div><div class="panel-body"><ol><li>Open each affected object in Miro and review the differences below.</li><li>For accidental changes, restore the listed last synced values. Preserve any notes you want to keep before changing grouping.</li><li>Return to Plots &amp; Miro, regenerate the board update, and retry.</li></ol><p class="small muted">Text values include formatting markup so small formatting changes remain visible. Use excerpts to locate a change, not to replace the complete object text. This report does not change the board.</p></div>${objects}${report.truncated || report.items.length > 20 ? '<div class="panel-body"><p class="artifact-note">The report was shortened. Additional differences may appear after these are resolved.</p></div>' : ""}</section>`;
 }
 
 function rebuildAction(detail: Case, saved: boolean): string {
@@ -1595,6 +1636,7 @@ async function refreshSession(): Promise<void> {
 
 async function openCase(id: string): Promise<void> {
   resetFrameRecovery();
+  state.editConflicts = null;
   dialog.close();
   const generation = ++pageGeneration;
   const detail = await api<Case>(`/api/cases/${encodeURIComponent(id)}`);
@@ -1619,6 +1661,7 @@ async function openCase(id: string): Promise<void> {
 function navigate(page: Page): void {
   saveSettingsDraft(); saveAddressDraft();
   resetFrameRecovery();
+  state.editConflicts = null;
   dialog.close();
   saveDraft();
   pageGeneration++;
@@ -1641,6 +1684,7 @@ async function startJob(
 ): Promise<void> {
   if (isBusy()) return;
   if (action !== "miro-frame-review") resetFrameRecovery();
+  state.editConflicts = null;
   saveDraft();
   submitting = true;
   render();
@@ -1723,6 +1767,8 @@ async function pollJob(): Promise<void> {
       }
     } else if (job.status === "failed") {
       if (active.action.startsWith("miro-frame-")) resetFrameRecovery();
+      state.editConflicts = active.caseId && state.activeCase?.id === active.caseId && job.edit_conflicts
+        ? { caseId: active.caseId, report: job.edit_conflicts } : null;
       const progress = job.progress || active.progress;
       const hopLabel = progress && collectionHopLabel(progress);
       const lastStage = hopLabel ? ` Last reported stage: ${hopLabel}.` : progress?.phase
@@ -2090,6 +2136,7 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
   }
   if (action === "dismiss-error") {
     state.error = "";
+    state.editConflicts = null;
     render();
     return;
   }
@@ -2196,6 +2243,7 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
 
 function handleError(error: unknown): void {
   resetFrameRecovery();
+  state.editConflicts = null;
   if (dialogAction === "miro-frame-recover") dialog.close();
   state.error =
     error instanceof Error

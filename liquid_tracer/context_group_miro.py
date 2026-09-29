@@ -273,7 +273,7 @@ def removals(plan, state):
 
 def check_remote(state, remote, removals, inventory, *, projection_removals=None, allow_organization=False):
     """Refuse destructive presentation replacement when analyst work is visible."""
-    from .miro import _editable, _fields, _get, _same
+    from .miro_conflicts import MiroEditConflict, editable_report
     shape_ids = {state["items"][key]["id"] for key, proof in removals.items()
                  if proof["endpoint"] == "shapes"}
     connector_ids = {state["items"][key]["id"] for key, proof in removals.items()
@@ -287,14 +287,14 @@ def check_remote(state, remote, removals, inventory, *, projection_removals=None
         ends = [(body.get(field) or {}).get("id") for field in ("startItem", "endItem")]
         if shape_ids.intersection(ends) and body["id"] not in connector_ids:
             raise TraceError("A board connector attaches to a retiring context object; preserve that attachment before syncing. No board writes made.")
+    report = editable_report(state, remote, {**(projection_removals or {}), **removals})
+    if report:
+        raise MiroEditConflict('Context object has manual edits; open the affected objects below to review the changed fields. No board writes made.', report)
     for key, proof in removals.items():
         record = state["items"][key]
         if key not in remote:  # Verified attempted deletion, checked by preflight.
             continue
         body = remote[key]
-        actual = _editable(body, record["endpoint"])
-        if any(not _same(_get(actual, path), value, path) for path, value in _fields(record["managed"])):
-            raise TraceError("Context object has manual edits; preserve its notes/styles before changing grouping. No board writes made.")
         if record["endpoint"] == "connectors":
             if record["id"] not in inventory:
                 raise TraceError("Complete connector inventory is missing a mapped context input; no board writes made")

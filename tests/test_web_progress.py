@@ -153,7 +153,7 @@ class ProgressReportTests(unittest.TestCase):
             request, result = Path(directory) / "request.json", Path(directory) / "result.json"
             request.write_text(json.dumps({"arguments": ["miro-sync", "--dry-run"]}))
 
-            def pretend_cli(arguments, *, progress=None):
+            def pretend_cli(arguments, *, progress=None, diagnostics=None):
                 self.assertEqual(arguments, ["miro-sync", "--dry-run"])
                 self.assertIsInstance(progress, ProgressReporter)
                 progress({"phase": "updating", "completed": 1, "total": 2, "message": SENTINEL})

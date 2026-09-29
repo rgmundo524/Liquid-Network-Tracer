@@ -682,6 +682,44 @@ dialog::backdrop {
 .mobile-brand {
   display: none;
 }
+.miro-edit-conflicts .panel-body ol {
+  margin: 0 0 12px;
+  padding-left: 22px;
+}
+.miro-edit-conflicts li + li {
+  margin-top: 6px;
+}
+.miro-edit-conflict {
+  border-top: 1px solid #e1e9e7;
+}
+.miro-edit-conflict .panel-head {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.miro-edit-conflict .panel-head > div {
+  min-width: 0;
+}
+.miro-edit-conflict code {
+  overflow-wrap: anywhere;
+}
+.miro-edit-conflict table {
+  table-layout: fixed;
+  width: 100%;
+  min-width: 540px;
+}
+.miro-edit-conflict th:first-child {
+  width: 24%;
+}
+.miro-edit-conflict td,
+.miro-edit-conflict th {
+  vertical-align: top;
+}
+.miro-edit-conflict pre {
+  font-size: 12px;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 @media (min-width: 1600px) {
   .content {
     padding-top: 44px;

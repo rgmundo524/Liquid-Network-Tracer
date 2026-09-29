@@ -50,6 +50,23 @@ LAYOUT_ALGORITHMS = ("elk_layered_v1", "dependency_layers_v1")
 FALLBACK_REASONS = ("size_limit", "timeout", "mermaid_size_limit", "mermaid_timeout")
 from .connections import FILES as CONNECTION_NAMES, LEGACY_FILES as LEGACY_CONNECTION_NAMES, preview_files
 CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact", "connections", "pegouts", "pegouts-preview", "plot"}
+MAX_FAILURE_RESULT_BYTES = 256 * 1024
+
+
+def read_edit_conflicts(path):
+    """Read only the known, bounded worker diagnostic from a failed result."""
+    from .miro_conflicts import public_report
+
+    try:
+        if not path.is_file() or path.is_symlink() or path.stat().st_size > MAX_FAILURE_RESULT_BYTES:
+            return None
+        report = read_json(path)
+        if (not isinstance(report, dict) or "result" not in report or report.get("ok") is not False
+                or report.get("result") is not None):
+            return None
+        return public_report(report.get("edit_conflicts"))
+    except (OSError, ValueError, TypeError, RecursionError):
+        return None
 
 
 def collected_hops(state):
@@ -696,6 +713,7 @@ class LocalServer(ThreadingHTTPServer):
     def run_job(self, identity, arguments, action, live, case, txids):
         terminal = None
         process = None
+        edit_conflicts = None
         try:
             with tempfile.TemporaryDirectory(prefix="liquid-web-job-") as directory:
                 request, result = Path(directory) / "request.json", Path(directory) / "result.json"
@@ -736,6 +754,7 @@ class LocalServer(ThreadingHTTPServer):
                     if self.jobs[identity]["status"] == "cancelling":
                         raise JobCancelled
                 if status != 0:
+                    edit_conflicts = read_edit_conflicts(result)
                     raise RuntimeError("CLI action failed")
                 report = read_json(result)
                 if report.get("ok") is not True or not isinstance(report.get("result"), dict):
@@ -757,11 +776,16 @@ class LocalServer(ThreadingHTTPServer):
             print("Local UI action failed: " + str(error), file=sys.stderr)
             with self.job_lock:
                 self.jobs[identity].update(status="failed", cancellable=False, message=(
+                    "Miro sync stopped because generated objects differ from their last-synced values. "
+                    "Open the linked objects and review the differences below."
+                    if edit_conflicts is not None else
                     "Plot and sync stopped. Check the launching terminal and the saved board status. "
                     "Resume the saved layout if publication already started."
                     if action == "plot-sync" else
                     "Action failed. Check the launching terminal for credential, API, or saved-file errors. "
                     "Review the investigation before retrying a live action."))
+                if edit_conflicts is not None:
+                    self.jobs[identity]["edit_conflicts"] = edit_conflicts
         finally:
             try:
                 stop_worker(process)
