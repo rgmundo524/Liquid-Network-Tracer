@@ -1124,11 +1124,12 @@ def create_app(root=None):
                 with Horizontal(classes="buttons"):
                     yield Button("Collect data", id="run", variant="primary")
                     yield Button("Review saved runs", id="review")
-                yield Label("2. Plot saved data", classes="title")
-                yield Static("Full investigation, starter connections, or paths to peg-outs. Uses saved data only.", markup=False)
-                yield Button("Choose plotting goal", id="workflow-plot", variant="primary")
-                yield Label("3. Miro boards", classes="title")
-                yield Button("View / create / sync boards", id="workflow-boards", variant="primary")
+                yield Label("2. Plot and sync", classes="title")
+                yield Static("Choose full investigation, starter connections, or paths to peg-outs, then generate and publish "
+                             "to a new or existing Miro board. Transaction data comes from saved collections.", markup=False)
+                yield Button("Generate plot and sync", id="workflow-plot", variant="primary")
+                yield Label("Saved boards and recovery", classes="title")
+                yield Button("View boards / resume saved layout", id="workflow-boards")
                 yield Label("Existing full-graph tools", classes="title")
                 with Horizontal(classes="buttons"):
                     yield Button("Preview Miro", id="preview")
@@ -1387,8 +1388,13 @@ def create_app(root=None):
             if cancelled:
                 message = "Calculation cancelled. Saved investigation evidence remains available."
             elif getattr(self, "current_action", None) == "plot":
-                message = ("Saved-data plot ready. Review the opened preview, then choose Miro boards to publish it."
+                message = ("Saved-data preview ready. Open Saved boards and recovery to publish this saved layout."
                            if status == 0 else "Plot did not complete. Saved collection data remains available.")
+            elif getattr(self, "current_action", None) == "plot-sync":
+                message = ("Plot and sync completed. Open Saved boards and recovery to view the board and saved layout. "
+                           "An empty fresh layout does not create a board."
+                           if status == 0 else "Plot and sync stopped. Open Saved boards and recovery to check the saved "
+                           "layout and board status before retrying. Resume that layout if publication already started.")
             elif getattr(self, "current_action", None) in ("investigation-board-create", "investigation-board-link"):
                 message = ("Board saved. Open Miro boards to choose a saved plot and sync it."
                            if status == 0 else "Board setup did not complete. Open Miro boards to check its saved status before retrying.")

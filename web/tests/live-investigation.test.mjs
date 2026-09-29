@@ -1140,7 +1140,7 @@ test('investigation tool views isolate panels and preserve the selected snapshot
   assert.doesNotMatch(view.workspace(), /id="plot-layouts-panel"|data-action="workflow-board-sync"/);
   await view.dispatch('view-plots');
   assert.match(view.workspace(), /id="plot-layouts-panel"/);
-  assert.match(view.workspace(), /Plot Layouts/);
+  assert.match(view.workspace(), /Plots & Miro/);
   assert.doesNotMatch(view.workspace(), /Plot views/);
   assert.doesNotMatch(view.workspace(), /id="collection-panel"|data-action="workflow-board-sync"/);
   await view.dispatch('view-history');
@@ -1626,7 +1626,7 @@ test('central board manager links existing boards before collection for each goa
       view.state.activeCase = workflowCase({runs: [], latest_run: undefined});
       await view.dispatch('view-boards');
       assert.match(view.workspace(), /No boards yet/);
-      workflowEdit(view, 'board-goal', goal); workflowEdit(view, 'board-name', 'My board');
+      workflowEdit(view, 'board-goal', goal); workflowEdit(view, 'link-board-name', 'My board');
       workflowEdit(view, 'board-url', 'https://miro.com/app/board/target=/');
       await view.dispatch('workflow-board-' + method);
       assert.deepEqual(view.calls.at(-1).body, {action: 'board-' + method, goal, name: 'My board',
@@ -1687,7 +1687,7 @@ test('job completion selects the generated plot or initialized board from the re
     view.state.activeCase = workflowCase();
     view.state.job = {id: 'job', action, caseId: 'case1'};
     await view.pollJob();
-    assert.equal(view.state.caseView, action === 'plot' ? 'plots' : 'boards');
+    assert.equal(view.state.caseView, 'plots');
     assert.equal(view.currentWorkflow(detail)[action === 'plot' ? 'plot' : 'board'], action === 'plot' ? 'newplot' : 'newboard');
   }
 });
@@ -1727,7 +1727,7 @@ test('interrupted sync permits its saved plot retry and excludes newer plots unt
     boards: [workflowBoard('pegouts', 'interrupted', {pending_count: 1, preview_id: 'saved', status: 'interrupted'})]});
   await view.dispatch('view-boards');
   assert.match(view.workspace(), /value="saved"/);
-  assert.doesNotMatch(view.workspace(), /value="newer"/);
+  assert.doesNotMatch(boardCardHtml(view, 'interrupted'), /value="newer"/);
   await view.dispatch('workflow-board-sync', boardControl('interrupted'));
   assert.deepEqual(view.calls.at(-1).body, {action: 'board-sync', record_id: 'interrupted', preview_id: 'saved', reorganize: false});
 });
@@ -1770,7 +1770,7 @@ test('one saved ELK plot feeds SVG export and Miro sync without generating anoth
   assert.match(html, /Download ELK SVG/);
   assert.match(html, /href="\/files\/case1\/previews\/reviewed\/graph.svg"/);
   await view.dispatch('plot-boards');
-  assert.equal(view.state.caseView, 'boards');
+  assert.equal(view.state.caseView, 'plots');
   assert.equal(view.currentWorkflow(view.state.activeCase).boardPlot, 'reviewed');
   assert.doesNotMatch(view.workspace(), /Generate matching plot|data-action="board-plot-goal"/);
   assert.match(boardCardHtml(view, 'cashouts'), /value="reviewed" selected/);
@@ -2068,7 +2068,7 @@ test('create and sync requires a fresh reviewed plot and submits the exact selec
   assert.doesNotMatch(picker, /value="(?:old|update|stale|empty)"/);
   workflowEdit(view, 'create-plot', 'update');
   await assert.rejects(view.dispatch('workflow-board-create-sync'), /reviewed New board layout/);
-  workflowEdit(view, 'create-plot', 'fresh'); workflowEdit(view, 'board-name', 'Reviewed paths');
+  workflowEdit(view, 'create-plot', 'fresh'); workflowEdit(view, 'saved-board-name', 'Reviewed paths');
   await view.dispatch('workflow-board-create-sync');
   assert.deepEqual(view.calls.at(-1).body, {action: 'board-create-sync', preview_id: 'fresh', name: 'Reviewed paths'});
   assert.equal(view.state.job.live, true);
@@ -2092,7 +2092,7 @@ test('board-aware plot handoff targets only its indexed board and renders remova
   assert.doesNotMatch(boardCardHtml(view, 'first'), /value="update"/);
   const second = boardCardHtml(view, 'second');
   assert.match(second, /value="update" selected/);
-  assert.match(second, />Update board<\/button>/);
+  assert.match(second, />Apply saved update<\/button>/);
   assert.doesNotMatch(second, /workflow-board-organize/);
   await assert.rejects(view.dispatch('workflow-board-organize', boardControl('second')), /preserving existing positions/);
   await view.dispatch('workflow-board-sync', boardControl('second'));
@@ -2137,4 +2137,183 @@ test('successful update layout generation selects its exact board plot after ref
   view.state.activeCase = workflowCase(); view.state.job = {id: 'job', action: 'plot', caseId: 'case1', live: true};
   await view.pollJob(); await view.dispatch('view-boards');
   assert.match(boardCardHtml(view, 'cashouts'), /value="update" selected/);
+});
+
+test('Plots and Miro share one workspace with unique controls and one primary generate action', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({boards: [workflowBoard('full', 'board')],
+    plots: [workflowPlot('full', 'fresh', {layout_mode: 'fresh'})]});
+  await view.dispatch('view-boards');
+  const html = view.workspace();
+  const navigation = html.match(/<nav class="case-navigation"[\s\S]*?<\/nav>/)[0];
+  assert.equal(view.state.caseView, 'plots');
+  assert.match(navigation, /Plots & Miro/);
+  assert.doesNotMatch(navigation, /view-boards/);
+  for (const id of ['plot-layouts-panel', 'miro-boards-panel', 'saved-plots-panel']) assert.match(html, new RegExp(`id="${id}"`));
+  const ids = [...html.matchAll(/\sid="([^"]+)"/g)].map(match => match[1]);
+  assert.equal(ids.length, new Set(ids).size, 'merged controls must not duplicate DOM IDs');
+  assert.ok(html.indexOf('id="workflow-board-name"') < html.indexOf('data-action="workflow-plot-sync"'));
+  assert.match(html, /class="btn primary" data-action="workflow-plot-sync"[^>]*>[\s\S]*?Generate & create board/);
+  assert.match(html, /<details class="tool-details"><summary>Preview without syncing<\/summary>/);
+  assert.match(html, /<details class="panel" id="create-sync-board-panel"><summary/);
+});
+
+test('combined new board action saves settings and submits generation and publication once', async () => {
+  const detail = workflowCase();
+  const view = await harness((path, body) => {
+    if (path.endsWith('/plot-settings')) {detail.run_defaults = {...detail.run_defaults, ...body.settings}; return detail;}
+    if (path.endsWith('/actions')) return {id: 'combined', status: 'running', live: true};
+  });
+  view.state.activeCase = detail;
+  await view.dispatch('view-plots');
+  workflowEdit(view, 'board-name', 'Investigator overview');
+  view.plotForm({connector_style: 'curved'});
+  await view.dispatch('workflow-plot-sync');
+  const writes = view.calls.filter(call => call.body);
+  assert.equal(writes.length, 2);
+  assert.match(writes[0].path, /plot-settings$/);
+  assert.deepEqual(writes[1].body, {action: 'plot-sync', goal: 'full', run_id: 'saved1', min_hops: 0,
+    max_hops: 0, layout_mode: 'fresh', name: 'Investigator overview'});
+  assert.equal(view.state.job.live, true);
+  const count = view.calls.length;
+  await view.dispatch('workflow-plot-sync');
+  assert.equal(view.calls.length, count, 'busy job prevents duplicate publication');
+});
+
+test('combined update binds the exact board and includes endpoint and context choices', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'combined', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase({boards: [workflowBoard('pegouts', 'cashouts')]});
+  await view.dispatch('workflow-board-prepare', boardControl('cashouts'));
+  workflowEdit(view, 'min-hops', '2'); workflowEdit(view, 'max-hops', '11');
+  view.workflowInput({id: 'workflow-include-unspent', checked: true});
+  view.workflowInput({id: 'workflow-include-unspendable', checked: true});
+  view.workflowInput({id: 'workflow-include-context', checked: true});
+  assert.match(view.workspace(), /Generate & update board/);
+  await view.dispatch('workflow-plot-sync');
+  assert.deepEqual(view.calls.at(-1).body, {action: 'plot-sync', goal: 'pegouts', run_id: 'saved1',
+    min_hops: 2, max_hops: 11, layout_mode: 'update', board_record_id: 'cashouts',
+    include_unspent: true, include_unspendable: true, include_context: true});
+  assert.equal(view.state.job.live, true);
+});
+
+test('switching update targets restores each board query and keeps unsaved board and fresh drafts', async () => {
+  const first = workflowPlot('pegouts', 'firstplot', {layout_mode: 'update', min_hops: 1, max_hops: 7,
+    query: {include_unspent: true, include_context: true},
+    layout_settings: {...defaults, include_fees: false, group_context_inputs: true, color_attribution_arrows: false, center_name: 'First', hub_addresses: []}});
+  const second = workflowPlot('pegouts', 'secondplot', {layout_mode: 'update', min_hops: 4, max_hops: 12,
+    query: {include_unspendable: true},
+    layout_settings: {...defaults, connector_style: 'curved', include_fees: false, group_context_inputs: false, color_attribution_arrows: true, center_name: 'Second', hub_addresses: []}});
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [first, second], boards: [
+    workflowBoard('pegouts', 'first', {preview_id: 'firstplot'}), workflowBoard('pegouts', 'second', {preview_id: 'secondplot'})]});
+  await view.dispatch('view-plots');
+  workflowEdit(view, 'board-name', 'Fresh draft');
+  await view.dispatch('workflow-board-prepare', boardControl('first'));
+  let draft = view.currentWorkflow(view.state.activeCase);
+  assert.equal(draft.minHops, '1'); assert.equal(draft.maxHops, '7');
+  assert.equal(draft.includeUnspent, true); assert.equal(draft.includeContext, true);
+  assert.match(view.workspace(), /name="center_name"[^>]*value="First"/);
+  workflowEdit(view, 'max-hops', '9');
+  view.workflowInput({id: 'workflow-include-context', checked: false});
+  workflowEdit(view, 'layout-board', 'second');
+  draft = view.currentWorkflow(view.state.activeCase);
+  assert.equal(draft.minHops, '4'); assert.equal(draft.maxHops, '12');
+  assert.equal(draft.includeUnspent, false); assert.equal(draft.includeUnspendable, true);
+  assert.match(view.workspace(), /name="center_name"[^>]*value="Second"/);
+  workflowEdit(view, 'layout-board', 'first');
+  assert.equal(draft.maxHops, '9'); assert.equal(draft.includeContext, false);
+  assert.match(view.workspace(), /name="center_name"[^>]*value="First"/);
+  workflowEdit(view, 'layout-mode', 'fresh');
+  assert.equal(draft.goal, 'full'); assert.equal(draft.boardName, 'Fresh draft');
+  assert.match(view.workspace(), /name="center_name"[^>]*value=""/);
+  assert.equal(view.calls.length, 1);
+});
+
+test('successful combined creation selects the new board for future updates and retains SVG output', async () => {
+  const plot = workflowPlot('full', 'fresh', {layout_mode: 'fresh', artifact: {preview_id: 'fresh',
+    preview_url: '/files/case1/previews/fresh/graph.html', downloads: [{name: 'graph.svg', url: '/files/case1/previews/fresh/graph.svg'}]}});
+  const board = workflowBoard('full', 'newboard', {status: 'synced', preview_id: 'fresh', creation_preview_id: 'fresh'});
+  const detail = workflowCase({plots: [plot], boards: [board]});
+  const view = await harness(path => path === '/api/jobs/job' ? {status: 'succeeded', result: {...plot,
+    published: true, record_id: 'newboard', board_url: board.board_url}}
+    : path === '/api/cases/case1' ? detail : undefined);
+  view.state.activeCase = workflowCase(); view.state.job = {id: 'job', action: 'plot-sync', caseId: 'case1', live: true};
+  await view.pollJob();
+  const draft = view.currentWorkflow(detail);
+  assert.equal(view.state.caseView, 'plots'); assert.equal(draft.plot, 'fresh');
+  assert.equal(draft.layoutMode, 'update'); assert.equal(draft.layoutBoard, 'newboard');
+  assert.match(view.workspace(), /Open synced Miro board/);
+  assert.match(view.workspace(), /href="\/files\/case1\/previews\/fresh\/graph.svg"/);
+  assert.match(view.workspace(), /Generate & update board/);
+});
+
+test('empty combined fresh result reports no board and preserves its saved preview', async () => {
+  const plot = workflowPlot('pegouts', 'empty', {layout_mode: 'fresh', empty: true, node_count: 0, edge_count: 0});
+  const detail = workflowCase({plots: [plot]});
+  const view = await harness(path => path === '/api/jobs/job' ? {status: 'succeeded', result: {...plot, published: false}}
+    : path === '/api/cases/case1' ? detail : undefined);
+  view.state.activeCase = workflowCase(); view.state.job = {id: 'job', action: 'plot-sync', caseId: 'case1', live: true};
+  await view.pollJob();
+  assert.equal(view.currentWorkflow(detail).layoutMode, 'fresh');
+  assert.equal(view.currentWorkflow(detail).plot, 'empty');
+  assert.match(view.notifications.at(-1), /no Miro board was created/);
+  assert.match(view.workspace(), /Preview saved; no board created/);
+  assert.doesNotMatch(view.workspace(), /Open synced Miro board/);
+});
+
+test('failed combined fresh publication refreshes and selects exact saved recovery without regenerating', async () => {
+  const plot = workflowPlot('full', 'saved', {layout_mode: 'fresh'});
+  const board = workflowBoard('full', 'partial', {status: 'interrupted', pending_count: 1,
+    preview_id: 'saved', creation_preview_id: 'saved'});
+  const detail = workflowCase({plots: [plot], boards: [board]});
+  const view = await harness(path => path === '/api/jobs/job' ? {status: 'failed', message: 'Sync interrupted.'}
+    : path === '/api/cases/case1' ? detail : path.endsWith('/actions') ? {id: 'resume', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase(); view.state.job = {id: 'job', action: 'plot-sync', caseId: 'case1', live: true};
+  await view.pollJob();
+  assert.equal(view.currentWorkflow(detail).layoutMode, 'update');
+  assert.equal(view.currentWorkflow(detail).layoutBoard, 'partial');
+  assert.match(boardCardHtml(view, 'partial'), /<details class="tool-details" open>/);
+  assert.match(boardCardHtml(view, 'partial'), /Resume board sync/);
+  await view.dispatch('workflow-board-sync', boardControl('partial'));
+  assert.deepEqual(view.calls.at(-1).body, {action: 'board-sync', record_id: 'partial', preview_id: 'saved', reorganize: false});
+});
+
+test('uncertain creation blocks a new combined create and offers linking instead of retrying POST', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [workflowPlot('full', 'saved', {layout_mode: 'fresh'})],
+    boards: [workflowBoard('full', 'unknown', {board_id: null, status: 'pending_creation', can_sync: false,
+      creation_preview_id: 'saved', preview_id: 'saved'})]});
+  await view.dispatch('view-plots');
+  assert.match(view.workspace(), /data-action="workflow-plot-sync"[^>]*disabled/);
+  assert.match(boardCardHtml(view, 'unknown'), /Link created board to this entry/);
+  assert.doesNotMatch(boardCardHtml(view, 'unknown'), /Retry saved board creation/);
+  await assert.rejects(view.dispatch('workflow-plot-sync'), /uncertain board creation/);
+  await assert.rejects(view.dispatch('workflow-board-retry-create', boardControl('unknown')), /Only a rejected/);
+  assert.equal(view.calls.length, 1);
+});
+
+test('known rejected creation retries its recorded preview and permits deliberate new generation', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'retry', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase({plots: [workflowPlot('full', 'saved', {layout_mode: 'fresh'})],
+    boards: [workflowBoard('full', 'rejected', {name: 'Original board name', board_id: null, status: 'creation_rejected',
+      can_sync: false, creation_preview_id: 'saved', preview_id: 'saved'})]});
+  await view.dispatch('view-plots');
+  assert.match(boardCardHtml(view, 'rejected'), /Retry saved board creation/);
+  assert.doesNotMatch(boardCardHtml(view, 'rejected'), /workflow-recovery-url/);
+  assert.doesNotMatch(view.workspace().match(/<button[^>]*data-action="workflow-plot-sync"[^>]*>/)[0], /disabled/);
+  await view.dispatch('workflow-board-retry-create', boardControl('rejected'));
+  assert.deepEqual(view.calls.at(-1).body, {action: 'board-create-sync', preview_id: 'saved', name: 'Original board name'});
+});
+
+test('failed later update and stale initial layouts do not block deliberate independent new boards', async () => {
+  for (const preview of ['later-update', 'initial']) {
+    const view = await harness(path => path.endsWith('/actions') ? {id: 'new', status: 'running'} : undefined);
+    view.state.activeCase = workflowCase({plots: [workflowPlot('full', 'initial', {layout_mode: 'fresh', reviewable: false})],
+      boards: [workflowBoard('full', 'existing', {status: 'sync_error', creation_preview_id: 'initial', preview_id: preview})]});
+    await view.dispatch('view-plots');
+    assert.doesNotMatch(view.workspace().match(/<button[^>]*data-action="workflow-plot-sync"[^>]*>/)[0], /disabled/);
+    await view.dispatch('workflow-plot-sync');
+    assert.equal(view.calls.at(-1).body.layout_mode, 'fresh');
+    assert.equal(view.calls.at(-1).body.action, 'plot-sync');
+  }
 });

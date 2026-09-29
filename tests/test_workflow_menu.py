@@ -1,4 +1,4 @@
-"""The terminal's primary workflow separates collection, local plots and boards."""
+"""The terminal combines layout and publication while keeping preview and recovery."""
 
 import importlib.util
 import tempfile
@@ -15,6 +15,21 @@ HAS_TEXTUAL = importlib.util.find_spec("textual") is not None
 
 
 class PlotCommandTests(unittest.TestCase):
+    def test_combined_command_is_live_and_requires_new_board_name(self):
+        arguments, live = plot_arguments("case", "full", "run", publish=True, name="New board", max_items=123)
+        self.assertTrue(live)
+        self.assertEqual(arguments, ["plot-sync", "--case", "case", "--goal", "full", "--run", "run",
+                                     "--name", "New board", "--max-items", "123"])
+        updated, live = plot_arguments("case", "pegouts", "run", publish=True,
+            layout_mode="update", board_record_id="existing", include_context=True)
+        self.assertTrue(live)
+        self.assertNotIn("--name", updated)
+        self.assertNotIn("--open", updated)
+        self.assertIn("--include-context", updated)
+        for name, limit in ((None, 750), ("", 750), ("Board", -1), ("Board", True)):
+            with self.subTest(name=name, limit=limit), self.assertRaises(TraceError):
+                plot_arguments("case", "full", "run", publish=True, name=name, max_items=limit)
+
     def test_update_layout_requires_target_and_live_read_credentials(self):
         arguments, live = plot_arguments("case", "full", "saved-run", layout_mode="update", board_record_id="board-test")
         self.assertTrue(live)
@@ -136,7 +151,7 @@ class WorkflowMenuTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.screen.__class__.__name__, "BoardsScreen")
             self.assertFalse(app.screen.query_one("#workflow-create", Button).disabled)
 
-    async def test_pegout_plot_uses_saved_collection_without_search_or_fetch(self):
+    async def test_pegout_preview_uses_saved_collection_without_search_or_fetch(self):
         from textual.widgets import Input, Select
         run = "saved-run"
         save_json(self.case / "runs" / run / "trace.json", {})
@@ -147,11 +162,11 @@ class WorkflowMenuTests(unittest.IsolatedAsyncioTestCase):
             app.screen.query_one("#plot-min-hops", Input).value = "2"
             app.screen.query_one("#plot-max-hops", Input).value = "10"
             await pilot.pause()
-            await self.click(app, pilot, "#plot-go")
+            await self.click(app, pilot, "#plot-preview")
             self.assertEqual(app.result, (["plot", "--case", str(self.case), "--goal", "pegouts", "--run", run,
                                           "--min-hops", "2", "--max-hops", "10", "--open"], False))
 
-    async def test_update_layout_selects_matching_board_and_read_credentials(self):
+    async def test_update_layout_selects_matching_board_and_combines_generation_with_sync(self):
         from textual.widgets import Select
         run = "saved-run"
         save_json(self.case / "runs" / run / "trace.json", {})
@@ -164,8 +179,22 @@ class WorkflowMenuTests(unittest.IsolatedAsyncioTestCase):
                 app.screen.query_one("#plot-board", Select).value = "board-full"
                 await self.click(app, pilot, "#plot-go")
                 self.assertTrue(app.result[1])
-                self.assertEqual(app.result[0][-5:],
-                                 ["--layout-mode", "update", "--board-record-id", "board-full", "--open"])
+                self.assertEqual(app.result[0][0], "plot-sync")
+                self.assertEqual(app.result[0][-6:],
+                                 ["--layout-mode", "update", "--board-record-id", "board-full", "--max-items", "750"])
+
+    async def test_new_board_primary_action_collects_name_before_generation(self):
+        from textual.widgets import Input
+        run = "saved-run"
+        save_json(self.case / "runs" / run / "trace.json", {})
+        save_json(self.case / "case.json", {**read_case(self.case), "latest_run": run})
+        app = self.app_for(plot_screen)
+        async with app.run_test(size=(110, 55)) as pilot:
+            app.screen.query_one("#plot-name", Input).value = "New assessment"
+            app.screen.query_one("#plot-max-items", Input).value = "200"
+            await self.click(app, pilot, "#plot-go")
+            self.assertEqual(app.result, (["plot-sync", "--case", str(self.case), "--goal", "full", "--run", run,
+                                         "--name", "New assessment", "--max-items", "200"], True))
 
     async def test_create_and_sync_selects_fresh_plot_without_prior_board(self):
         from textual.widgets import Input, Select
@@ -198,7 +227,7 @@ class WorkflowMenuTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertTrue(app.screen.query_one("#plot-endpoints").display)
             unspent.value = unspendable.value = context.value = True
-            await self.click(app, pilot, "#plot-go")
+            await self.click(app, pilot, "#plot-preview")
             self.assertEqual(app.result[0][-4:], ["--include-unspent", "--include-unspendable", "--include-context", "--open"])
             self.assertFalse(app.result[1])
 

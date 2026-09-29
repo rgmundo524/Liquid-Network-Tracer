@@ -7,6 +7,7 @@ Old mappings are discovered without migration; each board keeps its own sync map
 import copy
 import fcntl
 import json
+import math
 import os
 import re
 import uuid
@@ -26,8 +27,8 @@ UNCERTAIN = ("Miro board creation outcome is uncertain. Inspect your Miro boards
              "board to this pending board entry. No additional board will be created automatically.")
 PEGOUT_ADDRESS_NOTICE = (
     "This board uses the older per-output address layout and can still sync compatible saved layouts. "
-    "For one node per address, generate a new Paths to peg-outs layout in Plot Layouts, then create "
-    "or link a different Miro board for it in Miro Boards. The existing board stays unchanged.")
+    "For one node per address, select Paths to peg-outs and New board in Plot & Miro, then choose "
+    "Generate & create board. The existing board stays unchanged.")
 
 
 def _url(board):
@@ -212,7 +213,8 @@ def link_board(case, goal, name, board, *, record_id=None):
         return _display(case, record)
 
 
-def create_board(case, goal, name=None, *, team_id=None, transport=http, creation_preview_id=None, token=None):
+def create_board(case, goal, name=None, *, team_id=None, transport=http, creation_preview_id=None,
+                 creation_run_id=None, token=None):
     """Create a private named board once, journaling intent before its POST."""
     goal = _goal(goal)
     case, metadata, path = _paths(case)
@@ -235,6 +237,11 @@ def create_board(case, goal, name=None, *, team_id=None, transport=http, creatio
             if creation_preview_id is not None:
                 record["creation_preview_id"] = creation_preview_id
             registry["boards"].append(record)
+        if creation_preview_id is not None:
+            # Recovery must be visible even when the board POST or its first
+            # item sync fails before sync_board can persist its own binding.
+            record["preview_id"] = creation_preview_id
+            record["run_id"] = creation_run_id
         record.update(status="pending_creation", attempted_at=now(), creation_request=body)
         save_json(path, registry)
         headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json", "Accept": "application/json"}
@@ -353,11 +360,113 @@ def create_and_sync(case, preview_id, name=None, *, team_id=None, max_items=750,
     sync(plan, "new-board-preflight", case / "miro" / ("preflight-" + uuid.uuid4().hex + ".json"),
          max_items=max_items, dry_run=True, reorganize=True, interval=interval, workers=workers, progress=progress)
     record = create_board(case, graph["plot"]["goal"], name, team_id=team_id, transport=transport,
-                          creation_preview_id=preview_id, token=token)
+                          creation_preview_id=preview_id, creation_run_id=graph["run_id"], token=token)
     result = sync_board(case, record["id"], preview_id, max_items=max_items, transport=transport,
                         token=token, interval=interval, workers=workers, progress=progress)
     return {**result, "board_id": record["board_id"], "board_url": record["board_url"],
             "created_board": record["created"], "reused_board": record["reused"]}
+
+
+def _publication_budget(case, graph, record, max_items):
+    """Reject oversized publications before ELK or remote board inventory.
+
+    Identity counts are independent of coordinates. Context regrouping also
+    replaces its summary and reattached connectors. The final saved plan still
+    receives the sync engine's complete dry-run validation before publication.
+    """
+    from .context_group_miro import _identity
+    from .plots import plot_plan
+
+    plan = plot_plan(graph)
+    mapped = load_state(case / record["state_file"], {}).get("items", {}) if record else {}
+    replacements = set()
+    for key, proof in plan.get("context_group_items", {}).items():
+        previous = mapped.get(key, {}).get("context_group_proof")
+        if previous and _identity(previous) != _identity(proof):
+            replacements.add(key)
+            replacements.update(proof["inputs"])
+    for item in plan["connectors"]:
+        previous = mapped.get(item["key"])
+        if previous and (previous.get("source") != item["source"] or previous.get("target") != item["target"]):
+            replacements.add(item["key"])
+    count = sum(item["key"] not in mapped or item["key"] in replacements
+                for endpoint in ("shapes", "connectors") for item in plan[endpoint])
+    if count > max_items:
+        raise TraceError(f"Sync needs {count} new items, above max-items={max_items}; "
+                         "reduce the trace or explicitly raise the limit")
+
+
+def _check_unfinished_creation(case):
+    """Do not create another board while a prior board POST is unresolved."""
+    for record in list_boards(case):
+        preview = record.get("creation_preview_id")
+        if preview and record.get("status") == "pending_creation":
+            raise TraceError("A Miro board creation outcome is uncertain. Link the created board to its pending "
+                             "entry and resume saved plot " + preview + " before generating another new board.")
+
+
+def generate_and_sync(case, goal, run_id="latest", min_hops=0, max_hops=10, *, include_unspent=False,
+                      include_unspendable=False, include_context=False, layout_mode="fresh",
+                      board_record_id=None, name=None, team_id=None, max_items=750, token=None,
+                      transport=http, interval=.02, progress=None, workers=4):
+    """Save one plot, then create its board or apply its bound board update.
+
+    This is one live action over already collected evidence. On publication
+    failure its saved preview is the recovery input for create_and_sync or
+    sync_board; resuming must not generate a second layout or board.
+    """
+    from .plots import preview_plot
+
+    goal = _goal(goal)
+    case, metadata, _ = _paths(case)
+    if layout_mode not in ("fresh", "update"):
+        raise TraceError("Choose a fresh layout or an update to an existing Miro board")
+    if type(max_items) is not int or max_items < 0:
+        raise TraceError("max-items must be a nonnegative integer (it limits new items)")
+    if (isinstance(interval, bool) or not isinstance(interval, (int, float))
+            or not math.isfinite(interval) or interval < 0):
+        raise TraceError("Miro interval must be finite and nonnegative")
+    if type(workers) is not int or not 1 <= workers <= 4:
+        raise TraceError("Miro workers must be an integer between 1 and 4")
+    if progress is not None and not callable(progress):
+        raise TraceError("Miro progress must be a callback")
+    if layout_mode == "fresh":
+        if board_record_id is not None:
+            raise TraceError("Choose a target Miro board only when preparing an update layout")
+        name = _name(metadata, goal, name)
+        board_options(name, team_id, "private")
+        _check_unfinished_creation(case)
+    else:
+        if name is not None or team_id is not None:
+            raise TraceError("Board name and team apply only when creating a new Miro board")
+        board_for_plot(case, board_record_id, goal)
+    token = token or os.getenv("MIRO_ACCESS_TOKEN")
+    if not isinstance(token, str) or not token or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in token):
+        raise TraceError("MIRO_ACCESS_TOKEN is missing or malformed; load its raw value through SecretSpec")
+    if progress:
+        progress({"phase": "building_plan", "completed": 0, "total": 1})
+    plot = preview_plot(case, goal, run_id, min_hops, max_hops, include_unspent=include_unspent,
+                        include_unspendable=include_unspendable, include_context=include_context,
+                        layout_mode=layout_mode, board_record_id=board_record_id, token=token,
+                        transport=transport, interval=interval, progress=progress, workers=workers,
+                        _preflight=lambda graph, record: _publication_budget(case, graph, record, max_items))
+    if plot["empty"] and layout_mode == "fresh":
+        return {**plot, "published": False, "created_board": False, "reused_board": False,
+                "status": "empty", "publication_notice": "No matching paths were found in the saved data; no Miro board was created."}
+    if progress:
+        progress({"phase": "building_plan", "completed": 1, "total": 1})
+    options = {"max_items": max_items, "transport": transport, "token": token,
+               "interval": interval, "progress": progress, "workers": workers}
+    try:
+        if layout_mode == "fresh":
+            _check_unfinished_creation(case)
+            published = create_and_sync(case, plot["preview_id"], name, team_id=team_id, **options)
+        else:
+            published = sync_board(case, board_record_id, plot["preview_id"], **options)
+    except (TraceError, OSError, ValueError) as error:
+        raise TraceError(str(error) + " Saved plot " + plot["preview_id"] +
+                         " is available for recovery; resume that saved plot instead of generating another.") from error
+    return {**plot, **published, "published": True, "status": "synced"}
 
 
 def sync_board(case, record_id, preview_id, *, reorganize=False, max_items=750, **kwargs):

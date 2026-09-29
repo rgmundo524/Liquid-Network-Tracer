@@ -1,16 +1,16 @@
-# Collect data, create plot layouts, download or sync
+# Collect data, then generate and sync a plot
 
 An investigation owns one set of saved collection runs and can have several Miro
 boards. Each board has a name and a plotting goal. Use the same collected data
 to make a full investigation chart, starter-connection chart, and peg-out chart.
-In the browser, the sequence is **Collect data → Plot Layouts → Miro boards**.
+In the browser, the sequence is **Collect data → Plots & Miro**.
 Upload investigation CSVs before collection, then update them as your analysis
 develops. Choose the destination workflow before generating each layout.
 
 Create a new investigation with its name, blockchain, and selected starting
 outputs. **Liquid Network** is currently the only supported blockchain. The
 browser's creation form has no Miro board field or starting-preferences panel;
-create or link boards later in **Miro boards**.
+create or link boards later in **Plots & Miro**.
 
 ## 1. Collect data
 
@@ -39,14 +39,13 @@ transaction hop, with starting transactions at hop 0. Some branches may stop
 earlier, so the number does not indicate complete coverage at every hop. If an
 older snapshot has no usable transaction depths, the summary shows **Not recorded**.
 
-The **Collect data** tab contains collection actions. Use the **Plot Layouts**
+The **Collect data** tab contains collection actions. Use the **Plots & Miro**
 tab for the next step and the investigation heading to open settings.
 
-## 2. Create Plot Layouts from saved data
+## 2. Generate and sync from saved data
 
-In the browser, open **Plot Layouts** and select the saved run. In the terminal,
-choose **Choose plotting goal** under **Plot saved data**. The available goals
-are shown together:
+Open **Plots & Miro** and select the saved run, plotting goal, and board
+destination. The available goals are shown together:
 
 | Goal | What it plots |
 | --- | --- |
@@ -54,13 +53,21 @@ are shown together:
 | Starter connections | Verified paths between the starting transactions, within the selected maximum hops. |
 | Paths to peg-outs | Verified paths from selected seed UTXOs to peg-out requests, optionally also unspent UTXOs and unspendable outputs, within an inclusive hop range. |
 
-Choose **New board** for a fresh full arrangement, or **Update existing board**
-and a destination with the same plotting goal. Both modes use the selected
-collection run and current attribution, colors, and change-output rules.
-New-board plotting is offline. Update plotting also reads Miro's current items,
-connectors and positions; it does not write to the board. Neither mode fetches
-transactions or address statistics. Missing data must be collected separately.
-Changing a plotting goal or tracing rule never modifies the archived evidence.
+Choose **New board** and enter a name for a fresh arrangement, or choose
+**Update existing board** and a destination with the same plotting goal.
+Set the hop range and appearance, then choose **Generate & create board** or
+**Generate & update board**. Each runs layout generation and Miro publication
+as one job. There is no required preview-review or separate sync step.
+
+Both modes use the selected collection run and current attribution, colors,
+and change-output rules. Neither fetches transactions or address statistics.
+Missing data must be collected separately. Changing a plotting goal or tracing
+rule never modifies the archived evidence. A saved preview, SVG, and transaction
+CSV are still produced for later inspection and download.
+
+**Generate preview only** remains available for local output or an optional review before
+publication. Fresh previews are offline. Update previews read Miro's current
+objects, connectors, and positions without writing to the board.
 
 An update preserves retained nodes at their indexed Miro positions. ELK arranges
 only new graph nodes in a clear area beyond the board's current contents, and
@@ -113,8 +120,8 @@ hop limits, and trace evidence are unchanged.
 Grouping is saved as an investigation layout preference and captured with each
 generated layout. Disabling context or choosing Starter connections preserves
 the preference without applying it. Separate branch hubs and fee flows remain
-Full trace-only. Generate an update layout and choose **Update board** to apply
-grouping changes. Replaced context objects join the newly arranged additions.
+Full trace-only. **Generate & update board** applies grouping changes. Replaced
+context objects join the newly arranged additions.
 
 **Save layout settings** persists the preferences with this investigation, even
 before collection. **Generate** saves pending layout edits before generating the
@@ -122,8 +129,8 @@ plot. Unsaved edits survive tab navigation within the browser session; saved
 settings survive closing the browser or restarting the server. A failed save
 keeps the edits and does not start plotting.
 
-Every plot records its source run, goal, and coverage. Review the preview before
-downloading or syncing. A plot with no matching paths does not prove that no connection or
+Every plot records its source run, goal, and coverage. Inspect its saved preview
+and downloads as needed. A plot with no matching paths does not prove that no connection or
 peg-out exists outside the saved coverage. A peg-out request does not establish
 which Bitcoin transaction paid it.
 
@@ -137,12 +144,12 @@ later leaves that saved layout available for download and sync with its original
 appearance. Changed evidence or attribution inputs require regeneration. Older
 plots without captured settings may need to be regenerated once.
 
-## 3. Download the plot or sync with Miro
+## Saved plots and board management
 
-The saved browser plot offers **Download ELK SVG** and **Sync with Miro**.
-Downloading returns that plot's SVG immediately. **Sync with Miro** opens the
-board manager with the same saved plot selected. Neither action requires you to
-generate another plot.
+The generated plot remains available under saved layouts with **Download ELK
+SVG**, its local preview, and supporting files. Saved-layout publication controls
+remain available for preview-only plots and recovery; using them does not run
+ELK again.
 
 Miro publication uses the saved graph and layout. **Create & sync** publishes a
 fresh layout to a new private board. **Update board** applies the preview bound
@@ -151,21 +158,20 @@ from the ELK SVG.
 
 ### Manage boards
 
-Open **Miro boards** in the browser, or **View / create / sync boards** in the
-terminal. The browser keeps a separate block visible for every created or linked
+The **Plots & Miro** workspace keeps a separate block for every created or linked
 board, including historical boards. Each block has its own name, goal, status,
 Miro link, and saved layout information. Managed boards also have their own
 compatible layout picker and sync controls.
 
-1. For a new graph, select a reviewed **New board** layout and enter a board name.
-2. Choose **Create & sync**. Creation and initial publication are one action.
-   If publication is interrupted, retry the same layout to resume that board.
-   A different fresh layout creates a separate board, even if its name matches.
-3. To maintain a board, choose **Prepare update** in its block, or select it under
-   **Update existing board** in Plot Layouts. Generate and review the update.
-4. Choose **Update board** in the same block. Existing positions stay intact;
-   additions arrive in the separate ELK-arranged area and connect to retained
-   objects. A provided board can first be linked, then used for an update layout.
+1. Choose **New board**, its name, tracing goal, and settings, then **Generate &
+   create board**. The layout is saved before the board is created and synced.
+2. To maintain a board, select **Update existing board** and that target, then
+   **Generate & update board**. Existing positions stay intact; additions arrive
+   in the separate ELK-arranged area and connect to retained objects.
+3. If publication is interrupted, use the board's saved-layout resume control.
+   It reuses that layout and board. Generating a different fresh layout creates
+   a separate board, even if its name matches.
+4. A provided board can first be linked here, then selected as an update target.
 
 Changing one board's layout selection does not change another board's selection,
 including boards with the same goal. Draft choices survive tab navigation;
@@ -201,8 +207,8 @@ must be reconciled through the existing recovery flow.
 
 ## Settings, history, and downloads
 
-The browser has four task tabs: **Collect data**, **Plot Layouts**, **Miro boards**,
-and **History & downloads**. The last tab combines saved-run history with SVGs,
+The browser has three task tabs: **Collect data**, **Plots & Miro**, and
+**History & downloads**. The last tab combines saved-run history with SVGs,
 tables, reports, and other saved files.
 
 Use **Investigation settings → Investigation data** to import CSVs, review
@@ -215,7 +221,7 @@ Both **Investigation settings** and **Workspace defaults** persist across
 sessions. Investigation settings apply to the current case. Workspace defaults
 set collection limits, all seven plot layout preferences, and the Miro sync
 budget copied into future cases, without changing existing investigations.
-Edit a current investigation's layout preferences in **Plot Layouts**;
+Edit a current investigation's layout preferences in **Plots & Miro**;
 Workspace defaults supplies their starting values only.
 
 ## Existing investigations and older searches
@@ -231,7 +237,7 @@ are not silently replaced.
 
 In the browser, older standalone search controls are under **History & downloads**. In the
 terminal, they remain explicitly labeled below the primary collection, plotting,
-and board steps. Use the main **Plot Layouts** workflow for a new view of collected
+and board controls. Use the main **Plots & Miro** workflow for a new view of collected
 investigation data.
 
 ## CLI
@@ -242,7 +248,14 @@ Collection keeps its existing command and limits:
 liquid-live trace --case CASE_DIRECTORY --resume latest --additional-hops 3
 ```
 
-Generate local plots from the saved collection run:
+Generate and publish a new board, or generate and apply an existing-board update:
+
+```sh
+liquid-live plot-sync --case CASE_DIRECTORY --goal pegouts --run latest --max-hops 10 --name "Peg-out paths" --max-items 750
+liquid-live plot-sync --case CASE_DIRECTORY --goal full --run latest --layout-mode update --board-record-id BOARD_RECORD_ID --max-items 750
+```
+
+Generate previews without publication when needed:
 
 ```sh
 liquid-trace plot --case CASE_DIRECTORY --goal full --run latest --open
@@ -250,7 +263,7 @@ liquid-trace plot --case CASE_DIRECTORY --goal connections --run latest --max-ho
 liquid-trace plot --case CASE_DIRECTORY --goal pegouts --run latest --min-hops 0 --max-hops 10 --open
 ```
 
-Create and publish the reviewed fresh layout, or link a provided board:
+Publish or resume a saved fresh layout, or link a provided board:
 
 ```sh
 liquid-live investigation-board-create-sync --case CASE_DIRECTORY --preview PREVIEW_ID --name "Peg-out paths" --max-items 750
@@ -258,7 +271,9 @@ liquid-trace investigation-board-link --case CASE_DIRECTORY --goal connections -
 liquid-trace investigation-boards --case CASE_DIRECTORY
 ```
 
-Use the board record ID to prepare an update, then apply its returned preview ID:
+To review an update separately, prepare it without publication, then apply its
+returned preview ID. The sync command also resumes that saved update after an
+interruption:
 
 ```sh
 liquid-live plot --case CASE_DIRECTORY --goal full --run latest --layout-mode update --board-record-id BOARD_RECORD_ID --open

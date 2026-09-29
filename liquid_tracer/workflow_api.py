@@ -8,7 +8,7 @@ from .investigations import read_case
 PLOT_FIELDS = {"id", "preview_id", "run_id", "goal", "min_hops", "max_hops", "created_at",
                "status", "node_count", "edge_count", "transaction_count", "match_count",
                "connection_count", "source_max_hops", "source_run_status", "source_stop_reason",
-               "notice", "coverage_notice", "reviewable", "review_error", "empty", "saved_data_only",
+               "notice", "coverage_notice", "publication_notice", "reviewable", "review_error", "empty", "saved_data_only",
                "layout_mode", "board_record_id", "board_id", "board_name"}
 BOARD_FIELDS = {"id", "record_id", "name", "goal", "board_id", "status", "preview_id", "run_id",
                 "legacy_snapshot", "can_sync", "notice", "pending_count", "created", "reused",
@@ -124,11 +124,13 @@ def workflow_action(server, case, metadata, body):
 
     action = body["action"]
     live = False
-    if action == "plot":
+    if action in ("plot", "plot-sync"):
         required = {"action", "goal", "run_id", "min_hops", "max_hops"}
         endpoint_options = {"include_unspent", "include_unspendable"}
-        if not required <= set(body) or set(body) - required - endpoint_options - {
-                "include_context", "layout_mode", "board_record_id"}:
+        allowed = {"include_context", "layout_mode", "board_record_id"}
+        if action == "plot-sync":
+            allowed.add("name")
+        if not required <= set(body) or set(body) - required - endpoint_options - allowed:
             raise RequestError("Choose a saved collection, plotting goal, and hop range.")
         if not isinstance(body.get("goal"), str) or body["goal"] not in GOALS:
             raise RequestError("Choose full trace, starter connections, or peg-out paths.")
@@ -140,9 +142,15 @@ def workflow_action(server, case, metadata, body):
                            if item["id"] == body.get("board_record_id")), None)
             if not record or not record.get("can_sync") or record["goal"] != body["goal"]:
                 raise RequestError("Choose a managed Miro board matching this plotting goal.")
-            live = True  # Read the live board arrangement; plotting never writes to Miro.
+            live = True  # Both update paths first read the live arrangement.
         elif "board_record_id" in body:
             raise RequestError("A fresh layout does not use an existing board.")
+        if action == "plot-sync":
+            if mode == "fresh":
+                name = board_options(body.get("name"), None, "private")["name"]
+            elif "name" in body:
+                raise RequestError("An update uses the selected board's existing name.")
+            live = True
         if any(type(body.get(key, False)) is not bool for key in endpoint_options):
             raise RequestError("Additional endpoint options must be true or false.")
         if body["goal"] != "pegouts" and any(body.get(key, False) for key in endpoint_options):
@@ -158,13 +166,18 @@ def workflow_action(server, case, metadata, body):
             raise RequestError("Choose a saved collection to plot.")
         selected = resolve_latest(case, body["run_id"])
         verify_export(run_path(case, selected))
-        arguments = ["plot", "--case", str(case), "--goal", body["goal"], "--run", selected,
+        arguments = [action, "--case", str(case), "--goal", body["goal"], "--run", selected,
                      "--min-hops", str(lower), "--max-hops", str(upper)]
         for key in ("include_unspent", "include_unspendable", "include_context"):
             if body.get(key):
                 arguments.append("--" + key.replace("_", "-"))
         if mode == "update":
             arguments.extend(["--layout-mode", "update", "--board-record-id", record["id"]])
+        if action == "plot-sync":
+            if mode == "fresh":
+                arguments.extend(["--name", name])
+            settings = validate_settings(metadata.get("run_defaults", {}))
+            arguments.extend(["--max-items", str(settings["max_new_items"])])
     elif action == "board-create-sync":
         if set(body) != {"action", "name", "preview_id"}:
             raise RequestError("Choose a fresh saved plot and a name for the new board.")
@@ -233,6 +246,11 @@ def workflow_result(case, value, action):
         result["artifact"] = plot_artifact(case, value["preview_id"])
         return result
     result = public_board(value)
+    if action == "plot-sync":
+        result = {**public_plot(value), **result}
+        result["artifact"] = plot_artifact(case, value["preview_id"])
+        if type(value.get("published")) is bool:
+            result["published"] = value["published"]
     for key in ("new_shapes", "new_connectors", "new_items", "updated", "deleted", "moved", "reorganize"):
         if type(value.get(key)) in (int, bool):
             result[key] = value[key]
