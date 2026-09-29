@@ -212,22 +212,28 @@ def parser():
     fee_arguments(layout)
     connector_arguments(layout)
     context_arguments(layout)
-    plot = commands.add_parser("plot", help="Plot a goal from a saved data collection without fetching transactions")
-    plot.add_argument("--case", type=Path, default=case_default, required=case_default is None)
-    plot.add_argument("--goal", choices=("full", "connections", "pegouts"), required=True)
-    plot.add_argument("--run", default="latest")
-    plot.add_argument("--layout-mode", choices=("fresh", "update"), default="fresh",
-                      help="Create a fresh layout, or preserve a selected Miro board and arrange additions separately")
-    plot.add_argument("--board-record-id", help="Investigation board record to read for an update layout")
-    plot.add_argument("--min-hops", type=int, default=0)
-    plot.add_argument("--max-hops", type=int, default=10)
-    plot.add_argument("--include-unspent", action="store_true",
-                      help="Include paths to outputs recorded as unspent in peg-out plots")
-    plot.add_argument("--include-unspendable", action="store_true",
-                      help="Include paths to non-peg-out unspendable outputs in peg-out plots")
-    plot.add_argument("--include-context", action="store_true",
-                      help="Show other input addresses and spendable sibling outputs around selected peg-out path transactions")
-    plot.add_argument("--open", dest="open_browser", action="store_true")
+    for command, description in (("plot", "Prepare a saved-data plot without changing Miro"),
+                                 ("plot-sync", "Generate a saved-data layout and create or update its Miro board")):
+        plot = commands.add_parser(command, help=description)
+        plot.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+        plot.add_argument("--goal", choices=("full", "connections", "pegouts"), required=True)
+        plot.add_argument("--run", default="latest")
+        plot.add_argument("--layout-mode", choices=("fresh", "update"), default="fresh",
+                          help="Create a fresh layout, or preserve a selected Miro board and arrange additions separately")
+        plot.add_argument("--board-record-id", help="Investigation board record to read for an update layout")
+        plot.add_argument("--min-hops", type=int, default=0)
+        plot.add_argument("--max-hops", type=int, default=10)
+        plot.add_argument("--include-unspent", action="store_true",
+                          help="Include paths to outputs recorded as unspent in peg-out plots")
+        plot.add_argument("--include-unspendable", action="store_true",
+                          help="Include paths to non-peg-out unspendable outputs in peg-out plots")
+        plot.add_argument("--include-context", action="store_true",
+                          help="Show other input addresses and spendable sibling outputs around selected peg-out path transactions")
+        if command == "plot":
+            plot.add_argument("--open", dest="open_browser", action="store_true")
+        else:
+            plot.add_argument("--name", help="Name for a new private Miro board")
+            plot.add_argument("--max-items", type=int, default=750)
     managed_boards = commands.add_parser("investigation-boards", help="List every saved Miro board for an investigation")
     managed_boards.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     for command, help_text in (("investigation-board-create", "Create a private Miro board for a plotting goal"),
@@ -1273,6 +1279,14 @@ def main(argv=None, *, progress=None):
                 include_context=args.include_context,
                 layout_mode=args.layout_mode, board_record_id=args.board_record_id,
                 open_browser=args.open_browser, progress=progress), indent=2))
+        elif args.command == "plot-sync":
+            from .investigation_boards import generate_and_sync
+            print(json.dumps(generate_and_sync(args.case, args.goal, args.run,
+                min_hops=args.min_hops, max_hops=args.max_hops,
+                include_unspent=args.include_unspent, include_unspendable=args.include_unspendable,
+                include_context=args.include_context,
+                layout_mode=args.layout_mode, board_record_id=args.board_record_id,
+                name=args.name, max_items=args.max_items, progress=progress), indent=2))
         elif args.command == "investigation-boards":
             from .investigation_boards import list_boards
             print(json.dumps({"boards": list_boards(args.case)}, indent=2))

@@ -260,7 +260,7 @@ def _summary(graph, preview_id, *, reviewable=True, reason=None):
 def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, include_unspent=False,
                  include_unspendable=False, include_context=False, open_browser=False, progress=None,
                  layout_mode="fresh", board_record_id=None, token=None, transport=http,
-                 interval=.02, workers=4):
+                 interval=.02, workers=4, _preflight=None):
     """Plot saved evidence afresh, or review additions against a selected live board."""
     from .cli import open_preview
     from .elk_layout import optimize_graph
@@ -289,6 +289,8 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
             board_plan = _board_plan(plot_plan(graph), record)
             state_path = case / record["state_file"]
             _check_legacy_removals(board_plan, record, state_path)
+            if _preflight is not None:
+                _preflight(graph, record)
             snapshot = capture(record["board_id"], state_path, board_plan["namespace"],
                                token=token, transport=transport, interval=interval,
                                workers=workers, progress=progress)
@@ -297,9 +299,12 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
             board_fields.update(board_record_id=record["id"], board_id=record["board_id"],
                                 board_name=record["name"],
                                 update_counts=deepcopy(graph["board_layout"].get("counts", {})))
-        elif graph["nodes"]:
-            graph = optimize_graph(graph, connector_style=settings["connector_style"],
-                                   layout_attempts=settings["layout_attempts"], progress=progress)
+        else:
+            if _preflight is not None:
+                _preflight(graph, None)
+            if graph["nodes"]:
+                graph = optimize_graph(graph, connector_style=settings["connector_style"],
+                                       layout_attempts=settings["layout_attempts"], progress=progress)
         coverage = _coverage(state)
         graph["notice"] = coverage["coverage_notice"] + " " + graph["notice"]
         report = {"schema_version": 1, "case_id": state["case_id"], "run_id": state["run_id"],

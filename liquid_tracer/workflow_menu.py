@@ -1,4 +1,4 @@
-"""Terminal collection, saved-data plotting and investigation board workspace."""
+"""Terminal collection and combined plot-and-board workspace."""
 
 import webbrowser
 from pathlib import Path
@@ -42,7 +42,8 @@ def _compatible_plot(plot, board):
 
 
 def plot_arguments(case, goal, run, minimum="0", maximum="10", *, include_unspent=False, include_unspendable=False,
-                   include_context=False, layout_mode="fresh", board_record_id=None):
+                   include_context=False, layout_mode="fresh", board_record_id=None,
+                   publish=False, name=None, max_items=750):
     """Validate terminal fields; plotting always uses an explicit saved run."""
     if goal not in GOAL_NAMES:
         raise TraceError("Choose a plotting goal")
@@ -62,7 +63,7 @@ def plot_arguments(case, goal, run, minimum="0", maximum="10", *, include_unspen
         raise TraceError("Choose a Miro board for the update layout")
     if layout_mode == "fresh" and board_record_id is not None:
         raise TraceError("A fresh layout does not use an existing board")
-    arguments = ["plot", "--case", str(case), "--goal", goal, "--run", run]
+    arguments = ["plot-sync" if publish else "plot", "--case", str(case), "--goal", goal, "--run", run]
     if goal != "full":
         lower, upper = int(minimum) if goal == "pegouts" else 0, int(maximum)
         if not 0 <= lower <= upper <= 2147483647:
@@ -76,6 +77,13 @@ def plot_arguments(case, goal, run, minimum="0", maximum="10", *, include_unspen
         arguments.append("--include-context")
     if layout_mode == "update":
         arguments += ["--layout-mode", "update", "--board-record-id", board_record_id]
+    if publish:
+        from .boards import board_options
+        if layout_mode == "fresh":
+            arguments += ["--name", board_options(name, None, "private")["name"]]
+        if type(max_items) is not int or max_items < 0:
+            raise TraceError("Maximum new Miro items must be a nonnegative whole number")
+        return arguments + ["--max-items", str(max_items)], True
     return arguments + ["--open"], layout_mode == "update"
 
 
@@ -92,9 +100,10 @@ def plot_screen(base, button, case):
             self.boards = [board for board in list_boards(case) if board.get("can_sync")]
             yield Header()
             with VerticalScroll(classes="form-panel"):
-                yield Label("2. Plot layouts", classes="title")
-                yield Static("Choose a goal using collected transaction data. Fresh layouts run locally. Update layouts read "
-                             "the selected Miro board and arrange new objects in an empty area. Plotting never changes Miro.", markup=False)
+                yield Label("2. Plot and sync", classes="title")
+                yield Static("Choose a goal and destination using collected transaction data. Generate and sync creates "
+                             "a new board or updates the selected board in one action. Existing positions stay in place; "
+                             "new objects are arranged in an empty area. Preview only remains available below.", markup=False)
                 yield Label("Saved collection run")
                 yield Select([(run, run) for run in runs], value=selected if selected in runs else Select.BLANK,
                              id="plot-run", prompt="Collect transaction data first")
@@ -104,8 +113,14 @@ def plot_screen(base, button, case):
                 yield Select([("Fresh layout for a new board", "fresh"),
                               ("Update an existing Miro board", "update")], value="fresh", allow_blank=False, id="plot-mode")
                 with Vertical(id="plot-board-field"):
-                    yield Label("Miro board to read")
+                    yield Label("Miro board to update")
                     yield Select([], id="plot-board", prompt="Choose a board matching the plotting goal")
+                with Vertical(id="plot-name-field"):
+                    yield Label("New board name")
+                    yield Input(value=metadata.get("name", "Investigation")[:60], id="plot-name")
+                yield Label("Maximum new Miro items")
+                yield Input(value=str(metadata.get("run_defaults", {}).get("max_new_items", 750)),
+                            id="plot-max-items", type="integer")
                 yield Static("Full investigation: all displayed activity. Starter connections: verified paths between "
                              "starting transactions. Paths to peg-outs: verified paths ending in matching requests.", markup=False)
                 with Vertical(id="plot-range"):
@@ -128,7 +143,8 @@ def plot_screen(base, button, case):
                 yield Static("", id="workflow-error", markup=False)
             with Horizontal(classes="buttons form-actions"):
                 yield button("Back", id="workflow-back")
-                yield button("Plot saved data", id="plot-go", variant="primary", disabled=not runs)
+                yield button("Preview only", id="plot-preview", disabled=not runs)
+                yield button("Generate and create board", id="plot-go", variant="primary", disabled=not runs)
             yield Footer()
 
         def on_mount(self):
@@ -142,8 +158,12 @@ def plot_screen(base, button, case):
             self.query_one("#plot-minimum").styles.height = "auto"
             self.query_one("#plot-endpoints").display = goal == "pegouts"
             self.query_one("#plot-endpoints").styles.height = "auto"
-            self.query_one("#plot-board-field").display = self.query_one("#plot-mode", Select).value == "update"
+            updating = self.query_one("#plot-mode", Select).value == "update"
+            self.query_one("#plot-board-field").display = updating
             self.query_one("#plot-board-field").styles.height = "auto"
+            self.query_one("#plot-name-field").display = not updating
+            self.query_one("#plot-name-field").styles.height = "auto"
+            self.query_one("#plot-go", button).label = "Generate and update board" if updating else "Generate and create board"
             self.query_one("#plot-board", Select).set_options([
                 (board["name"], board["id"]) for board in self.boards if board["goal"] == goal])
 
@@ -157,7 +177,7 @@ def plot_screen(base, button, case):
                 return
             if event.button.id == "workflow-back":
                 self.action_back()
-            elif event.button.id == "plot-go":
+            elif event.button.id in ("plot-go", "plot-preview"):
                 try:
                     goal = self.query_one("#plot-goal", Select).value
                     mode = self.query_one("#plot-mode", Select).value
@@ -168,7 +188,9 @@ def plot_screen(base, button, case):
                         include_unspent=goal == "pegouts" and self.query_one("#plot-include-unspent", Checkbox).value,
                         include_unspendable=goal == "pegouts" and self.query_one("#plot-include-unspendable", Checkbox).value,
                         include_context=goal == "pegouts" and self.query_one("#plot-include-context", Checkbox).value,
-                        layout_mode=mode, board_record_id=self.query_one("#plot-board", Select).value if mode == "update" else None))
+                        layout_mode=mode, board_record_id=self.query_one("#plot-board", Select).value if mode == "update" else None,
+                        publish=event.button.id == "plot-go", name=self.query_one("#plot-name", Input).value,
+                        max_items=int(self.query_one("#plot-max-items", Input).value) if event.button.id == "plot-go" else 750))
                 except ERRORS as error:
                     self.query_one("#workflow-error", Static).update(str(error))
 
@@ -189,9 +211,9 @@ def boards_screen(base, button, case):
             self.settings = read_case(case).get("run_defaults", {})
             yield Header()
             with VerticalScroll(classes="form-panel"):
-                yield Label("3. Miro boards", classes="title")
-                yield Static("Create and sync a fresh plot to a new board. For an existing board, generate an update layout "
-                             "that reads its arrangement, then sync the additions and removals. Existing positions stay in place.", markup=False)
+                yield Label("Saved boards and recovery", classes="title")
+                yield Static("Use Plot and sync to generate and publish in one action. Manage existing boards here, "
+                             "or resume a saved layout after an interruption without generating it again.", markup=False)
                 yield Label("Investigation boards")
                 yield Select([(f"{row['name']} | {GOAL_NAMES.get(row['goal'], row['goal'])} | {row['status']}", identity)
                               for identity, row in self.boards.items()], id="workflow-board", prompt="Choose a board")

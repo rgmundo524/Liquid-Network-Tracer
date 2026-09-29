@@ -656,7 +656,9 @@ class LocalServer(ThreadingHTTPServer):
                                "case_id": case_id, "live": bool(live),
                                "started_at": time.time(),
                                "cancellable": action in CANCELLABLE_ACTIONS,
-                               "message": ("Reading the Miro board before arranging new objects. Check the launching terminal if Proton Pass needs to unlock."
+                               "message": ("Generating the layout and syncing Miro. Check the launching terminal if Proton Pass needs to unlock."
+                                           if action == "plot-sync" else
+                                           "Reading the Miro board before arranging new objects. Check the launching terminal if Proton Pass needs to unlock."
                                            if live and action == "plot" else
                                            "Working. Check the launching terminal if Proton Pass needs to unlock."
                                            if live else "Plotting saved collection data…" if action == "plot"
@@ -755,6 +757,9 @@ class LocalServer(ThreadingHTTPServer):
             print("Local UI action failed: " + str(error), file=sys.stderr)
             with self.job_lock:
                 self.jobs[identity].update(status="failed", cancellable=False, message=(
+                    "Plot and sync stopped. Check the launching terminal and the saved board status. "
+                    "Resume the saved layout if publication already started."
+                    if action == "plot-sync" else
                     "Action failed. Check the launching terminal for credential, API, or saved-file errors. "
                     "Review the investigation before retrying a live action."))
         finally:
@@ -780,7 +785,7 @@ class LocalServer(ThreadingHTTPServer):
             pass
 
     def public_result(self, result, action, case, txids):
-        if action in ("plot", "board-create", "board-create-sync", "board-link", "board-sync"):
+        if action in ("plot", "plot-sync", "board-create", "board-create-sync", "board-link", "board-sync"):
             from .workflow_api import workflow_result
             return workflow_result(case, result, action)
         if action in ("pegouts", "pegouts-preview"):
@@ -956,7 +961,7 @@ class LocalServer(ThreadingHTTPServer):
         from .cli import miro_recovery_status, resolve_latest, run_path, verify_export
 
         action = body.get("action")
-        if action in ("plot", "board-create", "board-create-sync", "board-link", "board-sync"):
+        if action in ("plot", "plot-sync", "board-create", "board-create-sync", "board-link", "board-sync"):
             from .workflow_api import workflow_action
             return workflow_action(self, case, metadata, body)
         if action in ("pegouts", "pegouts-preview", "miro-pegouts"):

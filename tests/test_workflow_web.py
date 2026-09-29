@@ -137,6 +137,63 @@ class WorkflowWebTests(unittest.TestCase):
                 self.assertEqual(self.request(route + "/actions", body)[0], 400)
             start.assert_not_called()
 
+    def test_combined_plot_sync_validates_destination_before_one_live_job(self):
+        case, route, run = self.collected()
+        board = link_board(case, "full", "Existing", "EXISTING=")
+        other = link_board(case, "pegouts", "Other goal", "OTHER=")
+        body = {"action": "plot-sync", "goal": "full", "run_id": "latest", "min_hops": 0, "max_hops": 10,
+                "layout_mode": "fresh", "name": "New investigation chart"}
+        with patch.object(self.server, "start_job", return_value={"id": "combined"}) as start:
+            self.success(route + "/actions", body, 202)
+            start.assert_called_once_with(["plot-sync", "--case", str(case), "--goal", "full", "--run", run,
+                "--min-hops", "0", "--max-hops", "10", "--name", "New investigation chart", "--max-items", "750"],
+                action="plot-sync", live=True, case=case)
+            update = {key: value for key, value in body.items() if key != "name"}
+            update.update(layout_mode="update", board_record_id=board["id"])
+            start.reset_mock()
+            self.success(route + "/actions", update, 202)
+            start.assert_called_once_with(["plot-sync", "--case", str(case), "--goal", "full", "--run", run,
+                "--min-hops", "0", "--max-hops", "10", "--layout-mode", "update", "--board-record-id", board["id"],
+                "--max-items", "750"], action="plot-sync", live=True, case=case)
+            start.reset_mock()
+            for invalid in ({**body, "name": ""}, {key: value for key, value in body.items() if key != "name"},
+                    {**body, "board_record_id": board["id"]}, {**body, "max_items": 100000},
+                    {**update, "name": "Rename"}, {**update, "board_record_id": other["id"]},
+                    {**update, "board_record_id": "missing"}, {**body, "include_context": "true"}):
+                with self.subTest(payload=invalid):
+                    self.assertEqual(self.request(route + "/actions", invalid)[0], 400)
+            start.assert_not_called()
+
+    def test_combined_job_cannot_be_canceled_during_miro_writes(self):
+        case, route, run = self.collected()
+        with patch("liquid_tracer.web.threading.Thread.start"):
+            job = self.server.action(case, read_case(case), {"action": "plot-sync", "goal": "full", "run_id": run,
+                "min_hops": 0, "max_hops": 10, "layout_mode": "fresh", "name": "New board"})
+        self.server.job_thread = None
+        try:
+            self.assertTrue(job["live"])
+            self.assertFalse(job["cancellable"])
+            self.assertEqual(self.request("/api/jobs/" + job["id"] + "/cancel", {})[0], 409)
+            self.assertEqual(self.server.jobs[job["id"]]["status"], "running")
+        finally:
+            self.server.active_job = None
+
+    def test_combined_result_includes_safe_board_and_saved_plot_artifacts(self):
+        case, _, _ = self.collected()
+        plot = preview_plot(case, "full")
+        value = {**plot, "published": True, "status": "synced", "record_id": "synthetic-record", "board_id": "NEW=",
+                 "board_url": "https://untrusted.invalid", "new_shapes": 3, "private_path": "/private/secret"}
+        public = self.server.public_result(value, "plot-sync", case, None)
+        self.assertEqual(public["board_url"], "https://miro.com/app/board/NEW%3D/")
+        self.assertEqual(public["preview_id"], plot["preview_id"])
+        self.assertTrue(public["published"])
+        self.assertIn("preview_url", public["artifact"])
+        self.assertNotIn("private_path", public)
+        empty = self.server.public_result({**plot, "published": False, "status": "empty", "empty": True},
+                                         "plot-sync", case, None)
+        self.assertFalse(empty["published"])
+        self.assertNotIn("board_url", empty)
+
     def test_update_sync_allows_removal_only_plot_but_rejects_other_target_or_reorganization(self):
         case, route, _ = self.collected()
         board = link_board(case, "full", "Manual arrangement", "MANUAL=")
@@ -190,6 +247,14 @@ class WorkflowWebTests(unittest.TestCase):
                 "--preview", "synthetic-preview", "--name", "New board", "--max-items", "120"]), 0)
             self.assertEqual(synced.call_args.args, (case, "synthetic-preview", "New board"))
             self.assertEqual(synced.call_args.kwargs["max_items"], 120)
+        with contextlib.redirect_stdout(io.StringIO()), \
+                patch("liquid_tracer.investigation_boards.generate_and_sync", return_value={}) as generated:
+            self.assertEqual(main(["plot-sync", "--case", str(case), "--goal", "pegouts", "--run", "saved-run",
+                "--layout-mode", "update", "--board-record-id", "board-test", "--include-context", "--max-items", "120"]), 0)
+            self.assertEqual(generated.call_args.args, (case, "pegouts", "saved-run"))
+            self.assertEqual(generated.call_args.kwargs["board_record_id"], "board-test")
+            self.assertTrue(generated.call_args.kwargs["include_context"])
+            self.assertEqual(generated.call_args.kwargs["max_items"], 120)
 
     def test_plot_endpoint_options_are_optional_strict_booleans_and_pegout_only(self):
         case, route, run = self.collected()
