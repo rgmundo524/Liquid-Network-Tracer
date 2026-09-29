@@ -388,6 +388,9 @@ def _request_graph(graph):
     # Explicit hubs restart presentation depth. The temporary view retains
     # every object and connector; original dependency columns remain saved.
     columns = {key: node["column"] for key, node in main.items()}
+    output_alignment = original.get("layout", {}).get("output_alignment")
+    if output_alignment:
+        columns.update(output_alignment["columns"])
     children, port_map = {}, {}
     for key, node in sorted(main.items()):
         children[key] = {"id": key, "width": node["width"], "height": node["height"], "ports": [],
@@ -430,7 +433,7 @@ def _request_graph(graph):
     center_metadata = {"centerNodeOrder": centered_order} if centered_order is not None else {}
     boundary_order = ({"branchNodeOrder": [key for key in ordered_nodes if key in main]}
                       if ordered_nodes is not None else {})
-    return {"id": "liquid-layout", "layoutOptions": {
+    request = {"id": "liquid-layout", "layoutOptions": {
         "elk.algorithm": "layered", "elk.direction": "RIGHT", "elk.edgeRouting": "ORTHOGONAL",
         "elk.partitioning.activate": "true", "elk.spacing.nodeNode": "80", "elk.spacing.componentComponent": "120",
         "elk.layered.spacing.nodeNodeBetweenLayers": str(HORIZONTAL_NODE_GAP), "elk.spacing.edgeNode": "35",
@@ -447,10 +450,14 @@ def _request_graph(graph):
         **boundary_order,
         **center_metadata,
         "inputPortOrders": {key: [port_map[edge_id][1] for edge_id in order]
-                            for key, order in input_orders(original).items()}}, port_map, fee_ids
+                            for key, order in input_orders(original).items()}}
+    if output_alignment:
+        from .output_alignment import constrain_request
+        constrain_request(request, output_alignment)
+    return request, port_map, fee_ids
 
 
-def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
+def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style, *, validation_graph=None):
     input_policy = candidate.get("inputOrderPolicy", "traced_first")
     if input_policy not in ("traced_first", "geometry"):
         raise TraceError("ELK returned an invalid input ordering policy")
@@ -567,7 +574,10 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
     exceptions = sum(edge["connector_shape"] != connector_style for edge in edges)
     # Preserve every dependency except a verified vin routed through a selected
     # hub. That exact relation returns to the hub before starting its new tree.
-    hub_layout = hub_plan(graph)
+    # A retained hub is absent from a board update's addition-only graph.
+    # Recompute its exact vin reset proof from the full source graph instead
+    # of accepting serialized exemptions or rejecting its new aligned spenders.
+    hub_layout = hub_plan(validation_graph if validation_graph is not None else graph)
     columns = hub_layout["columns"]
     for node in nodes.values():
         if node["kind"] != "transaction":
@@ -580,7 +590,7 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
                     and parent["x"] >= node["x"]):
                 raise TraceError("ELK could not preserve transaction order; no Miro changes were made")
     for hub, children in hub_layout["roots"].items():
-        if any(nodes[hub]["x"] >= nodes[child]["x"] for child in children):
+        if hub in nodes and any(nodes[hub]["x"] >= nodes[child]["x"] for child in children if child in nodes):
             raise TraceError("ELK could not preserve separate hub tree order; no Miro changes were made")
     main = [nodes[key] for key in main_ids]
     shift = -260 if fees else 0
@@ -606,6 +616,10 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style):
     if input_fallback is not None:
         result["layout"]["input_order"]["fallback_reason"] = input_fallback
     result.setdefault("graph_options", {})["connector_style"] = connector_style
+    if graph.get("layout", {}).get("output_alignment"):
+        result["layout"]["output_alignment"] = copy.deepcopy(graph["layout"]["output_alignment"])
+        from .output_alignment import validate_alignment
+        validate_alignment(result)
     result["connector_attachment"] = "transaction_ports_v2"
     result["presentation_version"] = max(6, graph.get("presentation_version", 0))
     return result
@@ -743,7 +757,7 @@ def _validate_rejected_pairs(candidates):
             raise TraceError("ELK returned an unpaired rejected input ordering alternative")
 
 
-def optimize_graph(graph, connector_style="straight", progress=None, *, layout_attempts=None):
+def optimize_graph(graph, connector_style="straight", progress=None, *, layout_attempts=None, validation_graph=None):
     """Compare bounded parallel ELK attempts without graph size or time ceilings.
 
     A bounded candidate batch and the best result are retained. Possible memory
@@ -793,7 +807,8 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
             _report_progress(report, "Validating ELK coordinates and routes", stage="applying")
             try:
                 compact_candidate(candidate)
-                result = _apply_candidate(graph, candidate, ports, fee_ids, connector_style)
+                result = _apply_candidate(graph, candidate, ports, fee_ids, connector_style,
+                                          validation_graph=validation_graph)
                 from .change_layout import apply_change_layout
                 apply_change_layout(result)
                 align_near_horizontal_endpoints(result)
@@ -896,6 +911,8 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
     from .context_clearance import repair_context_clearance
     _report_progress(report, "Clearing connector space around context inputs", stage="applying")
     repair_context_clearance(result)
+    from .output_alignment import validate_alignment
+    validate_alignment(result)
     result["layout"]["branch_organization"]["boundaries"] = boundary_metrics(result)
     result["layout"]["branch_organization"]["neighborhoods"] = neighborhood_metrics(result)
     if graph.get("graph_options", {}).get("center_name"):

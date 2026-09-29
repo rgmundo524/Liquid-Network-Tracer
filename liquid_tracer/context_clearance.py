@@ -29,6 +29,7 @@ def context_candidates(graph):
         adjacent[edge["source"]].append(edge)
         adjacent[edge["target"]].append(edge)
     locked = set(graph.get("layout", {}).get("change_outputs", {}).get("locked_nodes", []))
+    locked.update(graph.get("layout", {}).get("output_alignment", {}).get("outputs", []))
     locked.update(group_structure(graph)["core"])
     locked.update(graph.get("fee_items", {}))
     eligible = {}

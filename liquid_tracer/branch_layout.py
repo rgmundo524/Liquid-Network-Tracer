@@ -99,6 +99,7 @@ def compact_context_inputs(graph):
     fee_ids = {key for key, item in graph.get("fee_items", {}).items()
                if item.get("endpoint") == "shapes"}
     locked = set(graph.get("layout", {}).get("change_outputs", {}).get("locked_nodes", []))
+    locked.update(graph.get("layout", {}).get("output_alignment", {}).get("outputs", []))
     from .named_group_layout import group_structure
     locked.update(group_structure(graph)["core"])
     eligible = set()
