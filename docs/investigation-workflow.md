@@ -173,6 +173,14 @@ compatible layout picker and sync controls.
    a separate board, even if its name matches.
 4. A provided board can first be linked here, then selected as an update target.
 
+New outputs from the same forward transaction stage share a vertical column in
+the staged update area. This includes new outputs whose transaction is already
+on the board. Successive stages advance left to right, with space reserved for
+connector captions. Dependency order takes precedence over collection hop
+numbers when starting transactions overlap. An address reused across several
+stages remains one object at its join, and separate branch hubs and fee rows
+keep their special placement. Existing board positions remain unchanged.
+
 Changing one board's layout selection does not change another board's selection,
 including boards with the same goal. Draft choices survive tab navigation;
 reopening the application restores each board's saved plot binding. Interrupted

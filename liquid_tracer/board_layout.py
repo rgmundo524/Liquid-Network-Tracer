@@ -262,7 +262,12 @@ def prepare_graph(graph, snapshot, *, connector_style="straight", progress=None,
         if "fee_items" in addition:
             addition["fee_items"] = {key: value for key, value in addition["fee_items"].items() if key in included}
         addition.pop("activity_frames", None)
-        addition = optimize_graph(addition, connector_style=connector_style, progress=progress, layout_attempts=layout_attempts)
+        from .output_alignment import update_columns
+        alignment = update_columns(graph, new_ids)
+        if alignment:
+            addition.setdefault("layout", {})["output_alignment"] = alignment
+        addition = optimize_graph(addition, connector_style=connector_style, progress=progress,
+                                  layout_attempts=layout_attempts, validation_graph=graph)
         new_nodes = {node["id"]: node for node in addition["nodes"]}
         left = min(node["x"] - node["width"] / 2 for node in new_nodes.values())
         top = min(node["y"] - node["height"] / 2 for node in new_nodes.values())

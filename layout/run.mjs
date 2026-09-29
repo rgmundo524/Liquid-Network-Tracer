@@ -86,12 +86,18 @@ function validateInputOrder(graph, orders) {
   return preserved;
 }
 
-function layoutCandidate(result, seed, branchProfile, inputOrderPolicy, branchBoundary) {
+function layoutCandidate(result, seed, branchProfile, inputOrderPolicy, branchBoundary, spacers = new Set()) {
+  if (spacers.size) {
+    const returnedSpacers = result.children.filter(node => spacers.has(node.id));
+    if (returnedSpacers.length !== spacers.size || new Set(returnedSpacers.map(node => node.id)).size !== spacers.size) {
+      throw new Error('Invalid output alignment spacer result');
+    }
+  }
   // Snapshot data-only geometry before a second layout can mutate its request.
   // Sections contain nested points, so copying only their array is insufficient.
   return {
     seed, branchProfile, inputOrderPolicy, branchBoundary,
-    nodes: result.children.map(({id, x, y, width, height, ports}) =>
+    nodes: (spacers.size ? result.children.filter(node => !spacers.has(node.id)) : result.children).map(({id, x, y, width, height, ports}) =>
       ({id, x, y, width, height, ports: (ports || []).map(({id, x, y}) => ({id, x, y}))})),
     edges: result.edges.map(({id, sections, labels}) => ({id, sections: structuredClone(sections),
       labels: (labels || []).map(({id, x, y, width, height}) => ({id, x, y, width, height}))})),
@@ -186,6 +192,34 @@ try {
       || request.seeds.some(seed => !Number.isInteger(seed) || seed <= 0 || seed > 2147483647)) {
     throw new Error('Invalid layout request');
   }
+  const spacerIds = request.graph.outputAlignmentSpacers ?? [];
+  const alignmentPositions = request.graph.outputAlignmentPositions;
+  delete request.graph.outputAlignmentSpacers;
+  delete request.graph.outputAlignmentPositions;
+  if (!Array.isArray(spacerIds)) throw new Error('Invalid output alignment spacers');
+  const spacers = new Set(spacerIds);
+  const requestNodes = new Map(spacers.size ? request.graph.children.map(node => [node.id, node]) : []);
+  if (spacers.size !== spacerIds.length || spacerIds.some(id => {
+        const node = requestNodes.get(id);
+        return typeof id !== 'string' || !node || node.width !== 1 || node.height !== 1 || node.ports?.length !== 0;
+      })
+      || request.graph.edges.some(edge => [...edge.sources, ...edge.targets].some(id => spacers.has(id)))) {
+    throw new Error('Invalid output alignment spacers');
+  }
+  requestNodes.clear();
+  if (spacers.size && alignmentPositions === undefined
+      || alignmentPositions !== undefined && (!alignmentPositions || typeof alignmentPositions !== 'object'
+      || Array.isArray(alignmentPositions) || Object.keys(alignmentPositions).length !== request.graph.children.length
+      || request.graph.children.some(node => !Number.isFinite(alignmentPositions[node.id])))) {
+    throw new Error('Invalid output alignment positions');
+  }
+  function seedOutputColumns(graph) {
+    if (alignmentPositions) {
+      // The fixed-port rerun must use the same column seeds. Native caption
+      // margins in a previous result are not a new layering instruction.
+      for (const node of graph.children) node.x = alignmentPositions[node.id];
+    }
+  }
   const requestedProfile = request.graph.branchProfile;
   if (requestedProfile !== undefined && !['balanced', 'flow_weighted'].includes(requestedProfile)) {
     throw new Error('Invalid branch placement profile');
@@ -274,10 +308,11 @@ try {
         graph.layoutOptions['elk.spacing.edgeNode'] = String(Math.max(edgeSpacing, nodeSpacing / 2));
       }
     }
+    seedOutputColumns(graph);
     let result = await elk.layout(graph);
     graph = null;
     diagnostic.stage = 'order_constraints';
-    const firstCandidate = layoutCandidate(result, seed, branchProfile, 'geometry', boundaryOrdering);
+    const firstCandidate = layoutCandidate(result, seed, branchProfile, 'geometry', boundaryOrdering, spacers);
     const constraints = constrainInputOrder(result, orders);
     if (constraints) {
       // Compare ELK's crossing-aware port order with the historical traced-first
@@ -286,10 +321,11 @@ try {
       // Reuse the first result as the second request rather than cloning a
       // large graph. Fixed indices override the first pass's port positions.
       Object.assign(diagnostic, {input_order_policy: 'traced_first', stage: 'traced_first_layout'});
+      seedOutputColumns(result);
       result = await elk.layout(result);
       diagnostic.stage = 'validate_input_order';
       const ordered = validateInputOrder(result, constraints);
-      const secondCandidate = layoutCandidate(result, seed, branchProfile, 'traced_first', boundaryOrdering);
+      const secondCandidate = layoutCandidate(result, seed, branchProfile, 'traced_first', boundaryOrdering, spacers);
       if (!ordered) {
         // The first snapshot retains ELK's crossing-aware geometry and will
         // still undergo the Python adapter's complete layout validation.
