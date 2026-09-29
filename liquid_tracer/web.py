@@ -1254,6 +1254,14 @@ class LocalServer(ThreadingHTTPServer):
 class Handler(BaseHTTPRequestHandler):
     server_version = "LiquidLocal"
 
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError):
+            # A tab can close while reading a request or sending an error reply.
+            # Its connection is gone; background jobs have their own lifetime.
+            self.close_connection = True
+
     def log_message(self, format, *args):
         # Do not log case identifiers, transaction hashes, or request bodies.
         pass
@@ -1343,6 +1351,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(status, result)
             else:
                 self.get(parts)
+        except (BrokenPipeError, ConnectionResetError):
+            # Do not log a browser disconnect as an action failure or attempt
+            # another response on the same closed connection.
+            self.close_connection = True
         except RequestError as error:
             self.send(error.status, {"error": error.message})
         except (TraceError, OSError, ValueError, KeyError, TypeError) as error:

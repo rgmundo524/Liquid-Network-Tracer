@@ -198,6 +198,10 @@ saved value in Miro, then generate the board update again to capture that change
 Long values use labeled excerpts around the difference; use them to locate the
 change, not to replace an object's complete text.
 If the edit matters, preserve it before replacing the generated object.
+Miro may omit empty captions and their unused font size from connector responses.
+Those omissions do not count as edits when the saved connector also has no
+caption. Added or removed nonempty captions and explicit style changes are still
+protected. Previously saved layouts can be resumed with this comparison fix.
 
 Original full-trace boards from before the board registry can still receive
 additions and content updates. If a revised layout would remove their older

@@ -365,8 +365,9 @@ def _recover_updates(state, remote):
         if key not in remote:
             continue
         record = state["items"][key]
-        actual = _editable(remote[key], record["endpoint"])
-        for path, desired in _fields(_editable(entry["patch"], record["endpoint"])):
+        desired_fields = _editable(entry["patch"], record["endpoint"])
+        actual = _comparison_editable(remote[key], record["endpoint"], desired_fields)
+        for path, desired in _fields(desired_fields):
             current = _get(actual, path)
             if _same(current, desired, path):
                 _set(record["managed"], path, current)
@@ -394,6 +395,30 @@ def _editable(body, endpoint):
         result["captions"] = [{k: copy.deepcopy(c[k]) for k in ("content", "position") if k in c}
                               for c in body["captions"]]
     return result
+
+
+def _comparison_editable(body, endpoint, saved):
+    """Compare full reads without mistaking omitted empty captions for edits.
+
+    Miro can omit both captions and their font size on an unlabelled connector.
+    Only reconcile those omissions when the saved captions are already empty.
+    A new/deleted caption, an explicit font change, or other missing style fields
+    must still be detected. Partial list bodies first receive an individual GET
+    in miro_reads; do not use this helper to relax that completeness check.
+
+    Keep _editable unchanged: it also reads PATCHes, where an absent captions
+    field means leave the caption alone, not clear it.
+    """
+    actual = _editable(body, endpoint)
+    if (endpoint == "connectors" and saved.get("captions") == []
+            and ("captions" not in body or body["captions"] == [])):
+        actual["captions"] = []
+        style = actual.get("style")
+        if isinstance(style, dict) and "fontSize" not in style:
+            saved_style = saved.get("style", {})
+            if "fontSize" in saved_style:
+                style["fontSize"] = copy.deepcopy(saved_style["fontSize"])
+    return actual
 
 
 def _check_lineage(plan, state):
@@ -462,7 +487,7 @@ def _baseline(intent, remote, endpoint):
 
 def _merge_fields(record, body, remote, key):
     desired = _editable(body, record["endpoint"])
-    actual = _editable(remote, record["endpoint"])
+    actual = _comparison_editable(remote, record["endpoint"], record["managed"])
     managed = copy.deepcopy(record["managed"])
     intent = copy.deepcopy(record["intent"])
     patch, conflicts = {}, []
@@ -478,6 +503,14 @@ def _merge_fields(record, body, remote, key):
         else:
             conflicts.append({"key": key, "item_id": record["id"], "field": ".".join(path),
                               "reason": "Remote field differs from last managed value; manual edit preserved"})
+    # A newly added caption needs its generated font even if Miro discarded the
+    # unused font while the connector was unlabelled.
+    if (record["endpoint"] == "connectors" and patch.get("captions")
+            and record["managed"].get("captions") == []
+            and "fontSize" in record["managed"].get("style", {})
+            and isinstance(remote.get("style"), dict) and "fontSize" not in remote["style"]
+            and "fontSize" in desired.get("style", {})):
+        _set(patch, ("style", "fontSize"), desired["style"]["fontSize"])
     return patch, managed, intent, conflicts
 
 
@@ -652,7 +685,7 @@ def _check_fee_removals(state, remote, removals):
         record = state["items"][key]
         if key not in remote:  # An attempted DELETE or an already absent retired run summary.
             continue
-        actual = _editable(remote[key], record["endpoint"])
+        actual = _comparison_editable(remote[key], record["endpoint"], record["managed"])
         for path, previous in _fields(record["managed"]):
             if not _same(_get(actual, path), previous, path):
                 raise TraceError("Generated item " + key + " has manual edits. Preserve those notes and restore the generated content before removing this fee or annotation. No board writes made.")
