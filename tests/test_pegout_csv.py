@@ -53,6 +53,49 @@ class PegoutCSVTests(unittest.TestCase):
         self.assertEqual((row["Deposit/Peg-out Tx"], row["Outpoint"]), (tx("b"), pegout))
         self.assertEqual((row["Status"], row["Pegout LBTC"]), ("Pegout", "1.25"))
         self.assertEqual(row["Source Seed Outpoints"], tx("a") + ":0")
+        self.assertEqual(row["Hops from Seed"], 1)
+        self.assertEqual(json.loads(row["Source Seed Hops"]), {tx("a") + ":0": 1})
+
+    def test_seed_endpoint_is_zero_hops(self):
+        for kind in ("pegout", "unspent", "unspendable"):
+            with self.subTest(kind=kind):
+                state = graph_state(seeds=("a:0",))
+                key = (add_pegout(state, tx("a")) if kind == "pegout" else
+                       add_unspendable(state, tx("a")) if kind == "unspendable" else tx("a") + ":0")
+                if kind == "unspent":
+                    mark_unspent(state, key)
+                state["seeds"] = [key]
+                row, = endpoint_table_rows(graph(state, include_unspent=True, include_unspendable=True), state)
+                self.assertEqual(row["Hops from Seed"], 0)
+                self.assertEqual(json.loads(row["Source Seed Hops"]), {key: 0})
+
+    def test_named_hop_reset_keeps_actual_seed_distances_for_each_source(self):
+        state = named_state((("a:0", "d"), ("b:0", "c"), ("c:0", "d"), ("d:0", "e")),
+                            group=("a", "b", "c", "d"), seeds=("a:0", "b:0"))
+        add_pegout(state, tx("e"))
+        state["transactions"][tx("e")]["depth"] = 99  # Cached archive depths are not this query's distances.
+        row, = endpoint_table_rows(graph(state, 1, 1), state)
+        self.assertEqual((row["Hop Counts"], row["Hop Reference"]), ("1", "Perp"))
+        self.assertEqual(row["Hops from Seed"], 2)
+        self.assertEqual(json.loads(row["Source Seed Hops"]), {tx("a") + ":0": 2, tx("b") + ":0": 3})
+
+    def test_converging_named_paths_use_the_shortest_qualifying_seed_distance(self):
+        state = named_state((("a:0", "b"), ("b:0", "d"), ("b:1", "c"), ("c:0", "d"), ("d:0", "e")),
+                            group=("a", "b", "c", "d"))
+        add_pegout(state, tx("e"))
+        row, = endpoint_table_rows(graph(state, 1, 1), state)
+        self.assertEqual(row["Hop Counts"], "1")
+        self.assertEqual(row["Hops from Seed"], 3)
+        self.assertEqual(json.loads(row["Source Seed Hops"]), {tx("a") + ":0": 3})
+
+    def test_seed_distance_excludes_a_shorter_route_outside_the_named_hop_range(self):
+        state = named_state((("a:0", "b"), ("b:0", "d"), ("b:1", "c"),
+                             ("c:0", "e"), ("e:0", "d"), ("d:0", "f")), group=("a", "b"))
+        add_pegout(state, tx("f"))
+        row, = endpoint_table_rows(graph(state, 4, 4), state)
+        self.assertEqual(row["Hop Counts"], "4")
+        self.assertEqual(row["Hops from Seed"], 5)
+        self.assertEqual(json.loads(row["Source Seed Hops"]), {tx("a") + ":0": 5})
 
     def test_endpoint_table_multiple_sources_preserves_each_value_without_aggregation(self):
         state = graph_state((("a:0", "b"), ("a:1", "b"), ("c:0", "b")),
@@ -89,6 +132,7 @@ class PegoutCSVTests(unittest.TestCase):
         self.assertEqual({row["Status"] for row in rows}, {"Dormant", "OP_Return", "Pegout"})
         for row in rows:
             self.assertEqual(row["Pegout LBTC"], row["Value LBTC"] if row["Status"] == "Pegout" else "")
+            self.assertEqual(row["Hops from Seed"], 1)
         self.assertEqual(next(row["Value LBTC"] for row in rows if row["Status"] == "Dormant"), "0.2")
         self.assertFalse(any(row["Status"] == "Deposit" for row in rows))
 
@@ -160,6 +204,8 @@ class PegoutCSVTests(unittest.TestCase):
         rows, endpoints = pegout_csv_rows(graph(state, 3, 3), state)
         self.assertEqual({row["Transaction Hash"] for row in rows}, {tx(name) for name in "bcde"})
         self.assertEqual(source_paths(endpoints[0]), {tx("b") + ":0": [3]})
+        self.assertEqual(endpoints[0]["Hops from Seed"], 3)
+        self.assertEqual(json.loads(endpoints[0]["Source Seed Hops"]), {tx("b") + ":0": 3})
         self.assertTrue(all(row["Source Seed Outpoints"] == tx("b") + ":0" for row in rows))
 
     def test_reused_address_outputs_remain_distinct_dormant_rows_and_do_not_supply_provenance(self):
@@ -228,6 +274,8 @@ class PegoutCSVTests(unittest.TestCase):
         self.assertEqual([row["Outpoint"] for row in endpoints], [endpoint])
         self.assertEqual(source_paths(endpoints[0]), {tx("b") + ":0": [2]})
         self.assertEqual((endpoints[0]["Hop Reference"], endpoints[0]["Seed Depth"]), ("Perp", 3))
+        self.assertEqual(endpoints[0]["Hops from Seed"], 3)
+        self.assertEqual(json.loads(endpoints[0]["Source Seed Hops"]), {tx("b") + ":0": 3})
         self.assertEqual({row["Transaction Hash"] for row in rows}, {tx(name) for name in "bcde"})
         self.assertEqual(next(row["Hop Counts"] for row in rows if row["Transaction Hash"] == tx("c")), "0")
 
