@@ -17,7 +17,7 @@ from unittest.mock import patch
 from liquid_tracer.common import TraceError, read_json, save_json
 from liquid_tracer.investigations import (DEFAULTS, create_investigation, list_investigations,
                                          load_settings, read_case, save_settings, update_case)
-from liquid_tracer.menu import (_OfflineCalculation, _command, _lookup_reports, _seed_values,
+from liquid_tracer.menu import (SECRET_ACCESS_REASON, _OfflineCalculation, _command, _lookup_reports, _seed_values,
                                 _trace_arguments, create_app, run_menu)
 
 
@@ -80,9 +80,32 @@ finally:
                         "LIQUID_SECRET_PROVIDER": "protonpass", "LIQUID_SECRET_PROFILE": "development"}, clear=True):
             command = _command(arguments, live=True)
             self.assertEqual(command, ["secretspec", "--file", str(PROJECT / "secretspec.toml"), "run",
-                             "--provider", "protonpass", "--profile", "development", "--",
+                             "--provider", "protonpass", "--profile", "development",
+                             "--reason", SECRET_ACCESS_REASON, "--",
                              sys.executable, "-m", "liquid_tracer", *arguments])
             self.assertEqual(_command(arguments), [sys.executable, "-m", "liquid_tracer", *arguments])
+
+    def test_live_command_preserves_nonblank_reason_override_and_falls_back_for_blank(self):
+        arguments = ["credentials-check"]
+        for configured, expected in (("Check the selected account.", "Check the selected account."),
+                                     ("  Check the selected account.  ", "Check the selected account."),
+                                     ("", SECRET_ACCESS_REASON), (" \t\n", SECRET_ACCESS_REASON)):
+            with self.subTest(reason=configured), patch.dict(os.environ, {"SECRETSPEC_REASON": configured}, clear=True):
+                command = _command(arguments, live=True)
+                self.assertEqual(command[command.index("--reason") + 1], expected)
+                self.assertLess(command.index("--reason"), command.index("--"))
+                self.assertEqual(_command(arguments), [sys.executable, "-m", "liquid_tracer", *arguments])
+
+    def test_default_reason_excludes_investigation_paths_and_transaction_hashes(self):
+        case = "/investigations/private case name"
+        txid = "abcdef0123456789" * 4
+        arguments = ["trace", "--case", case, "--seeds", txid + ":0"]
+        with patch.dict(os.environ, {}, clear=True):
+            command = _command(arguments, live=True)
+        reason = command[command.index("--reason") + 1]
+        self.assertEqual(reason, "Authenticate the user-selected Liquid Tracer action with Blockstream or Miro.")
+        self.assertNotIn(case, reason)
+        self.assertNotIn(txid, reason)
 
     def test_live_command_uses_pinned_executable_over_host_path(self):
         arguments = ["credentials-check"]
@@ -153,6 +176,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.temp.name) / "investigations with spaces"
         self.environment = patch.dict(os.environ, {"LIQUID_TRACER_ROOT": str(PROJECT),
             "LIQUID_SECRET_PROVIDER": "protonpass", "LIQUID_SECRET_PROFILE": "development",
+            "SECRETSPEC_REASON": "",
             "LIQUID_SECRETSPEC_BIN": "/nix/store/test-secretspec/bin/secretspec",
             "LIQUID_CASE_DIR": "/unrelated/environment/case", "LIQUID_MIRO_BOARD": "UNRELATED="})
         self.environment.start()
@@ -291,10 +315,10 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         ]}
 
         def local_report(command, **kwargs):
-            self.assertEqual(command[:9], ["/nix/store/test-secretspec/bin/secretspec", "--file",
+            self.assertEqual(command[:11], ["/nix/store/test-secretspec/bin/secretspec", "--file",
                              str(PROJECT / "secretspec.toml"), "run", "--provider", "protonpass",
-                             "--profile", "development", "--"])
-            self.assertEqual(command[9:15], [sys.executable, "-m", "liquid_tracer", "inspect-tx", "--txid", txid])
+                             "--profile", "development", "--reason", SECRET_ACCESS_REASON, "--"])
+            self.assertEqual(command[11:17], [sys.executable, "-m", "liquid_tracer", "inspect-tx", "--txid", txid])
             self.assertNotIn("--fixture", command)
             self.assertNotIn("capture_output", kwargs)
             self.assertNotIn("stdout", kwargs)
@@ -346,10 +370,10 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         report_paths = []
 
         def local_report(command, **kwargs):
-            self.assertEqual(command[:9], ["/nix/store/test-secretspec/bin/secretspec", "--file",
+            self.assertEqual(command[:11], ["/nix/store/test-secretspec/bin/secretspec", "--file",
                 str(PROJECT / "secretspec.toml"), "run", "--provider", "protonpass",
-                "--profile", "development", "--"])
-            self.assertEqual(command[9:15], [sys.executable, "-m", "liquid_tracer", "inspect-txs",
+                "--profile", "development", "--reason", SECRET_ACCESS_REASON, "--"])
+            self.assertEqual(command[11:17], [sys.executable, "-m", "liquid_tracer", "inspect-txs",
                                            "--txids", ",".join(txids)])
             self.assertNotIn("capture_output", kwargs)
             self.assertNotIn("stdout", kwargs)
@@ -1114,7 +1138,8 @@ finally:
                 process.assert_called_once()
                 suspend.assert_called_once()
                 self.assertEqual(process.call_args.args[0], ["/nix/store/test-secretspec/bin/secretspec", "--file",
-                    str(PROJECT / "secretspec.toml"), "run", "--provider", "protonpass", "--profile", "development", "--",
+                    str(PROJECT / "secretspec.toml"), "run", "--provider", "protonpass", "--profile", "development",
+                    "--reason", SECRET_ACCESS_REASON, "--",
                     sys.executable, "-m", "liquid_tracer", "miro-sync", "--case", str(case), "--run", "latest",
                     "--board", "DEMO=", "--max-new-items", "750", "--reorganize"])
                 for field in ("capture_output", "stdout", "stderr"):
@@ -1209,7 +1234,7 @@ finally:
         def save_created_board(command, **kwargs):
             self.assertEqual(command, ["/nix/store/test-secretspec/bin/secretspec", "--file",
                 str(PROJECT / "secretspec.toml"), "run", "--provider", "protonpass",
-                "--profile", "development", "--", sys.executable, "-m", "liquid_tracer",
+                "--profile", "development", "--reason", SECRET_ACCESS_REASON, "--", sys.executable, "-m", "liquid_tracer",
                 "miro-create-board", "--case", str(case), "--name", selected_name,
                 "--visibility", "team", "--team-id", "SYNTHETIC-TEAM"])
             self.assertNotIn("capture_output", kwargs)
@@ -1284,7 +1309,7 @@ finally:
                 suspend.assert_called_once()
                 command = process.call_args.args[0]
                 self.assertEqual(command[0], "/nix/store/test-secretspec/bin/secretspec")
-                self.assertEqual(command[12:], ["miro-create-board", "--case", str(case), "--name",
+                self.assertEqual(command[14:], ["miro-create-board", "--case", str(case), "--name",
                                                "Synthetic rejected board", "--visibility", "private"])
                 self.assertNotIn("capture_output", process.call_args.kwargs)
                 self.assertFalse(app.busy)

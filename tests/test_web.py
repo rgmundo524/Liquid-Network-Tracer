@@ -17,6 +17,7 @@ from unittest.mock import patch
 from liquid_tracer.cli import verify_export
 from liquid_tracer.common import read_json, save_json
 from liquid_tracer.investigations import create_investigation, update_case
+from liquid_tracer.menu import SECRET_ACCESS_REASON
 from liquid_tracer.web import LocalServer, worker_command
 
 
@@ -421,14 +422,16 @@ class LocalWebTests(unittest.TestCase):
             self.assertEqual(start.call_args.args[0], ["inspect-txs", "--txids", txid])
             self.assertNotIn("SYNTHETIC-NEVER-EXPOSE", json.dumps(self.success("/api/session")))
         with patch.dict(os.environ, {"LIQUID_SECRETSPEC_BIN": "/synthetic/secretspec", "LIQUID_SECRET_PROFILE": "development",
-                                    "LIQUID_SECRET_PROVIDER": "protonpass"}):
+                                    "LIQUID_SECRET_PROVIDER": "protonpass", "SECRETSPEC_REASON": ""}):
             command = worker_command(Path("request.json"), Path("result.json"), live=True)
             self.assertEqual(command[0], "/synthetic/secretspec")
             self.assertIn("protonpass", command)
             self.assertIn("development", command)
+            self.assertEqual(command[command.index("--reason") + 1], SECRET_ACCESS_REASON)
+            self.assertLess(command.index("--reason"), command.index("--"))
             self.assertEqual(command[-4:], ["-m", "liquid_tracer.web_worker", "request.json", "result.json"])
         offline = worker_command(Path("request.json"), Path("result.json"), live=False)
-        self.assertNotIn("secretspec", offline)
+        self.assertEqual(offline, [sys.executable, "-m", "liquid_tracer.web_worker", "request.json", "result.json"])
 
     def test_miro_preview_remains_offline_and_uses_selected_run(self):
         _, case = self.create()

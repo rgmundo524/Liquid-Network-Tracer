@@ -92,8 +92,14 @@
   scripts.liquid-live = {
     description = "Load API credentials at runtime, then run liquid-trace";
     exec = ''
+      secret_access_reason="''${SECRETSPEC_REASON:-}"
+      case "$secret_access_reason" in
+        *[![:space:]]*) ;;
+        *) secret_access_reason="Authenticate the user-selected Liquid Tracer action with Blockstream or Miro." ;;
+      esac
       exec "$LIQUID_SECRETSPEC_BIN" --file "$LIQUID_TRACER_ROOT/secretspec.toml" run \
         --provider "$LIQUID_SECRET_PROVIDER" --profile "$LIQUID_SECRET_PROFILE" \
+        --reason "$secret_access_reason" \
         -- liquid-trace "$@"
     '';
   };
@@ -121,10 +127,16 @@
           exit 2
           ;;
       esac
+      secret_access_reason="''${SECRETSPEC_REASON:-}"
+      case "$secret_access_reason" in
+        *[![:space:]]*) ;;
+        *) secret_access_reason="Store API credentials for Liquid Tracer's Blockstream and Miro operations." ;;
+      esac
       printf 'Provider: %s; profile: %s\n' "$LIQUID_SECRET_PROVIDER" "$LIQUID_SECRET_PROFILE"
       for credential_name in "''${credential_names[@]}"; do
         "$LIQUID_SECRETSPEC_BIN" --file "$LIQUID_TRACER_ROOT/secretspec.toml" set "$credential_name" \
-          --provider "$LIQUID_SECRET_PROVIDER" --profile "$LIQUID_SECRET_PROFILE"
+          --provider "$LIQUID_SECRET_PROVIDER" --profile "$LIQUID_SECRET_PROFILE" \
+          --reason "$secret_access_reason"
       done
       printf '%s\n' 'Credentials saved. Use liquid-live for authenticated commands.'
     '';
