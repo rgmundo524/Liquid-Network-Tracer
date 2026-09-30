@@ -53,6 +53,7 @@ LAYOUT_ALGORITHMS = ("elk_layered_v1", "dependency_layers_v1")
 FALLBACK_REASONS = ("size_limit", "timeout", "mermaid_size_limit", "mermaid_timeout")
 from .connections import FILES as CONNECTION_NAMES, LEGACY_FILES as LEGACY_CONNECTION_NAMES, preview_files
 CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact", "connections", "pegouts", "pegouts-preview", "plot"}
+ACTIVE_JOB_STATUSES = {"running", "cancelling"}
 MAX_FAILURE_RESULT_BYTES = 256 * 1024
 
 
@@ -382,12 +383,13 @@ def handoff_terminal(process, live):
     return fd, previous
 
 
-def restore_terminal(terminal):
+def restore_terminal(terminal, *, strict=False):
     if terminal is not None:
         try:
             os.tcsetpgrp(*terminal)
         except OSError:
-            pass
+            if strict:
+                raise
 
 
 class LocalServer(ThreadingHTTPServer):
@@ -401,8 +403,14 @@ class LocalServer(ThreadingHTTPServer):
         self.jobs = {}
         self.active_job = None
         self.job_lock = threading.RLock()
-        self.process = None
+        self.processes = {}
+        self.job_threads = {}
+        # Only credential entry owns the shared terminal. Once web_worker has
+        # its credentials it detaches stdin and runs independently of this gate.
+        self.credential_lock = threading.Lock()
         self.closing = False
+        # Retain the latest thread for callers that joined a single action;
+        # lifecycle and shutdown always use job_threads instead.
         self.job_thread = None
         super().__init__(("127.0.0.1", port), Handler)
         self.origin = "http://127.0.0.1:" + str(self.server_port)
@@ -674,18 +682,45 @@ class LocalServer(ThreadingHTTPServer):
                 cases.append(self.case_summary(case, read_case(case)))
             except (TraceError, OSError, ValueError, RequestError):
                 continue
+        with self.job_lock:
+            active = [dict(job) for job in self.jobs.values()
+                      if job["status"] in ACTIVE_JOB_STATUSES]
         return {"csrf": self.csrf, "settings": load_settings(self.root),
-                "cases": cases, "active_job": self.active_job}
+                "cases": cases, "active_job": active[0]["id"] if active else None,
+                "active_jobs": active}
 
-    def ensure_idle(self):
-        if self.active_job:
-            raise RequestError("An action is already running. Wait for it to finish.", 409)
+    def ensure_open(self):
         if self.closing:
             raise RequestError("The local server is shutting down.", 503)
 
+    def ensure_case_idle(self, case_id):
+        """Admission is serialized with both quick mutations and job creation."""
+        self.ensure_open()
+        if case_id is not None:
+            for job in self.jobs.values():
+                if job.get("case_id") == case_id and job["status"] in ACTIVE_JOB_STATUSES:
+                    raise RequestError("This investigation already has an active action (" + job["action"]
+                                       + "). Wait for it to finish before changing it. "
+                                       "Other investigations remain available.", 409)
+
+    def trim_jobs(self):
+        # An unusually busy server may have more than 128 active jobs. Never
+        # discard their cancellation controls or their eventual results.
+        completed = sorted(
+            (identity for identity, job in self.jobs.items()
+             if job["status"] not in ACTIVE_JOB_STATUSES),
+            key=lambda identity: self.jobs[identity].get("finished_at", self.jobs[identity].get("started_at", 0)))
+        for identity in completed[:-128]:
+            del self.jobs[identity]
+
     def start_job(self, arguments, *, action, live=False, case=None, txids=None):
-        self.ensure_idle()
         case_id = read_case(case)["case_id"] if case is not None else None
+        with self.job_lock:
+            return self._start_job(arguments, action=action, live=live, case=case,
+                                   case_id=case_id, txids=txids)
+
+    def _start_job(self, arguments, *, action, live, case, case_id, txids):
+        self.ensure_case_idle(case_id)
         identity = secrets.token_hex(16)
         self.jobs[identity] = {"id": identity, "status": "running", "action": action,
                                "case_id": case_id, "live": bool(live),
@@ -699,14 +734,22 @@ class LocalServer(ThreadingHTTPServer):
                                            if live else "Plotting saved collection data…" if action == "plot"
                                            else "Preparing the graph and checking missing address counts…"
                                            if action in CANCELLABLE_ACTIONS else "Working with saved local evidence…")}
-        self.active_job = identity
+        if self.active_job is None:
+            self.active_job = identity
         # Keep a bounded history for tabs that remain open. Evidence persists in
         # the case, independently of this transient browser job history.
-        while len(self.jobs) > 128:
-            self.jobs.pop(next(iter(self.jobs)))
+        self.trim_jobs()
         self.job_thread = threading.Thread(target=self.run_job,
             args=(identity, arguments, action, live, case, txids), daemon=True)
-        self.job_thread.start()
+        self.job_threads[identity] = self.job_thread
+        try:
+            self.job_thread.start()
+        except Exception:
+            self.job_threads.pop(identity, None)
+            self.jobs.pop(identity, None)
+            self.active_job = next((key for key, job in self.jobs.items()
+                                    if job["status"] in ACTIVE_JOB_STATUSES), None)
+            raise
         return dict(self.jobs[identity])
 
     def cancel_job(self, identity):
@@ -714,14 +757,15 @@ class LocalServer(ThreadingHTTPServer):
         if not CASE_ID.fullmatch(identity) or identity not in self.jobs:
             raise RequestError("Job unavailable. Refresh the page to review active work.", 404)
         job = self.jobs[identity]
-        if self.active_job != identity or job["status"] not in ("running", "cancelling"):
+        if job["status"] not in ACTIVE_JOB_STATUSES:
             raise RequestError("This action has already finished. Refresh the investigation.", 409)
         if job["action"] not in CANCELLABLE_ACTIONS:
             raise RequestError("Only chart preparation and layout calculations can be canceled here.", 409)
         if job["status"] == "cancelling":
             return dict(job)
         # If completion already won, leave its result available to the browser.
-        if self.process is not None and self.process.poll() is not None:
+        process = self.processes.get(identity)
+        if process is not None and process.poll() is not None:
             job["cancellable"] = False
             return dict(job)
         job.update(status="cancelling", cancellable=False,
@@ -731,12 +775,29 @@ class LocalServer(ThreadingHTTPServer):
     def run_job(self, identity, arguments, action, live, case, txids):
         terminal = None
         process = None
+        credential_gate = False
         edit_conflicts = None
+        completion = None
         try:
             with tempfile.TemporaryDirectory(prefix="liquid-web-job-") as directory:
                 request, result = Path(directory) / "request.json", Path(directory) / "result.json"
-                request.write_text(json.dumps({"arguments": arguments}), encoding="utf-8")
+                payload = {"arguments": arguments}
+                if live:
+                    payload.update(terminal_handoff=True, server_pid=os.getpid())
+                request.write_text(json.dumps(payload), encoding="utf-8")
                 request.chmod(0o600)
+                if live:
+                    with self.job_lock:
+                        working_message = self.jobs[identity]["message"]
+                        self.jobs[identity]["message"] = "Waiting for another action to finish unlocking credentials in the launching terminal…"
+                    while not credential_gate:
+                        with self.job_lock:
+                            self.ensure_open()
+                            if self.jobs[identity]["status"] == "cancelling":
+                                raise JobCancelled
+                        credential_gate = self.credential_lock.acquire(timeout=.25)
+                    with self.job_lock:
+                        self.jobs[identity]["message"] = working_message
                 options = {"process_group": 0} if live else {"start_new_session": True}
                 # Inherit the terminal. Provider prompts and diagnostics are not
                 # captured into browser-readable job output.
@@ -747,9 +808,10 @@ class LocalServer(ThreadingHTTPServer):
                         raise JobCancelled
                     process = subprocess.Popen(worker_command(request, result, live), cwd=_project(),
                                                env=_environment(), **options)
-                    self.process = process
+                    self.processes[identity] = process
                 terminal = handoff_terminal(process, live)
                 progress_path = Path(directory) / "progress.json"
+                credentials_ready = Path(directory) / "credentials-ready"
                 while True:
                     with self.job_lock:
                         cancelling = self.jobs[identity]["status"] == "cancelling"
@@ -759,6 +821,18 @@ class LocalServer(ThreadingHTTPServer):
                         if cancelling:
                             raise JobCancelled
                         raise RuntimeError("Server is shutting down")
+                    if credential_gate and credentials_ready.is_file():
+                        # The authenticated worker has detached stdin and is
+                        # waiting. Restore the terminal before acknowledging it
+                        # or letting the next provider prompt for credentials.
+                        restore_terminal(terminal, strict=True)
+                        terminal = None
+                        acknowledgement = Path(directory) / "credentials-ack"
+                        with acknowledgement.open("x", encoding="ascii") as stream:
+                            os.chmod(acknowledgement, 0o600)
+                            stream.write("ready\n")
+                        self.credential_lock.release()
+                        credential_gate = False
                     try:
                         status = process.wait(timeout=.25)
                     except subprocess.TimeoutExpired:
@@ -768,6 +842,11 @@ class LocalServer(ThreadingHTTPServer):
                         break
                 restore_terminal(terminal)
                 terminal = None
+                # A failed provider or an injected worker without the private
+                # handshake can exit directly. It still relinquishes its gate.
+                if credential_gate:
+                    self.credential_lock.release()
+                    credential_gate = False
                 with self.job_lock:
                     if self.jobs[identity]["status"] == "cancelling":
                         raise JobCancelled
@@ -778,8 +857,7 @@ class LocalServer(ThreadingHTTPServer):
                 if report.get("ok") is not True or not isinstance(report.get("result"), dict):
                     raise RuntimeError("Invalid action result")
                 value = self.public_result(report["result"], action, case, txids)
-            with self.job_lock:
-                self.jobs[identity].update(status="succeeded", cancellable=False,
+            completion = dict(status="succeeded", cancellable=False,
                     message=(("Frame recovery complete. Choose Create / update Miro frames to resume."
                               if value.get("resume_action") == "miro-frames" else
                               "Frame recovery complete. Finish Sync to Miro, then create or update frames.") if action == "miro-frame-recover"
@@ -787,13 +865,11 @@ class LocalServer(ThreadingHTTPServer):
                              else "Recovery complete. Choose Sync to Miro to resume." if action == "miro-recover"
                              else "Action completed."), result=value)
         except JobCancelled:
-            with self.job_lock:
-                self.jobs[identity].update(status="canceled", cancellable=False,
-                    message="Calculation canceled. Saved investigation runs are unchanged.")
+            completion = dict(status="canceled", cancellable=False,
+                              message="Calculation canceled. Saved investigation runs are unchanged.")
         except Exception as error:
             print("Local UI action failed: " + str(error), file=sys.stderr)
-            with self.job_lock:
-                self.jobs[identity].update(status="failed", cancellable=False, message=(
+            completion = dict(status="failed", cancellable=False, message=(
                     "Miro sync stopped because generated objects differ from their last-synced values. "
                     "Open the linked objects and review the differences below."
                     if edit_conflicts is not None else
@@ -802,17 +878,23 @@ class LocalServer(ThreadingHTTPServer):
                     if action == "plot-sync" else
                     "Action failed. Check the launching terminal for credential, API, or saved-file errors. "
                     "Review the investigation before retrying a live action."))
-                if edit_conflicts is not None:
-                    self.jobs[identity]["edit_conflicts"] = edit_conflicts
+            if edit_conflicts is not None:
+                completion["edit_conflicts"] = edit_conflicts
         finally:
             try:
                 stop_worker(process)
             finally:
                 restore_terminal(terminal)
+                if credential_gate:
+                    self.credential_lock.release()
                 with self.job_lock:
-                    if self.active_job == identity:
-                        self.process = None
-                        self.active_job = None
+                    self.processes.pop(identity, None)
+                    self.job_threads.pop(identity, None)
+                    if completion is not None:
+                        self.jobs[identity].update(completion, finished_at=time.time())
+                    self.active_job = next((key for key, job in self.jobs.items()
+                                            if job["status"] in ACTIVE_JOB_STATUSES), None)
+                    self.trim_jobs()
 
     def read_progress(self, identity, path):
         try:
@@ -1268,10 +1350,14 @@ class LocalServer(ThreadingHTTPServer):
     def server_close(self):
         with self.job_lock:
             self.closing = True
+            threads = list(self.job_threads.values())
         # The job thread owns process termination. A second SIGTERM from this
         # thread could interrupt cleanup and orphan a renderer in its own group.
-        if self.job_thread is not None:
-            self.job_thread.join()
+        for thread in threads:
+            # A failed thread start has already removed its entry. The ident
+            # guard also accommodates callers that replace Thread.start.
+            if thread.ident is not None and thread is not threading.current_thread():
+                thread.join()
         super().server_close()
 
 
@@ -1370,7 +1456,10 @@ class Handler(BaseHTTPRequestHandler):
                     if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "cancel":
                         result, status = self.server.cancel_job(parts[2]), 202
                     else:
-                        self.server.ensure_idle()
+                        self.server.ensure_open()
+                        if (len(parts) == 4 and parts[:2] == ["api", "cases"]
+                                and not self.read_only_case_request(parts[3], body)):
+                            self.server.ensure_case_idle(parts[2])
                         result, status = self.post(parts, body)
                 self.send(status, result)
             else:
@@ -1388,6 +1477,10 @@ class Handler(BaseHTTPRequestHandler):
     def get(self, parts):
         if parts == ["api", "session"]:
             self.send(200, self.server.session())
+        elif parts == ["api", "jobs"]:
+            with self.server.job_lock:
+                jobs = [dict(job) for job in self.server.jobs.values()]
+            self.send(200, {"jobs": jobs})
         elif len(parts) == 3 and parts[:2] == ["api", "cases"]:
             case, metadata = self.server.case(parts[2])
             self.send(200, self.server.case_summary(case, metadata, detail=True))
@@ -1396,7 +1489,8 @@ class Handler(BaseHTTPRequestHandler):
                 job = self.server.jobs.get(parts[2])
                 if job is None:
                     raise RequestError("Job unavailable. Refresh the investigation to review saved runs.", 404)
-                self.send(200, dict(job))
+                job = dict(job)
+            self.send(200, job)
         elif len(parts) == 5 and parts[:2] == ["api", "cases"] and parts[3] == "input-exports":
             if parts[4] not in {"attributions", "name-colors", "change-outputs", "all"}:
                 raise RequestError("Input export not found", 404)
@@ -1428,6 +1522,18 @@ class Handler(BaseHTTPRequestHandler):
             if not path.is_file():
                 raise RequestError("Page not found", 404)
             self.send(200, path.read_bytes(), mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+
+    @staticmethod
+    def read_only_case_request(route, body):
+        # These POST routes accept searches or reviewed input previews for their
+        # bounded JSON bodies. Reading a case never reserves its job slot.
+        if route in ("addresses", "address", "address-merge-preview"):
+            return True
+        if route in ("change-outputs", "name-colors"):
+            return set(body) <= {"query", "offset", "limit"}
+        if route in ("address-import", "name-color-import", "change-output-import", "input-import"):
+            return "approve_plan" not in body
+        return False
 
     def post(self, parts, body):
         if parts == ["api", "settings"]:

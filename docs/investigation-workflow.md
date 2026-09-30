@@ -288,7 +288,10 @@ Changing one board's layout selection does not change another board's selection,
 including boards with the same goal. Draft choices survive tab navigation;
 reopening the application restores each board's saved plot binding. Interrupted
 syncs stay bound to their recorded plot until recovered. A background operation
-temporarily disables other write actions, while all board blocks remain visible.
+temporarily disables other write actions in that investigation, while all board
+blocks remain visible. Open another investigation to run independent work in the
+same server. The header task list shows progress and outcomes across investigations
+and browser tabs; finishing background work does not switch your current view.
 
 Each board keeps its own saved item mapping. The update is checked against a new
 board inventory before writes. If you move or edit board content after preparing

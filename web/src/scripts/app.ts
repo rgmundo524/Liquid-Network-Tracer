@@ -182,11 +182,12 @@ type Job = {
   message: string;
   result?: Result;
   action?: string;
-  case_id?: string;
+  case_id?: string | null;
   live?: boolean;
   progress?: JobProgress;
   cancellable?: boolean;
   started_at?: number;
+  finished_at?: number;
   edit_conflicts?: MiroEditConflictReport;
 };
 type ServiceRule = { address: string; name: string; notes: string; enabled: boolean; updated_at: string;
@@ -213,11 +214,17 @@ type ActiveJob = {
   action: string;
   caseId?: string;
   started: number;
+  finishedAt?: number;
   message: string;
   live: boolean;
   progress?: JobProgress;
   cancellable: boolean;
   cancelling: boolean;
+  status: Job["status"];
+  generation?: number;
+  lookupTxids?: string;
+  outcome?: Job;
+  outcomeError?: string;
 };
 
 const defaults: Settings = {
@@ -251,7 +258,7 @@ const state = {
     name: "", notes: "", enabled: false, pasted: "",
     confidence: "suspected", source: "Investigator designation", observedAt: "", stopTracing: true, hopLimit: "",
   },
-  job: null as ActiveJob | null,
+  jobs: new Map<string, ActiveJob>(),
   error: "",
   editConflicts: null as { caseId: string; report: MiroEditConflictReport } | null,
   results: new Map<string, { action: string; result: Result }>(),
@@ -269,7 +276,11 @@ const state = {
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const dialog = document.querySelector<HTMLDialogElement>("#action-dialog")!;
-let pollTimer: ReturnType<typeof setTimeout> | undefined;
+const pollTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const pollingJobs = new Set<string>();
+let discoveringJobs = false;
+const dismissedJobs = new Set<string>();
+let tasksOpen = false;
 let dialogAction = "";
 let dialogMergeApproval = "";
 let dialogPreviewId = "";
@@ -295,7 +306,12 @@ const short = (value: string | undefined, length = 12): string =>
     : "—";
 const human = (value: unknown): string =>
   String(value ?? "—").replaceAll("_", " ");
-const isBusy = (): boolean => !!state.job || submitting || changeOutputsPending() || inputImportPending();
+const runningJobs = (): ActiveJob[] => [...state.jobs.values()].filter(job => job.status === "running" || job.status === "cancelling");
+const viewingCase = (caseId?: string): boolean => !!caseId && state.activeCase?.id === caseId && ["case", "case-settings", "addresses"].includes(state.page);
+const scopeBusy = (caseId?: string): boolean => runningJobs().some(job => job.caseId === caseId);
+const isBusy = (): boolean => submitting || changeOutputsPending() || inputImportPending() ||
+  (state.page === "new" ? scopeBusy() : viewingCase(state.activeCase?.id) ? scopeBusy(state.activeCase!.id) : false);
+const canApplyJobView = (job: ActiveJob): boolean => job.generation === pageGeneration && viewingCase(job.caseId);
 const disabled = (condition: boolean): string => (condition ? " disabled" : "");
 const isCaseOpening = (id: string): boolean =>
   state.openingCase?.generation === pageGeneration && state.openingCase.id === id;
@@ -575,8 +591,8 @@ function collectionHopLabel(progress: JobProgress): string | undefined {
   return `${prefix} ${progress.hop_reference_name ? "group-relative " : ""}hop ${progress.completed} of ${progress.total}`;
 }
 
-function jobProgress(): string {
-  const progress = state.job?.progress;
+function jobProgress(job: ActiveJob): string {
+  const progress = job.progress;
   if (!progress) return '<progress class="job-progress-bar" aria-label="Calculation in progress"></progress>';
   const hopLabel = collectionHopLabel(progress);
   if (hopLabel) {
@@ -593,22 +609,40 @@ function jobProgress(): string {
   return `<div class="job-progress-meta"><span>Current stage · ${esc(human(progress.phase))}</span>${measured ? `<span>${esc(completed)} / ${esc(total)}</span>` : ""}</div><progress class="job-progress-bar"${measured ? ` max="${total}" value="${completed}"` : ""} aria-label="${esc(human(progress.phase))}"></progress>${waiting ? `<p class="job-retry">Waiting ${esc(progress.retry_after)} seconds before retrying Miro.</p>` : ""}`;
 }
 
+function taskName(job: ActiveJob): string {
+  return job.caseId ? state.cases.find(item => item.id === job.caseId)?.name ||
+    (state.activeCase?.id === job.caseId ? state.activeCase.name : job.caseId) : "New investigation";
+}
+
+function taskMessage(job: ActiveJob): string {
+  return job.outcomeError || (job.status === "running" ? job.progress?.message || job.message : job.message) || "Working on your request…";
+}
+
 function jobBanner(): string {
-  if (!state.job) return "";
-  return `<div class="job-banner"><span class="spinner" aria-hidden="true"></span><div class="job-details" role="status" aria-live="polite"><strong id="job-message">${esc(state.job.cancelling ? state.job.message : state.job.progress?.message || state.job.message || "Working on your request…")}</strong><div id="job-progress">${jobProgress()}</div><p>${state.job.live ? "Keep the launching terminal open. If Proton Pass requests login or unlocking, complete it there." : "Processing local evidence. You can browse saved investigations while this completes."}</p></div><div class="job-actions"><span class="job-time" id="job-elapsed">0s elapsed</span>${state.job.cancellable || state.job.cancelling ? `<button class="btn small" id="cancel-job" data-action="cancel-job"${disabled(state.job.cancelling)}>${state.job.cancelling ? "Canceling…" : "Cancel calculation"}</button>` : ""}</div></div>`;
+  const active = runningJobs();
+  const recent = finishedJobs().slice(0, 8);
+  const current = active.find(job => viewingCase(job.caseId)) || active[0];
+  if (!active.length && !recent.length) return '<div id="job-tasks"></div>';
+  return `<div id="job-tasks"><details class="task-list"${tasksOpen ? " open" : ""}><summary><span class="task-summary-count">${active.length ? `<span class="spinner" aria-hidden="true"></span>${active.length} active task${active.length === 1 ? "" : "s"}` : "Recent tasks"}</span><div class="task-summary-message"><span role="status" aria-live="polite">${esc(current ? `${taskName(current)} · ${taskMessage(current)}` : `${recent.length} completed task${recent.length === 1 ? "" : "s"}`)}</span>${current ? jobProgress(current) : ""}</div><span class="task-summary-hint">View tasks</span></summary><div class="task-list-body">${[...active, ...recent].map(job => {
+    const running = job.status === "running" || job.status === "cancelling";
+    return `<article class="job-banner task-row${job.status === "failed" ? " task-failed" : ""}" data-task="${esc(job.id)}"><div class="job-details"><div class="task-heading"><strong>${esc(taskName(job))}</strong><span>${esc(human(job.action))} · ${esc(human(job.status))}</span></div><p data-job-message="${esc(job.id)}">${esc(taskMessage(job))}</p>${running ? `<div data-job-progress="${esc(job.id)}">${jobProgress(job)}</div>` : ""}${running && job.live ? '<p>Complete any Proton Pass prompt in the launching terminal.</p>' : ""}</div><div class="job-actions">${running ? `<span class="job-time" data-job-elapsed="${esc(job.id)}"></span>` : ""}${job.caseId ? `<button class="btn small" data-action="open-job" data-id="${esc(job.id)}">Open investigation</button>` : !running && job.action === "lookup" && job.outcome?.result ? `<button class="btn small" data-action="load-job-outputs" data-id="${esc(job.id)}">Review outputs</button>` : ""}${running && (job.cancellable || job.cancelling) ? `<button class="btn small" data-action="cancel-job" data-id="${esc(job.id)}"${disabled(job.cancelling)}>${job.cancelling ? "Canceling…" : "Cancel calculation"}</button>` : ""}${!running ? `<button class="btn ghost small" data-action="dismiss-job" data-id="${esc(job.id)}">Dismiss</button>` : ""}</div></article>`;
+  }).join("")}</div></details></div>`;
 }
 
 function updateJobProgress(): void {
-  const message = document.querySelector("#job-message");
-  if (message && state.job)
-    message.textContent = state.job.cancelling ? state.job.message : state.job.progress?.message || state.job.message;
-  const progress = document.querySelector("#job-progress");
-  if (progress) progress.innerHTML = jobProgress();
-  const cancel = document.querySelector<HTMLButtonElement>("#cancel-job");
-  if (cancel && state.job) {
-    cancel.disabled = !state.job.cancellable || state.job.cancelling;
-    cancel.textContent = state.job.cancelling ? "Canceling…" : "Cancel calculation";
-  }
+  const container = document.querySelector("#job-tasks");
+  if (!container) return;
+  const focused = document.activeElement as HTMLElement | null;
+  const focusSummary = focused?.matches?.("#job-tasks summary");
+  const scrollTop = document.querySelector(".task-list-body")?.scrollTop || 0;
+  const focusId = focused?.closest("#job-tasks") ? focused.dataset.id : undefined;
+  const focusAction = focusId ? focused?.dataset.action : undefined;
+  container.outerHTML = jobBanner();
+  const body = document.querySelector(".task-list-body");
+  if (body) body.scrollTop = scrollTop;
+  if (focusSummary) document.querySelector<HTMLElement>("#job-tasks summary")?.focus({preventScroll: true});
+  if (focusId && focusAction) document.querySelector<HTMLElement>(`#job-tasks [data-action="${CSS.escape(focusAction)}"][data-id="${CSS.escape(focusId)}"]`)?.focus({preventScroll: true});
+  updateJobClock();
 }
 
 const workspaceHeaderObserver = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(entries => {
@@ -1686,33 +1720,74 @@ function saveDraft(): void {
   state.draft.settings = readSettings(form, state.draft.settings);
 }
 
+function finishedJobs(): ActiveJob[] {
+  return [...state.jobs.values()].filter(job => !["running", "cancelling"].includes(job.status))
+    .sort((a, b) => (b.finishedAt ?? b.started) - (a.finishedAt ?? a.started));
+}
+
+function pruneFinishedJobs(): void {
+  for (const old of finishedJobs().slice(32)) {state.jobs.delete(old.id); dismissedJobs.add(old.id);}
+}
+
+function rememberJob(job: Job, local?: {action: string; caseId?: string; live: boolean; generation: number; lookupTxids?: string}): ActiveJob {
+  const existing = state.jobs.get(job.id);
+  if (existing) {
+    // Discovery can observe a fast job before its initiating POST returns.
+    if (local) {
+      Object.assign(existing, local);
+      existing.status = "running";
+      existing.outcome = undefined;
+      existing.finishedAt = undefined;
+    }
+    return existing;
+  }
+  const active: ActiveJob = {
+    id: job.id, action: local?.action || job.action || "recovered", caseId: local?.caseId ?? job.case_id ?? undefined,
+    started: Number.isFinite(job.started_at) ? job.started_at! * 1000 : Date.now(),
+    finishedAt: Number.isFinite(job.finished_at) ? job.finished_at! * 1000 : undefined,
+    message: job.message || "A local action is running…", live: local?.live ?? job.live ?? true,
+    progress: job.progress, cancellable: job.cancellable === true, cancelling: job.status === "cancelling",
+    status: job.status || "running", generation: local?.generation, lookupTxids: local?.lookupTxids,
+    outcome: ["succeeded", "failed", "canceled"].includes(job.status) ? job : undefined,
+  };
+  state.jobs.set(job.id, active);
+  if (active.status === "running" || active.status === "cancelling") schedulePoll(active.id);
+  pruneFinishedJobs();
+  return active;
+}
+
 async function refreshSession(): Promise<void> {
   const session = await api<{
-    csrf: string;
-    settings: Settings;
-    cases: Case[];
-    active_job: string | null;
+    csrf: string; settings: Settings; cases: Case[];
+    active_job?: string | null; active_jobs?: Job[];
   }>("/api/session");
   state.csrf = session.csrf;
   state.settings = { ...defaults, ...session.settings };
   state.cases = session.cases;
-  if (session.active_job && !state.job) {
-    const recovered = await api<Job>(
-      `/api/jobs/${encodeURIComponent(session.active_job)}`,
-    );
-    state.job = {
-      id: session.active_job,
-      action: recovered.action || "recovered",
-      caseId: recovered.case_id,
-      started: Number.isFinite(recovered.started_at) ? recovered.started_at! * 1000 : Date.now(),
-      message: recovered.message || "A local action is still running…",
-      live: recovered.live ?? true,
-      progress: recovered.progress,
-      cancellable: recovered.cancellable === true,
-      cancelling: recovered.status === "cancelling",
-    };
-    schedulePoll();
-  }
+  if (session.active_jobs) session.active_jobs.forEach(job => rememberJob(job));
+  else if (session.active_job && !state.jobs.has(session.active_job))
+    rememberJob(await api<Job>(`/api/jobs/${encodeURIComponent(session.active_job)}`));
+}
+
+async function discoverJobs(): Promise<void> {
+  if (discoveringJobs || !state.csrf) return;
+  discoveringJobs = true;
+  const wasBusy = isBusy();
+  try {
+    const response = await api<{jobs: Job[]}>("/api/jobs");
+    const discovered = response.jobs.filter(job => !dismissedJobs.has(job.id) && !state.jobs.has(job.id));
+    for (const job of discovered) rememberJob(job);
+    if (discovered.length) await refreshSession();
+    const currentId = state.activeCase?.id;
+    const generation = pageGeneration;
+    if (currentId && discovered.some(job => job.case_id === currentId && !["running", "cancelling"].includes(job.status))) {
+      const detail = await api<Case>(`/api/cases/${encodeURIComponent(currentId)}`);
+      if (generation === pageGeneration && state.activeCase?.id === currentId) state.activeCase = detail;
+    }
+    if (wasBusy !== isBusy() || discovered.some(job => viewingCase(job.case_id || undefined)) ||
+        (state.page === "dashboard" && discovered.length)) render(); else updateJobProgress();
+  } catch { /* Individual job polling retains its state while reconnecting. */ }
+  finally { discoveringJobs = false; }
 }
 
 async function openCase(id: string): Promise<void> {
@@ -1780,11 +1855,13 @@ async function startJob(
   action: string,
   live: boolean,
   caseId?: string,
-): Promise<void> {
-  if (isBusy()) return;
+): Promise<string | null> {
+  if (submitting || scopeBusy(caseId)) return null;
   if (action !== "miro-frame-review") resetFrameRecovery();
   state.editConflicts = null;
   saveDraft();
+  const generation = pageGeneration;
+  const lookupTxids = action === "lookup" ? state.draft.txids : undefined;
   submitting = true;
   render();
   try {
@@ -1798,75 +1875,76 @@ async function startJob(
       const settingsDraft = settingsDrafts.get(caseId);
       if (settingsDraft) settingsDraft.settings.hop_reference_name = hop_reference_name;
     }
-    state.job = {
-      id: job.id,
-      action,
-      caseId,
-      started: Number.isFinite(job.started_at) ? job.started_at! * 1000 : Date.now(),
-      message: job.message,
-      live,
-      progress: job.progress,
-      cancellable: job.cancellable === true,
-      cancelling: job.status === "cancelling",
-    };
-    state.error = "";
-    dialog.close();
-    schedulePoll(150);
+    rememberJob(job, {action, caseId, live, generation, lookupTxids});
+    tasksOpen = true;
+    if (generation === pageGeneration) {state.error = ""; dialog.close();}
+    schedulePoll(job.id, 150);
+    return job.id;
   } finally {
     submitting = false;
     render();
   }
 }
 
-function schedulePoll(delay = 1200): void {
-  if (pollTimer) clearTimeout(pollTimer);
-  pollTimer = setTimeout(() => void pollJob(), delay);
+function schedulePoll(identity: string, delay = 1200): void {
+  const timer = pollTimers.get(identity);
+  if (timer) clearTimeout(timer);
+  pollTimers.set(identity, setTimeout(() => {pollTimers.delete(identity); void pollJob(identity);}, delay));
 }
 
-async function cancelJob(): Promise<void> {
-  const active = state.job;
-  if (!active || !active.cancellable || active.cancelling) return;
+async function cancelJob(identity: string): Promise<void> {
+  const active = state.jobs.get(identity);
+  if (!active || !active.cancellable || active.cancelling || active.status !== "running") return;
   active.cancelling = true;
   active.message = "Canceling the calculation and stopping its renderer…";
   updateJobProgress();
   try {
     const job = await api<Job>(`/api/jobs/${encodeURIComponent(active.id)}/cancel`, {});
-    if (state.job?.id !== active.id) return;
+    if (!["running", "cancelling"].includes(active.status)) return;
     active.cancelling = job.status === "cancelling";
     active.cancellable = job.cancellable === true;
     active.message = job.message;
   } catch (error) {
-    if (state.job?.id !== active.id) return;
     active.cancelling = false;
     toast(error instanceof Error ? error.message : "Could not request cancellation.", true);
   }
-  if (state.job?.id === active.id) {
-    updateJobProgress();
-    schedulePoll(150);
-  }
+  updateJobProgress();
+  schedulePoll(identity, 150);
 }
 
-async function pollJob(): Promise<void> {
-  const active = state.job;
-  if (!active) return;
+async function pollJob(identity: string): Promise<void> {
+  const active = state.jobs.get(identity);
+  if (!active || !["running", "cancelling"].includes(active.status) || pollingJobs.has(identity)) return;
+  pollingJobs.add(identity);
+  const wasBusy = isBusy();
+  const refreshJobView = () => {
+    if (wasBusy !== isBusy() || viewingCase(active.caseId) ||
+        (active.action === "lookup" && state.page === "new")) render();
+    else updateJobProgress();
+  };
   try {
     const job = await api<Job>(`/api/jobs/${encodeURIComponent(active.id)}`);
-    if (state.job?.id !== active.id) return;
     if (job.status === "running" || job.status === "cancelling") {
+      active.status = job.status;
       active.message = job.message || active.message;
       active.progress = job.progress;
       active.cancellable = job.cancellable === true;
       active.cancelling = job.status === "cancelling";
       updateJobProgress();
-      schedulePoll();
+      schedulePoll(identity);
       return;
     }
-    state.job = null;
+    active.status = job.status;
+    active.message = job.message;
+    active.outcome = job;
+    active.finishedAt = Number.isFinite(job.finished_at) ? job.finished_at! * 1000 : Date.now();
+    pruneFinishedJobs();
+    active.cancellable = false;
     if (job.status === "canceled") {
-      if (active.action.startsWith("miro-frame-")) resetFrameRecovery();
+      if (active.action.startsWith("miro-frame-") && canApplyJobView(active)) resetFrameRecovery();
       if (active.action === "change-output-lookup" && active.caseId) changeOutputsLookupComplete(active.caseId, active.id, undefined, job.message || "Transaction lookup canceled.");
-      state.error = "";
-      toast(job.message || "Calculation canceled. Saved investigation runs are unchanged.");
+      if (canApplyJobView(active)) state.error = "";
+      toast(`${taskName(active)}: ${job.message || "Calculation canceled. Saved investigation runs are unchanged."}`);
       if ((active.action.startsWith("board-") || ["plot-sync", "pegouts", "pegouts-preview"].includes(active.action)) && active.caseId && state.activeCase?.id === active.caseId) {
         try {
           const detail = await api<Case>(`/api/cases/${encodeURIComponent(active.caseId)}`);
@@ -1874,8 +1952,8 @@ async function pollJob(): Promise<void> {
         } catch { /* Preserve the cancellation message if refresh is unavailable. */ }
       }
     } else if (job.status === "failed") {
-      if (active.action.startsWith("miro-frame-")) resetFrameRecovery();
-      state.editConflicts = active.caseId && state.activeCase?.id === active.caseId && job.edit_conflicts
+      if (active.action.startsWith("miro-frame-") && canApplyJobView(active)) resetFrameRecovery();
+      if (viewingCase(active.caseId)) state.editConflicts = active.caseId && job.edit_conflicts
         ? { caseId: active.caseId, report: job.edit_conflicts } : null;
       const progress = job.progress || active.progress;
       const hopLabel = progress && collectionHopLabel(progress);
@@ -1886,17 +1964,17 @@ async function pollJob(): Promise<void> {
               : ""
           }.`
         : "";
-      state.error =
-        (job.message || "The action did not complete. Check the launching terminal.") + lastStage;
-      toast(state.error, true);
-      if (active.action === "change-output-lookup" && active.caseId) changeOutputsLookupComplete(active.caseId, active.id, undefined, state.error);
+      active.outcomeError = (job.message || "The action did not complete. Check the launching terminal.") + lastStage;
+      if (viewingCase(active.caseId)) state.error = active.outcomeError;
+      toast(`${taskName(active)}: ${active.outcomeError}`, true);
+      if (active.action === "change-output-lookup" && active.caseId) changeOutputsLookupComplete(active.caseId, active.id, undefined, active.outcomeError);
       if ((active.action.startsWith("miro-") || active.action.startsWith("board-") || ["plot-sync", "pegouts", "pegouts-preview"].includes(active.action)) && active.caseId && state.activeCase?.id === active.caseId) {
         try {
           const previousBoards = new Set((state.activeCase?.boards || []).map(board => board.id));
           const detail = await api<Case>(`/api/cases/${encodeURIComponent(active.caseId)}`);
           if (state.activeCase?.id === active.caseId) {
             state.activeCase = detail;
-            if (active.action === "plot-sync") {
+            if (active.action === "plot-sync" && canApplyJobView(active)) {
               const draft = currentWorkflow(detail);
               const board = detail.boards?.find(item => !previousBoards.has(item.id)) ||
                 detail.boards?.find(item => item.id === draft.layoutBoard) ||
@@ -1916,7 +1994,7 @@ async function pollJob(): Promise<void> {
       const result = job.result || {};
       if (active.action === "miro-frame-review" && active.caseId) {
         const detail = state.activeCase;
-        if (detail?.id === active.caseId && detail.miro_board && frameRecoveryComplete(active.caseId, active.id, result)) {
+        if (canApplyJobView(active) && detail?.id === active.caseId && detail.miro_board && frameRecoveryComplete(active.caseId, active.id, result)) {
           dialogAction = "miro-frame-recover";
           const content = frameRecoveryDialog(detail.id, boardUrl(detail.miro_board));
           if (!content) throw new Error("Reopen the investigation and review its interrupted frame again.");
@@ -1925,7 +2003,7 @@ async function pollJob(): Promise<void> {
           dialog.querySelector<HTMLButtonElement>('[data-action="close-dialog"]')?.focus();
           toast("Frame review ready. Inspect the linked board before confirming recovery.");
         } else {
-          resetFrameRecovery();
+          if (canApplyJobView(active)) resetFrameRecovery();
           toast("Frame lookup completed. Choose Recover interrupted frame again to review it in this investigation.");
         }
       } else if (active.action === "change-output-lookup" && active.caseId) {
@@ -1935,22 +2013,17 @@ async function pollJob(): Promise<void> {
         if (!active.live || job.live === false) {
           throw new Error("This lookup used synthetic data. Load your transaction hashes again to start a live investigation.");
         }
-        state.draft.reports = result.transactions || [];
-        state.draft.txids = state.draft.reports
-          .map((report) => report.txid)
-          .join(", ");
-        state.draft.selected = new Set();
-        toast(
-          `Loaded outputs from ${state.draft.reports.length} transaction${state.draft.reports.length === 1 ? "" : "s"}. Choose the outputs to follow.`,
-        );
+        if (active.generation === pageGeneration && active.lookupTxids === state.draft.txids && state.page === "new") {
+          applyLookupResult(result);
+        } else toast("Transaction outputs are ready. Open Tasks and choose Review outputs to load them.");
       } else if (active.caseId) {
         const detail = await api<Case>(
           `/api/cases/${encodeURIComponent(active.caseId)}`,
         );
         if (state.activeCase?.id === active.caseId) {
           state.activeCase = detail;
-          if (active.action === "trace") state.selectedRun = "latest";
-          if (["plot", "plot-sync"].includes(active.action)) {
+          if (canApplyJobView(active) && active.action === "trace") state.selectedRun = "latest";
+          if (canApplyJobView(active) && ["plot", "plot-sync"].includes(active.action)) {
             const draft = currentWorkflow(detail);
             draft.plot = String(result.preview_id || "");
             if (result.layout_mode === "update") {
@@ -1959,7 +2032,7 @@ async function pollJob(): Promise<void> {
             }
             state.caseView = "plots";
           }
-          if (["board-create", "board-create-sync", "board-link", "plot-sync"].includes(active.action)) {
+          if (canApplyJobView(active) && ["board-create", "board-create-sync", "board-link", "plot-sync"].includes(active.action)) {
             const draft = currentWorkflow(detail);
             draft.board = String(result.record_id || result.id || "");
             const board = detail.boards?.find(item => item.id === draft.board);
@@ -1974,12 +2047,12 @@ async function pollJob(): Promise<void> {
             if (["plot-sync", "board-create-sync"].includes(active.action)) draft.boardPlot = "";
             state.caseView = "plots";
           }
-          if (["pegouts", "pegouts-preview"].includes(active.action)) {
+          if (canApplyJobView(active) && ["pegouts", "pegouts-preview"].includes(active.action)) {
             currentPegoutSearch(detail);
             pegoutDraft.selected = String(result.search_id || result.run_id || "");
             pegoutDraft.approved = "";
           }
-          if (["miro-recover", "miro-frame-recover", "miro-rebuild"].includes(active.action) && result.run_id && detail.runs?.some(run => run.id === result.run_id)) {
+          if (canApplyJobView(active) && ["miro-recover", "miro-frame-recover", "miro-rebuild"].includes(active.action) && result.run_id && detail.runs?.some(run => run.id === result.run_id)) {
             state.selectedRun = result.run_id;
           }
         }
@@ -1987,10 +2060,12 @@ async function pollJob(): Promise<void> {
           const address = String(result.address || "");
           const inspected = await api<AddressRow>(`/api/cases/${encodeURIComponent(active.caseId)}/address`,
             { address, run_id: state.selectedRun });
-          const selected = state.addressReview.selected;
-          if (selected?.address === address) selected.activity = inspected.activity;
-          const row = state.addressReview.data?.rows.find(item => item.address === address);
-          if (row) row.activity = inspected.activity;
+          if (viewingCase(active.caseId)) {
+            const selected = state.addressReview.selected;
+            if (selected?.address === address) selected.activity = inspected.activity;
+            const row = state.addressReview.data?.rows.find(item => item.address === address);
+            if (row) row.activity = inspected.activity;
+          }
         }
         const key = `${active.caseId}:${result.run_id || detail.latest_run || "latest"}`;
         state.results.set(active.caseId, { action: active.action, result });
@@ -2057,52 +2132,48 @@ async function pollJob(): Promise<void> {
         );
     }
     await refreshSession();
-    render();
+    refreshJobView();
   } catch (error) {
-    if (active.action.startsWith("miro-frame-")) {resetFrameRecovery(); dialog.close();}
-    // Do not forget a potentially running live action when the browser loses contact.
+    if (active.action.startsWith("miro-frame-") && canApplyJobView(active)) {resetFrameRecovery(); dialog.close();}
+    // Keep potentially live work tracked during connection loss; a missing job after
+    // restart needs investigator review instead of silently starting it again.
     if (error instanceof ApiError && error.status === 404) {
-      state.job = null;
-      state.error =
-        "The local server no longer tracks this action. Review the saved investigation before starting it again.";
-      try {
-        await refreshSession();
-        if (state.activeCase)
-          state.activeCase = await api<Case>(
-            `/api/cases/${encodeURIComponent(state.activeCase.id)}`,
-          );
-      } catch {
-        // Keep the recovery notice if the restarted server goes away again.
-        // A user can reopen or refresh the page after starting liquid-web.
-      }
-      render();
-    } else if (state.job) {
-      state.job.message = "Waiting to reconnect to the local server…";
-      state.job.progress = undefined;
+      active.status = "failed";
+      active.finishedAt = Date.now();
+      pruneFinishedJobs();
+      active.cancellable = false;
+      active.outcomeError = "The local server no longer tracks this action. Review the saved investigation before starting it again.";
+      if (viewingCase(active.caseId)) state.error = active.outcomeError;
+      try { await refreshSession(); } catch { /* Retry from the next discovery poll. */ }
+      refreshJobView();
+    } else if (["running", "cancelling"].includes(active.status)) {
+      active.message = "Waiting to reconnect to the local server…";
+      active.progress = undefined;
       updateJobProgress();
-      schedulePoll(3500);
+      schedulePoll(identity, 3500);
     } else {
-      state.error =
-        error instanceof Error
-          ? error.message
-          : "Could not refresh the saved result.";
-      render();
+      active.outcomeError = error instanceof Error ? error.message : "Could not refresh the saved result.";
+      if (viewingCase(active.caseId) || (active.action === "lookup" && active.generation === pageGeneration)) state.error = active.outcomeError;
+      refreshJobView();
     }
-  }
+  } finally { pollingJobs.delete(identity); }
+}
+
+function applyLookupResult(result: Result): void {
+  state.draft.reports = result.transactions || [];
+  state.draft.txids = state.draft.reports.map(report => report.txid).join(", ");
+  state.draft.selected = new Set();
+  toast(`Loaded outputs from ${state.draft.reports.length} transaction${state.draft.reports.length === 1 ? "" : "s"}. Choose the outputs to follow.`);
 }
 
 function updateJobClock(): void {
-  const element = document.querySelector("#job-elapsed");
-  if (!state.job || !element) return;
-  const elapsed = Math.max(
-    0,
-    Math.floor((Date.now() - state.job.started) / 1000),
-    Number.isFinite(state.job.progress?.elapsed_seconds) ? Math.floor(state.job.progress!.elapsed_seconds!) : 0,
-  );
-  element.textContent =
-    elapsed >= 60
-      ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s elapsed`
-      : `${elapsed}s elapsed`;
+  for (const job of runningJobs()) {
+    const element = document.querySelector(`[data-job-elapsed="${job.id}"]`);
+    if (!element) continue;
+    const elapsed = Math.max(0, Math.floor((Date.now() - job.started) / 1000),
+      Number.isFinite(job.progress?.elapsed_seconds) ? Math.floor(job.progress!.elapsed_seconds!) : 0);
+    element.textContent = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s elapsed` : `${elapsed}s elapsed`;
+  }
 }
 
 async function openAddressMergeDialog(): Promise<void> {
@@ -2182,11 +2253,30 @@ async function caseAction(action: string): Promise<void> {
 }
 
 async function dispatch(action: string, element?: HTMLElement): Promise<void> {
+  if (["open-job", "dismiss-job", "load-job-outputs"].includes(action)) {
+    const job = state.jobs.get(element?.dataset.id || "");
+    if (!job) return;
+    if (action === "dismiss-job" && !["running", "cancelling"].includes(job.status)) {
+      state.jobs.delete(job.id); dismissedJobs.add(job.id); updateJobProgress();
+    } else if (action === "open-job" && job.caseId) {
+      await openCase(job.caseId);
+      if (viewingCase(job.caseId) && job.status === "failed") {
+        state.error = job.outcomeError || job.message;
+        state.editConflicts = job.outcome?.edit_conflicts ? {caseId: job.caseId, report: job.outcome.edit_conflicts} : null;
+        render();
+      }
+    } else if (action === "load-job-outputs" && job.outcome?.result && job.live && job.status === "succeeded") {
+      if (scopeBusy()) return;
+      navigate("new"); applyLookupResult(job.outcome.result); render();
+    }
+    return;
+  }
   if (action.startsWith("view-") && state.activeCase) {
     const view = action.slice(5);
     if (["collect", "plots", "boards", "history"].includes(view)) {
       saveSettingsDraft(); saveAddressDraft();
       cancelCaseOpening();
+      pageGeneration++;
       state.caseView = view === "boards" ? "plots" : view as CaseView; state.page = "case"; render();
       if (view === "plots" || view === "boards") void suggestCenterNames().catch(() => {});
     }
@@ -2212,8 +2302,8 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
     const detail = state.activeCase;
     if (!detail?.miro_board || !detail.miro_recovery?.can_recover_frame || isBusy()) return;
     const version = beginFrameRecovery(detail.id);
-    await startJob(`/api/cases/${encodeURIComponent(detail.id)}/actions`, {action}, action, true, detail.id);
-    if (state.job?.caseId === detail.id && state.job.action === action) frameRecoveryStarted(detail.id, version, state.job.id);
+    const identity = await startJob(`/api/cases/${encodeURIComponent(detail.id)}/actions`, {action}, action, true, detail.id);
+    if (identity) frameRecoveryStarted(detail.id, version, identity);
     return;
   }
   if (action === "change-outputs-open" && state.activeCase && !isBusy()) {saveSettingsDraft(); saveAddressDraft(); cancelCaseOpening(); state.page = "case-settings"; render();}
@@ -2223,9 +2313,8 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
       startLookup: async txid => {
         const detail = state.activeCase;
         if (!detail) return null;
-        await startJob(`/api/cases/${encodeURIComponent(detail.id)}/actions`,
+        return await startJob(`/api/cases/${encodeURIComponent(detail.id)}/actions`,
           {action: "change-output-lookup", txid}, "change-output-lookup", !detail.fixture, detail.id);
-        return state.job?.id || null;
       }
     }, element)) return;
   if (action === "name-colors-open" && state.activeCase && !isBusy()) {saveSettingsDraft(); saveAddressDraft(); cancelCaseOpening(); if (state.page !== "case-settings") navigate("case-settings");}
@@ -2241,7 +2330,7 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
     return;
   }
   if (action === "cancel-job") {
-    await cancelJob();
+    if (element?.dataset.id) await cancelJob(element.dataset.id);
     return;
   }
   if (action === "dismiss-error") {
@@ -2694,7 +2783,12 @@ async function initialize(): Promise<void> {
   else render();
 }
 
+app.addEventListener("toggle", event => {
+  const target = event.target as HTMLDetailsElement;
+  if (target.classList?.contains("task-list")) tasksOpen = target.open;
+}, true);
 setInterval(updateJobClock, 1000);
+setInterval(() => void discoverJobs(), 3500);
 void initialize().catch((error) => {
   app.innerHTML = `<main class="startup"><h1>The local server is unavailable</h1><p>${esc(error instanceof Error ? error.message : "Could not open the workspace.")}</p><p class="muted">Launch liquid-web from your devenv terminal, then open its local URL.</p><button type="button" class="btn primary" id="retry-start">Try again</button></main>`;
   document

@@ -12,6 +12,7 @@ from unittest.mock import patch
 from liquid_tracer.common import TraceError
 from liquid_tracer.investigations import create_investigation, read_case, update_case
 from liquid_tracer.web import LocalServer, public_frame_recovery
+from tests.test_web import synthetic_running_job
 
 
 REVIEW_ID = "a" * 64
@@ -135,11 +136,8 @@ class WebFrameRecoveryTests(unittest.TestCase):
             for body in ({"action": "miro-frame-review"},
                          {"action": "miro-frame-recover", "review_id": REVIEW_ID, "item_id": "frame-1"}):
                 self.assertEqual(self.request(body, csrf=False)[0], 403)
-                self.server.active_job = "synthetic-busy"
-                try:
+                with patch.dict(self.server.jobs, {"f" * 32: synthetic_running_job(read_case(self.case)["case_id"])}):
                     self.assertEqual(self.request(body)[0], 409)
-                finally:
-                    self.server.active_job = None
             start.assert_not_called()
         self.status.assert_not_called()
 

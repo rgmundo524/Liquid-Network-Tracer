@@ -55,9 +55,8 @@ class WebBoardRebuildTests(unittest.TestCase):
         route, path, run = self.traced()
         with patch.object(self.server, "start_job") as start:
             self.assertEqual(self.request(route + "/actions", self.body(run), headers={"X-Liquid-CSRF": ""})[0], 403)
-            self.server.active_job = "busy"
-            self.assertEqual(self.request(route + "/actions", self.body(run))[0], 409)
-            self.server.active_job = None
+            with patch.dict(self.server.jobs, {"f" * 32: test_web.synthetic_running_job(read_case(path)["case_id"])}):
+                self.assertEqual(self.request(route + "/actions", self.body(run))[0], 409)
             update_case(path, {"miro_board": None})
             self.assertEqual(self.request(route + "/actions", self.body(run))[0], 400)
             start.assert_not_called()

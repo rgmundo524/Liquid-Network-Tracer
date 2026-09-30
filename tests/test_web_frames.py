@@ -70,11 +70,8 @@ class WebFramesTests(unittest.TestCase):
         body = {"action": "miro-frames", "run_id": run}
         with patch.object(self.server, "start_job") as start:
             self.assertEqual(self.request(route + "/actions", body, headers={"X-Liquid-CSRF": ""})[0], 403)
-            self.server.active_job = "synthetic-busy"
-            try:
+            with patch.dict(self.server.jobs, {"f" * 32: test_web.synthetic_running_job(route.rsplit("/", 1)[1])}):
                 self.assertEqual(self.request(route + "/actions", body)[0], 409)
-            finally:
-                self.server.active_job = None
             start.assert_not_called()
 
     def test_result_exposes_frame_counts_without_saved_plan_or_paths(self):

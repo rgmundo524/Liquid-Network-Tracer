@@ -29,6 +29,11 @@ def synthetic_txid():
                 if line.strip() and not line.startswith("#"))
 
 
+def synthetic_running_job(case_id):
+    return {"id": "f" * 32, "case_id": case_id, "status": "running", "action": "trace",
+            "live": False, "started_at": time.time(), "cancellable": False, "message": "Synthetic work"}
+
+
 def fixture_lookup_worker(request, result, live=False):
     """Replace a live lookup's network boundary, keeping the real worker/job flow."""
     payload = read_json(request)
@@ -365,17 +370,15 @@ class LocalWebTests(unittest.TestCase):
         (later / "graph.svg").symlink_to(preview / "graph.svg")
         self.assertEqual(self.success(route)["artifacts"][run_id]["mermaid"], product)
 
-    def test_actions_serialize_and_validate_before_starting_jobs(self):
+    def test_actions_serialize_per_case_and_validate_before_starting_jobs(self):
         _, case = self.create()
         route = "/api/cases/" + case["id"]
-        self.server.active_job = "synthetic-busy"
-        try:
-            for path, body in (("/api/settings", {"settings": {}}), (route + "/settings", {"name": "change"}),
-                               (route + "/actions", {"action": "trace"}),
-                               ("/api/lookup", {"source": "live", "txids": "bad"})):
+        with patch.dict(self.server.jobs, {"f" * 32: synthetic_running_job(case["id"])}):
+            for path, body in ((route + "/settings", {"name": "change"}),
+                               (route + "/actions", {"action": "trace"})):
                 self.assertEqual(self.request(path, body)[0], 409)
-        finally:
-            self.server.active_job = None
+            self.success("/api/settings", {"settings": {}})
+            self.assertEqual(self.request("/api/lookup", {"source": "live", "txids": "bad"})[0], 400)
         with patch.object(self.server, "start_job") as start:
             for action in ("shell", "miro-preview", "miro-sync", "miro-organize", "csv"):
                 self.assertEqual(self.request(route + "/actions", {"action": action})[0], 400)
@@ -554,7 +557,6 @@ class LocalWebTests(unittest.TestCase):
     def test_cancel_before_launch_is_idempotent_and_cannot_stop_a_different_job(self):
         with patch("liquid_tracer.web.threading.Thread.start"):
             job = self.server.start_job([], action="layout")
-        self.server.job_thread = None
         route = "/api/jobs/" + job["id"] + "/cancel"
         self.assertEqual(self.success(route, {}, 202)["status"], "cancelling")
         self.assertEqual(self.success(route, {}, 202)["status"], "cancelling")
@@ -564,24 +566,24 @@ class LocalWebTests(unittest.TestCase):
         self.assertEqual(self.server.jobs[job["id"]]["status"], "canceled")
         with patch("liquid_tracer.web.threading.Thread.start"):
             new = self.server.start_job([], action="layout")
-        self.server.job_thread = None
         try:
             self.assertEqual(self.request(route, {})[0], 409)
             self.assertEqual(self.server.jobs[new["id"]]["status"], "running")
         finally:
-            self.server.active_job = None
+            self.server.job_threads.pop(new["id"], None)
+            self.server.jobs.pop(new["id"], None)
 
     def test_cancel_rejects_trace_and_miro_mutations_even_for_nonlive_fixtures(self):
         for action, live in (("trace", False), ("miro-sync", False), ("miro-organize", True)):
             with self.subTest(action=action), patch("liquid_tracer.web.threading.Thread.start"):
                 job = self.server.start_job([], action=action, live=live)
-            self.server.job_thread = None
             try:
                 self.assertFalse(job["cancellable"])
                 self.assertEqual(self.request("/api/jobs/" + job["id"] + "/cancel", {})[0], 409)
                 self.assertEqual(self.server.jobs[job["id"]]["status"], "running")
             finally:
-                self.server.active_job = None
+                self.server.job_threads.pop(job["id"], None)
+                self.server.jobs.pop(job["id"], None)
 
     @unittest.skipUnless(os.name == "posix", "The local devenv terminal is POSIX")
     def test_interactive_worker_receives_terminal_and_foreground_is_restored(self):
