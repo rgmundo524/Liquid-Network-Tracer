@@ -168,8 +168,8 @@ under its **Saved plot layouts** entry and **History & downloads → Plot downlo
 
 | Download | Rows included |
 | --- | --- |
-| **Path transactions CSV** (`path-transactions.csv`) | One row per transaction on a qualifying seed-to-endpoint path, including starting, intervening, and endpoint transactions. Exact traced input/output outpoints retain the UTXO links. Context-only branches are excluded. |
-| **Trace endpoints CSV** (`trace-endpoints.csv`) | One row per matched ending output, even when several outputs share an address or have multiple qualifying source seeds. |
+| **All trace transactions CSV** (`path-transactions.csv`) | One row per transaction on a qualifying seed-to-endpoint path, including starting, intervening, and endpoint transactions. Exact traced input/output outpoints retain the UTXO links. Context-only branches are excluded. |
+| **Endpoints only CSV** (`trace-endpoints.csv`) | One row per matched ending output, even when several outputs share an address or have multiple qualifying source seeds. |
 
 These files use the selected layout's saved hop range, counting basis, endpoint
 options, and attribution rules. To include dormant and OP_RETURN outputs, enable
@@ -191,9 +191,10 @@ missing amounts stay blank; known zero stays zero. Observation IDs and archived
 retrieval times are included where available. Block time is separate. A peg-out
 request is not confirmation of a Bitcoin payout.
 
-The existing plot `transactions.csv` remains an input/output table for the
-displayed graph, including optional context. **Full-run CSV downloads** exports
-the broader collection view. Older saved layouts remain usable; generate a new
+Peg-out plots offer exactly these two CSV downloads. The older input/output
+`transactions.csv` stays in saved archives for compatibility but is not an
+additional peg-out download choice. **Full-run CSV downloads** exports the
+broader collection view separately. Older saved layouts remain usable; generate a new
 layout to add the two focused downloads. No recollection or Miro sync is required.
 
 Set layout attempts, connector appearance, attribution arrow coloring, and
