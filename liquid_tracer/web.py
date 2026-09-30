@@ -496,6 +496,7 @@ class LocalServer(ThreadingHTTPServer):
 
     def pegout_artifact(self, case, preview_id):
         from .pegouts import reviewed_pegouts, preview_files as pegout_files
+        from .plot_csv import csv_links
 
         graph, _ = reviewed_pegouts(case, preview_id)
         directory = safe_path(case, ["previews", preview_id])
@@ -509,6 +510,8 @@ class LocalServer(ThreadingHTTPServer):
             product["downloads"].append({"name": name, "url": url})
             if name == "graph.html":
                 product["preview_url"] = url
+        product["downloads"] = [item for item in product["downloads"] if not item["name"].endswith(".csv")]
+        product["downloads"].extend(csv_links(identity, preview_id))
         product.update(public_graph_options(graph.get("graph_options", {})) or {})
         layout = graph.get("layout", {})
         metrics = public_layout_metrics(layout.get("metrics")) if isinstance(layout, dict) else None
@@ -530,6 +533,10 @@ class LocalServer(ThreadingHTTPServer):
                     item["artifact"] = self.pegout_artifact(case, summary["preview_id"])
                 except (TraceError, RequestError, OSError, ValueError, TypeError, KeyError):
                     pass  # Search evidence remains resumable when a preview is stale.
+            elif summary.get("export_preview_id"):
+                from .plot_csv import csv_links
+                item["artifact"] = {"preview_id": summary["export_preview_id"],
+                    "downloads": csv_links(read_case(case)["case_id"], summary["export_preview_id"])}
             searches.append(item)
         return searches
 
@@ -1394,6 +1401,16 @@ class Handler(BaseHTTPRequestHandler):
             from .input_export import build_input_export
             case, _ = self.server.case(parts[2])
             product = build_input_export(case, parts[4])
+            self.send(200, product["data"], product["content_type"], download=product["filename"])
+        elif len(parts) == 6 and parts[:2] == ["api", "cases"] and parts[3] == "plot-exports":
+            from .plot_csv import CSV_NAMES, build_plot_csv
+            if parts[5] not in CSV_NAMES:
+                raise RequestError("Plot export not found", 404)
+            case, _ = self.server.case(parts[2])
+            try:
+                product = build_plot_csv(case, parts[4], parts[5])
+            except TraceError as error:
+                raise RequestError(str(error)) from None
             self.send(200, product["data"], product["content_type"], download=product["filename"])
         elif len(parts) == 5 and parts[0] == "files":
             case, _ = self.server.case(parts[1])

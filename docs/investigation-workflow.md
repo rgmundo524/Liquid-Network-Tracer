@@ -163,39 +163,42 @@ this choice for both SVG export and Miro sync. Generate a new layout to change i
 
 ### CSVs for paths and endpoints
 
-Each new **Paths to peg-outs** layout saves two focused CSV downloads, available
-under its **Saved plot layouts** entry and **History & downloads → Plot downloads**:
+**Paths to peg-outs** offers two CSV downloads under **Saved plot layouts**
+and **History & downloads → Plot downloads**. Earlier standalone peg-out
+previews also offer both downloads.
 
 | Download | Rows included |
 | --- | --- |
-| **All trace transactions CSV** (`path-transactions.csv`) | One row per transaction on a qualifying seed-to-endpoint path, including starting, intervening, and endpoint transactions. Exact traced input/output outpoints retain the UTXO links. Context-only branches are excluded. |
-| **Endpoints only CSV** (`trace-endpoints.csv`) | One row per matched ending output, even when several outputs share an address or have multiple qualifying source seeds. |
+| **All trace transactions CSV** (`transactions.csv`) | The existing full accounting of displayed transaction inputs and outputs for this peg-out trace, including optional context. |
+| **Endpoints only CSV** (`endpoints.csv`) | One row per matched ending output, including its qualifying source seeds. Intermediate transactions are excluded. |
 
-These files use the selected layout's saved hop range, counting basis, endpoint
-options, and attribution rules. To include dormant and OP_RETURN outputs, enable
-**Include unspent UTXOs** and **Include unspendable outputs** when generating the
-layout. Stopped, unchecked, and hop-limited branches are not classified as dormant.
+The endpoint table starts with the example-style columns **Source**, **Source
+Value**, **Deposit/Peg-out Tx**, **Address/Peg-out Address**, **Receiving Entity**,
+**Status**, and **Pegout LBTC**. Further columns retain exact output indices,
+source outpoints, hop counts, asset values, and observation provenance.
+
+`Source Value` describes a selected source UTXO when its value and asset are
+public. It does not infer an external Bitcoin deposit total or allocate value
+from that source to the endpoint. Multiple source values are mapped to their
+exact seed outpoints within the cell. Unknown or confidential values stay blank.
+`Pegout LBTC` is populated only for peg-out requests with a known L-BTC amount.
+
+Statuses are `Pegout`, `OP_Return`, `Unspendable`, and `Dormant`.
 `Dormant` means unspent at the archived observation time, not a live balance.
-Peg-out requests take precedence over their OP_RETURN script classification.
+Stopped, unchecked, and hop-limited branches are not classified as dormant.
+A service deposit is not inferred from a label or a tracing stop. To include
+unspent and unspendable endpoints, select those options when creating the trace.
 
-Source transaction hashes and exact seed outpoints identify the qualifying
-origins. `Source Paths` records each seed's qualifying hop counts as JSON within
-one CSV cell, preserving that association without duplicating endpoint amounts.
-Source membership follows the same bounded paths as the plot, not shared
-addresses or arbitrary routes through the combined graph. It establishes
-reachability, not how much of an input funded an output.
+Endpoint tables are generated on download from the verified saved trace and
+its original attribution rules. Existing layouts get the second download
+without recollecting data, rerunning ELK, or syncing Miro. Later attribution
+changes do not rewrite a historical trace's endpoint table. Create a new plot
+to use updated rules. A layout that is no longer eligible to sync can still
+provide its CSVs when its saved snapshot and source archive remain intact.
 
-The endpoint CSV includes receiving attribution, exact explicit base-unit values,
-and an L-BTC value only when the asset and amount are known. Confidential or
-missing amounts stay blank; known zero stays zero. Observation IDs and archived
-retrieval times are included where available. Block time is separate. A peg-out
-request is not confirmation of a Bitcoin payout.
-
-Peg-out plots offer exactly these two CSV downloads. The older input/output
-`transactions.csv` stays in saved archives for compatibility but is not an
-additional peg-out download choice. **Full-run CSV downloads** exports the
-broader collection view separately. Older saved layouts remain usable; generate a new
-layout to add the two focused downloads. No recollection or Miro sync is required.
+**Full-run CSV downloads** remains the broader collection view. The earlier
+`path-transactions.csv` and `trace-endpoints.csv` files remain in archives that
+contain them; the peg-out interface presents only the two downloads above.
 
 Set layout attempts, connector appearance, attribution arrow coloring, and
 named-group centering here. **Full trace** also supports **Separate branch hubs**,

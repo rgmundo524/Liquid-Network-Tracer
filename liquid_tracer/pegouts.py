@@ -322,8 +322,13 @@ def preview_pegouts(case, search_id, *, open_browser=False, progress=None):
                 "browser_opened": open_preview(result["html"]) if open_browser else False}
 
 
-def reviewed_pegouts(case, preview_id):
-    from .cli import attribution_arrow_coloring, centered_name_group
+def saved_pegout_snapshot(case, preview_id):
+    """Read an intact historical preview without applying current display rules.
+
+    This verifies the frozen preview and its source archive only. Callers that
+    publish or replace live board items must still use ``reviewed_pegouts``.
+    The caller holds the case locks for its complete read/export operation.
+    """
     from .miro import validate_plan
     case = _ordinary(Path(case))
     if not isinstance(preview_id, str) or not PREVIEW_ID.fullmatch(preview_id):
@@ -333,21 +338,32 @@ def reviewed_pegouts(case, preview_id):
     _verify_manifest(directory, lambda name: name in files - {"SHA256SUMS"}, files - {"SHA256SUMS"})
     graph, plan = read_json(directory / "graph.json"), read_json(directory / "miro-plan.json")
     state, query, _ = _read_search(case, preview_id[:16])
-    metadata, controls = read_case(case), load_services(case)
+    metadata = read_case(case)
     report = graph.get("pegouts", {})
     if (graph.get("namespace", {}).get("case_id") != metadata["case_id"]
+            or graph.get("namespace", {}).get("source") != state.get("source")
             or graph.get("run_id") != state["run_id"] or plan.get("run_id") != state["run_id"]
             or graph.get("graph_options", {}).get("view") != "pegout_paths"
             or report.get("query") != query or plan.get("schema_version") != 1):
         raise TraceError("Peg-out preview does not match this investigation or query")
-    if (report.get("archive_sha256") != digest((_search_path(case, state["run_id"]) / "SHA256SUMS").read_bytes())
-            or report.get("service_sha256") != digest(canonical({k: v for k, v in controls.items() if k != "history"}))
-            or graph["graph_options"].get("color_attribution_arrows", False) is not attribution_arrow_coloring(metadata)
-            or graph["graph_options"].get("center_name", "") != centered_name_group(metadata)):
-        raise TraceError("Evidence, colors, layout settings or trace controls changed; regenerate the peg-out preview")
+    if report.get("archive_sha256") != digest((_search_path(case, state["run_id"]) / "SHA256SUMS").read_bytes()):
+        raise TraceError("Peg-out preview source archive changed; restore the saved evidence")
     validate_plan(plan)
     if _plan(graph) != plan or read_json(directory / "pegouts.json") != report:
         raise TraceError("Peg-out preview and publication plan disagree")
+    return graph, plan, state
+
+
+def reviewed_pegouts(case, preview_id):
+    from .cli import attribution_arrow_coloring, centered_name_group
+
+    graph, plan, _ = saved_pegout_snapshot(case, preview_id)
+    metadata, controls = read_case(case), load_services(case)
+    report = graph["pegouts"]
+    if (report.get("service_sha256") != digest(canonical({k: v for k, v in controls.items() if k != "history"}))
+            or graph["graph_options"].get("color_attribution_arrows", False) is not attribution_arrow_coloring(metadata)
+            or graph["graph_options"].get("center_name", "") != centered_name_group(metadata)):
+        raise TraceError("Evidence, colors, layout settings or trace controls changed; regenerate the peg-out preview")
     return graph, plan
 
 
@@ -373,9 +389,15 @@ def list_pegout_searches(case):
                 try:
                     graph, _ = reviewed_pegouts(case, preview.name)
                     summary.update(preview_id=preview.name, match_count=graph["pegouts"]["match_count"])
+                    summary.pop("export_preview_id", None)
                     break
                 except (TraceError, OSError, ValueError, TypeError, KeyError):
-                    continue
+                    if "export_preview_id" not in summary:
+                        try:
+                            saved_pegout_snapshot(case, preview.name)
+                            summary["export_preview_id"] = preview.name
+                        except (TraceError, OSError, ValueError, TypeError, KeyError):
+                            pass
             result.append(summary)
         except (TraceError, OSError, ValueError, TypeError, KeyError):
             continue
