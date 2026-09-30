@@ -137,8 +137,12 @@ def update_case(case, updates):
     if "run_defaults" in changes:
         changes["run_defaults"] = validate_settings(changes["run_defaults"])
     case = Path(case)
-    with (case / "case.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with (case / "trace.lock").open("a") as trace_lock, (case / "case.lock").open("a") as lock:
+        try:
+            fcntl.flock(trace_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise TraceError("An investigation operation is active; save settings after it finishes") from None
         metadata = {**read_case(case), **changes}
         save_json(case / "case.json", metadata)
     return metadata

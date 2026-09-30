@@ -20,6 +20,21 @@ class InvestigationTests(unittest.TestCase):
         self.root = Path(self.temp.name) / "cases"
         self.project = Path(__file__).resolve().parents[1]
 
+    def test_settings_reject_active_collection_or_publication_without_blocking_other_cases(self):
+        case = create_investigation(self.root, "Busy investigation")
+        other = create_investigation(self.root, "Other investigation")
+        before = (case / "case.json").read_bytes()
+        for filename, mode in (("trace.lock", fcntl.LOCK_EX), ("case.lock", fcntl.LOCK_SH)):
+            with self.subTest(lock=filename), (case / filename).open("a") as lock:
+                fcntl.flock(lock, mode | fcntl.LOCK_NB)
+                with self.assertRaisesRegex(TraceError, "operation is active"):
+                    update_case(case, {"name": "Changed while busy"})
+                self.assertEqual((case / "case.json").read_bytes(), before)
+                update_case(other, {"name": "Independent change"})
+        self.assertEqual(read_case(other)["name"], "Independent change")
+        self.assertEqual(update_case(case, {"name": "Changed after completion"})["name"],
+                         "Changed after completion")
+
     def test_plot_settings_merge_preserves_latest_budgets_metadata_and_other_investigations(self):
         save_settings(self.root, {"hops": 8, "connector_style": "curved"})
         case = create_investigation(self.root, "Plot settings", board="ORIGINAL=",

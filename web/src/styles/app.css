@@ -856,3 +856,64 @@ td .case-title:hover {
   white-space: nowrap;
   border: 0;
 }
+
+.task-list {
+  background: #edf6f3;
+  border-bottom: 1px solid #cbe5de;
+}
+.task-list > summary {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 44px;
+  padding: 10px 38px;
+  cursor: pointer;
+  color: #27685d;
+  font-size: 12px;
+}
+.task-list > summary:focus-visible {
+  outline: 2px solid #367969;
+  outline-offset: -3px;
+}
+.task-summary-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.task-summary-message {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-summary-hint {
+  flex: none;
+  font-size: 11px;
+}
+.task-summary-hint::after { content: " ▾"; }
+.task-list[open] .task-summary-hint::after { content: " ▴"; }
+.task-list-body {
+  max-height: min(360px, 42vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.task-row { background: transparent; }
+.task-row:last-child { border-bottom: 0; }
+.task-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 14px; }
+.task-heading > span { font-size: 11px; color: #5f766f; }
+.task-failed { background: #fff3ed; }
+.task-failed .job-details > p { color: #8c4233; }
+@media (max-width: 760px) {
+  .task-list > summary { padding: 10px 19px; gap: 10px; }
+  .task-summary-message { display: none; }
+  .task-summary-hint { margin-left: auto; }
+  .task-row.job-banner { display: block; }
+  .task-row .job-actions { margin-top: 10px; flex-wrap: wrap; gap: 8px; }
+}
+.task-summary-message > span { display: block; overflow: hidden; text-overflow: ellipsis; }
+.task-summary-message .job-progress-bar { margin: 6px 0 0; }
+.task-summary-message .job-progress-meta,
+.task-summary-message p { display: none; }

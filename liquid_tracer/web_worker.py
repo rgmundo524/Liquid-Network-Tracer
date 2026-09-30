@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 
 from .cli import main as cli_main
@@ -15,6 +16,31 @@ from .progress import ProgressReporter
 
 def _interrupt(*_):
     raise KeyboardInterrupt
+
+
+def finish_terminal_handoff(request, server_pid):
+    """The provider has injected credentials; detach before another prompt.
+
+    Only readiness flags cross this private channel. Secrets remain exclusively
+    in the provider/worker environment and are never serialized by the server.
+    """
+    if type(server_pid) is not int or server_pid <= 0:
+        raise ValueError("Invalid credential handoff owner")
+    with open(os.devnull, "rb") as stream:
+        os.dup2(stream.fileno(), 0)
+    ready = request.parent / "credentials-ready"
+    with ready.open("x", encoding="ascii") as stream:
+        os.chmod(ready, 0o600)
+        stream.write("ready\n")
+    acknowledgement = request.parent / "credentials-ack"
+    deadline = time.monotonic() + 30
+    while not acknowledgement.is_file():
+        # No CLI work or board writes may start until the parent has restored
+        # terminal ownership. A dead server cannot leave this worker waiting.
+        os.kill(server_pid, 0)
+        if time.monotonic() >= deadline:
+            raise RuntimeError("The local server did not finish the credential handoff")
+        time.sleep(.05)
 
 
 def main(argv=None):
@@ -27,6 +53,8 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, _interrupt)
     try:
         payload = json.loads(request.read_text(encoding="utf-8"))
+        if payload.get("terminal_handoff") is True:
+            finish_terminal_handoff(request, payload.get("server_pid"))
         output = io.StringIO()
         edit_conflicts = None
 

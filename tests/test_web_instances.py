@@ -33,8 +33,10 @@ class WebInstanceTests(unittest.TestCase):
         self.assertNotEqual(first.csrf, second.csrf)
         self.assertEqual(second.host, "127.0.0.1:" + str(second.server_port))
         self.assertEqual(second.origin, "http://" + second.host)
-        first.active_job = "synthetic-job"
-        self.assertIsNone(second.active_job)
+        first.jobs["synthetic-job"] = {"id": "synthetic-job", "status": "running"}
+        self.assertEqual(first.session()["active_job"], "synthetic-job")
+        self.assertEqual(second.session()["active_jobs"], [])
+        self.assertEqual(second.jobs, {})
         self.assertEqual(first.root, second.root)
 
     def test_explicit_occupied_port_is_not_silently_changed(self):

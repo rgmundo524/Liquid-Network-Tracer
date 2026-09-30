@@ -15,7 +15,7 @@ const source = stripTypeScriptTypes(
     .replace('void initialize().catch(', 'globalThis.startup = initialize().catch('),
   {mode: 'transform'},
 );
-const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy, pegoutsGraph, pegoutInput, currentPegoutSearch, suggestCenterNames, suggestHopReferenceNames, render, navigate, workflowInput, currentWorkflow};');
+const script = new vm.Script(source + '\n Object.defineProperty(state, "job", {get() {return runningJobs()[0] || null;}, set(job) {state.jobs.clear(); if (job && state.activeCase && state.page === "dashboard") state.page = "case"; if (job) state.jobs.set(job.id, {status: "running", generation: pageGeneration, caseId: state.activeCase?.id, ...job});}}); globalThis.appTest = {state, dispatch, pollJob: (id) => pollJob(id || runningJobs()[0]?.id), startJob, discoverJobs, runningJobs, jobBanner, jobProgress, cancelJob, openCase, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy, pegoutsGraph, pegoutInput, currentPegoutSearch, suggestCenterNames, suggestHopReferenceNames, render, navigate, workflowInput, currentWorkflow};');
 const txid = 'a'.repeat(64);
 const defaults = {hops: 1, hop_reference_name: '', max_transactions: 20, max_outpoints: 100, max_requests: 30,
   max_seconds: 60, max_new_items: 750, layout_attempts: 25, connector_style: 'straight'};
@@ -46,6 +46,11 @@ async function harness(respond = () => undefined, {hash = ''} = {}) {
         if (selector === '#action-dialog') return dialog;
         if (selector === '#new-case-form') return currentForm;
         if (selector === '#notifications') return {append(node) {notifications.push(node.textContent);}};
+        if (selector === '#job-tasks') return {set outerHTML(value) {
+          app.innerHTML = app.innerHTML.replace(/<div id="job-tasks">[\s\S]*?<\/header>/, value + '</header>');
+          const progress = elements.get('#job-progress'); if (progress) progress.innerHTML = value;
+          const message = elements.get('#job-message'); if (message) message.textContent = [...context.appTest.state.jobs.values()][0]?.progress?.message || '';
+        }};
         return elements.get(selector) ?? null;
       },
       addEventListener() {},
@@ -118,6 +123,7 @@ test('startup offers an empty live investigation without fetching bundled sample
   assert.match(view.newCase(), /<select name="blockchain" required><option value="liquid" selected>Liquid Network<\/option><\/select>/);
   assert.doesNotMatch(view.newCase(), /name="board"|Miro board URL or ID/);
   assert.doesNotMatch(view.newCase(), /Starting preferences/);
+  view.navigate('new');
   view.state.draft.txids = txid;
   await view.dispatch('lookup');
   assert.deepEqual(view.calls[1], {path: '/api/lookup', body: {source: 'live', blockchain: 'liquid', txids: txid}});
@@ -154,7 +160,7 @@ test('failed creation retains investigator inputs and releases the form for retr
 });
 
 for (const live of [true, false]) {
-  test(`recovered ${live ? 'live' : 'synthetic'} lookup ${live ? 'restores' : 'cannot populate'} a live draft`, async () => {
+  test(`recovered ${live ? 'live' : 'synthetic'} lookup never overwrites this tab's draft`, async () => {
     let jobReads = 0;
     const view = await harness(path => {
       if (path === '/api/session') return {csrf: 'test', settings: defaults, cases: [], active_job: jobReads ? null : 'lookup1'};
@@ -166,12 +172,15 @@ for (const live of [true, false]) {
     assert.equal(view.state.job, null);
     assert.equal(view.state.draft.blockchain, 'liquid');
     if (live) {
+      assert.equal(view.state.draft.txids, '');
+      assert.equal(view.state.draft.reports.length, 0);
+      await view.dispatch('load-job-outputs', {dataset: {id: 'lookup1'}});
       assert.equal(view.state.draft.txids, txid);
       assert.equal(view.state.draft.reports.length, 1);
     } else {
       assert.equal(view.state.draft.txids, '');
       assert.equal(view.state.draft.reports.length, 0);
-      assert.match(view.state.error, /lookup used synthetic data/);
+      assert.match(view.state.jobs.get('lookup1').outcomeError, /lookup used synthetic data/);
     }
   });
 }
@@ -249,7 +258,7 @@ test('finished and paused collection retain the actual frontier rather than fill
   }
   status = 'failed';
   await view.pollJob();
-  assert.equal(view.state.error, 'Request budget reached Last reported stage: Collection stopped while processing hop 3 of 10.');
+  assert.equal(view.state.jobs.get('collection').outcomeError, 'Request budget reached Last reported stage: Collection stopped while processing hop 3 of 10.');
 });
 
 test('zero-hop collection has a determinate starting-transactions indicator without premature completion', async () => {
@@ -585,6 +594,7 @@ test('canceling or navigating away invalidates the frame review and ignores its 
   view.dialog.close();
   await view.submitDialog({frame_item_id: 'frame-1'});
   assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 1);
+  view.state.jobs.delete('review1');
   await view.dispatch('miro-frame-review');
   await view.dispatch('dashboard');
   await view.pollJob();
@@ -2786,4 +2796,175 @@ test('failed later update and stale initial layouts do not block deliberate inde
     assert.equal(view.calls.at(-1).body.layout_mode, 'fresh');
     assert.equal(view.calls.at(-1).body.action, 'plot-sync');
   }
+});
+
+// Concurrent jobs exercise the actual handlers and multi-job state directly.
+// The state.job accessor above adapts older single-job fixtures only.
+const multiCase = (id, changes = {}) => ({id, name: `Investigation ${id}`, run_defaults: {...defaults}, runs: [], ...changes});
+const activeTask = (id, case_id, changes = {}) => ({id, case_id, action: 'trace', status: 'running', live: false,
+  message: `Working on ${id}`, cancellable: true, started_at: 100, ...changes});
+
+test('session reconnect restores every investigation task and gates only its current scope', async () => {
+  const jobs = [activeTask('a', 'alpha'), activeTask('b', 'beta')];
+  const view = await harness(path => path === '/api/session'
+    ? {csrf: 'test', settings: defaults, cases: [multiCase('alpha'), multiCase('beta')], active_jobs: jobs}
+    : path.startsWith('/api/cases/') ? multiCase(path.split('/').at(-1)) : undefined);
+  assert.equal(view.runningJobs().length, 2);
+  assert.match(view.jobBanner(), /2 active tasks/);
+  assert.match(view.jobBanner(), /Investigation alpha/);
+  assert.match(view.jobBanner(), /Investigation beta/);
+  await view.openCase('alpha'); assert.equal(view.isBusy(), true);
+  await view.openCase('gamma'); assert.equal(view.isBusy(), false);
+  view.navigate('new'); assert.equal(view.isBusy(), false);
+  view.navigate('settings'); assert.equal(view.isBusy(), false);
+  assert.match(view.jobBanner(), /data-action="cancel-job" data-id="a"/);
+  assert.match(view.jobBanner(), /data-action="cancel-job" data-id="b"/);
+});
+
+test('different investigations start concurrently and cancel targets exactly one job', async () => {
+  const jobs = new Map();
+  const view = await harness((path, body) => {
+    if (path.endsWith('/actions')) {
+      const caseId = path.split('/')[3], task = activeTask(`${caseId}-job`, caseId, {action: body.action});
+      jobs.set(task.id, task); return task;
+    }
+    if (path.endsWith('/cancel')) {
+      const id = path.split('/')[3]; jobs.get(id).status = 'cancelling';
+      return {...jobs.get(id), cancellable: false};
+    }
+    if (path.startsWith('/api/cases/')) return multiCase(path.split('/')[3]);
+    if (path.startsWith('/api/jobs/')) return jobs.get(path.split('/')[3]);
+  });
+  await view.openCase('alpha');
+  assert.equal(await view.startJob('/api/cases/alpha/actions', {action: 'trace'}, 'trace', false, 'alpha'), 'alpha-job');
+  assert.equal(await view.startJob('/api/cases/alpha/actions', {action: 'trace'}, 'trace', false, 'alpha'), null);
+  await view.openCase('beta');
+  assert.equal(view.isBusy(), false);
+  await view.startJob('/api/cases/beta/actions', {action: 'trace'}, 'trace', false, 'beta');
+  assert.equal(view.runningJobs().length, 2);
+  await view.dispatch('cancel-job', {dataset: {id: 'alpha-job'}});
+  assert.deepEqual(view.calls.filter(call => call.path.endsWith('/cancel')).map(call => call.path), ['/api/jobs/alpha-job/cancel']);
+  await Promise.all([view.pollJob('alpha-job'), view.pollJob('beta-job')]);
+  assert.equal(view.state.jobs.get('alpha-job').status, 'cancelling');
+  assert.equal(view.state.jobs.get('beta-job').status, 'running');
+  jobs.get('alpha-job').status = 'canceled';
+  await view.pollJob('alpha-job');
+  assert.equal(view.runningJobs().length, 1);
+  assert.equal(view.state.jobs.get('beta-job').status, 'running');
+  assert.equal(view.state.activeCase.id, 'beta');
+});
+
+test('background failure stays in its task and cannot clear another case error or conflicts', async () => {
+  const view = await harness(path => {
+    if (path === '/api/session') return {csrf: 'test', settings: defaults, cases: [], active_jobs: [activeTask('a', 'alpha')]};
+    if (path === '/api/jobs/a') return {id: 'a', status: 'failed', message: 'Alpha failed'};
+  });
+  view.state.activeCase = multiCase('beta'); view.state.page = 'case-settings';
+  view.state.error = 'Keep beta error'; view.state.editConflicts = {caseId: 'beta', report: {kind: 'beta'}};
+  await view.pollJob('a');
+  assert.equal(view.state.error, 'Keep beta error');
+  assert.equal(view.state.editConflicts.caseId, 'beta');
+  assert.match(view.jobBanner(), /Alpha failed/);
+  assert.equal(view.state.page, 'case-settings');
+});
+
+test('own job completion after switching tabs preserves the selected case view and drafts', async () => {
+  const detail = multiCase('alpha');
+  const view = await harness(path => {
+    if (path.endsWith('/actions')) return activeTask('a', 'alpha', {action: 'plot'});
+    if (path === '/api/jobs/a') return {id: 'a', status: 'succeeded', result: {preview_id: 'ready'}};
+    if (path === '/api/cases/alpha') return {...detail, plots: []};
+  });
+  await view.openCase('alpha');
+  await view.startJob('/api/cases/alpha/actions', {action: 'plot'}, 'plot', false, 'alpha');
+  await view.dispatch('view-history');
+  await view.pollJob('a');
+  assert.equal(view.state.caseView, 'history');
+  assert.equal(view.state.results.get('alpha').result.preview_id, 'ready');
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, '');
+});
+
+test('discovery of another tab active and short completed jobs refreshes data without changing view', async () => {
+  let listed = [activeTask('a', 'alpha')];
+  const view = await harness(path => {
+    if (path === '/api/jobs') return {jobs: listed};
+    if (path === '/api/cases/beta') return multiCase('beta', {latest_run: 'new-run'});
+  });
+  view.state.activeCase = multiCase('beta'); view.state.page = 'case'; view.state.caseView = 'history';
+  await view.discoverJobs(); assert.equal(view.runningJobs().length, 1);
+  assert.equal(view.isBusy(), false);
+  listed = [...listed, activeTask('b', 'beta', {status: 'succeeded', result: {run_id: 'new-run'}})];
+  await view.discoverJobs();
+  assert.equal(view.state.activeCase.latest_run, 'new-run');
+  assert.equal(view.state.caseView, 'history');
+  assert.equal(view.state.jobs.get('b').status, 'succeeded');
+  await view.dispatch('dismiss-job', {dataset: {id: 'b'}});
+  await view.discoverJobs(); assert.equal(view.state.jobs.has('b'), false);
+});
+
+test('real null-case lookup gates only new investigation and changed hashes survive completion', async () => {
+  const task = activeTask('lookup', null, {action: 'lookup', live: true});
+  const view = await harness(path => path === '/api/lookup' ? task : path === '/api/jobs/lookup'
+    ? {...task, status: 'succeeded', result: {transactions: [{txid, outputs: []}]}} : undefined);
+  view.navigate('new'); view.state.draft.txids = txid;
+  await view.startJob('/api/lookup', {}, 'lookup', true);
+  assert.equal(view.isBusy(), true);
+  view.navigate('settings'); assert.equal(view.isBusy(), false);
+  view.navigate('new'); view.state.draft.txids = 'b'.repeat(64);
+  await view.pollJob('lookup');
+  assert.equal(view.state.draft.txids, 'b'.repeat(64));
+  assert.equal(view.state.draft.reports.length, 0);
+  view.newForm({name: 'Keep my name', txids: 'b'.repeat(64)});
+  await view.dispatch('load-job-outputs', {dataset: {id: 'lookup'}});
+  assert.equal(view.state.draft.txids, txid);
+  assert.equal(view.state.draft.name, 'Keep my name');
+});
+
+test('discovery before a job POST returns retains local lookup ownership', async () => {
+  let resolvePost;
+  const posted = new Promise(resolve => {resolvePost = resolve;});
+  const task = activeTask('lookup', null, {action: 'lookup', live: true});
+  const view = await harness(path => {
+    if (path === '/api/lookup') return posted;
+    if (path === '/api/jobs') return {jobs: [task]};
+    if (path === '/api/jobs/lookup') return {...task, status: 'succeeded', result: {transactions: [{txid, outputs: []}]}};
+  });
+  view.navigate('new'); view.state.draft.txids = txid;
+  const starting = view.startJob('/api/lookup', {}, 'lookup', true);
+  await view.discoverJobs();
+  assert.equal(view.state.jobs.get('lookup').generation, undefined);
+  resolvePost(task); await starting;
+  assert.equal(typeof view.state.jobs.get('lookup').generation, 'number');
+  await view.pollJob('lookup');
+  assert.equal(view.state.draft.reports.length, 1);
+});
+
+test('Miro publication tasks show no cancellation control even alongside cancellable calculations', async () => {
+  const view = await harness(path => path === '/api/session' ? {csrf: 'test', settings: defaults, cases: [], active_jobs: [
+    activeTask('sync', 'alpha', {action: 'board-sync', cancellable: false}), activeTask('plot', 'beta', {action: 'plot'}),
+  ]} : undefined);
+  assert.doesNotMatch(view.jobBanner(), /data-action="cancel-job" data-id="sync"/);
+  assert.match(view.jobBanner(), /data-action="cancel-job" data-id="plot"/);
+  await view.cancelJob('sync');
+  assert.equal(view.calls.some(call => call.path.endsWith('/cancel')), false);
+});
+
+test('a long-running oldest task remains the newest outcome after many newer tasks finish', async () => {
+  const old = activeTask('oldest', 'alpha', {started_at: 1});
+  const finished = Array.from({length: 35}, (_, index) => activeTask(`newer-${index}`, `other-${index}`,
+    {status: 'succeeded', started_at: index + 2, finished_at: index + 3, message: 'Finished'}));
+  const view = await harness(path => {
+    if (path === '/api/session') return {csrf: 'test', settings: defaults, cases: [], active_jobs: [old]};
+    if (path === '/api/jobs') return {jobs: [old, ...finished]};
+    if (path === '/api/jobs/oldest') return {...old, status: 'succeeded', finished_at: 100, message: 'Oldest just completed'};
+    if (path === '/api/cases/alpha') return multiCase('alpha');
+  });
+  await view.discoverJobs();
+  assert.equal(view.state.jobs.size, 33); // All active work plus the most recent 32 outcomes.
+  await view.pollJob('oldest');
+  assert.equal(view.state.jobs.has('oldest'), true);
+  assert.equal(view.state.jobs.size, 32);
+  const html = view.jobBanner();
+  assert.match(html, /Oldest just completed/);
+  assert.ok(html.indexOf('data-task="oldest"') < html.indexOf('data-task="newer-34"'));
 });
