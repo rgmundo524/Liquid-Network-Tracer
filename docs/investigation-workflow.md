@@ -177,6 +177,15 @@ Value**, **Deposit/Peg-out Tx**, **Address/Peg-out Address**, **Receiving Entity
 **Status**, and **Pegout LBTC**. Further columns retain exact output indices,
 source outpoints, hop counts, asset values, and observation provenance.
 
+**Hops from Seed** counts transaction steps from the seed transaction (hop 0)
+to the endpoint transaction. It does not reset at a named address group. When
+multiple seeds or paths reach an endpoint, it reports the shortest qualifying
+distance. **Source Seed Hops** preserves the shortest qualifying distance for
+each source seed outpoint as JSON. Both follow the saved trace's selected paths
+and rules; context inputs and excluded shortcuts do not supply distances.
+The separate **Hop Counts** and **Hop Reference** columns retain the plot's
+chosen counting basis, which may be a named group.
+
 `Source Value` describes a selected source UTXO when its value and asset are
 public. It does not infer an external Bitcoin deposit total or allocate value
 from that source to the endpoint. Multiple source values are mapped to their

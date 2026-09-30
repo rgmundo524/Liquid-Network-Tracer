@@ -26,11 +26,12 @@ ENDPOINT_FIELDS = (
     "Source Paths", "Address", "Receiving Entity", "Status", "Asset", "Value Base Units",
     "Value LBTC", "Hop Counts", "Hop Reference", "Seed Depth", "Block", "Time",
     "Transaction Observation ID", "Transaction Observed At", "Spend Observation ID",
-    "Spend Observed At", "Explorer URL",
+    "Spend Observed At", "Explorer URL", "Hops from Seed", "Source Seed Hops",
 )
 ENDPOINT_TABLE_FIELDS = (
     "Source", "Source Value", "Deposit/Peg-out Tx", "Address/Peg-out Address",
-    "Receiving Entity", "Status", "Pegout LBTC", "Vout", "Outpoint", "Source Seed Outpoints",
+    "Receiving Entity", "Status", "Pegout LBTC", "Hops from Seed", "Source Seed Hops",
+    "Vout", "Outpoint", "Source Seed Outpoints",
     "Source Paths", "Hop Counts", "Hop Reference", "Value LBTC", "Asset", "Value Base Units",
     "Seed Depth", "Block", "Time", "Transaction Observation ID", "Transaction Observed At",
     "Spend Observation ID", "Spend Observed At", "Explorer URL",
@@ -152,14 +153,18 @@ def pegout_csv_rows(graph, state, *, observations=None):
                      enumerate(state["transactions"].get(txid, {}).get("data", {}).get("vout", []))
                      if output_kind(output) != "fee"]
         transaction_sources, endpoint_sources = defaultdict(dict), defaultdict(dict)
+        endpoint_seed_hops = defaultdict(dict)
         for seed in seeds:
             individual = {key: value for key, value in query.items() if key not in ("seeds", "txid")}
             individual["seeds"] = [seed]
-            _, source_matches, source_depths, source_output_depths = _paths(state, individual)
+            seed_distances = {}
+            _, source_matches, source_depths, source_output_depths = _paths(
+                state, individual, seed_distances=seed_distances)
             for txid, hops in _hops_by_transaction(source_depths, source_output_depths).items():
                 transaction_sources[txid][seed] = set(hops)
             for match in source_matches:
                 endpoint_sources[match["outpoint"]][seed] = set(match["hops"])
+                endpoint_seed_hops[match["outpoint"]][seed] = seed_distances[match["outpoint"]]
         if set(transaction_sources) != set(depths) or set(endpoint_sources) != endpoints:
             raise TraceError("Endpoint CSV source paths disagree with the combined plot query")
         input_keys, output_keys, endpoint_keys = defaultdict(set), defaultdict(set), defaultdict(set)
@@ -202,6 +207,8 @@ def pegout_csv_rows(graph, state, *, observations=None):
                 "Address": io["Address Hash"], "Receiving Entity": io["Address Label"],
                 "Status": status, "Asset": _asset(output), "Value Base Units": _amount(output),
                 "Value LBTC": _whole_lbtc(output), "Hop Counts": _joined(match["hops"]),
+                "Hops from Seed": min(endpoint_seed_hops[key].values()),
+                "Source Seed Hops": json.dumps(endpoint_seed_hops[key], sort_keys=True, separators=(",", ":")),
                 "Hop Reference": name or "Selected seed outputs", "Spend Observation ID": oid,
                 "Spend Observed At": _observed_at(observations, oid, state, "/tx/" + txid + "/outspends"),
             })

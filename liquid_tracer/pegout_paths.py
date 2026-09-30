@@ -125,7 +125,12 @@ def _evidence(state):
     return forward, pegouts
 
 
-def _paths(state, query):
+def _paths(state, query, *, seed_distances=None):
+    """Find qualifying paths and optionally report endpoint distance from seeds.
+
+    Seed distances count ordinary transaction edges only along paths accepted
+    by this query, including its attribution budgets and group-relative range.
+    """
     try:
         forward, pegouts = _evidence(state)
         endpoints = {txid: {index: "pegout" for index in indices} for txid, indices in pegouts.items()}
@@ -166,7 +171,9 @@ def _paths(state, query):
                 f"{txid}:{index}" for txid in roots & confirmed
                 for index in range(len(state["transactions"][txid]["data"]["vout"]))})
             links = {key: child for rows in forward.values() for child, key, _ in rows}
-            seen, predecessors = walk_outputs(state, starts, links, limit, confirmed)
+            seed_arrivals = {} if seed_distances is not None else None
+            seen, predecessors = walk_outputs(state, starts, links, limit, confirmed,
+                                               seed_distances=seed_arrivals)
             successful = set()
             distances = defaultdict(set)
             for point in seen:
@@ -175,6 +182,9 @@ def _paths(state, query):
                 if index in endpoints[txid] and depth >= query["min_hops"]:
                     successful.add(point)
                     distances[key].add(depth)
+                    if seed_distances is not None:
+                        seed_distances[key] = min(seed_arrivals[point],
+                                                  seed_distances.get(key, float("inf")))
             kept, output_depths = retain_paths(successful, predecessors)
             depths = transaction_depths(output_depths)
             return kept, _endpoint_matches(state, endpoints, distances), depths, output_depths
@@ -215,6 +225,8 @@ def _paths(state, query):
                 if previous not in marked:
                     marked.add(previous)
                     stack.append(previous)
+        if seed_distances is not None:
+            seed_distances.update({key: min(hops) for key, hops in distances.items()})
         return kept, _endpoint_matches(state, endpoints, distances), depths, {}
     except (KeyError, TypeError, ValueError, IndexError, AttributeError) as exc:
         raise TraceError("Peg-out search needs complete, consistent saved spend evidence") from exc

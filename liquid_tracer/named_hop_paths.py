@@ -8,13 +8,15 @@ from .group_hops import reference_addresses
 from .hop_limits import output_budget
 
 
-def walk_outputs(state, seeds, links, limit, confirmed):
+def walk_outputs(state, seeds, links, limit, confirmed, *, seed_distances=None):
     """Keep path-local depth and attribution allowance for each output.
 
     A named output resets only its own path. A boundary output may inspect its
     direct spender, but an outside output beyond the ceiling cannot continue.
     Incoming context never supplies an independent arrival or a reset.
     Callers validate spend evidence and DAG topology before calling this helper.
+    Optional seed distances count ordinary transaction edges for each exact
+    path state, independently of named-group resets.
     """
     transactions = state["transactions"]
     addresses = reference_addresses(state)
@@ -32,6 +34,11 @@ def walk_outputs(state, seeds, links, limit, confirmed):
             predecessors[point].add(previous)
         if point not in seen:
             seen.add(point)
+            if seed_distances is not None:
+                # This is a unit-edge breadth-first walk. First admission is
+                # the shortest seed path to this exact depth/budget state.
+                seed_distances[point] = (0 if previous is None else
+                                         seed_distances[previous] + 1)
             queue.append(point)
 
     for key in sorted(seeds):

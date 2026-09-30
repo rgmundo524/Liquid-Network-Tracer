@@ -73,6 +73,7 @@ class SavedPlotCSVDownloadTests(unittest.TestCase):
         self.assertEqual({row["Status"] for row in rows}, {"Pegout", "OP_Return", "Dormant"})
         self.assertEqual({row["Deposit/Peg-out Tx"] for row in rows}, {tx("c")})
         self.assertEqual({row["Source"] for row in rows}, {tx("a")})
+        self.assertEqual({row["Hops from Seed"] for row in rows}, {"2"})
         self.assertEqual(next(row["Receiving Entity"] for row in rows if row["Status"] == "Dormant"), "Saved Perp")
         after = {str(p.relative_to(case)): p.read_bytes() for p in case.rglob("*") if p.is_file()}
         self.assertEqual(before, after)
