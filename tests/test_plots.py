@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from liquid_tracer.common import LBTC, TraceError, canonical, digest, read_json, save_json
 from liquid_tracer.investigations import create_investigation, read_case, update_case
-from liquid_tracer.plots import FILES, list_plots, preview_plot, reviewed_plot
+from liquid_tracer.plots import FILES, PEGOUT_CSV_FILES, list_plots, plot_files, preview_plot, reviewed_plot
 from liquid_tracer.services import set_service
 from tests.test_attribution_convergence import graph_state, tx
 from tests.test_connections import saved_case
@@ -45,7 +45,7 @@ class PlotTests(unittest.TestCase):
 
     def rehash_preview(self, directory):
         (directory / "SHA256SUMS").write_text("".join(digest((directory / name).read_bytes()) + "  " + name + "\n"
-                                                    for name in sorted(FILES - {"SHA256SUMS"})))
+                                                    for name in sorted(plot_files(directory) - {"SHA256SUMS"})))
 
     def test_three_goals_share_saved_evidence_without_fetching_or_archive_mutation(self):
         before = self.bytes(self.archive)
@@ -58,7 +58,8 @@ class PlotTests(unittest.TestCase):
                 self.assertEqual(graph["namespace"], plan["namespace"])
                 self.assertEqual(plan["schema_version"], 2)
                 self.assertEqual(graph["plot"], read_json(Path(result["directory"]) / "plot.json"))
-                self.assertEqual(set(path.name for path in Path(result["directory"]).iterdir()), FILES)
+                self.assertEqual(set(path.name for path in Path(result["directory"]).iterdir()),
+                                 FILES | PEGOUT_CSV_FILES if goal == "pegouts" else FILES)
                 self.assertTrue(result["saved_data_only"])
                 self.assertEqual(result["source_max_hops"], 10)
                 self.assertEqual(result["source_run_status"], "bounded_complete")
@@ -78,6 +79,72 @@ class PlotTests(unittest.TestCase):
         metadata["seeds"] = [tx("e") + ":0"]
         save_json(self.case / "case.json", metadata)
         reviewed_plot(self.case, result["preview_id"])
+
+    def test_pegout_path_exports_are_scoped_manifested_and_detect_modified_bytes(self):
+        state = graph_state((("a:0", "c"), ("a:1", "d")), seeds=("a:0",), raw_links=(("e:0", "c"),))
+        endpoint = add_pegout(state, tx("c"))
+        add_pegout(state, tx("d"))
+        self.state, self.archive = saved_case(self.case, state)
+        result = preview_plot(self.case, "pegouts", max_hops=1, include_context=True)
+        directory = Path(result["directory"])
+        reviewed_plot(self.case, result["preview_id"])
+        with (directory / "path-transactions.csv").open(newline="") as stream:
+            paths = list(csv.DictReader(stream))
+        with (directory / "trace-endpoints.csv").open(newline="") as stream:
+            endpoints = list(csv.DictReader(stream))
+        self.assertEqual({row["Transaction Hash"] for row in paths}, {tx("a"), tx("c")})
+        self.assertEqual([row["Outpoint"] for row in endpoints], [endpoint])
+        self.assertNotIn(tx("e") + ":0", {value for row in paths for value in row.values()})
+        self.assertEqual(set(line.split("  ")[1] for line in (directory / "SHA256SUMS").read_text().splitlines()),
+                         (FILES | PEGOUT_CSV_FILES) - {"SHA256SUMS"})
+        with (directory / "trace-endpoints.csv").open("a") as stream:
+            stream.write("changed\n")
+        with self.assertRaisesRegex(TraceError, "changed"):
+            reviewed_plot(self.case, result["preview_id"])
+
+    def test_older_saved_pegout_plots_remain_reviewable_without_new_csv_exports(self):
+        result = preview_plot(self.case, "pegouts")
+        directory = Path(result["directory"])
+        graph = read_json(directory / "graph.json")
+        graph["plot"].pop("csv_export_version")
+        save_json(directory / "graph.json", graph)
+        save_json(directory / "plot.json", graph["plot"])
+        for name in PEGOUT_CSV_FILES:
+            (directory / name).unlink()
+        self.rehash_preview(directory)
+        self.assertEqual(plot_files(directory), FILES)
+        reviewed_plot(self.case, result["preview_id"])
+        self.assertTrue(list_plots(self.case)[0]["reviewable"])
+
+    def test_new_pegout_exports_are_required_even_for_empty_results(self):
+        result = preview_plot(self.case, "pegouts", max_hops=0)
+        directory = Path(result["directory"])
+        for name in PEGOUT_CSV_FILES:
+            with (directory / name).open(newline="") as stream:
+                reader = csv.DictReader(stream)
+                self.assertTrue(reader.fieldnames)
+                self.assertEqual(list(reader), [])
+        (directory / "trace-endpoints.csv").unlink()
+        with self.assertRaisesRegex(TraceError, "incomplete"):
+            reviewed_plot(self.case, result["preview_id"])
+
+    def test_endpoint_observation_time_comes_from_the_verified_run_archive(self):
+        state = graph_state((("a:0", "b"),), seeds=("a:0",))
+        state["outputs"][tx("b") + ":0"].update(status="unspent_at_observation",
+                observed_spend={"spent": False}, spend_observation_id=77)
+        self.state, self.archive = saved_case(self.case, state)
+        stamp = "2026-09-30T19:00:00Z"
+        save_json(self.archive / "evidence-index.json", [{"id": 77, "source": self.state["source"],
+            "endpoint": "/tx/" + tx("b") + "/outspends", "fetched_at": stamp, "status": 200}])
+        with (self.archive / "SHA256SUMS").open("a") as stream:
+            stream.write(digest((self.archive / "evidence-index.json").read_bytes()) + "  evidence-index.json\n")
+        with patch("liquid_tracer.store.Store", side_effect=AssertionError("Do not open the mutable evidence store")):
+            result = preview_plot(self.case, "pegouts", include_unspent=True)
+        with (Path(result["directory"]) / "trace-endpoints.csv").open(newline="") as stream:
+            endpoints = list(csv.DictReader(stream))
+        self.assertEqual(endpoints[0]["Status"], "Dormant")
+        self.assertEqual(endpoints[0]["Spend Observed At"], stamp)
+        self.assertNotEqual(endpoints[0]["Time"], stamp)
 
     def test_unselected_sibling_paths_and_context_spends_do_not_become_matches(self):
         state = graph_state((("a:0", "c"), ("a:1", "d")), seeds=("a:0",), raw_links=(("a:2", "e"),))

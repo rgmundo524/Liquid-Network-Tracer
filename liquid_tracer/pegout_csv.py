@@ -1,0 +1,220 @@
+"""Auditable transaction and terminal-output tables for a saved endpoint plot.
+
+Membership follows exact qualifying seed paths, never address reuse or the
+union of drawn lines. Public amounts describe outputs, not value allocation
+from any listed source, and a peg-out request does not prove a Bitcoin payout.
+"""
+from collections import defaultdict
+import csv
+import json
+from pathlib import Path
+
+from .common import TraceError, canonical, output_kind, parse_outpoint
+from .group_hops import reference_name
+from .pegout_paths import _paths, validate_query
+from .transaction_csv import _amount, _asset, _block_time, _text, transaction_csv_rows
+
+
+PATH_FIELDS = (
+    "Transaction Hash", "Roles", "Source Transactions", "Source Seed Outpoints",
+    "Source Paths", "Traced Input Outpoints", "Traced Output Outpoints", "Endpoint Outpoints",
+    "Hop Counts", "Hop Reference", "Seed Depth", "Block", "Time",
+    "Transaction Observation ID", "Transaction Observed At", "Explorer URL",
+)
+ENDPOINT_FIELDS = (
+    "Transaction Hash", "Vout", "Outpoint", "Source Transactions", "Source Seed Outpoints",
+    "Source Paths", "Address", "Receiving Entity", "Status", "Asset", "Value Base Units",
+    "Value LBTC", "Hop Counts", "Hop Reference", "Seed Depth", "Block", "Time",
+    "Transaction Observation ID", "Transaction Observed At", "Spend Observation ID",
+    "Spend Observed At", "Explorer URL",
+)
+
+
+def _joined(values):
+    return "; ".join(str(value) for value in sorted(set(values)))
+
+
+def _whole_lbtc(output):
+    if _asset(output) != "L-BTC" or _amount(output) == "":
+        return ""
+    whole, fraction = divmod(_amount(output), 100_000_000)
+    return str(whole) + (("." + f"{fraction:08d}".rstrip("0")) if fraction else "")
+
+
+def _hops_by_transaction(depths, output_depths):
+    if not output_depths:
+        return depths
+    result = defaultdict(set)
+    for key, hops in output_depths.items():
+        result[parse_outpoint(key)[0]].update(hops)
+    return result
+
+
+def _source_fields(sources):
+    """Keep source-to-distance associations without repeating monetary rows."""
+    return {
+        "Source Transactions": _joined(parse_outpoint(key)[0] for key in sources),
+        "Source Seed Outpoints": _joined(sources),
+        "Source Paths": json.dumps([
+            {"seed_outpoint": key, "hops": sorted(hops)} for key, hops in sorted(sources.items())
+        ], ensure_ascii=False, separators=(",", ":")),
+    }
+
+
+def _observed_at(observations, observation_id, state, endpoint):
+    """A retrieval timestamp must belong to this exact API observation."""
+    if not observations or observation_id in (None, ""):
+        return ""
+    record = observations.get(observation_id)
+    if record is None:
+        return ""
+    if (record.get("id") != observation_id or record.get("source") != state["source"]
+            or record.get("endpoint") != endpoint or record.get("status") != 200):
+        raise TraceError("Endpoint CSV observation does not match its saved transaction or outspends request")
+    stamp = record.get("fetched_at", "")
+    if not isinstance(stamp, str):
+        raise TraceError("Endpoint CSV observation timestamp must be text")
+    return stamp
+
+
+def _transaction_fields(txid, state, observations):
+    record = state["transactions"][txid]
+    block, stamp = _block_time(record["data"])
+    oid = record.get("observation_id", "")
+    source = state["source"]
+    explorer = "https://blockstream.info/" + ("liquidtestnet" if "liquidtestnet" in source else "liquid")
+    return {
+        "Transaction Hash": txid, "Seed Depth": record.get("depth", ""), "Block": block,
+        "Time": stamp, "Transaction Observation ID": oid,
+        "Transaction Observed At": _observed_at(observations, oid, state, "/tx/" + txid),
+        "Explorer URL": "" if source.startswith("fixture://") else explorer + "/tx/" + txid,
+    }
+
+
+def pegout_csv_rows(graph, state, *, observations=None):
+    """Return one row per qualifying transaction and one per terminal UTXO."""
+    try:
+        report = graph["pegouts"]
+        raw_query = report["query"]
+        name = reference_name(state)
+        query = validate_query(raw_query.get("txid"), raw_query.get("min_hops", 0),
+                               raw_query.get("max_hops", 10), seeds=raw_query.get("seeds"),
+                               include_unspent=raw_query.get("include_unspent", False),
+                               include_unspendable=raw_query.get("include_unspendable", False),
+                               include_context=raw_query.get("include_context", False),
+                               hop_reference_name=name)
+        if canonical(query) != canonical(raw_query) or reference_name(graph) != name:
+            raise TraceError("Endpoint CSV hop reference or query disagrees with the saved graph")
+        outpoints, matches, depths, output_depths = _paths(state, query)
+        pegouts = [{key: value for key, value in match.items() if key != "kind"}
+                   for match in matches if match["kind"] == "pegout"]
+        if (report.get("outpoints") != sorted(outpoints)
+                or canonical(report.get("matches")) != canonical(pegouts)
+                or report.get("match_count") != len(pegouts)
+                or report.get("transaction_count") != len(depths)):
+            raise TraceError("Endpoint CSV path report disagrees with saved spend evidence")
+        if query.get("include_unspent") or query.get("include_unspendable"):
+            counts = {kind: sum(match["kind"] == kind for match in matches)
+                      for kind in ("pegout", "unspent", "unspendable")}
+            if (canonical(report.get("endpoint_matches")) != canonical(matches)
+                    or report.get("endpoint_count") != len(matches)
+                    or report.get("endpoint_counts") != counts):
+                raise TraceError("Endpoint CSV terminal outputs disagree with saved spend evidence")
+        endpoints = {match["outpoint"] for match in matches}
+        expected_edges = {"out:" + key for key in outpoints | endpoints}
+        expected_edges.update(f"in:{state['links'][key]['spending_txid']}:{state['links'][key]['vin']}"
+                              for key in outpoints)
+        actual_edges = {edge["id"] for edge in graph["edges"]}
+        transactions = {node["id"][3:] for node in graph["nodes"] if node["kind"] == "transaction"}
+        if transactions != set(depths) or not expected_edges <= actual_edges:
+            raise TraceError("Endpoint CSV graph is missing qualifying transactions or path arrows")
+        if any(edge["id"] not in expected_edges and
+               (not query.get("include_context") or not edge.get("role", "").startswith("context_"))
+               for edge in graph["edges"]):
+            raise TraceError("Endpoint CSV graph contains an unrelated path arrow")
+        # Reuse the established exact-I/O and grouped-context validation, as
+        # well as attribution resolution for each output occurrence.
+        io_rows = transaction_csv_rows(graph, state)
+        output_rows = {(row["Transaction Hash"], row["Number of I/O"]): row
+                       for row in io_rows if row["Direction"] == "OUT"}
+        if "seeds" in query:
+            seeds = query["seeds"]
+        else:
+            txid = query["txid"]
+            seeds = [f"{txid}:{index}" for index, output in
+                     enumerate(state["transactions"].get(txid, {}).get("data", {}).get("vout", []))
+                     if output_kind(output) != "fee"]
+        transaction_sources, endpoint_sources = defaultdict(dict), defaultdict(dict)
+        for seed in seeds:
+            individual = {key: value for key, value in query.items() if key not in ("seeds", "txid")}
+            individual["seeds"] = [seed]
+            _, source_matches, source_depths, source_output_depths = _paths(state, individual)
+            for txid, hops in _hops_by_transaction(source_depths, source_output_depths).items():
+                transaction_sources[txid][seed] = set(hops)
+            for match in source_matches:
+                endpoint_sources[match["outpoint"]][seed] = set(match["hops"])
+        if set(transaction_sources) != set(depths) or set(endpoint_sources) != endpoints:
+            raise TraceError("Endpoint CSV source paths disagree with the combined plot query")
+        input_keys, output_keys, endpoint_keys = defaultdict(set), defaultdict(set), defaultdict(set)
+        for key in outpoints:
+            input_keys[state["links"][key]["spending_txid"]].add(key)
+        for key in outpoints | endpoints:
+            output_keys[parse_outpoint(key)[0]].add(key)
+        for key in endpoints:
+            endpoint_keys[parse_outpoint(key)[0]].add(key)
+        path_rows = []
+        for txid, sources in sorted(transaction_sources.items()):
+            roles = []
+            if any(parse_outpoint(seed)[0] == txid for seed in sources):
+                roles.append("Seed")
+            if input_keys[txid] and (output_keys[txid] - endpoints):
+                roles.append("Intermediate")
+            if endpoint_keys[txid]:
+                roles.append("Endpoint")
+            path_rows.append({
+                **_transaction_fields(txid, state, observations), **_source_fields(sources),
+                "Roles": "; ".join(roles), "Traced Input Outpoints": _joined(input_keys[txid]),
+                "Traced Output Outpoints": _joined(output_keys[txid]),
+                "Endpoint Outpoints": _joined(endpoint_keys[txid]),
+                "Hop Counts": _joined(hop for hops in sources.values() for hop in hops),
+                "Hop Reference": name or "Selected seed outputs",
+            })
+        endpoint_rows = []
+        for match in matches:
+            txid, index, key = match["txid"], match["vout"], match["outpoint"]
+            output = state["transactions"][txid]["data"]["vout"][index]
+            io = output_rows[txid, index]
+            kind = match["kind"]
+            status = ("Peg-out" if kind == "pegout" else "Dormant" if kind == "unspent" else
+                      "OP_RETURN" if output.get("scriptpubkey_type") == "op_return"
+                      or output.get("scriptpubkey", "").startswith("6a") else "Unspendable")
+            oid = match.get("spend_observation_id", "") if kind == "unspent" else ""
+            endpoint_rows.append({
+                **_transaction_fields(txid, state, observations),
+                **_source_fields(endpoint_sources[key]), "Vout": index, "Outpoint": key,
+                "Address": io["Address Hash"], "Receiving Entity": io["Address Label"],
+                "Status": status, "Asset": _asset(output), "Value Base Units": _amount(output),
+                "Value LBTC": _whole_lbtc(output), "Hop Counts": _joined(match["hops"]),
+                "Hop Reference": name or "Selected seed outputs", "Spend Observation ID": oid,
+                "Spend Observed At": _observed_at(observations, oid, state, "/tx/" + txid + "/outspends"),
+            })
+        order = lambda row: (row["Time"] == "", row["Time"], row["Transaction Hash"], row.get("Vout", -1))
+        path_rows.sort(key=order)
+        endpoint_rows.sort(key=order)
+        return path_rows, endpoint_rows
+    except (KeyError, TypeError, ValueError, IndexError, AttributeError) as error:
+        raise TraceError("Endpoint CSV requires complete, consistent saved path evidence") from error
+
+
+def write_pegout_csvs(destination, graph, state, *, observations=None):
+    """Write both tables, including their headers when no endpoints match."""
+    path_rows, endpoint_rows = pegout_csv_rows(graph, state, observations=observations)
+    destination = Path(destination)
+    for name, rows, fields in (("path-transactions.csv", path_rows, PATH_FIELDS),
+                               ("trace-endpoints.csv", endpoint_rows, ENDPOINT_FIELDS)):
+        with (destination / name).open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({key: _text(value) for key, value in row.items()})
+    return {"path_transactions": len(path_rows), "trace_endpoints": len(endpoint_rows)}
