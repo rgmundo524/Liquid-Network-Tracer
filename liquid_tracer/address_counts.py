@@ -155,7 +155,7 @@ def _failure_reason(error):
 
 def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=False,
                     progress=None, transport=None, fixture=None, best_effort=False):
-    """One bounded, serialized cache update. Never acquires trace.lock.
+    """Fetch counts concurrently, with serialized cache updates and no trace.lock.
 
     Callers may already own trace.lock (trace -> export -> Miro). A separate
     ancillary-cache lock avoids recursive flock deadlocks and lost updates.
@@ -204,42 +204,55 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
                     fetch_options = state.get("fetch_options", {})
                     store = Store(case)
                     api = Esplora(store, "counts-"+uuid.uuid4().hex, limits, base=base, auth=auth,
-                                  fixture=fixture, tx_cache_seconds=0, workers=1,
+                                  fixture=fixture, tx_cache_seconds=0, workers=fetch_options.get("workers", 8),
                                   advertised_rps=fetch_options.get("advertised_rps"),
                                   min_interval=fetch_options.get("min_interval"), **options)
                     if api.base != source:
                         raise TraceError("Address-count source does not match the saved run")
-                    for address in todo:
-                        try:
-                            body, oid = api.get("/address/"+address)
-                            confirmed, mempool = _transaction_counts(body, address)
-                        except StopRun as error:
-                            stop = str(error)
-                            break
-                        except TraceError as error:
-                            if not best_effort:
-                                raise
-                            reason = _failure_reason(error)
-                            failures.append({"address": address, "reason": reason})
+                    # Bound each batch so a global failure cannot enqueue the
+                    # remaining investigation. The shared client owns pacing,
+                    # retries, request budgets, and evidence synchronization.
+                    for start in range(0, len(todo), api.workers):
+                        batch = todo[start:start + api.workers]
+                        results = api.prefetch(["/address/" + address for address in batch])
+                        failure = None
+                        for address in batch:
+                            try:
+                                result = results["/address/" + address]
+                                if isinstance(result, TraceError):
+                                    raise result
+                                body, oid = result
+                                confirmed, mempool = _transaction_counts(body, address)
+                            except StopRun as error:
+                                stop = stop or str(error)
+                                continue
+                            except TraceError as error:
+                                if not best_effort and failure is None:
+                                    failure = error
+                                reason = _failure_reason(error)
+                                failures.append({"address": address, "reason": reason})
+                                examined += 1
+                                _progress(progress, "address_counts", len(wanted)-len(todo)+examined, len(wanted))
+                                if reason in ("authentication_failed", "network_failed"):
+                                    stop = stop or reason
+                                continue
+                            observation = next(store.observations([oid]))
+                            counts[address] = {"address": address, "source": source,
+                                "observed_at": observation["fetched_at"],
+                                "confirmed_tx_count": confirmed, "mempool_tx_count": mempool,
+                                "observation_ids": [oid]}
+                            data = {"schema_version": 1, "case_id": state["case_id"], "source": source, "counts": counts}
+                            data["sha256"] = digest(canonical(data))
+                            save_json(case/"address-counts.json", data)
+                            fetched += 1
                             examined += 1
                             _progress(progress, "address_counts", len(wanted)-len(todo)+examined, len(wanted))
-                            # A global connection/authentication problem should not
-                            # cause the same failing request for every address.
-                            if reason in ("authentication_failed", "network_failed"):
-                                stop = reason
-                                break
-                            continue
-                        observation = next(store.observations([oid]))
-                        counts[address] = {"address": address, "source": source,
-                            "observed_at": observation["fetched_at"],
-                            "confirmed_tx_count": confirmed, "mempool_tx_count": mempool,
-                            "observation_ids": [oid]}
-                        data = {"schema_version": 1, "case_id": state["case_id"], "source": source, "counts": counts}
-                        data["sha256"] = digest(canonical(data))
-                        save_json(case/"address-counts.json", data)
-                        fetched += 1
-                        examined += 1
-                        _progress(progress, "address_counts", len(wanted)-len(todo)+examined, len(wanted))
+                        # Drain and save every successful result, even if an
+                        # earlier address hit a limit or failed in this batch.
+                        if failure is not None:
+                            raise failure
+                        if stop is not None:
+                            break
             known = sum(address in counts for address in wanted)
             remaining = len(todo)-fetched
             reason = stop or ("lookup_failed" if failures else None)
