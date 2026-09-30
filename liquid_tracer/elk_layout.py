@@ -271,7 +271,7 @@ def _report_progress(progress, message, *, completed=0, elapsed_seconds=None, st
             pass  # An advisory progress sink must not change layout behavior.
 
 
-def _worker(graph, seeds, progress=None, *, heap_mb=None, cancel_event=None):
+def _worker(graph, seeds, progress=None, *, heap_mb=None, cancel_event=None, resource_lease_fd=None):
     project = Path(os.environ.get("LIQUID_TRACER_ROOT", Path(__file__).resolve().parents[1]))
     runner = project / "layout" / "run.mjs"
     node = os.environ.get("LIQUID_NODE_BIN") or shutil.which("node")
@@ -297,7 +297,8 @@ def _worker(graph, seeds, progress=None, *, heap_mb=None, cancel_event=None):
         with defer_cancellation_during_spawn():
             process = subprocess.Popen([node, f"--max-old-space-size={heap_mb}", str(runner)],
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE, text=True, env=environment, start_new_session=True)
+                                       stderr=subprocess.PIPE, text=True, env=environment, start_new_session=True,
+                                       pass_fds=() if resource_lease_fd is None else (resource_lease_fd,))
         # Signals are handled by the main thread. It can cancel while this
         # thread is inside Popen; ownership is established before we unwind.
         if cancel_event is not None and cancel_event.is_set():

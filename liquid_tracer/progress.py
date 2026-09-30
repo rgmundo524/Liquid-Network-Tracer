@@ -58,6 +58,8 @@ ELK_STAGES = {
     "input_order_fallback": "Preferred connector ordering unavailable; retaining ELK geometry for validation",
     "measuring_output": "Measuring the completed ELK layout",
     "memory_measured": "ELK worker memory measurement completed",
+    "resource_wait": "Waiting for CPU and memory shared with other Liquid Tracer layouts",
+    "resource_allocated": "CPU and memory allocated for this ELK layout",
     "ready": "ELK layout completed",
     "attempt_failed": "ELK layout attempt failed; continuing the layout search",
     "retrying_memory": "Retrying the ELK layout attempt alone with the full shared heap budget",
@@ -103,6 +105,22 @@ def _public_count_workers(event):
     return value
 
 
+def _public_shared_api(event):
+    """Only local numeric pacing state and fixed reasons cross the UI boundary."""
+    value = {}
+    clients = event.get("shared_api_active_clients")
+    if type(clients) is int and 1 <= clients <= 65535:
+        value["shared_api_active_clients"] = clients
+    for field in ("shared_api_effective_rps", "shared_api_wait_seconds"):
+        number = event.get(field)
+        if type(number) in (int, float) and 0 <= number <= 2 ** 53 - 1 and math.isfinite(number):
+            value[field] = number
+    reason = event.get("shared_api_wait_reason")
+    if isinstance(reason, str) and reason in ("", "shared_rate_limit", "server_cooldown"):
+        value["shared_api_wait_reason"] = reason
+    return value
+
+
 def public_progress(event):
     """Allow only known phases and bounded numbers across the browser boundary.
 
@@ -135,6 +153,14 @@ def public_progress(event):
         if name:
             value["hop_reference_name"] = name
             value["message"] += f" from {name}; named-group outputs reset to hop 0"
+    if value["phase"].startswith("address_counts") or value["phase"] in COLLECTION_PHASES:
+        value.update(_public_shared_api(event))
+        if value.get("shared_api_active_clients", 1) > 1:
+            value["message"] += f"; API budget shared by {value['shared_api_active_clients']} clients"
+            if "shared_api_effective_rps" in value:
+                value["message"] += f" ({value['shared_api_effective_rps']:.1f} requests/s total)"
+        if value.get("shared_api_wait_reason") == "server_cooldown" and value.get("shared_api_wait_seconds", 0) > 0:
+            value["message"] += "; waiting for the shared API cooldown"
     if value["phase"] == "optimizing":
         stage = event.get("stage")
         if isinstance(stage, str) and stage in ELK_STAGES:
@@ -185,6 +211,14 @@ def public_progress(event):
                 value["message"] += f"; per-worker Node heap budget {value['heap_mb']:,} MiB"
         elif "heap_mb" in value:
             value["message"] += f"; Node heap budget {value['heap_mb']:,} MiB"
+        layouts = event.get("active_layouts")
+        if type(layouts) is int and 1 <= layouts <= 65535:
+            value["active_layouts"] = layouts
+            if layouts > 1:
+                value["message"] += f"; sharing resources across {layouts} layouts"
+        machine_heap = event.get("machine_heap_mb")
+        if type(machine_heap) is int and 1 <= machine_heap <= 2 ** 53 - 1:
+            value["machine_heap_mb"] = machine_heap
     if value["phase"] == "waiting":
         reason = event.get("reason")
         if reason == "rate_limit":

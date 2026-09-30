@@ -22,7 +22,7 @@
     LIQUID_CASE_DIR = "${config.devenv.root}/cases/current";
     LIQUID_SECRET_PROVIDER = "protonpass";
     LIQUID_SECRET_PROFILE = "development";
-    # Chosen operating rate for the paid endpoint, shared across fetch workers.
+    # Chosen paid-endpoint rate, shared across local workers and instances.
     # This is an actual target, not an advertised Blockstream quota.
     LIQUID_BLOCKSTREAM_ENTERPRISE_RPS = "49";
     # A verified allowance in LIQUID_BLOCKSTREAM_API_RPS overrides this target
@@ -33,12 +33,12 @@
     # local files and never needs API credentials or a separate server.
     LIQUID_MERMAID_BIN = "${pkgs.mermaid-cli}/bin/mmdc";
     LIQUID_NODE_BIN = "${pkgs.nodejs_24}/bin/node";
-    # Total V8 old-space allowance, shared by concurrent ELK workers. Mermaid
+    # Per-layout V8 old-space ceiling within the shared ELK resource pool. Mermaid
     # uses the allowance for one renderer. Auto uses 90% of available RAM,
     # accounting for Linux cgroup limits; a number sets total MiB explicitly.
     LIQUID_RENDER_HEAP_MB = "auto";
     # Auto measures the first ELK attempt, then sizes parallel batches from
-    # peak RAM with 2x headroom, available CPUs and the shared memory budget.
+    # peak RAM with 2x headroom and CPU/memory shares across active instances.
     # Set 1 for serial execution or 1..64 as an explicit concurrency ceiling.
     LIQUID_ELK_WORKERS = "auto";
   };
@@ -60,12 +60,9 @@
     description = "Install the locked local ELK layout dependency when needed";
     exec = ''
       set -euo pipefail
-      cd "$LIQUID_TRACER_ROOT/layout"
-      layout_lock_hash="$(sha256sum package.json package-lock.json | sha256sum | cut -d ' ' -f 1)"
-      if [ ! -f node_modules/.liquid-lock ] || [ "$(cat node_modules/.liquid-lock)" != "$layout_lock_hash" ]; then
-        ${pkgs.nodejs_24}/bin/npm ci --ignore-scripts --no-audit --no-fund
-        printf '%s\n' "$layout_lock_hash" > node_modules/.liquid-lock
-      fi
+      export PYTHONPATH="$LIQUID_TRACER_ROOT''${PYTHONPATH:+:$PYTHONPATH}"
+      exec ${config.languages.python.package}/bin/python3 -m liquid_tracer.web_build layout \
+        --root "$LIQUID_TRACER_ROOT" --npm "${pkgs.nodejs_24}/bin/npm"
     '';
   };
 
@@ -73,14 +70,9 @@
     description = "Install locked Astro dependencies when needed and build the local UI";
     exec = ''
       set -euo pipefail
-      liquid-layout-setup
-      cd "$LIQUID_TRACER_ROOT/web"
-      web_lock_hash="$(sha256sum package.json package-lock.json | sha256sum | cut -d ' ' -f 1)"
-      if [ ! -f node_modules/.liquid-lock ] || [ "$(cat node_modules/.liquid-lock)" != "$web_lock_hash" ]; then
-        ${pkgs.nodejs_24}/bin/npm ci --no-audit --no-fund
-        printf '%s\n' "$web_lock_hash" > node_modules/.liquid-lock
-      fi
-      exec ${pkgs.nodejs_24}/bin/npm run build
+      export PYTHONPATH="$LIQUID_TRACER_ROOT''${PYTHONPATH:+:$PYTHONPATH}"
+      exec ${config.languages.python.package}/bin/python3 -m liquid_tracer.web_build web \
+        --root "$LIQUID_TRACER_ROOT" --npm "${pkgs.nodejs_24}/bin/npm"
     '';
   };
 
