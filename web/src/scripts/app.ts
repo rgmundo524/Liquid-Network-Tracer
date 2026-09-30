@@ -1153,8 +1153,8 @@ const endpointCsvFiles = ["path-transactions.csv", "trace-endpoints.csv"];
 
 function plotDownloadLabel(item: Download): string {
   const labels: Record<string, string> = {
-    "path-transactions.csv": "Path transactions CSV",
-    "trace-endpoints.csv": "Trace endpoints CSV",
+    "path-transactions.csv": "All trace transactions CSV",
+    "trace-endpoints.csv": "Endpoints only CSV",
     "transactions.csv": "Plot inputs and outputs CSV",
   };
   return labels[item.name] || item.name;
@@ -1164,11 +1164,12 @@ function endpointCsvDownloads(plot: Plot): string {
   if (plot.goal !== "pegouts") return "";
   const downloads = endpointCsvFiles.map(name => plot.artifact?.downloads.find(item => item.name === name));
   const missing = downloads.some(item => !item || !safeLocalUrl(item.url));
-  return `<div class="plot-csv-downloads"><p class="small muted"><strong>Path transactions CSV:</strong> one row per transaction on the selected seed-to-endpoint paths. <strong>Trace endpoints CSV:</strong> one row per matching ending output. Both use this saved plot's hop range and endpoint choices; context-only activity is excluded. Unspent outputs are labeled Dormant; OP_RETURN and other unspendable outputs are included when selected.</p><div class="artifact-actions">${downloads.map(item => item ? downloadLink(item, plotDownloadLabel(item)) : "").join("")}</div>${missing ? `<p class="artifact-note">Generate this plot again to add the path transactions and trace endpoints CSV exports.${plot.reviewable ? " Existing downloads and Miro syncing remain available." : ""}</p>` : ""}</div>`;
+  return `<div class="plot-csv-downloads"><p class="small muted"><strong>All trace transactions:</strong> every transaction in this peg-out trace, including seeds, intermediate transactions, and endpoint transactions. One row per transaction. <strong>Endpoints only:</strong> one row per ending output. Both use this saved trace's hop range and endpoint choices. Unspent outputs are labeled Dormant.</p><div class="artifact-actions">${downloads.map(item => item ? downloadLink(item, plotDownloadLabel(item)) : "").join("")}</div>${missing ? `<p class="artifact-note">Generate this plot again to add both CSV downloads.${plot.reviewable ? " The saved chart and Miro syncing remain available." : ""}</p>` : ""}</div>`;
 }
 
 function plotEvidenceDownloads(plot: Plot): string {
-  const downloads = (plot.artifact?.downloads || []).filter(item => !endpointCsvFiles.includes(item.name));
+  const downloads = (plot.artifact?.downloads || []).filter(item => !endpointCsvFiles.includes(item.name)
+    && (plot.goal !== "pegouts" || !item.name.endsWith(".csv")));
   return `${endpointCsvDownloads(plot)}${downloads.some(item => item.name === "transactions.csv") ? '<p class="small muted">Plot inputs and outputs CSV has one row per displayed input or output, including context when shown.</p>' : ""}<div class="artifact-actions">${downloads.map(item => downloadLink(item, plotDownloadLabel(item))).join("")}</div>`;
 }
 

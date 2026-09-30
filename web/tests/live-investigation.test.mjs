@@ -1897,18 +1897,19 @@ test('saved peg-out paths expose separate transaction and endpoint CSVs in plots
   for (const page of ['plots', 'history']) {
     await view.dispatch('view-' + page);
     const html = view.workspace();
-    assert.match(html, /href="\/files\/case1\/previews\/terminal\/path-transactions.csv"[^>]*>[\s\S]*?Path transactions CSV<\/a>/);
-    assert.match(html, /href="\/files\/case1\/previews\/terminal\/trace-endpoints.csv"[^>]*>[\s\S]*?Trace endpoints CSV<\/a>/);
-    assert.match(html, /one row per transaction on the selected seed-to-endpoint paths/);
-    assert.match(html, /one row per matching ending output/);
-    assert.match(html, /this saved plot's hop range and endpoint choices; context-only activity is excluded/);
+    assert.match(html, /href="\/files\/case1\/previews\/terminal\/path-transactions.csv"[^>]*>[\s\S]*?All trace transactions CSV<\/a>/);
+    assert.match(html, /href="\/files\/case1\/previews\/terminal\/trace-endpoints.csv"[^>]*>[\s\S]*?Endpoints only CSV<\/a>/);
+    assert.match(html, /every transaction in this peg-out trace, including seeds, intermediate transactions, and endpoint transactions/);
+    assert.match(html, /one row per ending output/);
+    assert.match(html, /this saved trace's hop range and endpoint choices/);
     assert.match(html, /Unspent outputs are labeled Dormant/);
     assert.doesNotMatch(html, /Generate this plot again to add/);
     assert.equal((html.match(/href="[^\"]*path-transactions.csv"/g) || []).length, 1);
     assert.equal((html.match(/href="[^\"]*trace-endpoints.csv"/g) || []).length, 1);
+    assert.equal((html.match(/href="\/files\/case1\/previews\/terminal\/[^"]*\.csv"/g) || []).length, 2);
     if (page === 'history') {
-      assert.match(html, /download="transactions.csv"[^>]*>[\s\S]*?Plot inputs and outputs CSV<\/a>/);
-      assert.match(html, /one row per displayed input or output, including context when shown/);
+      assert.doesNotMatch(html, /href="\/files\/case1\/previews\/terminal\/transactions.csv"/);
+      assert.doesNotMatch(html, /Plot inputs and outputs CSV/);
       assert.match(html, /Full-run CSV downloads/);
       assert.match(html, /selected collection run, across its full trace/);
       assert.match(html, /href="\/files\/case1\/previews\/terminal\/pegouts.json"/);
@@ -1926,12 +1927,12 @@ test('older peg-out plots offer regeneration without disabling their existing do
   for (const page of ['plots', 'history']) {
     await view.dispatch('view-' + page);
     const html = view.workspace();
-    assert.match(html, /Generate this plot again to add the path transactions and trace endpoints CSV exports/);
-    assert.match(html, /Existing downloads and Miro syncing remain available/);
+    assert.match(html, /Generate this plot again to add both CSV downloads/);
+    assert.match(html, /The saved chart and Miro syncing remain available/);
     assert.match(html, /href="\/files\/case1\/previews\/old\/graph.svg"/);
     assert.doesNotMatch(html, /download="(?:path-transactions|trace-endpoints).csv"/);
     if (page === 'plots') assert.doesNotMatch(html.match(/<button[^>]*data-action="plot-boards"[^>]*>/)[0], /disabled/);
-    else assert.match(html, /href="\/files\/case1\/previews\/old\/transactions.csv"/);
+    else assert.doesNotMatch(html, /href="\/files\/case1\/previews\/old\/transactions.csv"/);
   }
 });
 
@@ -1946,7 +1947,7 @@ test('path export actions stay specific to peg-out plots and follow the saved se
     workflowEdit(view, 'plot-picker', goal);
     for (const page of ['plots', 'history']) {
       await view.dispatch('view-' + page);
-      assert.doesNotMatch(view.workspace(), /Path transactions CSV|Trace endpoints CSV|Generate this plot again to add/);
+      assert.doesNotMatch(view.workspace(), /All trace transactions CSV|Endpoints only CSV|Generate this plot again to add/);
     }
   }
   workflowEdit(view, 'plot-picker', 'terminal');
@@ -1961,8 +1962,8 @@ test('unreviewable older peg-out plots do not claim syncing remains available', 
   for (const page of ['plots', 'history']) {
     await view.dispatch('view-' + page);
     const html = view.workspace();
-    assert.match(html, /Generate this plot again to add the path transactions and trace endpoints CSV exports/);
-    assert.doesNotMatch(html, /Existing downloads and Miro syncing remain available/);
+    assert.match(html, /Generate this plot again to add both CSV downloads/);
+    assert.doesNotMatch(html, /The saved chart and Miro syncing remain available/);
     if (page === 'plots') assert.match(html.match(/<button[^>]*data-action="plot-boards"[^>]*>/)[0], /disabled/);
   }
 });
