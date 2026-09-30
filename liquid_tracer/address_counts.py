@@ -234,7 +234,13 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
 
                     def metrics():
                         return {"worker_count": workers(), "worker_limit": scaling.ceiling,
-                                "observed_rps": fetched / max(.001, time.monotonic() - started)}
+                                "observed_rps": fetched / max(.001, time.monotonic() - started),
+                                **{key: value for key, value in api.request_metrics().items()
+                                   if key.startswith("shared_api_")}}
+
+                    def idle_progress():
+                        _progress(progress, "address_counts", len(wanted)-len(todo)+examined,
+                                  len(wanted), **metrics())
 
                     def receive(endpoint, result):
                         nonlocal fetched, examined, stop, failure, dirty
@@ -272,7 +278,7 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
                     _progress(progress, "address_counts", len(wanted)-len(todo), len(wanted), **metrics())
                     try:
                         api.prefetch(["/address/" + address for address in todo],
-                                     on_result=receive, concurrency=workers)
+                                     on_result=receive, concurrency=workers, on_idle=idle_progress)
                     finally:
                         checkpoint(force=True)
                     concurrency_report = {"concurrency_mode": scaling.mode, "peak_workers": scaling.peak,

@@ -1,6 +1,7 @@
 """ELK attempts overlap without changing quality selection or multiplying memory."""
 
 import copy
+import tempfile
 import threading
 import time
 import unittest
@@ -10,6 +11,7 @@ from liquid_tracer.common import TraceError
 from liquid_tracer.elk_errors import ElkWorkerFailure
 from liquid_tracer.elk_layout import optimize_graph
 from liquid_tracer.layout_search import layout_seeds
+from liquid_tracer.shared_render_resources import SharedRenderResources
 from tests.test_elk_layout import crossing_graph, synthetic_candidate
 from tests.test_layout_search import disconnected_graph
 
@@ -32,6 +34,16 @@ def budget_for(workers, total):
 
 
 class ParallelLayoutTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        # Exercise real lease lifetimes without making deterministic worker
+        # budget tests depend on the test host's current memory/CPU pressure.
+        factory = lambda: SharedRenderResources(directory=directory.name, capacity=lambda: (131072, 64))
+        patcher = patch("liquid_tracer.elk_parallel.SharedRenderResources", side_effect=factory)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_workers_overlap_with_bounded_concurrency_and_shared_heap(self):
         first_batch = threading.Barrier(3)
         lock = threading.Lock()

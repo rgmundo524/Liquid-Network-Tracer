@@ -31,6 +31,10 @@ PEGOUT_ADDRESS_NOTICE = (
     "Generate & create board. The existing board stays unchanged.")
 
 
+class _BoardBusy(TraceError):
+    """An active board operation, distinct from an abandoned pending record."""
+
+
 def _url(board):
     return "https://miro.com/app/board/" + quote(board, safe="") + "/" if board else None
 
@@ -77,16 +81,56 @@ def _read(path, metadata):
 
 @contextmanager
 def _lock(case, *, trace=False):
+    """Keep investigation inputs stable without serializing different boards."""
     with ExitStack() as stack:
         names = [("trace.lock", fcntl.LOCK_SH)] if trace else []
-        names += [("case.lock", fcntl.LOCK_SH), ("boards.lock", fcntl.LOCK_EX)]
+        names += [("case.lock", fcntl.LOCK_SH)]
         for name, mode in names:
             handle = stack.enter_context((Path(case) / name).open("a"))
             try:
                 fcntl.flock(handle, mode | fcntl.LOCK_NB)
             except BlockingIOError:
-                raise TraceError("Investigation data, settings, or boards are busy; try after that operation finishes") from None
+                raise TraceError("Investigation data or settings are busy; try after that operation finishes") from None
         yield
+
+
+@contextmanager
+def _registry_lock(case):
+    """Serialize short local registry edits only, never remote requests."""
+    with (Path(case) / "boards.lock").open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
+@contextmanager
+def _board_lock(case, record_id):
+    """One mutable operation per board, including uncertain-creation recovery.
+
+    Initial acquisition happens under the registry lock and never waits. This
+    lets the owner reacquire the registry lock to merge its completion without
+    deadlocking a second caller trying to acquire the same board.
+    """
+    directory = Path(case) / "miro" / "operations"
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / (digest(str(record_id).encode()) + ".lock")).open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise _BoardBusy("This Miro board is busy in another operation or Liquid Tracer instance; "
+                             "wait for it to finish, or select a different board") from None
+        yield
+
+
+def _update_record(case, path, metadata, record_id, **fields):
+    """Merge just this board into the latest registry after remote work."""
+    with _registry_lock(case):
+        registry = _read(path, metadata)
+        record = next((item for item in registry["boards"] if item["id"] == record_id), None)
+        if record is None:
+            raise TraceError("The selected board entry is missing; restore the investigation board registry")
+        record.update(fields)
+        save_json(path, registry)
+        return copy.deepcopy(record)
 
 
 def _pending(state):
@@ -192,13 +236,14 @@ def link_board(case, goal, name, board, *, record_id=None):
     goal, target = _goal(goal), board_id(board)
     case, metadata, path = _paths(case)
     name = _name(metadata, goal, name)
-    with _lock(case):
+    with _lock(case), _registry_lock(case), ExitStack() as operation:
         registry = _read(path, read_case(case))
         _assert_unused(case, target, record_id)
         if record_id is not None:
             record = next((item for item in registry["boards"] if item["id"] == record_id), None)
             if record is None or record["goal"] != goal:
                 raise TraceError("Choose the matching pending board entry")
+            operation.enter_context(_board_lock(case, record_id))
             if record.get("board_id"):
                 if record["board_id"] != target:
                     raise TraceError("An existing board binding cannot be replaced; add a separate board entry")
@@ -220,30 +265,34 @@ def create_board(case, goal, name=None, *, team_id=None, transport=http, creatio
     case, metadata, path = _paths(case)
     name = _name(metadata, goal, name)
     body = board_options(name, team_id, "private")
-    with _lock(case):
-        registry = _read(path, read_case(case))
-        record = next((item for item in registry["boards"] if item["goal"] == goal and (
-            item.get("creation_preview_id") == creation_preview_id if creation_preview_id is not None
-            else item["name"] == name)), None)
-        if record and record.get("board_id"):
-            return {**_display(case, record), "created": False, "reused": True}
-        if record and record["status"] == "pending_creation":
-            raise TraceError(UNCERTAIN)
-        token = token or os.getenv("MIRO_ACCESS_TOKEN")
-        if not isinstance(token, str) or not token or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in token):
-            raise TraceError("MIRO_ACCESS_TOKEN is missing or malformed; load its raw value through SecretSpec")
-        if record is None:
-            record = _new(goal, name)
+    with _lock(case), ExitStack() as operation:
+        with _registry_lock(case):
+            registry = _read(path, read_case(case))
+            record = next((item for item in registry["boards"] if item["goal"] == goal and (
+                item.get("creation_preview_id") == creation_preview_id if creation_preview_id is not None
+                else item["name"] == name)), None)
+            if record is not None:
+                operation.enter_context(_board_lock(case, record["id"]))
+            if record and record.get("board_id"):
+                return {**_display(case, record), "created": False, "reused": True}
+            if record and record["status"] == "pending_creation":
+                raise TraceError(UNCERTAIN)
+            token = token or os.getenv("MIRO_ACCESS_TOKEN")
+            if not isinstance(token, str) or not token or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in token):
+                raise TraceError("MIRO_ACCESS_TOKEN is missing or malformed; load its raw value through SecretSpec")
+            if record is None:
+                record = _new(goal, name)
+                operation.enter_context(_board_lock(case, record["id"]))
+                if creation_preview_id is not None:
+                    record["creation_preview_id"] = creation_preview_id
+                registry["boards"].append(record)
             if creation_preview_id is not None:
-                record["creation_preview_id"] = creation_preview_id
-            registry["boards"].append(record)
-        if creation_preview_id is not None:
-            # Recovery must be visible even when the board POST or its first
-            # item sync fails before sync_board can persist its own binding.
-            record["preview_id"] = creation_preview_id
-            record["run_id"] = creation_run_id
-        record.update(status="pending_creation", attempted_at=now(), creation_request=body)
-        save_json(path, registry)
+                # Recovery must be visible even when the board POST or its first
+                # item sync fails before sync_board can persist its own binding.
+                record["preview_id"] = creation_preview_id
+                record["run_id"] = creation_run_id
+            record.update(status="pending_creation", attempted_at=now(), creation_request=body)
+            save_json(path, registry)
         headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json", "Accept": "application/json"}
         try:
             status, _, raw = transport("POST", BOARDS_URL, headers, canonical(body), 30)
@@ -251,23 +300,28 @@ def create_board(case, goal, name=None, *, team_id=None, transport=http, creatio
             raise TraceError(UNCERTAIN) from None
         if status != 201:
             if isinstance(status, int) and 400 <= status < 500 and status != 408:
-                record.update(status="creation_rejected", http_status=status)
-                save_json(path, registry)
+                _update_record(case, path, metadata, record["id"], status="creation_rejected", http_status=status)
                 raise TraceError("Miro board creation failed (HTTP " + str(status) + "); check token, team permissions, or board limits before retrying")
             raise TraceError(UNCERTAIN)
         from .cli import board_id
         try:
             response = json.loads(raw)
             target = board_id(response["id"])
-            _assert_unused(case, target, record["id"])
         except (TraceError, ValueError, KeyError, TypeError):
             raise TraceError(UNCERTAIN) from None
-        record.update(board_id=target, status="linked", created_at=now())
         try:
-            save_json(path, registry)
+            with _registry_lock(case):
+                registry = _read(path, metadata)
+                _assert_unused(case, target, record["id"])
+                saved = next(item for item in registry["boards"] if item["id"] == record["id"])
+                saved.update(board_id=target, status="linked", created_at=now())
+                save_json(path, registry)
+                record = copy.deepcopy(saved)
         except OSError:
             raise TraceError("Miro created board " + target + "; link that ID to pending entry " + record["id"] +
                              ". Its acknowledgement could not be saved; do not create another board.") from None
+        except (TraceError, StopIteration):
+            raise TraceError(UNCERTAIN) from None
         return {**_display(case, record), "created": True, "reused": False}
 
 
@@ -307,7 +361,7 @@ def _check_pegout_address_mode(plan, record, state_path):
         raise TraceError("This board uses one node per address, but the selected saved peg-out layout uses "
                          "older per-output nodes. Select a regenerated Paths to peg-outs layout for this "
                          "board, or sync the old layout to its original compatible board or a different "
-                         "Miro board. The existing board stays unchanged.")
+    "Miro board. The existing board stays unchanged.")
 
 
 def board_for_plot(case, record_id, goal):
@@ -350,19 +404,22 @@ def create_and_sync(case, preview_id, name=None, *, team_id=None, max_items=750,
     from .plots import reviewed_plot
 
     case, _, _ = _paths(case)
-    graph, plan = reviewed_plot(case, preview_id)
-    if graph["plot"].get("layout_mode", "fresh") != "fresh" or "board_layout" in plan:
-        raise TraceError("This layout updates an existing board; use Update board for its selected target")
-    if not graph.get("nodes"):
-        raise TraceError("This plot has no matching paths; no Miro board was created")
-    # Complete local validation and the full new-board budget before POSTing.
-    # A unique nonexistent state path keeps this dry run independent of any board.
-    sync(plan, "new-board-preflight", case / "miro" / ("preflight-" + uuid.uuid4().hex + ".json"),
-         max_items=max_items, dry_run=True, reorganize=True, interval=interval, workers=workers, progress=progress)
-    record = create_board(case, graph["plot"]["goal"], name, team_id=team_id, transport=transport,
-                          creation_preview_id=preview_id, creation_run_id=graph["run_id"], token=token)
-    result = sync_board(case, record["id"], preview_id, max_items=max_items, transport=transport,
-                        token=token, interval=interval, workers=workers, progress=progress)
+    # Keep the reviewed evidence stable across board creation and its first
+    # publication; another instance must not invalidate it after the POST.
+    with _lock(case, trace=True):
+        graph, plan = reviewed_plot(case, preview_id)
+        if graph["plot"].get("layout_mode", "fresh") != "fresh" or "board_layout" in plan:
+            raise TraceError("This layout updates an existing board; use Update board for its selected target")
+        if not graph.get("nodes"):
+            raise TraceError("This plot has no matching paths; no Miro board was created")
+        # Complete local validation and the full new-board budget before POSTing.
+        # A unique nonexistent state path keeps this dry run independent of any board.
+        sync(plan, "new-board-preflight", case / "miro" / ("preflight-" + uuid.uuid4().hex + ".json"),
+             max_items=max_items, dry_run=True, reorganize=True, interval=interval, workers=workers, progress=progress)
+        record = create_board(case, graph["plot"]["goal"], name, team_id=team_id, transport=transport,
+                              creation_preview_id=preview_id, creation_run_id=graph["run_id"], token=token)
+        result = sync_board(case, record["id"], preview_id, max_items=max_items, transport=transport,
+                            token=token, interval=interval, workers=workers, progress=progress)
     return {**result, "board_id": record["board_id"], "board_url": record["board_url"],
             "created_board": record["created"], "reused_board": record["reused"]}
 
@@ -397,12 +454,18 @@ def _publication_budget(case, graph, record, max_items):
 
 
 def _check_unfinished_creation(case):
-    """Do not create another board while a prior board POST is unresolved."""
-    for record in list_boards(case):
-        preview = record.get("creation_preview_id")
-        if preview and record.get("status") == "pending_creation":
-            raise TraceError("A Miro board creation outcome is uncertain. Link the created board to its pending "
-                             "entry and resume saved plot " + preview + " before generating another new board.")
+    """Block abandoned POSTs while allowing other instances' active creations."""
+    with _lock(case), _registry_lock(case):
+        for record in list_boards(case):
+            preview = record.get("creation_preview_id")
+            if preview and record.get("status") == "pending_creation":
+                with ExitStack() as operation:
+                    try:
+                        operation.enter_context(_board_lock(case, record["id"]))
+                    except _BoardBusy:
+                        continue
+                    raise TraceError("A Miro board creation outcome is uncertain. Link the created board to its pending "
+                                     "entry and resume saved plot " + preview + " before generating another new board.")
 
 
 def generate_and_sync(case, goal, run_id="latest", min_hops=0, max_hops=10, *, include_unspent=False,
@@ -475,10 +538,12 @@ def sync_board(case, record_id, preview_id, *, reorganize=False, max_items=750, 
     from .miro import sync
 
     case, metadata, path = _paths(case)
-    with _lock(case, trace=True):
-        record = next((item for item in list_boards(case) if item["id"] == record_id), None)
-        if record is None or not record["can_sync"]:
-            raise TraceError("Select a linked managed board; historical snapshots remain read-only")
+    with _lock(case, trace=True), ExitStack() as operation:
+        with _registry_lock(case):
+            record = next((item for item in list_boards(case) if item["id"] == record_id), None)
+            if record is None or not record["can_sync"]:
+                raise TraceError("Select a linked managed board; historical snapshots remain read-only")
+            operation.enter_context(_board_lock(case, record_id))
         graph, plan = reviewed_plot(case, preview_id)
         if graph.get("plot", {}).get("goal") != record["goal"]:
             raise TraceError("The selected plot has a different goal from this board")
@@ -509,24 +574,20 @@ def sync_board(case, record_id, preview_id, *, reorganize=False, max_items=750, 
         _check_pegout_address_mode(plan, record, state_path)
         # Validate item budgets and lineage before changing the publication record.
         sync(plan, record["board_id"], state_path, max_items=max_items, dry_run=True, reorganize=reorganize)
-        registry = _read(path, metadata)
-        saved = next((item for item in registry["boards"] if item["id"] == record_id), None)
-        if saved:
-            if saved.get("status") in ("syncing", "sync_error") and saved.get("preview_id") != preview_id:
+        if not record.get("legacy"):
+            if record.get("status") in ("syncing", "sync_error", "interrupted") and record.get("preview_id") != preview_id:
                 state = load_state(state_path, {})
                 if _pending(state) or state.get("active_run_id"):
                     raise TraceError("Finish or reconcile this board's interrupted sync with its saved plot before selecting another")
-            saved.update(status="syncing", preview_id=preview_id, run_id=graph["run_id"],
-                         sync_plan_sha256=plan["sha256"], attempted_sync_at=now())
-            save_json(path, registry)
+            _update_record(case, path, metadata, record_id, status="syncing", preview_id=preview_id,
+                           run_id=graph["run_id"], sync_plan_sha256=plan["sha256"], attempted_sync_at=now())
         try:
             result = sync(plan, record["board_id"], state_path, max_items=max_items, reorganize=reorganize, **kwargs)
         except (TraceError, OSError, ValueError):
-            if saved:
-                saved["status"] = "sync_error"
-                save_json(path, registry)
+            if not record.get("legacy"):
+                _update_record(case, path, metadata, record_id, status="sync_error")
             raise
-        if saved:
-            saved.update(status="synced", published_at=now(), published_plan_sha256=plan["sha256"])
-            save_json(path, registry)
+        if not record.get("legacy"):
+            _update_record(case, path, metadata, record_id, status="synced", published_at=now(),
+                           published_plan_sha256=plan["sha256"])
         return {**result, "record_id": record_id, "preview_id": preview_id, "goal": record["goal"]}

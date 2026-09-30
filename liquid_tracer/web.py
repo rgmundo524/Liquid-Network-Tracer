@@ -5,6 +5,7 @@ filesystem paths, API credentials, or a SecretSpec provider configuration.
 """
 
 import argparse
+import errno
 import json
 import math
 import mimetypes
@@ -33,6 +34,7 @@ from .layout_search import MAX_LAYOUT_ATTEMPTS, normalize_layout_attempts
 from .layout_search_reporting import public_search_counts
 
 MAX_BODY = 64 * 1024
+DEFAULT_PORT = 4321
 CASE_ID = re.compile(r"[0-9a-f]{32}")
 RUN_ID = re.compile(r"[a-zA-Z0-9]{16}")
 FRAME_REVIEW_ID = re.compile(r"[0-9a-f]{64}")
@@ -1605,15 +1607,32 @@ def _interrupt(*_):
     raise KeyboardInterrupt
 
 
+def _open_server(root, assets, port=None):
+    """Bind before choosing a URL; another instance may win any candidate port."""
+    if port is not None:
+        return LocalServer(root, assets, port)
+    for candidate in range(DEFAULT_PORT, min(DEFAULT_PORT + 32, 65536)):
+        try:
+            return LocalServer(root, assets, candidate)
+        except OSError as error:
+            if error.errno != errno.EADDRINUSE:
+                raise
+    # Let the OS atomically select a free loopback port if the usual range is full.
+    return LocalServer(root, assets, 0)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Open the local Astro investigation interface")
     parser.add_argument("--root", type=Path, default=default_root(), help="Existing investigation directory")
     parser.add_argument("--assets", type=Path, default=_project() / "web" / "dist", help="Built Astro assets")
-    parser.add_argument("--port", type=int, default=4321, help="Loopback port (default: 4321)")
+    parser.add_argument("--port", type=int, help="Use this exact loopback port (default: first available from 4321)")
     parser.add_argument("--no-open", action="store_true", help="Print the URL without opening a browser")
     args = parser.parse_args(argv)
-    if not 1 <= args.port <= 65535:
+    if args.port is not None and not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")
+    # Pin this server to one immutable build even if another launcher publishes
+    # a newer web/dist symlink while it is running.
+    args.assets = args.assets.expanduser().resolve()
     if not (args.assets / "index.html").is_file():
         parser.error("Astro assets are missing. Start with liquid-web in the devenv shell to build them.")
     # The server remains alive while an interactive provider temporarily owns
@@ -1622,7 +1641,9 @@ def main(argv=None):
     previous_term = signal.signal(signal.SIGTERM, _interrupt)
     server = None
     try:
-        server = LocalServer(args.root, args.assets, args.port)
+        server = _open_server(args.root, args.assets, args.port)
+        if args.port is None and server.server_port != DEFAULT_PORT:
+            print("The default port is busy; this instance is using port " + str(server.server_port) + ".", flush=True)
         print("Liquid Network Tracer: " + server.origin, flush=True)
         print("Keep this terminal open. Proton Pass prompts for live actions appear here.", flush=True)
         if not args.no_open:

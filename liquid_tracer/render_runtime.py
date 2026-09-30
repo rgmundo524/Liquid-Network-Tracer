@@ -80,6 +80,10 @@ def _available_bytes():
     return min(values) if values else None
 
 
+def renderer_heap_is_auto():
+    return os.environ.get(_SETTING, "auto").strip().lower() == "auto"
+
+
 def renderer_heap_mb():
     """Choose 90% of currently available memory, or an explicit old-space MiB cap.
 

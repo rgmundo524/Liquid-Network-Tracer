@@ -11,6 +11,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from email.utils import parsedate_to_datetime
 
 from .common import StopRun, TraceError, canonical, read_json
+from .explorer_quota import SharedExplorerQuota
 
 TOKEN_URL = "https://login.blockstream.com/realms/blockstream-public/protocol/openid-connect/token"
 ENTERPRISE = "https://enterprise.blockstream.info/liquid/api"
@@ -97,10 +98,14 @@ class Budget:
 
     def request(self):
         with self._lock:
+            self.check_request()
+            self.requests += 1
+
+    def check_request(self):
+        with self._lock:
             self.check()
             if self.requests >= self.limits.max_requests:
                 raise StopRun("request_limit")
-            self.requests += 1
 
     def timeout(self):
         self.check()
@@ -115,7 +120,7 @@ class Budget:
 class Esplora:
     def __init__(self, store, run_id, limits, base=ENTERPRISE, auth="blockstream",
                  fixture=None, tx_cache_seconds=86400, min_interval=None, transport=http,
-                 workers=8, advertised_rps=None, adaptive_workers=False):
+                 workers=8, advertised_rps=None, adaptive_workers=False, shared_quota=None):
         self.store, self.run_id = store, run_id
         self.base = base.rstrip("/")
         self.budget = Budget(limits)
@@ -175,6 +180,13 @@ class Esplora:
             raise TraceError("Adaptive explorer workers must be a boolean")
         self.worker_ceiling = 64 if adaptive_workers else workers
         self._transport_slots = threading.BoundedSemaphore(self.worker_ceiling)
+        # Real HTTP clients automatically coordinate by endpoint host. Fixture
+        # and explicitly injected transports remain isolated unless a test or
+        # embedding application supplies its own coordinator.
+        self._shared_quota = shared_quota if self.fixture is None else None
+        self._automatic_quota = self.fixture is None and transport is http
+        self._shared_metrics = None
+        self._pacing_error = None
 
     def __enter__(self):
         return self
@@ -196,6 +208,8 @@ class Esplora:
         interrupted = self._drain(results)
         if pool is not None:
             pool.shutdown(wait=True, cancel_futures=True)
+        if self._shared_quota is not None:
+            self._shared_quota.close()
         if interrupted:
             raise KeyboardInterrupt()
 
@@ -219,11 +233,18 @@ class Esplora:
             self.used.add(oid)
 
     def request_metrics(self):
-        """Snapshot transport feedback without gate, OAuth, or archive time."""
+        """Snapshot transport feedback and current shared admission status.
+
+        Shared wait seconds is the latest estimated delay, not cumulative
+        threaded waiting time. Network latency excludes all admission waits.
+        """
         with self._metrics_lock:
-            return {"latency_seconds": self._latency_seconds,
-                    "completed_requests": self._completed_requests,
-                    "pressure_events": self._pressure_events}
+            metrics = {"latency_seconds": self._latency_seconds,
+                       "completed_requests": self._completed_requests,
+                       "pressure_events": self._pressure_events}
+            if self._shared_metrics is not None:
+                metrics.update(self._shared_metrics)
+            return metrics
 
     def _measure_request(self, started, pressure):
         elapsed = max(0., time.monotonic() - started)
@@ -237,14 +258,31 @@ class Esplora:
         # Reserve starts under one shared gate. Increasing workers never
         # multiplies the configured request rate or the run's hard budget.
         with self._gate:
+            if self._automatic_quota and self._shared_quota is None:
+                self._shared_quota = SharedExplorerQuota(self.base, self.min_interval)
             while True:
-                self.budget.check()
+                self.budget.check_request()
                 if self._cancelled.is_set():
                     raise StopRun("interrupted")
                 if self._stop_reason is not None:
                     raise StopRun(self._stop_reason)
+                if self._pacing_error is not None:
+                    raise self._pacing_error
                 current = time.monotonic()
-                delay = max(self.last_call + self.min_interval, self._cooldown_until) - current
+                if self._shared_quota is not None:
+                    admission = self._shared_quota.reserve()
+                    with self._metrics_lock:
+                        if self._shared_metrics is None:
+                            self._shared_metrics = {"shared_api_active_clients": 1,
+                                                    "shared_api_effective_rps": self.effective_rps}
+                        if admission.active_clients:
+                            self._shared_metrics.update(shared_api_active_clients=admission.active_clients,
+                                                        shared_api_effective_rps=admission.effective_rps)
+                        self._shared_metrics.update(shared_api_wait_seconds=admission.wait_seconds,
+                                                    shared_api_wait_reason=admission.reason)
+                    delay = 0. if admission.admitted else admission.wait_seconds
+                else:
+                    delay = max(self.last_call + self.min_interval, self._cooldown_until) - current
                 if delay <= 0:
                     break
                 remaining = self.budget.limits.max_seconds - (current - self.budget.started)
@@ -260,6 +298,15 @@ class Esplora:
 
     def _cooldown(self, seconds):
         with self._gate:
+            if self._shared_quota is not None:
+                # Publish the cooldown before deciding whether this run can
+                # wait for it. Otherwise another instance could retry at once
+                # after a long Retry-After stops the reporting run.
+                while not self._shared_quota.cooldown(seconds):
+                    self.budget.check()
+                    if self._cancelled.is_set():
+                        raise StopRun("interrupted")
+                    self._gate.wait(.05)
             if not math.isfinite(seconds) or seconds > 30:
                 self._stop_reason = "server_retry_later"
                 self._gate.notify_all()
@@ -302,6 +349,12 @@ class Esplora:
                 self._cooldown(self._retry_delay(result[1]))
             except StopRun:
                 pass
+            except TraceError as error:
+                # Preserve the received response as evidence before stopping
+                # for a broken coordinator. The next admission stays blocked.
+                with self._gate:
+                    self._pacing_error = error
+                    self._gate.notify_all()
         self.store.attempt(self.run_id, kind, endpoint, result[0])
         return result
 
@@ -358,13 +411,15 @@ class Esplora:
                 future.set_exception(error)
         return future.result()
 
-    def prefetch(self, endpoints, *, on_result=None, concurrency=None):
+    def prefetch(self, endpoints, *, on_result=None, concurrency=None, on_idle=None):
         """Return ordered unique endpoints mapped to results or TraceError.
 
         Stream completed results on the calling thread before replenishing the
         in-flight jobs. A false callback result stops new jobs; already started
         jobs still finish and deliver their results. An optional target callback
         can vary concurrency up to worker_ceiling without changing rate limits.
+        The optional advisory idle callback runs on the calling thread so UI
+        progress can report a shared cooldown while no response is completing.
         """
         endpoints = list(dict.fromkeys(endpoints))
         if not endpoints:
@@ -406,7 +461,13 @@ class Esplora:
         try:
             submit()
             while pending:
-                completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+                completed, _ = wait(pending, timeout=.25, return_when=FIRST_COMPLETED)
+                if not completed and on_idle is not None:
+                    try:
+                        on_idle()
+                    except Exception:
+                        # Progress reporting must not abort evidence fetching.
+                        pass
                 for future in completed:
                     endpoint = pending[future]
                     try:
@@ -491,6 +552,8 @@ class Esplora:
                 auth_retried = True
                 continue
             if status == 429 or status in (500, 502, 503, 504):
+                if self._pacing_error is not None:
+                    raise self._pacing_error
                 delay = self._retry_delay(response_headers, attempt)
                 if status == 429:
                     # The service's cooldown applies to every worker, including
