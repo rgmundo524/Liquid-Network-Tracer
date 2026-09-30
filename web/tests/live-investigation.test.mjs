@@ -1887,84 +1887,121 @@ test('historical peg-out layouts keep their peg-out-only summary regardless of c
   assert.doesNotMatch(view.workspace(), /Endpoint types: Peg-outs \+|0 unspent UTXOs|0 unspendable outputs/);
 });
 
-test('saved peg-out paths expose separate transaction and endpoint CSVs in plots and history', async () => {
+const pegoutCsvArtifact = (id, {oldFiles = false} = {}) => ({preview_id: id,
+  downloads: [
+    {name: 'transactions.csv', url: `/api/cases/case1/plot-exports/${id}/transactions.csv`},
+    {name: 'endpoints.csv', url: `/api/cases/case1/plot-exports/${id}/endpoints.csv`},
+    {name: 'graph.svg', url: `/files/case1/previews/${id}/graph.svg`},
+    ...(oldFiles ? ['path-transactions.csv', 'trace-endpoints.csv'].map(name => ({name,
+      url: `/files/case1/previews/${id}/${name}`})) : []),
+  ]});
+
+test('saved peg-out paths show exactly full accounting and endpoint table CSVs in plots and history', async () => {
   const view = await harness();
-  const files = ['path-transactions.csv', 'trace-endpoints.csv', 'transactions.csv', 'graph.svg', 'pegouts.json'];
   view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'terminal', {
     query: {include_unspent: true, include_unspendable: true, include_context: true},
-    artifact: {downloads: files.map(name => ({name, url: `/files/case1/previews/terminal/${name}`}))},
+    artifact: pegoutCsvArtifact('terminal', {oldFiles: true}),
   })]});
   for (const page of ['plots', 'history']) {
     await view.dispatch('view-' + page);
     const html = view.workspace();
-    assert.match(html, /href="\/files\/case1\/previews\/terminal\/path-transactions.csv"[^>]*>[\s\S]*?All trace transactions CSV<\/a>/);
-    assert.match(html, /href="\/files\/case1\/previews\/terminal\/trace-endpoints.csv"[^>]*>[\s\S]*?Endpoints only CSV<\/a>/);
-    assert.match(html, /every transaction in this peg-out trace, including seeds, intermediate transactions, and endpoint transactions/);
-    assert.match(html, /one row per ending output/);
-    assert.match(html, /this saved trace's hop range and endpoint choices/);
+    assert.match(html, /href="\/api\/cases\/case1\/plot-exports\/terminal\/transactions.csv"[^>]*>[\s\S]*?All trace transactions CSV<\/a>/);
+    assert.match(html, /href="\/api\/cases\/case1\/plot-exports\/terminal\/endpoints.csv"[^>]*>[\s\S]*?Endpoints only CSV<\/a>/);
+    assert.match(html, /full input\/output accounting for this saved trace/);
+    assert.match(html, /ending-output table with source, source value, deposit\/peg-out transaction, address, receiving entity, status, and peg-out LBTC/);
     assert.match(html, /Unspent outputs are labeled Dormant/);
-    assert.doesNotMatch(html, /Generate this plot again to add/);
-    assert.equal((html.match(/href="[^\"]*path-transactions.csv"/g) || []).length, 1);
-    assert.equal((html.match(/href="[^\"]*trace-endpoints.csv"/g) || []).length, 1);
-    assert.equal((html.match(/href="\/files\/case1\/previews\/terminal\/[^"]*\.csv"/g) || []).length, 2);
+    assert.doesNotMatch(html, /Generate this plot again to add|One row per transaction|download="(?:path-transactions|trace-endpoints).csv"/);
+    assert.equal((html.match(/href="(?:\/files\/case1\/previews\/terminal\/|\/api\/cases\/case1\/plot-exports\/terminal\/)[^"]*\.csv"/g) || []).length, 2);
     if (page === 'history') {
-      assert.doesNotMatch(html, /href="\/files\/case1\/previews\/terminal\/transactions.csv"/);
       assert.doesNotMatch(html, /Plot inputs and outputs CSV/);
       assert.match(html, /Full-run CSV downloads/);
       assert.match(html, /selected collection run, across its full trace/);
-      assert.match(html, /href="\/files\/case1\/previews\/terminal\/pegouts.json"/);
     }
   }
-  assert.equal(view.calls.length, 1, 'rendering downloads does not regenerate or refetch the saved plot');
+  assert.equal(view.calls.length, 1, 'rendering exports does not regenerate or refetch the saved plot');
 });
 
-test('older peg-out plots offer regeneration without disabling their existing downloads or syncing', async () => {
+test('older saved peg-out plots get endpoint download from the API without new artifact files or regeneration', async () => {
   const view = await harness();
   view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'old', {
-    artifact: {downloads: [{name: 'transactions.csv', url: '/files/case1/previews/old/transactions.csv'},
-      {name: 'graph.svg', url: '/files/case1/previews/old/graph.svg'}]},
+    artifact: pegoutCsvArtifact('old'),
   })]});
   for (const page of ['plots', 'history']) {
     await view.dispatch('view-' + page);
     const html = view.workspace();
-    assert.match(html, /Generate this plot again to add both CSV downloads/);
-    assert.match(html, /The saved chart and Miro syncing remain available/);
-    assert.match(html, /href="\/files\/case1\/previews\/old\/graph.svg"/);
-    assert.doesNotMatch(html, /download="(?:path-transactions|trace-endpoints).csv"/);
+    assert.match(html, /href="\/api\/cases\/case1\/plot-exports\/old\/endpoints.csv"/);
+    assert.match(html, /href="\/api\/cases\/case1\/plot-exports\/old\/transactions.csv"/);
+    assert.doesNotMatch(html, /Generate this plot again to add/);
     if (page === 'plots') assert.doesNotMatch(html.match(/<button[^>]*data-action="plot-boards"[^>]*>/)[0], /disabled/);
-    else assert.doesNotMatch(html, /href="\/files\/case1\/previews\/old\/transactions.csv"/);
   }
 });
 
-test('path export actions stay specific to peg-out plots and follow the saved selection', async () => {
+test('CSV choices follow selected peg-out plot and stay off other plotting goals', async () => {
   const view = await harness();
-  const terminal = workflowPlot('pegouts', 'terminal', {
-    artifact: {downloads: ['path-transactions.csv', 'trace-endpoints.csv'].map(name => ({name,
-      url: `/files/case1/previews/terminal/${name}`}))},
-  });
+  const terminal = workflowPlot('pegouts', 'terminal', {artifact: pegoutCsvArtifact('terminal')});
   view.state.activeCase = workflowCase({plots: [terminal, workflowPlot('full', 'full'), workflowPlot('connections', 'connections')]});
   for (const goal of ['full', 'connections']) {
     workflowEdit(view, 'plot-picker', goal);
     for (const page of ['plots', 'history']) {
       await view.dispatch('view-' + page);
-      assert.doesNotMatch(view.workspace(), /All trace transactions CSV|Endpoints only CSV|Generate this plot again to add/);
+      assert.doesNotMatch(view.workspace(), /All trace transactions CSV|Endpoints only CSV/);
     }
   }
   workflowEdit(view, 'plot-picker', 'terminal');
-  assert.match(view.workspace(), /download="path-transactions.csv"/);
+  assert.match(view.workspace(), /download="transactions.csv"/);
+  assert.match(view.workspace(), /download="endpoints.csv"/);
 });
 
-test('unreviewable older peg-out plots do not claim syncing remains available', async () => {
+test('changed settings block syncing but retain both CSV downloads from the valid saved archive', async () => {
   const view = await harness();
-  view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'unavailable', {
+  view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'earlier', {
+    reviewable: false, reason: 'Settings changed.', artifact: pegoutCsvArtifact('earlier'),
+  })]});
+  for (const page of ['plots', 'history']) {
+    await view.dispatch('view-' + page);
+    const html = view.workspace();
+    assert.match(html, /download="transactions.csv"/);
+    assert.match(html, /download="endpoints.csv"/);
+    assert.doesNotMatch(html, /Generate this plot again to add|syncing remain available/);
+    if (page === 'plots') assert.match(html.match(/<button[^>]*data-action="plot-boards"[^>]*>/)[0], /disabled/);
+  }
+});
+
+test('missing saved artifacts do not invent CSV download links', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'missing', {
     reviewable: false, reason: 'Saved layout files are unavailable.', artifact: undefined,
   })]});
   for (const page of ['plots', 'history']) {
     await view.dispatch('view-' + page);
     const html = view.workspace();
-    assert.match(html, /Generate this plot again to add both CSV downloads/);
-    assert.doesNotMatch(html, /The saved chart and Miro syncing remain available/);
-    if (page === 'plots') assert.match(html.match(/<button[^>]*data-action="plot-boards"[^>]*>/)[0], /disabled/);
+    assert.doesNotMatch(html, /All trace transactions CSV|Endpoints only CSV|Generate this plot again to add/);
+    assert.match(html, /Saved layout files are unavailable/);
+  }
+});
+
+test('legacy standalone peg-out searches expose full accounting and dynamic endpoint table exports', async () => {
+  const view = await harness();
+  const id = '1'.repeat(16) + '-pegouts-12345678';
+  view.state.activeCase = pegoutCase([pegoutSearch({artifact: pegoutCsvArtifact(id)})]);
+  const html = view.pegoutsGraph(view.state.activeCase);
+  assert.match(html, /download="transactions.csv"[^>]*>[\s\S]*?All trace transactions CSV<\/a>/);
+  assert.match(html, /download="endpoints.csv"[^>]*>[\s\S]*?Endpoints only CSV<\/a>/);
+  assert.match(html, new RegExp(`href="/api/cases/case1/plot-exports/${id}/endpoints.csv"`));
+  assert.equal((html.match(/download="[^"]*\.csv"/g) || []).length, 2);
+  assert.doesNotMatch(html, /Generate this plot again to add|>Transaction CSV<\/a>/);
+});
+
+test('endpoint download links permit only local saved files and the dedicated CSV export route', async () => {
+  const view = await harness();
+  for (const url of ['https://example.com/endpoints.csv', '//example.com/endpoints.csv',
+    '/api/cases/case1/actions', '/api/cases/case1/plot-exports/terminal/endpoints.csv?redirect=other',
+    '/api/cases/case1/plot-exports/terminal/endpoints.csv\n']) {
+    view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'terminal', {
+      artifact: {downloads: [{name: 'endpoints.csv', url}]},
+    })]});
+    await view.dispatch('view-history');
+    assert.doesNotMatch(view.workspace(), /download="endpoints.csv"/);
   }
 });
 

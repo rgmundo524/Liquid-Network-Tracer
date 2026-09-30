@@ -7,7 +7,10 @@ import tempfile
 import unittest
 
 from liquid_tracer.common import LBTC, TraceError
-from liquid_tracer.pegout_csv import ENDPOINT_FIELDS, PATH_FIELDS, pegout_csv_rows, write_pegout_csvs
+from liquid_tracer.pegout_csv import (
+    ENDPOINT_FIELDS, ENDPOINT_TABLE_FIELDS, PATH_FIELDS, endpoint_table_rows, pegout_csv_rows,
+    write_endpoint_table_csv, write_pegout_csvs,
+)
 from liquid_tracer.pegout_paths import pegout_graph, validate_query
 from tests.test_attribution_convergence import annotation, graph_state, tx
 from tests.test_named_hop_plots import named_state
@@ -23,7 +26,99 @@ def source_paths(row):
     return {entry["seed_outpoint"]: entry["hops"] for entry in json.loads(row["Source Paths"])}
 
 
+def set_value(state, key, value, asset=LBTC):
+    txid, index = key.rsplit(":", 1)
+    output = state["transactions"][txid]["data"]["vout"][int(index)]
+    output.pop("valuecommitment", None)
+    output.pop("assetcommitment", None)
+    output.update(value=value, asset=asset)
+    for record in state["transactions"].values():
+        for vin in record["data"]["vin"]:
+            if vin.get("txid") == txid and vin.get("vout") == int(index):
+                vin["prevout"] = deepcopy(output)
+
+
 class PegoutCSVTests(unittest.TestCase):
+    def test_endpoint_table_uses_sample_columns_and_selected_source_value(self):
+        state = graph_state((("a:0", "b"),), seeds=("a:0",))
+        set_value(state, tx("a") + ":0", 500_000_001)
+        pegout = add_pegout(state, tx("b"))
+        set_value(state, pegout, 125_000_000)
+        row, = endpoint_table_rows(graph(state), state)
+        self.assertEqual(ENDPOINT_TABLE_FIELDS[:7], (
+            "Source", "Source Value", "Deposit/Peg-out Tx", "Address/Peg-out Address",
+            "Receiving Entity", "Status", "Pegout LBTC",
+        ))
+        self.assertEqual((row["Source"], row["Source Value"]), (tx("a"), "5.00000001 L-BTC"))
+        self.assertEqual((row["Deposit/Peg-out Tx"], row["Outpoint"]), (tx("b"), pegout))
+        self.assertEqual((row["Status"], row["Pegout LBTC"]), ("Pegout", "1.25"))
+        self.assertEqual(row["Source Seed Outpoints"], tx("a") + ":0")
+
+    def test_endpoint_table_multiple_sources_preserves_each_value_without_aggregation(self):
+        state = graph_state((("a:0", "b"), ("a:1", "b"), ("c:0", "b")),
+                            seeds=("a:0", "a:1", "c:0"))
+        set_value(state, tx("a") + ":0", 100_000_000)
+        set_value(state, tx("a") + ":1", 250_000_000)
+        add_pegout(state, tx("b"))
+        row, = endpoint_table_rows(graph(state), state)
+        self.assertEqual(row["Source"], tx("a") + "; " + tx("c"))
+        self.assertEqual(json.loads(row["Source Value"]), {
+            tx("a") + ":0": "1 L-BTC", tx("a") + ":1": "2.5 L-BTC", tx("c") + ":0": "",
+        })
+        self.assertEqual(len(source_paths(row)), 3)
+
+    def test_endpoint_table_confidential_source_unknowns_and_non_lbtc_assets(self):
+        state = graph_state((("a:0", "b"),), seeds=("a:0",))
+        add_pegout(state, tx("b"))
+        row, = endpoint_table_rows(graph(state), state)
+        self.assertEqual(row["Source Value"], "")
+        set_value(state, tx("a") + ":0", 1234, asset="bc" * 32)
+        row, = endpoint_table_rows(graph(state), state)
+        self.assertEqual(row["Source Value"], "1234 base units " + "bc" * 32)
+        set_value(state, tx("a") + ":0", 1234, asset=None)
+        row, = endpoint_table_rows(graph(state), state)
+        self.assertEqual(row["Source Value"], "")
+
+    def test_endpoint_table_status_and_pegout_amount_are_endpoint_specific(self):
+        state = graph_state((("a:0", "b"),), seeds=("a:0",))
+        mark_unspent(state, tx("b") + ":0")
+        set_value(state, tx("b") + ":0", 20_000_000)
+        add_unspendable(state, tx("b"))
+        add_pegout(state, tx("b"))
+        rows = endpoint_table_rows(graph(state, include_unspent=True, include_unspendable=True), state)
+        self.assertEqual({row["Status"] for row in rows}, {"Dormant", "OP_Return", "Pegout"})
+        for row in rows:
+            self.assertEqual(row["Pegout LBTC"], row["Value LBTC"] if row["Status"] == "Pegout" else "")
+        self.assertEqual(next(row["Value LBTC"] for row in rows if row["Status"] == "Dormant"), "0.2")
+        self.assertFalse(any(row["Status"] == "Deposit" for row in rows))
+
+    def test_endpoint_table_headers_formula_safety_and_historical_snapshot_controls(self):
+        from liquid_tracer.services import apply_service_labels
+        state = graph_state((("a:0", "b"),), seeds=("a:0",))
+        address = "SYNTHETIC-b-address"
+        controls = {"rules": {address: {
+            "enabled": True, "name": "=Saved label", "confidence": "confirmed",
+            "stop_tracing": False, "updated_at": "2026-09-30T12:00:00Z",
+        }}}
+        state["service_controls"] = deepcopy(controls)
+        state["labels"] = apply_service_labels([], controls)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "endpoints.csv"
+            self.assertEqual(write_endpoint_table_csv(path, graph(state), state), 0)
+            with path.open(newline="") as stream:
+                self.assertEqual(list(csv.reader(stream)), [list(ENDPOINT_TABLE_FIELDS)])
+            mark_unspent(state, tx("b") + ":0")
+            saved = graph(state, include_unspent=True)
+            changed = deepcopy(controls)
+            changed["rules"][address]["name"] = "Current label"
+            state["labels"] = apply_service_labels(state["labels"], changed)
+            restored = deepcopy(state)
+            restored["labels"] = apply_service_labels(restored["labels"], saved["service_controls"])
+            self.assertEqual(write_endpoint_table_csv(path, saved, restored), 1)
+            with path.open(newline="") as stream:
+                row, = list(csv.DictReader(stream))
+            self.assertEqual(row["Receiving Entity"], "'=Saved label")
+
     def test_endpoints_and_paths_exclude_context_and_unrelated_investigation_transactions(self):
         state = graph_state((("a:0", "b"), ("b:0", "c"), ("a:1", "d")),
                             seeds=("a:0",), raw_links=(("e:0", "b"), ("f:0", "b")))

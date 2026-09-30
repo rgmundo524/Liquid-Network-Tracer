@@ -742,7 +742,10 @@ function safeLocalUrl(url: string | undefined): string {
 }
 
 function downloadLink(item: Download | undefined, label: string, classes = ""): string {
-  if (!item || !safeLocalUrl(item.url)) return "";
+  if (!item) return "";
+  const localExport = /^\/api\/cases\/[a-zA-Z0-9_-]+\/plot-exports\/[a-zA-Z0-9_-]+\/(?:transactions|endpoints)\.csv$/.test(item.url)
+    && !/[\r\n]/.test(item.url);
+  if (!safeLocalUrl(item.url) && !localExport) return "";
   return `<a class="btn small ${classes}" href="${esc(item.url)}" download="${esc(item.name)}">${icon("download")}${esc(label)}</a>`;
 }
 
@@ -833,7 +836,8 @@ function pegoutsGraph(detail: Case): string {
   <p>${count === undefined ? "Generate a preview to see the matches found so far." : count === 0 ? "No matching peg-out found in the searched data." : `${count} matching peg-out request${count === 1 ? "" : "s"} found.`}</p>
   ${button(pending ? "Recover and resume search" : "Resume search", "pegouts-resume", "play", "", busy)}
   ${button("Refresh peg-out preview", "pegouts-preview", "refresh", "", busy || pending)}
-  <div class="artifact-actions">${downloadLink(artifact?.downloads.find(item => item.name === "graph.svg"), "SVG")}${downloadLink(artifact?.downloads.find(item => item.name === "pegouts.json"), "Peg-out report")}${downloadLink(artifact?.downloads.find(item => item.name === "transactions.csv"), "Transaction CSV")}${preview ? `<a class="btn small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">Open full view</a>` : ""}${detailPagesLink(artifact?.downloads)}</div>
+  <div class="artifact-actions">${downloadLink(artifact?.downloads.find(item => item.name === "graph.svg"), "SVG")}${downloadLink(artifact?.downloads.find(item => item.name === "pegouts.json"), "Peg-out report")}${preview ? `<a class="btn small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">Open full view</a>` : ""}${detailPagesLink(artifact?.downloads)}</div>
+  ${pegoutCsvDownloads(artifact)}
   ${artifact?.preview_id && count ? `<details><summary>Publish this reviewed snapshot to Miro</summary><p>Choose a separate Miro board for this peg-out snapshot.</p>
   <label class="field"><span>Separate board URL or ID</span><input id="pegouts-board" maxlength="512" value="${esc(pegoutDraft.board)}"${disabled(busy)}/></label>
   <label class="check-line"><input id="pegouts-confirm" type="checkbox"${pegoutDraft.approved === artifact.preview_id ? " checked" : ""}${disabled(busy)}/><span>I reviewed this snapshot and authorize publishing it to the board above.</span></label>
@@ -1149,22 +1153,21 @@ function plotEndpointSummary(plot: Plot | undefined): string {
   return `<p class="small muted">Endpoint types: ${esc(plotEndpointScope(plot))}.${matches ? ` Results: ${esc(matches)}.` : ""}</p><p class="small muted">Saved layout: ${plotContextScope(plot)}.${contextCount}</p>`;
 }
 
-const endpointCsvFiles = ["path-transactions.csv", "trace-endpoints.csv"];
+const endpointCsvFiles = ["path-transactions.csv", "trace-endpoints.csv", "endpoints.csv"];
 
 function plotDownloadLabel(item: Download): string {
-  const labels: Record<string, string> = {
-    "path-transactions.csv": "All trace transactions CSV",
-    "trace-endpoints.csv": "Endpoints only CSV",
-    "transactions.csv": "Plot inputs and outputs CSV",
-  };
-  return labels[item.name] || item.name;
+  return item.name === "transactions.csv" ? "Plot inputs and outputs CSV" : item.name;
+}
+
+function pegoutCsvDownloads(artifact: Artifact | undefined): string {
+  const transactions = artifact?.downloads.find(item => item.name === "transactions.csv");
+  const endpoints = artifact?.downloads.find(item => item.name === "endpoints.csv");
+  if (!transactions && !endpoints) return "";
+  return `<div class="plot-csv-downloads"><p class="small muted"><strong>All trace transactions:</strong> full input/output accounting for this saved trace, including seeds, intermediate and ending transactions, and any displayed context. <strong>Endpoints only:</strong> an ending-output table with source, source value, deposit/peg-out transaction, address, receiving entity, status, and peg-out LBTC. Unspent outputs are labeled Dormant. Exports use this saved trace's hop range and endpoint choices.</p><div class="artifact-actions">${downloadLink(transactions, "All trace transactions CSV")}${downloadLink(endpoints, "Endpoints only CSV")}</div></div>`;
 }
 
 function endpointCsvDownloads(plot: Plot): string {
-  if (plot.goal !== "pegouts") return "";
-  const downloads = endpointCsvFiles.map(name => plot.artifact?.downloads.find(item => item.name === name));
-  const missing = downloads.some(item => !item || !safeLocalUrl(item.url));
-  return `<div class="plot-csv-downloads"><p class="small muted"><strong>All trace transactions:</strong> every transaction in this peg-out trace, including seeds, intermediate transactions, and endpoint transactions. One row per transaction. <strong>Endpoints only:</strong> one row per ending output. Both use this saved trace's hop range and endpoint choices. Unspent outputs are labeled Dormant.</p><div class="artifact-actions">${downloads.map(item => item ? downloadLink(item, plotDownloadLabel(item)) : "").join("")}</div>${missing ? `<p class="artifact-note">Generate this plot again to add both CSV downloads.${plot.reviewable ? " The saved chart and Miro syncing remain available." : ""}</p>` : ""}</div>`;
+  return plot.goal === "pegouts" ? pegoutCsvDownloads(plot.artifact) : "";
 }
 
 function plotEvidenceDownloads(plot: Plot): string {

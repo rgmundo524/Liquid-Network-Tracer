@@ -76,16 +76,16 @@ class WorkflowWebTests(unittest.TestCase):
         detail = self.success(route)
         saved = next(item for item in detail["plots"] if item["preview_id"] == plot["preview_id"])
         downloads = {item["name"]: item["url"] for item in saved["artifact"]["downloads"]}
-        paths = list(csv.DictReader(io.StringIO(self.success(downloads["path-transactions.csv"]).decode())))
-        endpoints = list(csv.DictReader(io.StringIO(self.success(downloads["trace-endpoints.csv"]).decode())))
+        paths = list(csv.DictReader(io.StringIO(self.success(downloads["transactions.csv"]).decode())))
+        endpoints = list(csv.DictReader(io.StringIO(self.success(downloads["endpoints.csv"]).decode())))
         self.assertEqual({row["Transaction Hash"] for row in paths}, {"a" * 64, "b" * 64})
         self.assertEqual(len(endpoints), 1)
-        self.assertEqual(endpoints[0]["Status"], "Peg-out")
+        self.assertEqual(endpoints[0]["Status"], "Pegout")
         self.assertEqual(endpoints[0]["Source Seed Outpoints"], "a" * 64 + ":0")
         full_saved = next(item for item in detail["plots"] if item["preview_id"] == full["preview_id"])
-        self.assertNotIn("trace-endpoints.csv", {item["name"] for item in full_saved["artifact"]["downloads"]})
-        wrong_url = downloads["trace-endpoints.csv"].replace(plot["preview_id"], full["preview_id"])
-        self.assertEqual(self.request(wrong_url)[0], 404)
+        self.assertNotIn("endpoints.csv", {item["name"] for item in full_saved["artifact"]["downloads"]})
+        wrong_url = downloads["endpoints.csv"].replace(plot["preview_id"], full["preview_id"])
+        self.assertEqual(self.request(wrong_url)[0], 400)
 
     def test_plot_action_pins_collection_and_is_offline_for_live_investigations(self):
         case, route, run = self.collected()

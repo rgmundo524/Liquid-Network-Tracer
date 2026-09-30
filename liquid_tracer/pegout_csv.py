@@ -28,6 +28,13 @@ ENDPOINT_FIELDS = (
     "Transaction Observation ID", "Transaction Observed At", "Spend Observation ID",
     "Spend Observed At", "Explorer URL",
 )
+ENDPOINT_TABLE_FIELDS = (
+    "Source", "Source Value", "Deposit/Peg-out Tx", "Address/Peg-out Address",
+    "Receiving Entity", "Status", "Pegout LBTC", "Vout", "Outpoint", "Source Seed Outpoints",
+    "Source Paths", "Hop Counts", "Hop Reference", "Value LBTC", "Asset", "Value Base Units",
+    "Seed Depth", "Block", "Time", "Transaction Observation ID", "Transaction Observed At",
+    "Spend Observation ID", "Spend Observed At", "Explorer URL",
+)
 
 
 def _joined(values):
@@ -218,3 +225,58 @@ def write_pegout_csvs(destination, graph, state, *, observations=None):
             for row in rows:
                 writer.writerow({key: _text(value) for key, value in row.items()})
     return {"path_transactions": len(path_rows), "trace_endpoints": len(endpoint_rows)}
+
+
+def _source_values(row, state):
+    """Describe selected source UTXOs without inferring external BTC totals."""
+    values = {}
+    for source in json.loads(row["Source Paths"]):
+        key = source["seed_outpoint"]
+        txid, index = parse_outpoint(key)
+        output = state["transactions"][txid]["data"]["vout"][index]
+        asset, amount = _asset(output), _amount(output)
+        value = ""
+        if asset and amount != "":
+            value = (_whole_lbtc(output) + " L-BTC" if asset == "L-BTC"
+                     else str(amount) + " base units " + asset)
+        values[key] = value
+    if len(values) == 1:
+        return next(iter(values.values()))
+    # Multiple seed outputs can share a transaction or converge. Preserve the
+    # exact outpoint-to-value association rather than adding amounts together.
+    return json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def endpoint_table_rows(graph, state, *, observations=None):
+    """User-facing terminal-output table with the supplied sample's lead columns.
+
+    Source values are the explicit selected Liquid UTXOs, never an external
+    Bitcoin source total or an allocation to the endpoint. A caller exporting
+    an older plot must supply the archived run with that plot's saved service
+    controls applied, so later attribution changes cannot alter its contents.
+    """
+    _, endpoints = pegout_csv_rows(graph, state, observations=observations)
+    rows = []
+    for endpoint in endpoints:
+        status = {"Peg-out": "Pegout", "OP_RETURN": "OP_Return",
+                  "Dormant": "Dormant", "Unspendable": "Unspendable"}[endpoint["Status"]]
+        row = {key: endpoint[key] for key in ENDPOINT_TABLE_FIELDS if key in endpoint}
+        row.update({
+            "Source": endpoint["Source Transactions"], "Source Value": _source_values(endpoint, state),
+            "Deposit/Peg-out Tx": endpoint["Transaction Hash"],
+            "Address/Peg-out Address": endpoint["Address"], "Status": status,
+            "Pegout LBTC": endpoint["Value LBTC"] if status == "Pegout" else "",
+        })
+        rows.append(row)
+    return rows
+
+
+def write_endpoint_table_csv(path, graph, state, *, observations=None):
+    """Write the endpoint summary, including headers for an empty saved plot."""
+    rows = endpoint_table_rows(graph, state, observations=observations)
+    with Path(path).open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=ENDPOINT_TABLE_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: _text(value) for key, value in row.items()})
+    return len(rows)

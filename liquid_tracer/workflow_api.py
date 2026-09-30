@@ -74,6 +74,8 @@ def public_plot(value):
 def plot_artifact(case, preview_id, *, verified=False):
     from .plots import reviewed_plot, plot_files
     from .web import safe_path
+    from .common import read_json
+    from .plot_csv import csv_links
 
     if not verified:
         reviewed_plot(case, preview_id)
@@ -87,6 +89,9 @@ def plot_artifact(case, preview_id, *, verified=False):
         result["downloads"].append({"name": name, "url": url})
         if name == "graph.html":
             result["preview_url"] = url
+    if read_json(directory / "plot.json").get("goal") == "pegouts":
+        result["downloads"] = [item for item in result["downloads"] if not item["name"].endswith(".csv")]
+        result["downloads"].extend(csv_links(identity, preview_id))
     return result
 
 
@@ -107,6 +112,12 @@ def case_workflow(case):
                 item["artifact"] = plot_artifact(case, value["preview_id"], verified=True)
             except (TraceError, OSError, ValueError):
                 item.update(reviewable=False, reason="Saved plot unavailable. Generate it again.")
+        if value.get("goal") == "pegouts" and "artifact" not in item:
+            # list_plots verified the immutable snapshot. Changed live settings
+            # can prevent syncing, while its original CSV tables remain useful.
+            from .plot_csv import csv_links
+            item["artifact"] = {"preview_id": value["preview_id"],
+                                "downloads": csv_links(read_case(case)["case_id"], value["preview_id"])}
         result["plots"].append(item)
     try:
         result["boards"] = [public_board(value) for value in list_boards(case)]

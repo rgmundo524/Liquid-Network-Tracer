@@ -11,7 +11,7 @@ from liquid_tracer.api import Esplora
 from liquid_tracer.common import StopRun, TraceError, digest, read_json, save_json
 from liquid_tracer.investigations import create_investigation, read_case, update_case
 from liquid_tracer.pegouts import (FILES, list_pegout_searches, preview_pegouts, publish_pegouts,
-                                  reviewed_pegouts, search_pegouts)
+                                  reviewed_pegouts, saved_pegout_snapshot, search_pegouts)
 from liquid_tracer.services import set_service
 from tests.fixtures import A, B, C, D, fixture
 
@@ -339,6 +339,72 @@ class PegoutSearchTests(unittest.TestCase):
         # B's other output also reaches C; the C output shares the stopped address.
         self.assertEqual(refreshed["match_count"], 0)
         self.assertEqual(len(self.state(result)["transactions"]), 4)
+
+    def test_historical_snapshot_survives_rule_changes_without_becoming_publishable(self):
+        result = self.search()
+        graph, plan = reviewed_pegouts(self.case, result["preview_id"])
+        archive = self.case / "pegouts" / result["search_id"]
+        preview = Path(result["directory"])
+        before = {str(path): path.read_bytes() for directory in (archive, preview)
+                  for path in directory.rglob("*") if path.is_file()}
+        set_service(self.case, "SYNTHETIC-branch-A", name="Changed attribution", stop_tracing=True)
+        update_case(self.case, {"run_defaults": {"center_name": "Changed center", "color_attribution_arrows": True}})
+        with patch("liquid_tracer.pegouts.load_services", side_effect=AssertionError("Current rules must not be read")), \
+                patch.object(Esplora, "get", side_effect=AssertionError("Snapshot must not fetch")):
+            saved_graph, saved_plan, state = saved_pegout_snapshot(self.case, result["preview_id"])
+        self.assertEqual((saved_graph, saved_plan), (graph, plan))
+        self.assertEqual(state, self.state(result))
+        self.assertEqual(saved_graph["pegouts"]["match_count"], 1)
+        with patch("liquid_tracer.miro.publish") as publish:
+            with self.assertRaisesRegex(TraceError, "controls changed"):
+                publish_pegouts(self.case, result["preview_id"], "separate-board")
+            publish.assert_not_called()
+        self.assertEqual(before, {str(path): path.read_bytes() for directory in (archive, preview)
+                                  for path in directory.rglob("*") if path.is_file()})
+
+    def test_historical_snapshot_rejects_changed_archive_even_when_resealed(self):
+        result = self.search()
+        archive = self.case / "pegouts" / result["search_id"]
+        state = self.state(result)
+        state["stop_reason"] = "changed"
+        save_json(archive / "trace.json", state)
+        manifest = archive / "SHA256SUMS"
+        names = [line.split("  ", 1)[1] for line in manifest.read_text().splitlines()]
+        manifest.write_text("".join(digest((archive / name).read_bytes()) + "  " + name + "\n" for name in names))
+        with self.assertRaisesRegex(TraceError, "source archive changed"):
+            saved_pegout_snapshot(self.case, result["preview_id"])
+
+    def test_stale_search_listing_exposes_only_newest_intact_export_preview(self):
+        original = self.search()
+        newer = preview_pegouts(self.case, original["search_id"])
+        latest = preview_pegouts(self.case, original["search_id"])
+        # A broken newest preview must not hide the preceding intact snapshot.
+        (Path(latest["directory"]) / "transactions.csv").write_text("changed\n")
+        set_service(self.case, "SYNTHETIC-branch-A", name="Changed", stop_tracing=True)
+        listed = next(row for row in list_pegout_searches(self.case) if row["id"] == original["search_id"])
+        self.assertEqual(listed["export_preview_id"], newer["preview_id"])
+        self.assertNotIn("preview_id", listed)
+        self.assertNotIn("match_count", listed)
+        with patch("liquid_tracer.miro.publish") as publish:
+            with self.assertRaisesRegex(TraceError, "controls changed"):
+                publish_pegouts(self.case, listed["export_preview_id"], "separate-board")
+            publish.assert_not_called()
+        refreshed = preview_pegouts(self.case, original["search_id"])
+        listed = next(row for row in list_pegout_searches(self.case) if row["id"] == original["search_id"])
+        self.assertEqual(listed["preview_id"], refreshed["preview_id"])
+        self.assertNotIn("export_preview_id", listed)
+
+    def test_historical_snapshot_requires_report_and_graph_agreement(self):
+        result = self.search()
+        preview = Path(result["directory"])
+        report = read_json(preview / "pegouts.json")
+        report["match_count"] += 1
+        save_json(preview / "pegouts.json", report)
+        manifest = preview / "SHA256SUMS"
+        names = [line.split("  ", 1)[1] for line in manifest.read_text().splitlines()]
+        manifest.write_text("".join(digest((preview / name).read_bytes()) + "  " + name + "\n" for name in names))
+        with self.assertRaisesRegex(TraceError, "plan disagree"):
+            saved_pegout_snapshot(self.case, result["preview_id"])
 
     def test_center_group_changes_preview_without_refetching_and_invalidates_review(self):
         original = self.search()
