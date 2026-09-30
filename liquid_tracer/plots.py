@@ -24,13 +24,23 @@ PREVIEW_ID = re.compile(r"[0-9a-f]{16}-plots-[0-9a-f]{8}\Z")
 FILES = frozenset({"graph.html", "graph.svg", "graph.json", "layout-report.json", "graph.mmd",
                    "transactions.csv", "plot.json", "miro-plan.json", "details.html", "details.json",
                    "SHA256SUMS"})
+PEGOUT_CSV_FILES = frozenset({"path-transactions.csv", "trace-endpoints.csv"})
 SCOPE = ("Saved-data-only plot. No additional transactions or address statistics were fetched. "
          "Paused, stopped, unconfirmed, unsearched or hop-limited branches may contain further activity. "
          "Use Collect data to extend the evidence, then regenerate this plot.")
 
 
 def plot_files(directory=None):
-    return FILES
+    if directory is None:
+        return FILES | PEGOUT_CSV_FILES
+    report = read_json(_ordinary(Path(directory) / "plot.json"))
+    if not isinstance(report, dict):
+        raise TraceError("Malformed saved investigation plot")
+    if "csv_export_version" not in report:
+        return FILES  # Earlier immutable previews keep their original manifest.
+    if type(report["csv_export_version"]) is not int or report["csv_export_version"] != 1 or report.get("goal") != "pegouts":
+        raise TraceError("Unsupported saved plot CSV exports; regenerate the plot")
+    return FILES | PEGOUT_CSV_FILES
 
 
 def _ordinary(path):
@@ -195,6 +205,21 @@ def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_un
     return reference
 
 
+def _observations(case, run_id):
+    """Read retrieval times from the verified archive, without opening a live store."""
+    directory = _ordinary(case / "runs" / run_id)
+    names = {line.split("  ", 1)[1] for line in (directory / "SHA256SUMS").read_text(encoding="utf-8").splitlines()}
+    if "evidence-index.json" not in names:
+        return {}  # Some earlier or imported run archives contain only the graph evidence.
+    rows = read_json(_ordinary(directory / "evidence-index.json"))
+    if not isinstance(rows, list) or any(not isinstance(row, dict) or type(row.get("id")) is not int for row in rows):
+        raise TraceError("Malformed saved observation index")
+    result = {row["id"]: row for row in rows}
+    if len(result) != len(rows):
+        raise TraceError("Duplicate observation IDs in the saved index")
+    return result
+
+
 def _graph(state, goal, query, settings):
     from .connections import connection_graph
     from .export import build_graph
@@ -324,6 +349,7 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
             report.update(connection_count=graph["connections"]["connection_count"], status=graph["connections"]["status"])
         elif goal == "pegouts":
             report.update(match_count=graph["pegouts"]["match_count"], status=graph["pegouts"]["status"])
+            report["csv_export_version"] = 1
             for key in ("endpoint_count", "endpoint_counts", "context_edge_count"):
                 if key in graph["pegouts"]:
                     report[key] = deepcopy(graph["pegouts"][key])
@@ -340,8 +366,11 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
             (destination / "graph.mmd").write_text(mermaid_source(graph) if graph["nodes"] else
                 "flowchart LR\n  %% No matching activity in saved collection data.\n", encoding="utf-8")
             write_transaction_csv(destination / "transactions.csv", graph, state)
+            if goal == "pegouts":
+                from .pegout_csv import write_pegout_csvs
+                write_pegout_csvs(destination, graph, state, observations=_observations(case, state["run_id"]))
             manifest = "".join(digest((destination / name).read_bytes()) + "  " + name + "\n"
-                               for name in sorted(FILES - {"SHA256SUMS"}))
+                               for name in sorted(plot_files(destination) - {"SHA256SUMS"}))
             (destination / "SHA256SUMS.tmp").write_text(manifest, encoding="utf-8")
             (destination / "SHA256SUMS.tmp").replace(destination / "SHA256SUMS")
         except BaseException:
@@ -357,20 +386,21 @@ def _snapshot(case, preview_id):
     if not isinstance(preview_id, str) or not PREVIEW_ID.fullmatch(preview_id):
         raise TraceError("Choose a saved investigation plot")
     directory = _ordinary(case / "previews" / preview_id)
-    for name in FILES:
+    files = plot_files(directory)
+    for name in files:
         if not _ordinary(directory / name).is_file():
             raise TraceError("The saved plot is incomplete; regenerate it")
     seen = set()
     for line in (directory / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
         parts = line.split("  ", 1)
         if (len(parts) != 2 or not re.fullmatch(r"[0-9a-f]{64}", parts[0])
-                or parts[1] not in FILES - {"SHA256SUMS"} or parts[1] in seen):
+                or parts[1] not in files - {"SHA256SUMS"} or parts[1] in seen):
             raise TraceError("Invalid plot manifest")
         checksum, name = parts
         if digest((directory / name).read_bytes()) != checksum:
             raise TraceError("Saved plot changed; regenerate and review it")
         seen.add(name)
-    if seen != FILES - {"SHA256SUMS"}:
+    if seen != files - {"SHA256SUMS"}:
         raise TraceError("The saved plot manifest is incomplete")
     from .investigations import read_case
     from .miro import validate_plan

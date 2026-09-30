@@ -1887,6 +1887,86 @@ test('historical peg-out layouts keep their peg-out-only summary regardless of c
   assert.doesNotMatch(view.workspace(), /Endpoint types: Peg-outs \+|0 unspent UTXOs|0 unspendable outputs/);
 });
 
+test('saved peg-out paths expose separate transaction and endpoint CSVs in plots and history', async () => {
+  const view = await harness();
+  const files = ['path-transactions.csv', 'trace-endpoints.csv', 'transactions.csv', 'graph.svg', 'pegouts.json'];
+  view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'terminal', {
+    query: {include_unspent: true, include_unspendable: true, include_context: true},
+    artifact: {downloads: files.map(name => ({name, url: `/files/case1/previews/terminal/${name}`}))},
+  })]});
+  for (const page of ['plots', 'history']) {
+    await view.dispatch('view-' + page);
+    const html = view.workspace();
+    assert.match(html, /href="\/files\/case1\/previews\/terminal\/path-transactions.csv"[^>]*>[\s\S]*?Path transactions CSV<\/a>/);
+    assert.match(html, /href="\/files\/case1\/previews\/terminal\/trace-endpoints.csv"[^>]*>[\s\S]*?Trace endpoints CSV<\/a>/);
+    assert.match(html, /one row per transaction on the selected seed-to-endpoint paths/);
+    assert.match(html, /one row per matching ending output/);
+    assert.match(html, /this saved plot's hop range and endpoint choices; context-only activity is excluded/);
+    assert.match(html, /Unspent outputs are labeled Dormant/);
+    assert.doesNotMatch(html, /Generate this plot again to add/);
+    assert.equal((html.match(/href="[^\"]*path-transactions.csv"/g) || []).length, 1);
+    assert.equal((html.match(/href="[^\"]*trace-endpoints.csv"/g) || []).length, 1);
+    if (page === 'history') {
+      assert.match(html, /download="transactions.csv"[^>]*>[\s\S]*?Plot inputs and outputs CSV<\/a>/);
+      assert.match(html, /one row per displayed input or output, including context when shown/);
+      assert.match(html, /Full-run CSV downloads/);
+      assert.match(html, /selected collection run, across its full trace/);
+      assert.match(html, /href="\/files\/case1\/previews\/terminal\/pegouts.json"/);
+    }
+  }
+  assert.equal(view.calls.length, 1, 'rendering downloads does not regenerate or refetch the saved plot');
+});
+
+test('older peg-out plots offer regeneration without disabling their existing downloads or syncing', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'old', {
+    artifact: {downloads: [{name: 'transactions.csv', url: '/files/case1/previews/old/transactions.csv'},
+      {name: 'graph.svg', url: '/files/case1/previews/old/graph.svg'}]},
+  })]});
+  for (const page of ['plots', 'history']) {
+    await view.dispatch('view-' + page);
+    const html = view.workspace();
+    assert.match(html, /Generate this plot again to add the path transactions and trace endpoints CSV exports/);
+    assert.match(html, /Existing downloads and Miro syncing remain available/);
+    assert.match(html, /href="\/files\/case1\/previews\/old\/graph.svg"/);
+    assert.doesNotMatch(html, /download="(?:path-transactions|trace-endpoints).csv"/);
+    if (page === 'plots') assert.doesNotMatch(html.match(/<button[^>]*data-action="plot-boards"[^>]*>/)[0], /disabled/);
+    else assert.match(html, /href="\/files\/case1\/previews\/old\/transactions.csv"/);
+  }
+});
+
+test('path export actions stay specific to peg-out plots and follow the saved selection', async () => {
+  const view = await harness();
+  const terminal = workflowPlot('pegouts', 'terminal', {
+    artifact: {downloads: ['path-transactions.csv', 'trace-endpoints.csv'].map(name => ({name,
+      url: `/files/case1/previews/terminal/${name}`}))},
+  });
+  view.state.activeCase = workflowCase({plots: [terminal, workflowPlot('full', 'full'), workflowPlot('connections', 'connections')]});
+  for (const goal of ['full', 'connections']) {
+    workflowEdit(view, 'plot-picker', goal);
+    for (const page of ['plots', 'history']) {
+      await view.dispatch('view-' + page);
+      assert.doesNotMatch(view.workspace(), /Path transactions CSV|Trace endpoints CSV|Generate this plot again to add/);
+    }
+  }
+  workflowEdit(view, 'plot-picker', 'terminal');
+  assert.match(view.workspace(), /download="path-transactions.csv"/);
+});
+
+test('unreviewable older peg-out plots do not claim syncing remains available', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'unavailable', {
+    reviewable: false, reason: 'Saved layout files are unavailable.', artifact: undefined,
+  })]});
+  for (const page of ['plots', 'history']) {
+    await view.dispatch('view-' + page);
+    const html = view.workspace();
+    assert.match(html, /Generate this plot again to add the path transactions and trace endpoints CSV exports/);
+    assert.doesNotMatch(html, /Existing downloads and Miro syncing remain available/);
+    if (page === 'plots') assert.match(html.match(/<button[^>]*data-action="plot-boards"[^>]*>/)[0], /disabled/);
+  }
+});
+
 test('central board manager links existing boards before collection for each goal', async () => {
   for (const goal of ['full', 'connections', 'pegouts']) {
     for (const method of ['link']) {
