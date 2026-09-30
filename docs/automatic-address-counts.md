@@ -35,8 +35,15 @@ never go into browser responses or the ELK/Mermaid renderer environment.
 ## Caching, limits and failures
 
 `address-counts.json` and existing address-review observations are reused. Lookups
-are deduplicated by full address, serialized by a separate ancillary-cache lock,
-and checkpointed after each success. The code does not recursively reacquire the
+are deduplicated by full address. Requests run concurrently using the selected
+run's saved API worker count, from 1 to 8; older runs without a worker setting
+use 8. All workers share the saved request pacing, retry cooldowns, and lookup
+budget, so concurrency does not multiply the configured request-rate limit.
+
+A separate ancillary-cache lock permits one count lookup per investigation.
+Requests run in batches of at most the worker count, while cache writes and
+progress updates stay on the coordinating thread. Each successful result is
+checkpointed before the next batch. The code does not recursively reacquire the
 trace lock when a trace immediately exports or syncs its graph.
 
 Automatic statistics are a separate reported API phase, using the investigation's
@@ -46,8 +53,10 @@ contains an `address_counts` report with fetched/known/total/remaining/failed,
 requests used, and a stop reason. Budget exhaustion or an API failure is visible
 in terminal progress and the browser result. Good counts are retained; missing
 ones are retried automatically on the next normal visual operation. A global
-network/authentication failure does not trigger the same failing call for every
-address. Interrupted/error traces are not followed by a new count lookup.
+network/authentication failure stops new batches after the current batch drains;
+successful responses from that batch are still saved, including on an explicit
+lookup that raises an error. Interrupted/error traces are not followed by a new
+count lookup.
 
 Counts remain dated observations, not a live feed. `0` is an observed zero; `??`
 means no usable count is available. The optional explicit count command supports
