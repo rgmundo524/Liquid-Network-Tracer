@@ -162,6 +162,8 @@ def parser():
     run.add_argument("--only", action="append", help="Resume only these frontier outpoints; may be repeated")
     run.add_argument("--hops", type=int, help="Absolute maximum hop depth (default: 3)")
     run.add_argument("--additional-hops", type=int, help="Increase the resumed run's hop ceiling by this many")
+    run.add_argument("--hop-reference-name", default=None,
+                     help="Count hops from this attribution name, resetting each matching output to zero; blank uses seed hops")
     run.add_argument("--max-transactions", type=int, default=250, help="New unique transactions per run, including seed funding transactions")
     run.add_argument("--max-outpoints", type=int, default=2000)
     run.add_argument("--max-requests", type=int, default=600, help="All HTTP attempts, including OAuth and retries")
@@ -901,16 +903,25 @@ def run_trace(args, progress=None):
             raise TraceError("The resumed run belongs to a different case")
         if parent and parent.get("run_id") != args.resume:
             raise TraceError("Saved trace does not match the selected run")
+        from .group_hops import normalize_reference_name, reference_addresses, reference_name
+        metadata = read_case(args.case)
+        reference = normalize_reference_name(args.hop_reference_name if args.hop_reference_name is not None
+            else reference_name(parent) if parent else metadata.get("run_defaults", {}).get("hop_reference_name", ""))
+        changed_reference = bool(parent and reference.casefold() != reference_name(parent).casefold())
+        if changed_reference and args.additional_hops is not None:
+            raise TraceError("Changing the hop origin requires --hops for the new maximum, not --additional-hops")
         hops = args.hops if args.hops is not None else (parent["limits"]["max_hops"] if parent else 3)
         if args.additional_hops is not None:
             hops += args.additional_hops
-        if parent and hops < parent["limits"]["max_hops"]:
+        if parent and not changed_reference and hops < parent["limits"]["max_hops"]:
             raise TraceError("Continuation cannot lower its parent's hop ceiling; start a fresh run to narrow scope")
         limits = Limits(hops, args.max_transactions, args.max_outpoints, args.max_requests, args.max_seconds)
         limits.validate()
         labels = load_labels(args.labels) if args.labels else (parent["labels"] if parent else [])
         service_settings = load_services(args.case)
         labels = apply_service_labels(labels, service_settings)
+        if reference and not reference_addresses({"labels": labels, "hop_reference_name": reference}):
+            raise TraceError("The hop reference name has no enabled address attributions; choose an existing named group")
         merge_addresses = bool(args.merge_addresses)
         store = Store(args.case)
         api = None
@@ -919,6 +930,10 @@ def run_trace(args, progress=None):
                           args.tx_cache_seconds, args.min_interval, workers=args.api_workers,
                           advertised_rps=args.api_rate_limit)
             state = new_state(seeds, api.base, limits, labels, parent, case_id=identity)
+            if reference:
+                state["hop_reference_name"] = reference
+            else:
+                state.pop("hop_reference_name", None)
             state["service_controls"] = {key: value for key, value in service_settings.items() if key != "history"}
             state["fetch_options"] = {"workers": api.workers,
                                       "advertised_rps": api.advertised_rps,

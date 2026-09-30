@@ -83,6 +83,12 @@ def legend_notes(graph=None):
         "L-BTC amounts use L-BTC units: 100,000,000 base units = 1 L-BTC. Other assets use base units.",
         "?? = not publicly available. STOP TRACING = an explicit address boundary.",
     ]
+    from .group_hops import normalize_reference_name
+    name = normalize_reference_name((graph or {}).get("hop_reference_name", ""))
+    if name:
+        notes.append(f"Hops count away from attribution group {name}. A reached output in that group resets "
+                     "its own branch to 0; outside outputs continue independently. Attribution stop rules "
+                     "and hop allowances still apply.")
     if (graph or {}).get("graph_options", {}).get("view") == "pegout_paths":
         from .common import TraceError
         from .pegout_paths import validate_query
@@ -94,7 +100,8 @@ def legend_notes(graph=None):
         query = validate_query(query.get("txid"), query.get("min_hops"), query.get("max_hops"),
                                seeds=query.get("seeds"), include_unspent=query.get("include_unspent", False),
                                include_unspendable=query.get("include_unspendable", False),
-                               include_context=query.get("include_context", False))
+                               include_context=query.get("include_context", False),
+                               hop_reference_name=query.get("hop_reference_name", ""))
         if "seeds" in query:
             count = len({seed.split(":")[0] for seed in query["seeds"]})
             origin = (f"Peg-out search: {len(query['seeds'])} selected seed UTXO(s) "
@@ -103,11 +110,16 @@ def legend_notes(graph=None):
         else:
             origin = "Peg-out search origin: " + query["txid"]
             hop_zero = "The origin is hop 0."
+        if query.get("hop_reference_name"):
+            hop_zero = ("Selected outputs in the named group reset their own path to hop 0; "
+                        "outside outputs beyond the limit are not followed.")
         coverage = ("Coverage: bounded search completed. " if report.get("source_run_status") == "bounded_complete"
                     else "Coverage: partial search. ")
         notes.extend([
             origin,
-            f"Range: {query['min_hops']} to {query['max_hops']} transaction hops, inclusive. " + hop_zero,
+            f"Range: {query['min_hops']} to {query['max_hops']} "
+            + ("group-relative" if query.get("hop_reference_name") else "transaction")
+            + " hops, inclusive. " + hop_zero,
             ("Qualifying paths are shown with transaction context. Thinner context arrows do not establish traced paths "
              "or add endpoint matches. Combined path edges can also form routes outside the selected range."
              if query.get("include_context") else

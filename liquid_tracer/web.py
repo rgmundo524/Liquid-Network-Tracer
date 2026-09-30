@@ -25,7 +25,8 @@ from urllib.parse import quote, unquote, urlsplit
 from .common import TraceError, read_json
 from .inspection import parse_transaction_hashes
 from .investigations import (create_investigation, default_root, load_settings,
-                             read_case, save_plot_settings, save_settings, update_case, validate_blockchain, validate_settings)
+                             read_case, save_collection_reference, save_plot_settings, save_settings, update_case,
+                             validate_blockchain, validate_settings)
 from .menu import _command, _environment, _lookup_reports, _project, _seed_values, _trace_arguments
 from .progress import public_progress
 from .layout_search import MAX_LAYOUT_ATTEMPTS, normalize_layout_attempts
@@ -79,12 +80,17 @@ def collected_hops(state):
     transactions = state.get("transactions")
     if not isinstance(transactions, dict) or not transactions:
         return None
-    maximum = 0
+    from .group_hops import reference_name
+    named = bool(reference_name(state))
+    maximum = None
     for transaction in transactions.values():
-        depth = transaction.get("depth") if isinstance(transaction, dict) else None
+        field = "reference_hops" if named else "depth"
+        if named and isinstance(transaction, dict) and field in transaction and transaction[field] is None:
+            continue  # Inspected boundary transactions do not establish in-range coverage.
+        depth = transaction.get(field) if isinstance(transaction, dict) else None
         if type(depth) is not int or not 0 <= depth <= 2 ** 53 - 1:
             return None
-        maximum = max(maximum, depth)
+        maximum = max(maximum or 0, depth)
     return maximum
 
 
@@ -452,6 +458,9 @@ class LocalServer(ThreadingHTTPServer):
                     limits = state.get("limits", {})
                     if isinstance(limits, dict) and type(limits.get("max_hops")) is int:
                         run["max_hops"] = limits["max_hops"]
+                    from .group_hops import reference_name
+                    if reference_name(state):
+                        run["hop_reference_name"] = reference_name(state)
                     depth = collected_hops(state)
                     if depth is not None:
                         run["collected_hops"] = depth
@@ -1097,12 +1106,18 @@ class LocalServer(ThreadingHTTPServer):
                 if "settings" in body:
                     raise RequestError("Choose a run hop allowance or legacy settings, not both.")
                 settings = validate_settings({**settings, "hops": body["hops"]})
+            if "hop_reference_name" in body:
+                if "settings" in body:
+                    raise RequestError("Choose a hop origin or legacy settings, not both.")
+                settings = validate_settings({**settings, "hop_reference_name": body["hop_reference_name"]})
             arguments, live = _trace_arguments(case, metadata, settings)
             # Current UI actions use saved defaults and a one-run hop allowance.
             # Keep explicit legacy API settings compatible without rewriting
             # defaults every time an ordinary run is started.
             if "settings" in body:
                 update_case(case, {"run_defaults": settings})
+            elif "hop_reference_name" in body:
+                save_collection_reference(case, settings["hop_reference_name"])
         elif action == "connections":
             from .connections import validate_hops
             hops = validate_hops(body.get("connection_hops", 10))

@@ -171,6 +171,9 @@ def _status(case, metadata):
 def _trace_arguments(case, metadata, settings):
     """Validate saved source/evidence before invoking SecretSpec or any remote call."""
     arguments = ["trace", "--case", str(case)]
+    from .group_hops import normalize_reference_name, reference_addresses, reference_name
+    reference = normalize_reference_name(settings.get("hop_reference_name", ""))
+    parent = None
     fixture = metadata.get("fixture")
     if metadata.get("latest_run"):
         _, parent = _latest(case, metadata, verify=True)
@@ -180,7 +183,8 @@ def _trace_arguments(case, metadata, settings):
             from .api import ENTERPRISE
             if parent.get("source") != ENTERPRISE:
                 raise TraceError("Continue with the trace command and the original API source.")
-        arguments.extend(["--resume", "latest", "--additional-hops", str(settings["hops"])])
+        ceiling = "--additional-hops" if reference.casefold() == reference_name(parent).casefold() else "--hops"
+        arguments.extend(["--resume", "latest", ceiling, str(settings["hops"])])
     else:
         seeds = metadata.get("seeds")
         if not seeds:
@@ -188,6 +192,12 @@ def _trace_arguments(case, metadata, settings):
         for seed in seeds:
             arguments.extend(["--seed", seed])
         arguments.extend(["--hops", str(settings["hops"])])
+    if reference:
+        from .services import apply_service_labels, load_services
+        labels = apply_service_labels(parent.get("labels", []) if parent else [], load_services(case))
+        if not reference_addresses({"labels": labels, "hop_reference_name": reference}):
+            raise TraceError("The hop reference name has no enabled address attributions; choose an existing named group")
+    arguments.extend(["--hop-reference-name", reference])
     if fixture:
         path = Path(fixture)
         if not path.is_file():

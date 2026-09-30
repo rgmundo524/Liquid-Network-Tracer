@@ -145,6 +145,14 @@ def _unspent_endpoints(state):
                  or (isinstance(item.get("spend_observation_id"), str) and item["spend_observation_id"].strip()))}
 
 
+def _reference_fields(item, enabled):
+    """Describe a reached UTXO without assigning hops to context occurrences."""
+    depth = (item or {}).get("trace_scope_depth")
+    if not enabled or type(depth) is not int or depth < 0:
+        return {}
+    return {"seed_depth": item.get("depth"), "reference_hops": depth}
+
+
 def build_graph(state, merge_addresses=True, include_fees=False, *, group_context_inputs=False, hub_addresses=None,
                 color_attribution_arrows=None, center_name=None, edge_ids=None):
     """Build display nodes, optionally limited to exact input/output edges.
@@ -164,6 +172,7 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
     if type(color_attribution_arrows) is not bool:
         raise TraceError("Attribution arrow colors must be enabled or disabled")
     nodes, edges, fee_items = {}, [], {}
+    reference_name = state.get("hop_reference_name", "")
     occurrence_keys = defaultdict(set)
     unspent_endpoints = _unspent_endpoints(state)
     starting_transactions = {seed.rsplit(":", 1)[0] for seed in state["seeds"]}
@@ -184,6 +193,7 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
         addr = output.get("scriptpubkey_address")
         kind = output_kind(output)
         tracked = state["outputs"].get(key) if network == "liquid" else None
+        reference = _reference_fields(tracked, reference_name and kind != "fee")
         matches = match_labels(state["labels"], key, output) if network == "liquid" else []
         if kind != "spendable":
             label = "PEG-OUT REQUEST" if kind == "pegout" else ("FEE" if kind == "fee" else "UNSPENDABLE")
@@ -191,7 +201,7 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
             destination = peg.get("scriptpubkey_address")
             label += "\n" + (short_address(destination) if destination else "vout " + key.rsplit(":", 1)[-1])
             return add_node("event:" + key, "event", label, column,
-                            {"outpoint": key, "output": output, "trace": tracked})
+                            {"outpoint": key, "output": output, "trace": tracked, **reference})
         # Display identity is independent of the UTXO evidence. Never deduplicate
         # by a shortened label, and never collapse unknown addresses together.
         # Network separation is explicit; the enclosing namespace fixes source.
@@ -217,7 +227,8 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
         # attributed output. Its role and label must not depend on visit order.
         if _ADDRESS_PRIORITY[role] >= _ADDRESS_PRIORITY[node.get("role", "address")]:
             node["role"], node["color"] = role, COLORS[role]
-        occurrence = {"outpoint": key, "output": public_fields(output), "trace": tracked, "labels": matches}
+        occurrence = {"outpoint": key, "output": public_fields(output), "trace": tracked, "labels": matches,
+                      **reference}
         fingerprint = canonical(occurrence)
         if fingerprint not in occurrence_keys[node_id]:
             occurrence_keys[node_id].add(fingerprint)
@@ -228,9 +239,21 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
         tx = record["data"]
         column = 2 * ranks[txid] + 1
         role = "starting_transaction" if txid in starting_transactions else "transaction"
+        details = {"transaction": tx, "observation_id": record["observation_id"]}
+        hop_label = "hop " + str(record["depth"])
+        if reference_name:
+            details["seed_depth"] = record["depth"]
+            reference_hops = record.get("reference_hops")
+            if type(reference_hops) is int and reference_hops >= 0:
+                details["reference_hops"] = reference_hops
+                hop_label = "hop " + str(reference_hops)
+            else:
+                # A retained boundary transaction may have no reachable output.
+                # Its seed distance would misstate this selected hop measure.
+                hop_label = "Boundary inspection"
         txnode = add_node("tx:" + txid, "transaction",
-                          "TX\n" + short(txid) + "\n" + transaction_date(tx) + "\nhop " + str(record["depth"]),
-                          column, {"transaction": tx, "observation_id": record["observation_id"]},
+                          "TX\n" + short(txid) + "\n" + transaction_date(tx) + "\n" + hop_label,
+                          column, details,
                           None if simulated else explorer + "/tx/" + txid, COLORS[role])
         nodes[txnode]["role"] = role
         for index, vin in enumerate(tx["vin"]):
@@ -264,7 +287,8 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
             role = "seed_output" if key in state["seeds"] else ("candidate_output" if key in state["outputs"] else "context_output")
             edges.append({"id": "out:" + key, "source": txnode, "target": output_node,
                           "role": role, "outpoint": key, "label": "vout " + str(index),
-                          "quantity": graph_quantity(output), "details": public_fields(output)})
+                          "quantity": graph_quantity(output), "details": {**public_fields(output),
+                              **_reference_fields(state["outputs"].get(key), reference_name and output_kind(output) != "fee")}})
 
     # Aggregate shared labels once, not once for each input/output occurrence.
     # A highly reused service address must not make rendering quadratic.
@@ -323,6 +347,9 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
                        "shared addresses do not establish value allocation or common ownership."
                        if merge_addresses else "Legacy view: separate outpoint occurrences."),
             "nodes": list(nodes.values()), "edges": edges}
+    if reference_name:
+        graph["hop_reference_name"] = reference_name
+        graph["run"]["hop_reference_name"] = reference_name
     if "service_controls" in state:
         # A refreshed preview may use current investigator designations over an
         # older archived run. Record that presentation snapshot independently.
@@ -583,6 +610,7 @@ def export_run(store, state, destination, merge_addresses=True, offline_preview=
     write_csv(destination / "edges.csv", graph["edges"],
         ["id", "source", "target", "role", "outpoint", "label", "quantity", "details"])
     rows, events, inputs = [], [], []
+    reference_name = state.get("hop_reference_name", "")
     for txid, record in state["transactions"].items():
         tx = record["data"]
         for index, output in enumerate(tx["vout"]):
@@ -591,6 +619,7 @@ def export_run(store, state, destination, merge_addresses=True, offline_preview=
             rows.append({"outpoint": key, "txid": txid, "vout": index,
                          "depth": item.get("depth"), "trace_status": item.get("status", "context_only"),
                          "kind": output_kind(output), **public_fields(output),
+                         **_reference_fields(item, reference_name and output_kind(output) != "fee"),
                          "observation_id": record["observation_id"], "labels": match_labels(state["labels"], key, output)})
             if output_kind(output) != "spendable":
                 events.append({"txid": txid, "index": index, "kind": output_kind(output), "data": output,
@@ -604,14 +633,17 @@ def export_run(store, state, destination, merge_addresses=True, offline_preview=
                     events.append({"txid": txid, "index": index, "kind": kind, "data": vin,
                                    "observation_id": record["observation_id"]})
     write_csv(destination / "outputs.csv", rows, ["outpoint", "txid", "vout", "depth", "trace_status", "kind",
-        "scriptpubkey_address", "scriptpubkey", "scriptpubkey_type", "value", "valuecommitment", "asset", "assetcommitment", "pegout", "labels", "observation_id"])
+        "scriptpubkey_address", "scriptpubkey", "scriptpubkey_type", "value", "valuecommitment", "asset", "assetcommitment", "pegout", "labels", "observation_id"]
+        + (["reference_hops"] if reference_name else []))
     write_csv(destination / "inputs.csv", inputs, ["txid", "vin", "previous_txid", "previous_vout", "is_pegin", "is_coinbase",
         "scriptpubkey_address", "scriptpubkey", "value", "valuecommitment", "asset", "assetcommitment", "observation_id"])
     write_csv(destination / "spends.csv", state["links"].values(), ["outpoint", "spending_txid", "vin", "hop", "relationship", "observation_id", "spending_tx_observation_id"])
     write_csv(destination / "events.csv", events, ["txid", "index", "kind", "data", "observation_id"])
     frontier = [item for item in state["outputs"].values() if item["status"] not in TERMINAL]
     save_json(destination / "frontier.json", frontier)
-    write_csv(destination / "frontier.csv", frontier, ["outpoint", "depth", "status", "labels", "spend_observation_id", "observed_spend"])
+    frontier_rows = [{**item, **_reference_fields(item, reference_name)} for item in frontier] if reference_name else frontier
+    write_csv(destination / "frontier.csv", frontier_rows, ["outpoint", "depth", "status", "labels", "spend_observation_id", "observed_spend"]
+        + (["reference_hops"] if reference_name else []))
     evidence = destination / "evidence"
     evidence.mkdir(exist_ok=True)
     metadata = []

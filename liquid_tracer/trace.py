@@ -66,7 +66,16 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
     state["include_unconfirmed"] = include_unconfirmed
     state["selected_frontier"] = sorted(only) if only is not None else None
     from .hop_limits import HopScope, has_hop_limits
-    scope = HopScope(state) if has_hop_limits(labels) else ServiceScope(state)
+    from .group_hops import reference_name, refresh_reference_hops, refresh_seed_depths
+    named_hops = bool(reference_name(state))
+    hop_progress = {"hop_reference_name": reference_name(state)} if named_hops else {}
+    was_named = any("reference_hops" in record for record in state["transactions"].values())
+    if named_hops or was_named:
+        refresh_seed_depths(state)
+    scope = HopScope(state) if named_hops or was_named or has_hop_limits(labels) else ServiceScope(state)
+
+    def within_hops(depth):
+        return depth <= limits.max_hops if named_hops else depth < limits.max_hops
 
     def add(txid, index, depth, origin, parent=None):
         key = f"{txid}:{index}"
@@ -82,7 +91,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
             # A longer path can carry more allowance than an exhausted short
             # path. Offer every verified arrival, not only depth improvements.
             released = scope.admit(key, depth, parent=parent)
-            for candidate in set(released) | ({key} if existing is None else set()):
+            for candidate in set(released) | ({key} if existing is None or existing["status"] == "pending" else set()):
                 item = state["outputs"][candidate]
                 if not scope.blocked(candidate) and item["status"] not in TERMINAL:
                     item["status"] = "pending"
@@ -105,6 +114,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
             add(txid, index, 0, "analyst_seed")
 
     def save():
+        refresh_reference_hops(state, scope)
         state["observations"] = sorted(set(state["observations"]) | api.used)
         state["stats"] = {"requests_this_run": api.budget.requests,
             "outpoints_examined_this_run": count, "new_transactions_this_run": new_transactions,
@@ -173,7 +183,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
         # At most one previously unseen spending transaction per output. This
         # bound also covers converging branches, without fetching any sibling
         # outputs that the investigator did not select for this frontier.
-        possible_children = len(window) if depth < limits.max_hops else 0
+        possible_children = len(window) if within_hops(depth) else 0
         if len(missing) + possible_children > limits.max_transactions - new_transactions:
             return
         fetch_ids = [txid for txid in funding_ids
@@ -202,7 +212,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
             if transaction is None or item["vout"] >= len(transaction["vout"]):
                 continue
             output = transaction["vout"][item["vout"]]
-            if (output_kind(output) != "spendable" or depth >= limits.max_hops
+            if (output_kind(output) != "spendable" or not within_hops(depth)
                     or not scope.permits(item, output)
                     or any(label.get("stop") for label in match_labels(labels, item["outpoint"], output))
                     or (not include_unconfirmed and not transaction["status"]["confirmed"])):
@@ -244,10 +254,10 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
         depth = min(limits.max_hops, depth)
         if depth != current_hop:
             current_hop = depth
-            report_progress(progress, "collecting", current_hop, limits.max_hops)
+            report_progress(progress, "collecting", current_hop, limits.max_hops, **hop_progress)
 
     if had_frontier:
-        report_progress(progress, "collecting", current_hop, limits.max_hops)
+        report_progress(progress, "collecting", current_hop, limits.max_hops, **hop_progress)
     try:
         save()
         while queue:
@@ -265,11 +275,15 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
             if depth != scope.depth(current) or current["status"] != "pending" or scope.blocked(key):
                 continue
             count += 1
-            tx = get_tx(current["txid"], depth)
+            tx = get_tx(current["txid"], current["depth"] if named_hops else depth)
             if current["vout"] >= len(tx["vout"]):
                 raise TraceError("Seed or frontier output index does not exist: " + key)
             output = tx["vout"][current["vout"]]
-            scope.refresh(key)
+            for released in scope.refresh(key) or ():
+                item = state["outputs"][released]
+                if released != key and not scope.blocked(released) and item["status"] not in TERMINAL:
+                    item["status"] = "pending"
+                    heapq.heappush(queue, (scope.depth(item), released))
             depth = scope.depth(current)
             if scope.blocked(key):
                 current = None
@@ -286,7 +300,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
                 current["status"] = "analyst_stop"
             elif not include_unconfirmed and not tx.get("status", {}).get("confirmed"):
                 current["status"] = "unconfirmed_funding"
-            elif depth >= limits.max_hops:
+            elif not within_hops(depth):
                 current["status"] = "hop_limit"
             else:
                 spends, oid = api.get("/tx/" + current["txid"] + "/outspends")
@@ -307,7 +321,8 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
                         raise TraceError("Malformed spending transaction reference")
                     if child_id == current["txid"]:
                         raise TraceError("Invalid self-spending transaction")
-                    child = get_tx(child_id, depth + 1)
+                    child_depth = current["depth"] + 1 if named_hops else depth + 1
+                    child = get_tx(child_id, child_depth)
                     if vin >= len(child["vin"]):
                         raise TraceError("Outspend input index does not exist")
                     actual = child["vin"][vin]
@@ -318,10 +333,10 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
                     else:
                         state["links"][key] = {"outpoint": key, "spending_txid": child_id, "vin": vin,
                             "observation_id": oid, "spending_tx_observation_id": state["transactions"][child_id]["observation_id"],
-                            "hop": depth + 1, "relationship": "observed_utxo_spend"}
+                            "hop": child_depth, "relationship": "observed_utxo_spend"}
                         current["status"] = "spent"
                         for index in range(len(child["vout"])):
-                            add(child_id, index, depth + 1, "candidate_descendant", parent=key)
+                            add(child_id, index, child_depth, "candidate_descendant", parent=key)
             current = None
             save()
         state["status"] = "bounded_complete"
@@ -340,6 +355,8 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
         stop_reason = "interrupted"
         state["status"] = "paused"
     finally:
+        if named_hops or was_named:
+            refresh_seed_depths(state)
         if stop_reason:
             for item in state["outputs"].values():
                 if item["status"] == "pending":
@@ -350,7 +367,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
         phase = {"bounded_complete": "collection_complete", "paused": "collection_paused",
                  "error": "collection_error"}.get(state["status"], "collection_error")
         if not had_frontier and state["status"] == "bounded_complete":
-            report_progress(progress, "collection_empty", 0, 0)
+            report_progress(progress, "collection_empty", 0, 0, **hop_progress)
         else:
-            report_progress(progress, phase, current_hop, limits.max_hops)
+            report_progress(progress, phase, current_hop, limits.max_hops, **hop_progress)
     return state

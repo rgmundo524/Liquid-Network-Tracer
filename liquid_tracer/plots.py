@@ -15,6 +15,7 @@ import uuid
 
 from .api import http
 from .common import TraceError, canonical, digest, now, read_json, save_json
+from .group_hops import reference_name
 
 GOALS = frozenset({"full", "connections", "pegouts"})
 LAYOUT_SETTINGS = frozenset({"include_fees", "group_context_inputs", "hub_addresses",
@@ -187,10 +188,11 @@ def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_un
     if goal == "pegouts":
         return validate_query(seeds=state["seeds"], min_hops=min_hops, max_hops=max_hops,
                               include_unspent=include_unspent, include_unspendable=include_unspendable,
-                              include_context=include_context)
+                              include_context=include_context, hop_reference_name=reference_name(state))
+    reference = {"hop_reference_name": reference_name(state)} if reference_name(state) else {}
     if goal == "connections":
-        return {"max_hops": validate_hops(max_hops)}
-    return {}
+        return {"max_hops": validate_hops(max_hops), **reference}
+    return reference
 
 
 def _graph(state, goal, query, settings):
@@ -226,9 +228,13 @@ def _coverage(state):
     status = state.get("status")
     reason = state.get("stop_reason")
     text = f"Source collection {state['run_id']}: status {status or 'unknown'}; hop limit {maximum if maximum is not None else 'unknown'}. "
+    name = reference_name(state)
+    if name:
+        text += f"Hops count away from attribution group {name}, resetting at each reached group output. "
     if reason:
         text += f"Stop reason: {reason}. "
     return {"saved_data_only": True, "source_max_hops": maximum, "source_run_status": status,
+            **({"hop_reference_name": name} if name else {}),
             "source_stop_reason": reason, "coverage_notice": text + SCOPE}
 
 
@@ -382,6 +388,9 @@ def _snapshot(case, preview_id):
             or plan.get("run_id") != graph["run_id"] or read_json(directory / "plot.json") != report
             or report.get("node_count") != len(graph["nodes"]) or report.get("edge_count") != len(graph["edges"])):
         raise TraceError("Saved plot does not match this investigation")
+    name = reference_name(report)
+    if name != reference_name(report["query"]) or name != reference_name(graph):
+        raise TraceError("Saved plot hop reference disagrees with its graph; regenerate the plot")
     validate_plan(plan)
     if plot_plan(graph) != plan:
         raise TraceError("Saved plot and its Miro plan disagree")
@@ -408,7 +417,7 @@ def _review_source(case, graph, source_cache=None):
         if source_cache is not None:
             # Several goals commonly share one large archive. Verify its bytes
             # once per listing, retaining only the seed/source identity here.
-            state = {key: state[key] for key in ("seeds", "source")}
+            state = {key: state[key] for key in ("seeds", "source", "hop_reference_name") if key in state}
             source_cache[run_id] = state, fingerprints
     query = report.get("query", {})
     expected = _query(report["goal"], state, query.get("min_hops", 0), query.get("max_hops", 10),

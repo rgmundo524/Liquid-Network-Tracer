@@ -13,6 +13,7 @@ from .layout_search import DEFAULT_LAYOUT_ATTEMPTS, normalize_layout_attempts
 
 DEFAULTS = {
     "hops": 1,
+    "hop_reference_name": "",
     "max_transactions": 20,
     "max_outpoints": 100,
     "max_requests": 30,
@@ -49,6 +50,10 @@ def validate_settings(settings):
         raise TraceError("Run settings must contain only supported tracing limits and graph options")
     result = {**DEFAULTS, **settings}
     for key, value in result.items():
+        if key == "hop_reference_name":
+            from .group_hops import normalize_reference_name
+            result[key] = normalize_reference_name(value)
+            continue
         if key == "layout_attempts":
             if value is None:
                 raise TraceError("layout_attempts must be a whole number from 1 to 1000")
@@ -158,6 +163,26 @@ def save_plot_settings(case, settings):
         defaults = validate_settings(metadata.get("run_defaults", {}))
         defaults = validate_settings({**defaults, **changes})
         if changes and defaults != metadata.get("run_defaults"):
+            metadata = {**metadata, "run_defaults": defaults}
+            save_json(case / "case.json", metadata)
+        return metadata
+
+
+def save_collection_reference(case, name):
+    """Save only the collection hop origin, retaining other sessions' settings."""
+    from .group_hops import normalize_reference_name
+    name = normalize_reference_name(name)
+    case = Path(case)
+    with (case / "trace.lock").open("a") as trace_lock, (case / "case.lock").open("a") as case_lock:
+        try:
+            fcntl.flock(trace_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            fcntl.flock(case_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise TraceError("An investigation operation is active; change the hop origin after it finishes") from None
+        metadata = read_case(case)
+        defaults = validate_settings(metadata.get("run_defaults", {}))
+        defaults["hop_reference_name"] = name
+        if defaults != metadata.get("run_defaults"):
             metadata = {**metadata, "run_defaults": defaults}
             save_json(case / "case.json", metadata)
         return metadata

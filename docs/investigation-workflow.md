@@ -47,6 +47,56 @@ older snapshot has no usable transaction depths, the summary shows **Not recorde
 The **Collect data** tab contains collection actions. Use the **Plots & Miro**
 tab for the next step and the investigation heading to open settings.
 
+### Count hops from a named group
+
+In the collection dialog, enter an existing attribution name in **Count hops
+from named group**. Leave it blank to count from the starting outputs as before.
+This collection choice is independent of **Center named group**, which controls
+the visual layout. The starting transaction/output selections stay the same.
+Names match enabled address attributions exactly, ignoring case and surrounding
+spaces. Selected seed outputs start at hop 0; reaching the named group resets
+the count for that output branch.
+
+| Traced activity | Hop count |
+| --- | --- |
+| Selected seed output received by Perp | 0 |
+| Perp to another Perp address | 0 |
+| Perp to Unknown A | 1 |
+| Unknown A to Unknown B | 2 |
+| Unknown B back to Perp | 0 |
+| Perp sends outward again | 1 |
+
+Each output has its own hop count. A transaction with a Perp output and an
+outside output can therefore produce hops 0 and 1. The transaction label
+summarizes the highest in-range output hop; output details retain each branch's
+count. Other inputs are context and do not reset a traced branch merely because
+one belongs to the named group.
+
+At the maximum hop, collection checks the immediate spending transaction for
+returning outputs. Outputs returning to the group reset to 0; outside outputs
+beyond the limit are saved as inspected boundary evidence and are not followed.
+The tracer cannot discover a return behind an outside output beyond that
+boundary. A maximum of 0 can follow internal group transfers. Transaction,
+output, request, and time budgets still bound the work. Stop-tracing rules still
+apply, and per-address hop allowances decrease on every spend, including
+internal transfers; a named-group reset does not replenish those allowances.
+
+The chosen name is saved with each run and shown in collection history. For the
+same hop origin, continuation adds the entered hops to the previous ceiling.
+When changing the origin, the entered value is the new maximum under that
+origin. Continuation recalculates eligible paths using current attribution and
+can reuse already collected transactions. Earlier saved runs remain unchanged.
+The original distance from the seeds stays in the evidence alongside the
+group-relative measurement.
+
+Full, starter-connection, and peg-out layouts use the selected collection run's
+hop origin. Updated attribution can change which saved outputs reset to 0 when
+generating another layout. Plotting uses saved data only; run collection again
+to retrieve newly eligible activity. Boundary-only inspections do not increase
+the **Hops collected** measurement. The progress indicator may return to 0 as
+branches re-enter the group, so it remains a depth indicator, not a completion
+percentage.
+
 ## 2. Generate and sync from saved data
 
 Open **Plots & Miro** and select the saved run, plotting goal, and board
