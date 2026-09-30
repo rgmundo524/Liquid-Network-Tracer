@@ -4,6 +4,7 @@ from copy import deepcopy
 
 from .export import _unspent_endpoints
 from .hop_limits import HopScope
+from .group_hops import reference_name, refresh_reference_hops
 
 
 def project_full_scope(state):
@@ -18,21 +19,27 @@ def project_full_scope(state):
     result = deepcopy(state)
     scope = HopScope(result)
     unspent = _unspent_endpoints(result)
+    named = bool(reference_name(result))
+    maximum = result.get("limits", {}).get("max_hops", float("inf"))
+    reachable = {key for key in scope.reachable
+                 if not named or scope.depth(result["outputs"][key]) <= maximum}
     links = {
         key: link for key, link in result["links"].items()
-        if any(remaining > 0 for _, remaining in scope.paths.get(key, ()))
+        if key in reachable and any(remaining > 0 and (not named or depth <= maximum)
+                                    for depth, remaining in scope.paths.get(key, ()))
     }
     selected = {key.rpartition(":")[0] for key in result["seeds"]}
-    selected.update(result["outputs"][key]["txid"] for key in scope.reachable)
+    selected.update(result["outputs"][key]["txid"] for key in reachable)
     # A spending transaction may have been saved before all its output records
     # were checkpointed. Its verified arrival still belongs in the plot.
-    selected.update(link["spending_txid"] for link in links.values())
+    if not named:
+        selected.update(link["spending_txid"] for link in links.values())
     result["transactions"] = {
         key: value for key, value in result["transactions"].items() if key in selected
     }
     result["outputs"] = {
         key: value for key, value in result["outputs"].items()
-        if key in scope.reachable and value["txid"] in result["transactions"]
+        if key in reachable and value["txid"] in result["transactions"]
     }
     result["links"] = {
         key: value for key, value in links.items()
@@ -44,4 +51,6 @@ def project_full_scope(state):
             # unspent observation. Hiding that transaction must not resurrect
             # an unspent endpoint. Preserve the raw observation for inspection.
             item["status"] = "spent_in_saved_evidence"
+    if named:
+        refresh_reference_hops(result, scope)
     return result

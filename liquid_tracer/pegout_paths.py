@@ -9,6 +9,7 @@ from copy import deepcopy
 
 from .common import HEX64, TraceError, output_kind, parse_outpoint
 from .hop_limits import output_budget
+from .group_hops import normalize_reference_name, reference_name
 from .trace import validate_transaction
 
 SCOPE = ("Search scope: verified forward UTXO spends from the chosen transaction. "
@@ -19,7 +20,8 @@ SEED_SCOPE = SCOPE.replace("from the chosen transaction", "from the selected see
 
 
 def validate_query(txid=None, min_hops=0, max_hops=10, *, seeds=None,
-                   include_unspent=False, include_unspendable=False, include_context=False):
+                   include_unspent=False, include_unspendable=False, include_context=False,
+                   hop_reference_name=""):
     if seeds is not None:
         if txid is not None:
             raise TraceError("Choose either selected seed outputs or one transaction for a peg-out search")
@@ -42,6 +44,9 @@ def validate_query(txid=None, min_hops=0, max_hops=10, *, seeds=None,
     if type(include_context) is not bool:
         raise TraceError("Context addresses must be enabled or disabled")
     options["include_context"] = include_context
+    name = normalize_reference_name(hop_reference_name)
+    if name:
+        options["hop_reference_name"] = name
     # Omitting disabled options preserves the identity of existing saved queries.
     return {**origin, "min_hops": min_hops, "max_hops": max_hops,
             **{key: value for key, value in options.items() if value}}
@@ -145,7 +150,9 @@ def _paths(state, query):
         confirmed = {txid for txid, record in state["transactions"].items()
                      if state.get("include_unconfirmed", False)
                      or record["data"]["status"]["confirmed"] is True}
-        limit = min(query["max_hops"], max(0, len(state["transactions"]) - 1))
+        named = bool(reference_name(state))
+        limit = (query["max_hops"] if named else
+                 min(query["max_hops"], max(0, len(state["transactions"]) - 1)))
         seeds = set(query["seeds"]) if "seeds" in query else None
         roots = {parse_outpoint(key)[0] for key in seeds} if seeds is not None else {query["txid"]}
         if seeds is not None:
@@ -153,6 +160,24 @@ def _paths(state, query):
                 txid, index = parse_outpoint(key)
                 if txid in state["transactions"] and index >= len(state["transactions"][txid]["data"]["vout"]):
                     raise TraceError("Selected seed output does not exist in its saved transaction")
+        if named:
+            from .named_hop_paths import walk_outputs, retain_paths, transaction_depths
+            starts = (seeds if seeds is not None else {
+                f"{txid}:{index}" for txid in roots & confirmed
+                for index in range(len(state["transactions"][txid]["data"]["vout"]))})
+            links = {key: child for rows in forward.values() for child, key, _ in rows}
+            seen, predecessors = walk_outputs(state, starts, links, limit, confirmed)
+            successful = set()
+            distances = defaultdict(set)
+            for point in seen:
+                key, depth, _ = point
+                txid, index = parse_outpoint(key)
+                if index in endpoints[txid] and depth >= query["min_hops"]:
+                    successful.add(point)
+                    distances[key].add(depth)
+            kept, output_depths = retain_paths(successful, predecessors)
+            depths = transaction_depths(output_depths)
+            return kept, _endpoint_matches(state, endpoints, distances), depths, output_depths
         starts = {(txid, 0, limit) for txid in roots & confirmed}
         queue = deque(sorted(starts))
         seen, predecessors, successful = set(starts), defaultdict(set), set()
@@ -190,25 +215,29 @@ def _paths(state, query):
                 if previous not in marked:
                     marked.add(previous)
                     stack.append(previous)
-        matches = []
-        for key, hops in sorted(distances.items(), key=lambda item: parse_outpoint(item[0])):
-            txid, index = parse_outpoint(key)
-            output = state["transactions"][txid]["data"]["vout"][index]
-            kind = endpoints[txid][index]
-            match = {"outpoint": key, "txid": txid, "vout": index,
-                     "hops": sorted(hops), "kind": kind}
-            if kind == "pegout":
-                match["pegout"] = deepcopy(output["pegout"])
-            else:
-                match["output"] = deepcopy(output)
-                match["trace"] = deepcopy(state["outputs"].get(key))
-                if kind == "unspent":
-                    match.update({field: deepcopy(state["outputs"][key][field])
-                                  for field in ("observed_spend", "spend_observation_id")})
-            matches.append(match)
-        return kept, matches, depths
+        return kept, _endpoint_matches(state, endpoints, distances), depths, {}
     except (KeyError, TypeError, ValueError, IndexError, AttributeError) as exc:
         raise TraceError("Peg-out search needs complete, consistent saved spend evidence") from exc
+
+
+def _endpoint_matches(state, endpoints, distances):
+    matches = []
+    for key, hops in sorted(distances.items(), key=lambda item: parse_outpoint(item[0])):
+        txid, index = parse_outpoint(key)
+        output = state["transactions"][txid]["data"]["vout"][index]
+        kind = endpoints[txid][index]
+        match = {"outpoint": key, "txid": txid, "vout": index,
+                 "hops": sorted(hops), "kind": kind}
+        if kind == "pegout":
+            match["pegout"] = deepcopy(output["pegout"])
+        else:
+            match["output"] = deepcopy(output)
+            match["trace"] = deepcopy(state["outputs"].get(key))
+            if kind == "unspent":
+                match.update({field: deepcopy(state["outputs"][key][field])
+                              for field in ("observed_spend", "spend_observation_id")})
+        matches.append(match)
+    return matches
 
 
 def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=None,
@@ -223,11 +252,14 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
         raise TraceError("Context input grouping must be enabled or disabled")
     if not isinstance(query, dict):
         raise TraceError("Choose selected seed outputs or a transaction and an inclusive peg-out hop range")
+    name = reference_name(state)
+    if "hop_reference_name" in query and normalize_reference_name(query["hop_reference_name"]) != name:
+        raise TraceError("Peg-out hop reference must match the selected collection run")
     query = validate_query(query.get("txid"), query.get("min_hops", 0), query.get("max_hops", 10),
                            seeds=query.get("seeds"), include_unspent=query.get("include_unspent", False),
                            include_unspendable=query.get("include_unspendable", False),
-                           include_context=query.get("include_context", False))
-    outpoints, endpoint_matches, depths = _paths(state, query)
+                           include_context=query.get("include_context", False), hop_reference_name=name)
+    outpoints, endpoint_matches, depths, output_depths = _paths(state, query)
     matches = [{key: value for key, value in match.items() if key != "kind"}
                for match in endpoint_matches if match["kind"] == "pegout"]
     selected = set(depths)
@@ -235,16 +267,22 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
     reduced = deepcopy(state)
     reduced["transactions"] = {key: value for key, value in reduced["transactions"].items() if key in selected}
     for txid, record in reduced["transactions"].items():
-        record["depth"] = min(depths[txid])
+        if name:
+            record["reference_hops"] = max(depths[txid])
+        else:
+            record["depth"] = min(depths[txid])
     reduced["outputs"] = {key: value for key, value in reduced["outputs"].items() if key in outpoints | endpoints}
     for match in endpoint_matches:
         # The full transaction can already prove a terminal request or script when the
         # bounded trace paused before classifying this individual output.
         reduced["outputs"].setdefault(match["outpoint"], {
             "outpoint": match["outpoint"], "txid": match["txid"], "vout": match["vout"],
-            "depth": min(match["hops"]),
+            "depth": (state["transactions"][match["txid"]]["depth"] if name else min(match["hops"])),
             "status": "provably_unspendable" if match["kind"] == "unspendable" else match["kind"]})
     reduced["links"] = {key: value for key, value in reduced["links"].items() if key in outpoints}
+    if name:
+        for key, record in reduced["outputs"].items():
+            record["trace_scope_depth"] = min(output_depths[key])
     if "seeds" in query:
         reduced["seeds"] = sorted(set(query["seeds"]) & (outpoints | endpoints))
     else:
@@ -289,6 +327,11 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
                   "they do not establish a qualifying path or extend the trace.")
     origin_notice = ("each seed transaction is hop 0, with only its selected outputs starting a path. "
                      if "seeds" in query else "the chosen transaction is hop 0. ")
+    if name:
+        origin_notice = (f"hops count away from attribution group {name}; a reached output in that group "
+                         "resets to 0, independently of its siblings. Selected seed outputs still start at 0. "
+                         "The direct spender at the hop boundary may reveal a return, but outputs beyond "
+                         "the boundary are not followed. ")
     graph["pegouts"] = {"schema_version": 1, "query": query, "matches": matches,
                         "match_count": len(matches), "outpoints": sorted(outpoints),
                         "transaction_count": len(selected), "scope": scope,
@@ -311,8 +354,9 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
         summary += f", {counts['unspendable']} unspendable output(s)"
     path_notice = ("Every traced path edge belongs to a qualifying path; "
                    if query.get("include_context") else "Every displayed edge belongs to a qualifying path; ")
+    units = "group-relative hops" if name else "transaction hops"
     graph["notice"] = (summary + f" found within {query['min_hops']} to {query['max_hops']} "
-                       "transaction hops, inclusive; " + origin_notice + scope +
+                       + units + ", inclusive; " + origin_notice + scope +
                        " One circle per full address per network; UTXO occurrences and connectors remain separate. "
                        + path_notice +
                        "their union may also form routes outside the selected range. "

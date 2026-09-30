@@ -103,6 +103,15 @@ def public_progress(event):
              "message": MESSAGES[event["phase"]]}
     if value["phase"] in COLLECTION_PHASES:
         value["message"] = COLLECTION_PHASES[value["phase"]].format(**value)
+        from .group_hops import normalize_reference_name
+        from .common import TraceError
+        try:
+            name = normalize_reference_name(event.get("hop_reference_name", ""))
+        except TraceError:
+            name = ""
+        if name:
+            value["hop_reference_name"] = name
+            value["message"] += f" from {name}; named-group outputs reset to hop 0"
     if value["phase"] == "optimizing":
         stage = event.get("stage")
         if isinstance(stage, str) and stage in ELK_STAGES:
@@ -170,11 +179,12 @@ def public_progress(event):
     return value
 
 
-def report_progress(progress, phase, completed=0, total=0):
+def report_progress(progress, phase, completed=0, total=0, *, hop_reference_name=""):
     """Advisory observers cannot change collection or its saved evidence."""
     if progress is None:
         return
-    value = public_progress({"phase": phase, "completed": completed, "total": total})
+    value = public_progress({"phase": phase, "completed": completed, "total": total,
+                             "hop_reference_name": hop_reference_name})
     if value is not None:
         try:
             progress(value)

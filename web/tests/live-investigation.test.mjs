@@ -15,9 +15,9 @@ const source = stripTypeScriptTypes(
     .replace('void initialize().catch(', 'globalThis.startup = initialize().catch('),
   {mode: 'transform'},
 );
-const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy, pegoutsGraph, pegoutInput, currentPegoutSearch, suggestCenterNames, render, navigate, workflowInput, currentWorkflow};');
+const script = new vm.Script(source + '\n globalThis.appTest = {state, dispatch, pollJob, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy, pegoutsGraph, pegoutInput, currentPegoutSearch, suggestCenterNames, suggestHopReferenceNames, render, navigate, workflowInput, currentWorkflow};');
 const txid = 'a'.repeat(64);
-const defaults = {hops: 1, max_transactions: 20, max_outpoints: 100, max_requests: 30,
+const defaults = {hops: 1, hop_reference_name: '', max_transactions: 20, max_outpoints: 100, max_requests: 30,
   max_seconds: 60, max_new_items: 750, layout_attempts: 25, connector_style: 'straight'};
 
 async function harness(respond = () => undefined, {hash = ''} = {}) {
@@ -1307,7 +1307,7 @@ test('investigation tool views isolate panels and preserve the selected snapshot
   assert.equal(view.calls.length, 1, 'navigation performs no fetches or writes');
 });
 
-test('compact trace form submits only its hop allowance and retains all saved preferences', async () => {
+test('compact trace form submits its hop allowance and hop basis while retaining other saved preferences', async () => {
   const settings = {...defaults, hops: 2, include_fees: true, group_context_inputs: true, color_attribution_arrows: true, center_name: 'Treasury', connector_style: 'curved'};
   const view = await harness(path => path.endsWith('/actions') ? {id: 'job1', status: 'running'} : undefined);
   view.state.activeCase = {id: 'case', name: 'Case', run_defaults: settings, runs: []};
@@ -1315,9 +1315,121 @@ test('compact trace form submits only its hop allowance and retains all saved pr
   assert.match(view.dialog.innerHTML, /name="hops"/);
   assert.doesNotMatch(view.dialog.innerHTML, /name="(?:include_fees|layout_attempts|max_transactions|max_new_items|connector_style)"/);
   await view.submitDialog({hops: '5'});
-  assert.deepEqual(view.calls.at(-1).body, {action: 'trace', run_id: 'latest', hops: 5});
+  assert.deepEqual(view.calls.at(-1).body, {action: 'trace', run_id: 'latest', hops: 5, hop_reference_name: ''});
   assert.equal(view.state.activeCase.run_defaults.hops, 2);
   assert.equal(view.state.activeCase.run_defaults.group_context_inputs, true);
+});
+
+test('named-group collection saves only its hop basis and keeps original seeds and centered layout', async () => {
+  const settings = {...defaults, hops: 3, hop_reference_name: 'Perp', center_name: 'Service', hub_addresses: []};
+  const detail = workflowCase({run_defaults: settings});
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'trace', status: 'running'} : undefined);
+  view.state.activeCase = detail;
+  assert.match(view.workspace(), /Hops from named group: Perp/);
+  view.openActionDialog('trace');
+  assert.match(view.dialog.innerHTML, /name="hop_reference_name" maxlength="120" value="Perp"/);
+  assert.match(view.dialog.innerHTML, /First run or changed named group: maximum hops/);
+  assert.match(view.dialog.innerHTML, /Same hop basis: additional hops/);
+  assert.match(view.dialog.innerHTML, /At the hop limit, the next spending transaction is checked/);
+  assert.doesNotMatch(view.dialog.innerHTML, /name="center_name"/);
+  await view.submitDialog({hops: '2', hop_reference_name: '  Other group  '});
+  assert.deepEqual(view.calls.at(-1).body, {action: 'trace', run_id: 'latest', hops: 2, hop_reference_name: 'Other group'});
+  assert.equal(detail.run_defaults.hop_reference_name, 'Other group');
+  assert.equal(detail.run_defaults.center_name, 'Service');
+  assert.equal(detail.run_defaults.hops, 3);
+  assert.deepEqual(detail.seeds, [`${txid}:0`]);
+  assert.equal(view.calls.some(call => call.path.endsWith('/settings')), false);
+  const reopened = await harness();
+  reopened.state.activeCase = detail;
+  reopened.openActionDialog('trace');
+  assert.match(reopened.dialog.innerHTML, /name="hop_reference_name"[^>]*value="Other group"/);
+  reopened.state.caseView = 'plots';
+  assert.doesNotMatch(reopened.workspace(), /name="hop_reference_name"/);
+  assert.match(reopened.workspace(), /name="center_name"[^>]*value="Service"/);
+});
+
+test('blank collection basis explicitly restores seed hops and rejected collection preserves its preference', async () => {
+  for (const reject of [false, true]) {
+    const view = await harness(path => path.endsWith('/actions')
+      ? reject ? {error: 'Invalid collection request'} : {id: 'trace', status: 'running'} : undefined);
+    view.state.activeCase = workflowCase({run_defaults: {...defaults, hop_reference_name: 'Perp'}});
+    view.openActionDialog('trace');
+    await view.submitDialog({hops: '0', hop_reference_name: '  '});
+    assert.deepEqual(view.calls.at(-1).body, {action: 'trace', run_id: 'latest', hops: 0, hop_reference_name: ''});
+    assert.equal(view.state.activeCase.run_defaults.hop_reference_name, reject ? 'Perp' : '');
+  }
+});
+
+test('legacy settings use seed hops while unrelated forms preserve an existing named-group preference', async () => {
+  const view = await harness();
+  const legacy = {...defaults, hub_addresses: []};
+  delete legacy.hop_reference_name;
+  assert.equal(view.readSettings({values: {}}, legacy).hop_reference_name, '');
+  const selected = {...legacy, hop_reference_name: 'Perp'};
+  assert.equal(view.readSettings({values: {hops: '6'}}, selected).hop_reference_name, 'Perp');
+  assert.equal(view.readSettings({values: {hop_reference_name: ''}}, selected).hop_reference_name, '');
+});
+
+test('collection name suggestions are local escaped enabled names and ignore replies after closing', async () => {
+  let resolveNames;
+  const view = await harness(path => path.endsWith('/name-colors') ? new Promise(resolve => {resolveNames = resolve;}) : undefined);
+  view.state.activeCase = workflowCase();
+  view.openActionDialog('trace');
+  const input = {value: ' Perp '}, list = {innerHTML: ''};
+  view.elements.set('#action-form input[name="hop_reference_name"]', input);
+  view.elements.set('#hop-reference-name-options', list);
+  const pending = view.suggestHopReferenceNames();
+  assert.deepEqual(view.calls.at(-1).body, {query: 'Perp', offset: 0, limit: 100});
+  resolveNames({rows: [{name: 'Perp "<one>', enabled_addresses: 2}, {name: 'Disabled', enabled_addresses: 0}]});
+  await pending;
+  assert.match(list.innerHTML, /Perp &quot;&lt;one&gt;/);
+  assert.doesNotMatch(list.innerHTML, /Disabled|<one>/);
+  const stale = view.suggestHopReferenceNames();
+  view.dialog.close();
+  resolveNames({rows: [{name: 'Stale reply', enabled_addresses: 1}]});
+  await stale;
+  assert.doesNotMatch(list.innerHTML, /Stale reply/);
+});
+
+test('saved run and plot hop descriptions follow their recorded basis rather than current collection preference', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({run_defaults: {...defaults, hop_reference_name: 'Next group'},
+    runs: [{id: 'saved1', status: 'bounded_complete', max_hops: 2, collected_hops: 2, hop_reference_name: 'Perp <A>'},
+      {id: 'legacy', status: 'bounded_complete', max_hops: 5, collected_hops: 5}],
+    plots: [workflowPlot('pegouts', 'plot1', {hop_reference_name: 'Original group'})]});
+  assert.match(view.workspace(), /Deepest collected group-relative hop/);
+  assert.match(view.workspace(), /Hops from named group: Perp &lt;A&gt;/);
+  view.state.caseView = 'history';
+  assert.match(view.workspace(), /<th>Counted from<\/th>/);
+  assert.match(view.workspace(), /<td>Perp &lt;A&gt;<\/td>/);
+  assert.match(view.workspace(), /<td>Starting transactions<\/td>/);
+  view.state.caseView = 'plots';
+  assert.match(view.workspace(), /Hops from named group: Perp &lt;A&gt;/);
+  assert.match(view.workspace(), /Hops from named group: Original group/);
+  assert.doesNotMatch(view.workspace(), /Hops from named group: Next group/);
+  view.state.selectedRun = 'legacy';
+  assert.match(view.workspace(), /Hops from starting transactions/);
+  assert.match(view.workspace(), /Starting transactions are hop 0/);
+});
+
+test('group-relative progress labels resets including a zero-hop ceiling without implying seed-only collection', async () => {
+  let progress = {phase: 'collecting', completed: 2, total: 3, hop_reference_name: 'Perp <A>'};
+  const view = await harness(path => path === '/api/jobs/trace' ? {status: 'running', progress} : undefined);
+  const element = {innerHTML: ''};
+  view.elements.set('#job-progress', element);
+  view.state.job = {id: 'trace', action: 'trace'};
+  for (const hop of [2, 0, 1]) {
+    progress = {...progress, completed: hop};
+    await view.pollJob();
+    assert.match(element.innerHTML, new RegExp(`Group-relative hop ${hop} / 3`));
+    assert.match(element.innerHTML, /returns to the group reset to hop 0/);
+    assert.match(element.innerHTML, /Perp &lt;A&gt;/);
+  }
+  progress = {...progress, completed: 0, total: 0};
+  await view.pollJob();
+  assert.match(element.innerHTML, /Group-relative hop 0 \/ 0/);
+  assert.match(element.innerHTML, /max="1" value="0"/);
+  assert.doesNotMatch(element.innerHTML, /Starting transactions only/);
 });
 
 test('partial settings forms preserve absent values and unchecked rendered controls clear flags', async () => {

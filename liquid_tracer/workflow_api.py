@@ -9,7 +9,7 @@ PLOT_FIELDS = {"id", "preview_id", "run_id", "goal", "min_hops", "max_hops", "cr
                "status", "node_count", "edge_count", "transaction_count", "match_count",
                "connection_count", "source_max_hops", "source_run_status", "source_stop_reason",
                "notice", "coverage_notice", "publication_notice", "reviewable", "review_error", "empty", "saved_data_only",
-               "layout_mode", "board_record_id", "board_id", "board_name"}
+               "layout_mode", "board_record_id", "board_id", "board_name", "hop_reference_name"}
 BOARD_FIELDS = {"id", "record_id", "name", "goal", "board_id", "status", "preview_id", "run_id",
                 "legacy_snapshot", "can_sync", "notice", "pending_count", "created", "reused",
                 "creation_preview_id", "created_board", "reused_board"}

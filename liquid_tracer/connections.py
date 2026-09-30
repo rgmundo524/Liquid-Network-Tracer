@@ -116,7 +116,38 @@ def connecting_outpoints(state, max_hops=10):
         return distance
 
     from .hop_limits import has_hop_limits, bounded_connections
-    if has_hop_limits(state["labels"]):
+    from .group_hops import reference_name
+    name = reference_name(state)
+    reference_fields = {}
+    if name:
+        from .named_hop_paths import walk_outputs, retain_paths, transaction_depths
+        confirmed = {txid for txid, record in transactions.items()
+                     if state.get("include_unconfirmed", False)
+                     or record["data"].get("status", {}).get("confirmed") is True}
+        links = {key: child for _, child, key, _ in eligible}
+        retained, pairs, output_depths = set(), [], defaultdict(set)
+        for root in roots:
+            starts = {key for key in seeds if parse_outpoint(key)[0] == root}
+            seen, predecessors = walk_outputs(state, starts, links, limit, confirmed)
+            success = {point for point in seen
+                       if point[0].rpartition(":")[0] in roots
+                       and point[0].rpartition(":")[0] != root}
+            kept, depths = retain_paths(success, predecessors)
+            retained.update(kept)
+            for key, values in depths.items():
+                output_depths[key].update(values)
+            targets = defaultdict(set)
+            for key, depth, _ in success:
+                targets[key.rpartition(":")[0]].add(depth)
+            pairs.extend({"source": root, "target": target, "shortest_hops": min(depths)}
+                         for target, depths in sorted(targets.items()))
+        reference_fields = {
+            "hop_reference_name": name,
+            "transaction_reference_hops": {key: max(values) for key, values in
+                                            transaction_depths(output_depths).items()},
+            "output_reference_hops": {key: min(values) for key, values in output_depths.items()},
+        }
+    elif has_hop_limits(state["labels"]):
         retained, pairs = bounded_connections(state, roots, seeds, eligible, limit)
     else:
         retained, pairs = set(), []
@@ -131,7 +162,7 @@ def connecting_outpoints(state, max_hops=10):
                         and downstream[parent] + 1 + upstream[child] <= limit):
                     retained.add(key)
             pairs.extend({"source": root, "target": target, "shortest_hops": downstream[target]} for target in targets)
-    return {"schema_version": 1, "max_hops": limit, "starting_transactions": roots,
+    return {"schema_version": 1, "max_hops": limit, "starting_transactions": roots, **reference_fields,
             "pairs": pairs, "outpoints": sorted(retained), "scope": SCOPE,
             "source_run_status": state.get("status"), "source_stop_reason": state.get("stop_reason"),
             "source_max_hops": state.get("limits", {}).get("max_hops"),
@@ -152,6 +183,11 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
     reduced["transactions"] = {k: v for k, v in reduced["transactions"].items() if k in selected}
     reduced["outputs"] = {k: v for k, v in reduced["outputs"].items() if k in outpoints}
     reduced["links"] = {k: v for k, v in reduced["links"].items() if k in outpoints}
+    if report.get("hop_reference_name"):
+        for key, record in reduced["transactions"].items():
+            record["reference_hops"] = report["transaction_reference_hops"][key]
+        for key, record in reduced["outputs"].items():
+            record["trace_scope_depth"] = report["output_reference_hops"][key]
     # A separate circle per outpoint avoids visual cross-spends between different
     # UTXOs at a reused address. The ordinary merged-address graph is unchanged.
     graph = build_graph(reduced, merge_addresses=False, include_fees=False,
@@ -167,12 +203,17 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
     report.update(transaction_count=len(selected), connection_count=len(report["pairs"]))
     graph["connections"] = report
     graph["graph_options"].update(view="starter_connections", connection_hops=max_hops)
-    graph["notice"] = ((f"Starter-to-starter paths of at most {max_hops} transaction hops. "
+    units = "group-relative hops" if report.get("hop_reference_name") else "transaction hops"
+    graph["notice"] = ((f"Starter-to-starter paths of at most {max_hops} {units}. "
                          f"{len(report['pairs'])} ordered starter pair(s) connected. " if outpoints else
                          f"No connection found within {max_hops} hops in the saved searched data. Nothing is plotted. ")
                         + SCOPE + " One circle per connecting UTXO, not address clustering. "
                         "Every displayed edge belongs to a qualifying path; their union may also form longer routes. "
                         "UTXO reachability does not prove ownership or allocate confidential values.")
+    if report.get("hop_reference_name"):
+        graph["notice"] += (f" Hops count away from attribution group {report['hop_reference_name']}; "
+                            "each reached output in that group resets its own path to 0. "
+                            "Outside outputs beyond the boundary are not followed.")
     return graph
 
 
