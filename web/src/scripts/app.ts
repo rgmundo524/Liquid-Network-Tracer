@@ -238,6 +238,7 @@ const state = {
   cases: [] as Case[],
   page: "dashboard" as Page,
   activeCase: null as Case | null,
+  openingCase: null as {id: string; name: string; generation: number} | null,
   selectedRun: "latest",
   addressReview: {
     query: "", suspectedOnly: false, data: null as AddressPage | null,
@@ -291,6 +292,8 @@ const human = (value: unknown): string =>
   String(value ?? "—").replaceAll("_", " ");
 const isBusy = (): boolean => !!state.job || submitting || changeOutputsPending() || inputImportPending();
 const disabled = (condition: boolean): string => (condition ? " disabled" : "");
+const isCaseOpening = (id: string): boolean =>
+  state.openingCase?.generation === pageGeneration && state.openingCase.id === id;
 const outputValue = (output: Output): string =>
   typeof output.value_text === "string"
     ? output.value_text
@@ -516,7 +519,7 @@ function sidebar(): string {
       .slice(0, 5)
       .map(
         (item) =>
-          `<button class="recent-case" data-case="${esc(item.id)}"><span class="case-dot"></span><span>${esc(item.name)}</span></button>`,
+          `<button class="recent-case" data-case="${esc(item.id)}"${disabled(isCaseOpening(item.id))}><span class="case-dot"></span><span>${esc(item.name)}</span></button>`,
       )
       .join("") ||
     '<p class="small" style="padding:0 13px;color:#7293a1">Your saved cases will appear here.</p>'
@@ -578,6 +581,17 @@ const workspaceHeaderObserver = typeof ResizeObserver === "undefined" ? undefine
   if (header) document.documentElement.style.setProperty("--workspace-header-height", `${header.getBoundingClientRect().height}px`);
 });
 
+function caseOpeningBanner(): string {
+  const opening = state.openingCase;
+  if (!opening || opening.generation !== pageGeneration) return "";
+  return `<div class="job-banner" id="case-opening"><span class="spinner" aria-hidden="true"></span><div class="job-details" role="status" aria-live="polite"><strong>Opening ${esc(opening.name)}</strong><p>Loading saved runs, plots, and board records.</p></div></div>`;
+}
+
+function cancelCaseOpening(): void {
+  if (state.openingCase?.generation === pageGeneration) pageGeneration++;
+  state.openingCase = null;
+}
+
 function render(focus = false): void {
   saveSettingsDraft();
   const openImports = ['advanced-attributions', 'advanced-name-colors', 'advanced-change-outputs', 'compact-tools']
@@ -590,7 +604,7 @@ function render(focus = false): void {
     "case-settings": "Investigation settings",
     addresses: "Address review",
   };
-  app.innerHTML = `<div class="layout">${sidebar()}<div class="main-shell"><header class="workspace-header"><div class="topbar"><div class="breadcrumb">${icon("folder")}<span>Workspace</span>${icon("chevron")}<strong>${esc(names[state.page])}</strong></div><div class="topbar-right"><span class="local-pill">${icon("lock")} LOCAL SESSION</span><span class="avatar" aria-label="Investigation workspace">LT</span></div></div>${jobBanner()}</header><main id="main" class="content" tabindex="-1">${state.error ? `<div class="alert error" role="alert">${icon("info")}<div><strong>Unable to complete the action</strong><p>${esc(state.error)}</p></div><button class="dismiss" data-action="dismiss-error" aria-label="Dismiss error">${icon("close")}</button></div>` : ""}${miroEditConflictsPanel()}${state.page === "dashboard" ? dashboard() : state.page === "new" ? newCase() : state.page === "case" ? workspace() : state.page === "addresses" ? addressReviewPage() : settingsPage()}</main></div></div>`;
+  app.innerHTML = `<div class="layout">${sidebar()}<div class="main-shell"><header class="workspace-header"><div class="topbar"><div class="breadcrumb">${icon("folder")}<span>Workspace</span>${icon("chevron")}<strong>${esc(names[state.page])}</strong></div><div class="topbar-right"><span class="local-pill">${icon("lock")} LOCAL SESSION</span><span class="avatar" aria-label="Investigation workspace">LT</span></div></div>${jobBanner()}${caseOpeningBanner()}</header><main id="main" class="content" tabindex="-1">${state.error ? `<div class="alert error" role="alert">${icon("info")}<div><strong>Unable to complete the action</strong><p>${esc(state.error)}</p></div><button class="dismiss" data-action="dismiss-error" aria-label="Dismiss error">${icon("close")}</button></div>` : ""}${miroEditConflictsPanel()}${state.page === "dashboard" ? dashboard() : state.page === "new" ? newCase() : state.page === "case" ? workspace() : state.page === "addresses" ? addressReviewPage() : settingsPage()}</main></div></div>`;
   workspaceHeaderObserver?.disconnect();
   const header = document.querySelector(".workspace-header");
   if (header) workspaceHeaderObserver?.observe(header);
@@ -609,7 +623,7 @@ function render(focus = false): void {
 function dashboard(): string {
   const traced = state.cases.filter((item) => !!item.latest_run).length;
   const linked = state.cases.filter((item) => !!item.miro_board).length;
-  return `<div class="page-heading"><div><div class="eyebrow">Your local workspace</div><h1 id="page-title" tabindex="-1">Investigations</h1><p>Trace selected outputs through bounded, documented runs.</p></div>${button("New investigation", "new", "plus", "primary")}</div><div class="stats-grid"><div class="stat"><div><div class="stat-label">Investigations</div><div class="stat-value">${state.cases.length.toString().padStart(2, "0")}</div><div class="stat-note">Saved on this computer</div></div><span class="stat-icon">${icon("folder")}</span></div><div class="stat"><div><div class="stat-label">Investigations with runs</div><div class="stat-value">${traced.toString().padStart(2, "0")}</div><div class="stat-note">Bounded, recorded traces</div></div><span class="stat-icon">${icon("layers")}</span></div><div class="stat"><div><div class="stat-label">Linked Miro boards</div><div class="stat-value">${linked.toString().padStart(2, "0")}</div><div class="stat-note">Editable graph workspaces</div></div><span class="stat-icon">${icon("board")}</span></div></div><section class="panel"><div class="panel-head"><div><h2>Saved investigations</h2><p>Pick up where you left off, with every run kept intact.</p></div>${button("Refresh", "refresh", "refresh", "ghost small")}</div>${state.cases.length ? `<div class="table-wrap"><table><thead><tr><th>Investigation</th><th>Source</th><th>Latest run</th><th>Miro board</th><th><span class="sr-only">Open</span></th></tr></thead><tbody>${state.cases.map((item) => `<tr><td><div class="case-cell"><span class="case-icon">${icon("folder")}</span><div><button class="case-title" data-case="${esc(item.id)}">${esc(item.name)}</button><span class="small muted">${esc(formatDate(item.created_at))}</span></div></div></td><td><span class="badge ${item.fixture ? "purple" : ""}">${item.fixture ? "Synthetic data" : "Live Liquid"}</span></td><td>${item.latest_run ? `<span class="mono">${esc(short(item.latest_run, 8))}</span><div class="small muted">${esc(human(item.status || "saved"))}</div>` : '<span class="small muted">Ready for first run</span>'}</td><td><span class="badge ${item.miro_board ? "" : "gray"}">${item.miro_board ? "Linked" : "Not linked"}</span></td><td>${button("Open", "open-case", "arrow", "ghost small", false, `data-id="${esc(item.id)}" aria-label="Open ${esc(item.name)}"`)}</td></tr>`).join("")}</tbody></table></div><div class="table-footer"><span>${state.cases.length} investigation${state.cases.length === 1 ? "" : "s"}</span><span>Saved runs are shared with the terminal interface</span></div>` : `<div class="empty-state"><div class="empty-icon">${icon("folder")}</div><h2>Start with a transaction</h2><p>Create an investigation, choose the outputs to follow, and run a trace with a clear stopping point.</p>${button("Create your first investigation", "new", "plus", "primary")}</div>`}</section><div class="info-grid"><div class="info-card">${icon("graph")}<div><h3>A clear path from evidence to graph</h3><p>Select starting UTXOs, run a bounded trace, then explore locally with Mermaid or add the result to your Miro board.</p></div></div><div class="info-card secondary">${icon("shield")}<div><h3>Credentials stay behind the scenes</h3><p>Live actions use SecretSpec and Proton Pass through your terminal. No API keys are entered in this interface.</p></div></div></div>`;
+  return `<div class="page-heading"><div><div class="eyebrow">Your local workspace</div><h1 id="page-title" tabindex="-1">Investigations</h1><p>Trace selected outputs through bounded, documented runs.</p></div>${button("New investigation", "new", "plus", "primary")}</div><div class="stats-grid"><div class="stat"><div><div class="stat-label">Investigations</div><div class="stat-value">${state.cases.length.toString().padStart(2, "0")}</div><div class="stat-note">Saved on this computer</div></div><span class="stat-icon">${icon("folder")}</span></div><div class="stat"><div><div class="stat-label">Investigations with runs</div><div class="stat-value">${traced.toString().padStart(2, "0")}</div><div class="stat-note">Bounded, recorded traces</div></div><span class="stat-icon">${icon("layers")}</span></div><div class="stat"><div><div class="stat-label">Linked Miro boards</div><div class="stat-value">${linked.toString().padStart(2, "0")}</div><div class="stat-note">Editable graph workspaces</div></div><span class="stat-icon">${icon("board")}</span></div></div><section class="panel"><div class="panel-head"><div><h2>Saved investigations</h2><p>Pick up where you left off, with every run kept intact.</p></div>${button("Refresh", "refresh", "refresh", "ghost small")}</div>${state.cases.length ? `<div class="table-wrap"><table><thead><tr><th>Investigation</th><th>Source</th><th>Latest run</th><th>Miro board</th><th><span class="sr-only">Open</span></th></tr></thead><tbody>${state.cases.map((item) => `<tr><td><div class="case-cell"><span class="case-icon">${icon("folder")}</span><div><button class="case-title" data-case="${esc(item.id)}"${disabled(isCaseOpening(item.id))}>${esc(item.name)}</button><span class="small muted">${esc(formatDate(item.created_at))}</span></div></div></td><td><span class="badge ${item.fixture ? "purple" : ""}">${item.fixture ? "Synthetic data" : "Live Liquid"}</span></td><td>${item.latest_run ? `<span class="mono">${esc(short(item.latest_run, 8))}</span><div class="small muted">${esc(human(item.status || "saved"))}</div>` : '<span class="small muted">Ready for first run</span>'}</td><td><span class="badge ${item.miro_board ? "" : "gray"}">${item.miro_board ? "Linked" : "Not linked"}</span></td><td>${button("Open", "open-case", "arrow", "ghost small", isCaseOpening(item.id), `data-id="${esc(item.id)}" aria-label="Open ${esc(item.name)}"`)}</td></tr>`).join("")}</tbody></table></div><div class="table-footer"><span>${state.cases.length} investigation${state.cases.length === 1 ? "" : "s"}</span><span>Saved runs are shared with the terminal interface</span></div>` : `<div class="empty-state"><div class="empty-icon">${icon("folder")}</div><h2>Start with a transaction</h2><p>Create an investigation, choose the outputs to follow, and run a trace with a clear stopping point.</p>${button("Create your first investigation", "new", "plus", "primary")}</div>`}</section><div class="info-grid"><div class="info-card">${icon("graph")}<div><h3>A clear path from evidence to graph</h3><p>Select starting UTXOs, run a bounded trace, then explore locally with Mermaid or add the result to your Miro board.</p></div></div><div class="info-card secondary">${icon("shield")}<div><h3>Credentials stay behind the scenes</h3><p>Live actions use SecretSpec and Proton Pass through your terminal. No API keys are entered in this interface.</p></div></div></div>`;
 }
 
 function newCase(): string {
@@ -1418,6 +1432,7 @@ async function loadAddresses(offset: number): Promise<void> {
   const detail = state.activeCase;
   if (!detail || isBusy()) return;
   saveSettingsDraft(); saveAddressDraft();
+  cancelCaseOpening();
   const generation = ++pageGeneration;
   state.page = "addresses";
   state.error = "";
@@ -1635,12 +1650,29 @@ async function refreshSession(): Promise<void> {
 }
 
 async function openCase(id: string): Promise<void> {
+  if (isCaseOpening(id)) return;
+  saveSettingsDraft(); saveAddressDraft(); saveDraft();
   resetFrameRecovery();
   state.editConflicts = null;
   dialog.close();
   const generation = ++pageGeneration;
-  const detail = await api<Case>(`/api/cases/${encodeURIComponent(id)}`);
+  const name = state.cases.find(item => item.id === id)?.name || "investigation";
+  state.openingCase = {id, name, generation};
+  state.error = "";
+  render();
+  let detail: Case;
+  try {
+    detail = await api<Case>(`/api/cases/${encodeURIComponent(id)}`);
+  } catch (error) {
+    if (generation !== pageGeneration) return;
+    state.openingCase = null;
+    state.error = `Could not open ${name}. ${error instanceof Error ? error.message : "Try opening it again."}`;
+    toast(state.error, true);
+    render();
+    return;
+  }
   if (generation !== pageGeneration) return;
+  state.openingCase = null;
   saveDraft();
   state.activeCase = detail;
   state.addressReview = { query: "", suspectedOnly: false, data: null, selected: null,
@@ -1664,6 +1696,7 @@ function navigate(page: Page): void {
   state.editConflicts = null;
   dialog.close();
   saveDraft();
+  cancelCaseOpening();
   pageGeneration++;
   state.page = page;
   state.error = "";
@@ -2077,6 +2110,7 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
     const view = action.slice(5);
     if (["collect", "plots", "boards", "history"].includes(view)) {
       saveSettingsDraft(); saveAddressDraft();
+      cancelCaseOpening();
       state.caseView = view === "boards" ? "plots" : view as CaseView; state.page = "case"; render();
       if (view === "plots" || view === "boards") void suggestCenterNames().catch(() => {});
     }
@@ -2086,7 +2120,7 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
   if (await pegoutAction(action)) return;
   if (action === "address-import-open") action = "input-import-open";
   if (action === "input-import-open" && state.activeCase && !isBusy()) {
-    saveSettingsDraft(); saveAddressDraft(); state.page = "case-settings";
+    saveSettingsDraft(); saveAddressDraft(); cancelCaseOpening(); state.page = "case-settings";
   }
   if (state.activeCase && await inputImportAction(action, {
       caseId: state.activeCase.id, busy: isBusy(), render,
@@ -2106,7 +2140,7 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
     if (state.job?.caseId === detail.id && state.job.action === action) frameRecoveryStarted(detail.id, version, state.job.id);
     return;
   }
-  if (action === "change-outputs-open" && state.activeCase && !isBusy()) {saveSettingsDraft(); saveAddressDraft(); state.page = "case-settings"; render();}
+  if (action === "change-outputs-open" && state.activeCase && !isBusy()) {saveSettingsDraft(); saveAddressDraft(); cancelCaseOpening(); state.page = "case-settings"; render();}
   if (state.activeCase && await changeOutputsAction(action, {
       caseId: state.activeCase.id, busy: isBusy(), render,
       post: (path, body) => api(path, body as Record<string, unknown>),
@@ -2118,7 +2152,7 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
         return state.job?.id || null;
       }
     }, element)) return;
-  if (action === "name-colors-open" && state.activeCase && !isBusy()) {saveSettingsDraft(); saveAddressDraft(); if (state.page !== "case-settings") navigate("case-settings");}
+  if (action === "name-colors-open" && state.activeCase && !isBusy()) {saveSettingsDraft(); saveAddressDraft(); cancelCaseOpening(); if (state.page !== "case-settings") navigate("case-settings");}
   if (state.activeCase && await nameColorsAction(action, {caseId: state.activeCase.id, busy: isBusy(), render,
       post: (path, body) => api(path, body as Record<string, unknown>)}, element)) return;
   if (state.activeCase && await addressImportAction(action, {
