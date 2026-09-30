@@ -208,6 +208,16 @@ class StatisticsFailureTests(unittest.TestCase):
         report.update(stop_reason="secret-token", errors=[{"address":"private", "reason":"secret"}], notice="secret")
         cleaned = public_count_report(report)
         self.assertNotIn("secret", json.dumps(cleaned)); self.assertNotIn("private", json.dumps(cleaned))
+        report.update(concurrency_mode="auto", peak_workers=32, worker_limit=64, elapsed_seconds=12.5, observed_rps=49.0)
+        cleaned = public_count_report(report)
+        self.assertEqual({key: cleaned[key] for key in ("concurrency_mode", "peak_workers", "worker_limit",
+            "elapsed_seconds", "observed_rps")}, {"concurrency_mode": "auto", "peak_workers": 32,
+            "worker_limit": 64, "elapsed_seconds": 12.5, "observed_rps": 49.0})
+        report.update(concurrency_mode="secret-token", peak_workers=True, worker_limit=65,
+                      elapsed_seconds=float("inf"), observed_rps=float("nan"))
+        cleaned = public_count_report(report)
+        self.assertFalse(any(key in cleaned for key in ("concurrency_mode", "peak_workers", "worker_limit",
+            "elapsed_seconds", "observed_rps")))
 
 
 class CountJobRoutesTests(unittest.TestCase):
