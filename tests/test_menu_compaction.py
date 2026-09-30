@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from liquid_tracer.common import TraceError
 from liquid_tracer.investigations import create_investigation, read_case, update_case
-from liquid_tracer.menu import create_app
+from liquid_tracer.menu import SECRET_ACCESS_REASON, create_app
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -43,6 +43,7 @@ class CompactionMenuTests(unittest.IsolatedAsyncioTestCase):
         self.recovery = {"pending_count": 0, "can_confirm_empty": False}
         self.environment = patch.dict(os.environ, {"LIQUID_TRACER_ROOT": str(PROJECT),
             "LIQUID_SECRET_PROVIDER": "protonpass", "LIQUID_SECRET_PROFILE": "development",
+            "SECRETSPEC_REASON": "",
             "LIQUID_SECRETSPEC_BIN": "/nix/store/test-secretspec/bin/secretspec"})
         self.environment.start()
         self.addCleanup(self.environment.stop)
@@ -142,10 +143,10 @@ class CompactionMenuTests(unittest.IsolatedAsyncioTestCase):
         suspend.assert_called_once()
         process.assert_called_once()
         command = process.call_args.args[0]
-        self.assertEqual(command[:9], ["/nix/store/test-secretspec/bin/secretspec", "--file",
+        self.assertEqual(command[:11], ["/nix/store/test-secretspec/bin/secretspec", "--file",
                                       str(PROJECT / "secretspec.toml"), "run", "--provider", "protonpass",
-                                      "--profile", "development", "--"])
-        self.assertEqual(command[9:], [sys.executable, "-m", "liquid_tracer", "miro-sync", "--case", str(self.case),
+                                      "--profile", "development", "--reason", SECRET_ACCESS_REASON, "--"])
+        self.assertEqual(command[11:], [sys.executable, "-m", "liquid_tracer", "miro-sync", "--case", str(self.case),
                                      "--run", self.run_id, "--compact-preview", self.preview_id,
                                      "--reorganize", "--max-new-items", "321"])
         self.assertNotIn("capture_output", process.call_args.kwargs)

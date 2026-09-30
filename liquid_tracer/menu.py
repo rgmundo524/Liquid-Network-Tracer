@@ -28,6 +28,7 @@ LIMIT_FIELDS = (
     ("max_new_items", "Maximum new Miro items per sync", int, 0),
 )
 ACTION_ERRORS = (TraceError, OSError, ValueError, KeyError, TypeError)
+SECRET_ACCESS_REASON = "Authenticate the user-selected Liquid Tracer action with Blockstream or Miro."
 
 
 def _rebuild_status(case):
@@ -104,6 +105,7 @@ def _command(arguments, live=False):
         command = [executable, "--file", str(_project() / "secretspec.toml"), "run",
                    "--provider", os.environ.get("LIQUID_SECRET_PROVIDER") or "protonpass",
                    "--profile", os.environ.get("LIQUID_SECRET_PROFILE") or "development",
+                   "--reason", (os.environ.get("SECRETSPEC_REASON") or "").strip() or SECRET_ACCESS_REASON,
                    "--", *command]
     return command
 
