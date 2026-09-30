@@ -108,7 +108,7 @@ function layoutCandidate(result, seed, branchProfile, inputOrderPolicy, branchBo
 // supervisor stores the latter locally; it must never enter normal summaries.
 const diagnostic = {version: 1, stage: 'read_request'};
 let engineVersion = null;
-const engineBuild = 'non_minified';
+let engineBuild = 'non_minified';
 // This controls captured frames, not V8's actual call-stack capacity.
 Error.stackTraceLimit = 64;
 
@@ -258,8 +258,11 @@ try {
   const {default: enginePackage} = await import('elkjs/package.json', {with: {type: 'json'}});
   engineVersion = typeof enginePackage.version === 'string' ? enginePackage.version.slice(0, 128) : null;
   const {default: ELK} = await import('elkjs/lib/elk-api.js');
-  const {Worker} = await import('elkjs/lib/elk-worker.js');
-  // Same pinned engine and algorithms, with readable function names on failure.
+  const {default: stackSafeEngine} = await import('./elk-stack-safe.cjs');
+  const {Worker} = stackSafeEngine.loadWorker();
+  engineBuild = stackSafeEngine.ENGINE_BUILD;
+  // Same pinned engine and algorithms, with iterative network-simplex walks
+  // and readable function names on failure. The loader verifies the source.
   const elk = new ELK({workerFactory: url => new Worker(url)});
   if (typeof elk.layout !== 'function') throw new Error('Invalid layout engine');
   diagnostic.stage = 'validate_request';

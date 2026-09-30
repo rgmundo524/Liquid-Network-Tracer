@@ -51,13 +51,18 @@ def request_graph(west=("w1", "w0")):
 
 
 def install_fake_engine(root, engine):
-    """Keep mock algorithms independent of the non-minified ELK adapter import."""
+    """Isolate worker protocol tests from the production engine source guard."""
     package = root / "node_modules" / "elkjs"
     module = package / "lib" / "elk-api.js"
     module.parent.mkdir(parents=True)
     (package / "package.json").write_text(json.dumps({"version": "0.12.0"}))
     module.write_text(engine)
     (module.parent / "elk-worker.js").write_text("exports.Worker = class Worker {};\n")
+    # This local fixture replaces the loader explicitly. The production
+    # loader has no test mode or bypass for its pinned-source verification.
+    (root / "elk-stack-safe.cjs").write_text(
+        "exports.ENGINE_BUILD = 'test_stub';\n"
+        "exports.loadWorker = () => require('./node_modules/elkjs/lib/elk-worker.js');\n")
 
 
 @unittest.skipUnless(NODE, "Node is not installed")
