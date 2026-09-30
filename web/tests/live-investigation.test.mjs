@@ -20,7 +20,7 @@ const txid = 'a'.repeat(64);
 const defaults = {hops: 1, max_transactions: 20, max_outpoints: 100, max_requests: 30,
   max_seconds: 60, max_new_items: 750, layout_attempts: 25, connector_style: 'straight'};
 
-async function harness(respond = () => undefined) {
+async function harness(respond = () => undefined, {hash = ''} = {}) {
   frameRecovery.resetFrameRecovery();
   const calls = [], listeners = {}, dialogListeners = {}, notifications = [], importActions = [];
   const elements = new Map();
@@ -53,7 +53,7 @@ async function harness(respond = () => undefined) {
     },
     window: {addEventListener() {}},
     history: {replaceState() {}},
-    location: {hash: '', pathname: '/', reload() {}},
+    location: {hash, pathname: '/', reload() {}},
     setInterval() {}, setTimeout() {return 1;}, clearTimeout() {},
     FormData: class {
       constructor(form) {this.values = form.values;}
@@ -63,7 +63,7 @@ async function harness(respond = () => undefined) {
     async fetch(path, options) {
       const body = options.body === undefined ? undefined : JSON.parse(options.body);
       calls.push({path, body});
-      const response = respond(path, body, calls.length)
+      const response = await Promise.resolve(respond(path, body, calls.length))
         ?? (path === '/api/session' ? {csrf: 'test', settings: defaults, cases: []} : {});
       return {ok: !response.error, status: response.error ? 400 : 200, async json() {return response;}};
     },
@@ -95,6 +95,9 @@ async function harness(respond = () => undefined) {
       const form = this.plotForm(values);
       listeners.input({target: {name: Object.keys(values)[0], id: '', form,
         closest: selector => selector === '#plot-layout-form' ? form : null}});
+    },
+    newForm(values) {
+      currentForm = {id: 'new-case-form', values: {...defaults, ...values}, reportValidity: () => true};
     },
     async submit(values) {
       currentForm = {id: 'new-case-form', values: {...defaults, ...values}, reportValidity: () => true};
@@ -302,6 +305,159 @@ test('ELK stays indeterminate and Miro item and retry indicators retain their ex
   await view.pollJob();
   assert.match(element.innerHTML, /Waiting 20 seconds before retrying Miro/);
   assert.doesNotMatch(element.innerHTML, /Hop progress/);
+});
+
+test('opening a saved investigation shows header feedback immediately and suppresses duplicate opens', async () => {
+  const request = Promise.withResolvers();
+  const detail = {id: 'savedcase', name: 'Saved <investigation>', run_defaults: defaults, runs: []};
+  const view = await harness(path => path === '/api/cases/savedcase' ? request.promise : undefined);
+  view.state.cases = [detail];
+  view.state.job = {id: 'active', action: 'trace', message: 'Collecting transactions', live: false};
+  const opening = view.dispatch('open-case', {dataset: {id: detail.id}});
+  await new Promise(setImmediate);
+  assert.equal(view.state.page, 'dashboard');
+  const header = view.app.innerHTML.match(/<header class="workspace-header">[\s\S]*?<\/header>/)[0];
+  assert.match(header, /id="case-opening"[\s\S]*role="status" aria-live="polite"/);
+  assert.match(header, /Opening Saved &lt;investigation&gt;/);
+  assert.match(header, /Loading saved runs, plots, and board records\./);
+  assert.match(header, /Collecting transactions/);
+  assert.match(view.app.innerHTML, /data-case="savedcase" disabled/);
+  assert.match(view.app.innerHTML, /data-action="open-case" disabled/);
+  assert.doesNotMatch(view.app.innerHTML.match(/<button[^>]*data-page="new"[^>]*>/)[0], /disabled/);
+  await view.dispatch('open-case', {dataset: {id: detail.id}});
+  assert.equal(view.calls.filter(call => call.path === '/api/cases/savedcase').length, 1);
+  request.resolve(detail);
+  await opening;
+  assert.equal(view.state.activeCase.id, detail.id);
+  assert.equal(view.state.openingCase, null);
+  assert.equal(view.state.job.id, 'active');
+  assert.doesNotMatch(view.app.innerHTML, /id="case-opening"/);
+});
+
+for (const failed of [false, true]) {
+  test(`navigation ignores a late investigation ${failed ? 'error' : 'response'}`, async () => {
+    const request = Promise.withResolvers();
+    const view = await harness(path => path === '/api/cases/slowcase' ? request.promise : undefined);
+    const opening = view.dispatch('open-case', {dataset: {id: 'slowcase'}});
+    await new Promise(setImmediate);
+    view.navigate('new');
+    assert.doesNotMatch(view.app.innerHTML, /id="case-opening"/);
+    if (failed) request.reject(new Error('Old investigation error'));
+    else request.resolve({id: 'slowcase', name: 'Slow case', runs: []});
+    await opening;
+    assert.equal(view.state.page, 'new');
+    assert.equal(view.state.activeCase, null);
+    assert.equal(view.state.error, '');
+    assert.deepEqual(view.notifications, []);
+  });
+
+  test(`a newer investigation stays selected after an earlier ${failed ? 'error' : 'response'}`, async () => {
+    const first = Promise.withResolvers();
+    const second = {id: 'second', name: 'Second case', runs: []};
+    const view = await harness(path => path === '/api/cases/first' ? first.promise
+      : path === '/api/cases/second' ? second : undefined);
+    const opening = view.dispatch('open-case', {dataset: {id: 'first'}});
+    await new Promise(setImmediate);
+    await view.dispatch('open-case', {dataset: {id: 'second'}});
+    if (failed) first.reject(new Error('Earlier investigation error'));
+    else first.resolve({id: 'first', name: 'First case', runs: []});
+    await opening;
+    assert.equal(view.state.activeCase.id, 'second');
+    assert.equal(view.state.page, 'case');
+    assert.equal(view.state.error, '');
+    assert.equal(view.state.openingCase, null);
+    assert.doesNotMatch(view.app.innerHTML, /id="case-opening"/);
+  });
+}
+
+test('a failed investigation open shows its error, clears loading, and permits retry', async () => {
+  const detail = {id: 'savedcase', name: 'Saved investigation', runs: []};
+  let failed = true;
+  const view = await harness(path => path === '/api/cases/savedcase'
+    ? failed ? {error: 'Saved records could not be read.'} : detail : undefined);
+  view.state.cases = [detail];
+  await view.dispatch('open-case', {dataset: {id: detail.id}});
+  assert.equal(view.state.page, 'dashboard');
+  assert.match(view.state.error, /Could not open Saved investigation\. Saved records could not be read\./);
+  assert.equal(view.state.openingCase, null);
+  assert.doesNotMatch(view.app.innerHTML, /id="case-opening"|The local server is unavailable/);
+  assert.doesNotMatch(view.app.innerHTML.match(/<button[^>]*data-action="open-case"[^>]*>/)[0], /disabled/);
+  failed = false;
+  await view.dispatch('open-case', {dataset: {id: detail.id}});
+  assert.equal(view.state.activeCase.id, detail.id);
+  assert.equal(view.state.error, '');
+});
+
+test('an unavailable investigation deep link keeps the available workspace and saved list open', async () => {
+  const detail = {id: 'savedcase', name: 'Saved investigation', runs: []};
+  const view = await harness(path => path === '/api/session' ? {csrf: 'test', settings: defaults, cases: [detail]}
+    : path === '/api/cases/savedcase' ? {error: 'Investigation not found'} : undefined,
+    {hash: '#case/savedcase'});
+  assert.equal(view.state.page, 'dashboard');
+  assert.match(view.app.innerHTML, /Saved investigations/);
+  assert.match(view.app.innerHTML, /Could not open Saved investigation\. Investigation not found/);
+  assert.doesNotMatch(view.app.innerHTML, /The local server is unavailable|id="retry-start"|id="case-opening"/);
+});
+
+test('a failed session request still reports that the local server is unavailable', async () => {
+  const view = await harness(path => path === '/api/session' ? {error: 'Server is offline'} : undefined,
+    {hash: '#case/savedcase'});
+  assert.match(view.app.innerHTML, /The local server is unavailable/);
+  assert.equal(view.calls.length, 1);
+});
+
+test('opening feedback preserves unsaved new-investigation fields before rendering', async () => {
+  const request = Promise.withResolvers();
+  const view = await harness(path => path === '/api/cases/savedcase' ? request.promise : undefined);
+  view.navigate('new');
+  view.newForm({name: 'Unsaved name', txids: txid, seeds: `${txid}:3`, blockchain: 'liquid'});
+  const opening = view.dispatch('open-case', {dataset: {id: 'savedcase'}});
+  await new Promise(setImmediate);
+  assert.equal(view.state.draft.name, 'Unsaved name');
+  assert.equal(view.state.draft.txids, txid);
+  assert.equal(view.state.draft.seeds, `${txid}:3`);
+  request.resolve({id: 'savedcase', name: 'Saved investigation', runs: []});
+  await opening;
+});
+
+test('opening feedback saves current investigation settings and address notes before rendering', async () => {
+  const request = Promise.withResolvers();
+  const view = await harness(path => path === '/api/cases/othercase' ? request.promise : undefined);
+  view.state.activeCase = {id: 'current', name: 'Current case', run_defaults: defaults, runs: []};
+  view.navigate('case-settings');
+  view.elements.set('#settings-form', {values: {...defaults, name: 'Unsaved case name', max_transactions: 37}});
+  view.elements.set('#service-form', {values: {service_name: 'Unsaved attribution', service_notes: 'Keep my notes',
+    service_enabled: 'on', service_confidence: 'confirmed', service_source: 'My analysis', service_hop_limit: '5'}});
+  const opening = view.dispatch('open-case', {dataset: {id: 'othercase'}});
+  await new Promise(setImmediate);
+  view.elements.delete('#settings-form');
+  view.elements.delete('#service-form');
+  view.navigate('case-settings');
+  assert.match(view.settingsPage(), /value="Unsaved case name"/);
+  assert.match(view.settingsPage(), /name="max_transactions"[^>]*value="37"/);
+  assert.equal(view.state.addressReview.name, 'Unsaved attribution');
+  assert.equal(view.state.addressReview.notes, 'Keep my notes');
+  assert.equal(view.state.addressReview.hopLimit, '5');
+  request.resolve({id: 'othercase', name: 'Other case', runs: []});
+  await opening;
+  assert.equal(view.state.activeCase.id, 'current');
+});
+
+test('returning to the current investigation tools abandons an in-flight case switch', async () => {
+  for (const action of ['view-history', 'input-import-open', 'change-outputs-open', 'name-colors-open']) {
+    const request = Promise.withResolvers();
+    const view = await harness(path => path === '/api/cases/othercase' ? request.promise : undefined);
+    view.state.activeCase = {id: 'current', name: 'Current case', runs: []};
+    view.state.page = 'case';
+    const opening = view.dispatch('open-case', {dataset: {id: 'othercase'}});
+    await new Promise(setImmediate);
+    await view.dispatch(action);
+    request.resolve({id: 'othercase', name: 'Other case', runs: []});
+    await opening;
+    assert.equal(view.state.activeCase.id, 'current', action);
+    assert.equal(view.state.openingCase, null, action);
+    assert.equal(view.state.page, action === 'view-history' ? 'case' : 'case-settings', action);
+  }
 });
 
 test('saved fixture investigations retain synthetic provenance and offline trace routing', async () => {

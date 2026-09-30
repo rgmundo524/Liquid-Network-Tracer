@@ -12,6 +12,11 @@ outputs. **Liquid Network** is currently the only supported blockchain. The
 browser's creation form has no Miro board field or starting-preferences panel;
 create or link boards later in **Plots & Miro**.
 
+Opening an existing investigation displays its name with an **Opening** status
+in the header while the app loads its saved runs, plots, and board records. Larger
+investigations can take longer because saved files are checked before they are
+offered for reuse. Opening does not fetch blockchain data or contact Miro.
+
 ## 1. Collect data
 
 Select the investigation's seed UTXOs, then collect transaction data with the
