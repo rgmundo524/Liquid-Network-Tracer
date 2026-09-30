@@ -13,13 +13,15 @@ from tests.test_worker_port_candidates import MUTATING_ELK, NODE, ROOT, install_
 
 @unittest.skipUnless(NODE, "Node is not installed")
 class WorkerDiagnosticTests(unittest.TestCase):
-    def run_worker(self, engine, *, request=None, raw=None):
+    def run_worker(self, engine, *, request=None, raw=None, production_loader=False):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             worker = root / "run.mjs"
             shutil.copyfile(ROOT / "layout" / "run.mjs", worker)
             if engine is not None:
                 install_fake_engine(root, engine)
+            if production_loader:
+                shutil.copyfile(ROOT / "layout" / "elk-stack-safe.cjs", root / "elk-stack-safe.cjs")
             graph = request_graph()
             graph["branchProfile"] = "flow_weighted"
             result = subprocess.run([NODE, str(worker)],
@@ -167,7 +169,7 @@ module.exports = class ELK {
         self.assertEqual(diagnostic["code"], "stack_limit")
         trace = self.trace
         self.assertEqual(trace["engine_version"], "0.12.0")
-        self.assertEqual(trace["engine_build"], "non_minified")
+        self.assertEqual(trace["engine_build"], "test_stub")
         self.assertEqual(trace["seed"], 19)
         self.assertEqual(trace["input_order_policy"], "geometry")
         self.assertEqual(set(trace["runtime"]), {"node", "v8", "platform", "arch"})
@@ -239,6 +241,13 @@ module.exports = class ELK {
                 self.assertIsNone(self.trace["engine_version"])
                 self.assertTrue(self.trace["errors"][0]["stack"])
 
+    def test_production_loader_rejects_unrecognized_source_as_setup_failure(self):
+        diagnostic, _ = self.run_worker(MUTATING_ELK, production_loader=True)
+        self.assertEqual(diagnostic, {"version": 1, "stage": "load_engine", "code": "elk_worker_setup"})
+        self.assertEqual(self.trace["engine_version"], "0.12.0")
+        self.assertEqual(self.trace["engine_build"], "non_minified")
+        self.assertTrue(self.trace["errors"][0]["stack"])
+
     @unittest.skipUnless((ROOT / "layout/node_modules/elkjs/lib/elk-worker.js").is_file(),
                          "local ELK package is not installed")
     def test_real_engine_failure_contains_readable_function_names(self):
@@ -252,6 +261,7 @@ module.exports = class ELK {
         line = next(line for line in result.stderr.splitlines() if line.startswith("LIQUID_ELK_TRACE "))
         trace = json.loads(line.removeprefix("LIQUID_ELK_TRACE "))
         self.assertEqual(trace["engine_version"], "0.12.0")
+        self.assertEqual(trace["engine_build"], "non_minified_iterative_network_simplex_v1")
         self.assertIn("$shapeById", trace["errors"][0]["stack"])
         self.assertIn("elk-worker.js", trace["errors"][0]["stack"])
 
