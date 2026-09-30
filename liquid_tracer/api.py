@@ -115,7 +115,7 @@ class Budget:
 class Esplora:
     def __init__(self, store, run_id, limits, base=ENTERPRISE, auth="blockstream",
                  fixture=None, tx_cache_seconds=86400, min_interval=None, transport=http,
-                 workers=8, advertised_rps=None):
+                 workers=8, advertised_rps=None, adaptive_workers=False):
         self.store, self.run_id = store, run_id
         self.base = base.rstrip("/")
         self.budget = Budget(limits)
@@ -146,6 +146,10 @@ class Esplora:
         self._auth_error = None
         self._results_lock = threading.RLock()
         self._results = {}
+        self._metrics_lock = threading.Lock()
+        self._latency_seconds = None
+        self._completed_requests = 0
+        self._pressure_events = 0
         self._pool = None
         self._closed = False
         self.fixture = read_json(fixture) if fixture else None
@@ -167,7 +171,10 @@ class Esplora:
             self.effective_rps = 1. / self.min_interval
         if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= 8:
             raise TraceError("Explorer workers must be an integer from 1 to 8")
-        self._transport_slots = threading.BoundedSemaphore(workers)
+        if not isinstance(adaptive_workers, bool):
+            raise TraceError("Adaptive explorer workers must be a boolean")
+        self.worker_ceiling = 64 if adaptive_workers else workers
+        self._transport_slots = threading.BoundedSemaphore(self.worker_ceiling)
 
     def __enter__(self):
         return self
@@ -210,6 +217,21 @@ class Esplora:
     def _remember(self, oid):
         with self._results_lock:
             self.used.add(oid)
+
+    def request_metrics(self):
+        """Snapshot transport feedback without gate, OAuth, or archive time."""
+        with self._metrics_lock:
+            return {"latency_seconds": self._latency_seconds,
+                    "completed_requests": self._completed_requests,
+                    "pressure_events": self._pressure_events}
+
+    def _measure_request(self, started, pressure):
+        elapsed = max(0., time.monotonic() - started)
+        with self._metrics_lock:
+            self._latency_seconds = (elapsed if self._latency_seconds is None else
+                                     .2 * elapsed + .8 * self._latency_seconds)
+            self._completed_requests += 1
+            self._pressure_events += int(pressure)
 
     def _admit(self, kind=None, endpoint=None):
         # Reserve starts under one shared gate. Increasing workers never
@@ -263,11 +285,16 @@ class Esplora:
 
     def _call(self, method, url, kind, endpoint, headers=None, body=None):
         timeout = self._admit(kind, endpoint)
+        started = time.monotonic()
         try:
             result = self.transport(method, url, headers, body, timeout)
-        except TraceError:
+        except (TraceError, OSError, urllib.error.URLError):
+            if kind == "esplora":
+                self._measure_request(started, True)
             self.store.attempt(self.run_id, kind, endpoint, "network_error")
             raise
+        if kind == "esplora":
+            self._measure_request(started, result[0] in (429, 500, 502, 503, 504))
         if result[0] == 429:
             # Close the shared gate as soon as the response arrives. The caller
             # still archives the response before propagating a long cooldown.
@@ -331,12 +358,13 @@ class Esplora:
                 future.set_exception(error)
         return future.result()
 
-    def prefetch(self, endpoints):
+    def prefetch(self, endpoints, *, on_result=None, concurrency=None):
         """Return ordered unique endpoints mapped to results or TraceError.
 
-        At most `workers` jobs are submitted at once. The caller receives all
-        results only after started requests have saved their evidence, including
-        when one request reaches a hard run limit.
+        Stream completed results on the calling thread before replenishing the
+        in-flight jobs. A false callback result stops new jobs; already started
+        jobs still finish and deliver their results. An optional target callback
+        can vary concurrency up to worker_ceiling without changing rate limits.
         """
         endpoints = list(dict.fromkeys(endpoints))
         if not endpoints:
@@ -345,39 +373,79 @@ class Esplora:
             if self._closed:
                 raise TraceError("Explorer client is closed")
             if self._pool is None:
-                self._pool = ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="esplora")
+                self._pool = ThreadPoolExecutor(max_workers=self.worker_ceiling, thread_name_prefix="esplora")
             pool = self._pool
         pending, results = {}, {}
         remaining = iter(endpoints)
         stop = None
+        delivered = set()
+        callback_stopped = False
 
         def submit():
-            for endpoint in remaining:
-                pending[pool.submit(self.get, endpoint)] = endpoint
-                if len(pending) >= self.workers:
+            target = concurrency() if concurrency is not None else self.workers
+            if isinstance(target, bool) or not isinstance(target, int) or not 1 <= target <= self.worker_ceiling:
+                target = self.workers
+            while len(pending) < target:
+                endpoint = next(remaining, None)
+                if endpoint is None:
                     break
+                pending[pool.submit(self.get, endpoint)] = endpoint
+
+        def deliver(endpoint):
+            nonlocal stop, callback_stopped
+            if on_result is None or endpoint in delivered:
+                return
+            # Mark first so interruption or an exception inside a consumer can
+            # never cause its partially completed write to run a second time.
+            delivered.add(endpoint)
+            if on_result(endpoint, results[endpoint]) is False:
+                callback_stopped = True
+                if stop is None:
+                    stop = StopRun("prefetch_stopped")
 
         try:
             submit()
             while pending:
                 completed, _ = wait(pending, return_when=FIRST_COMPLETED)
                 for future in completed:
-                    endpoint = pending.pop(future)
+                    endpoint = pending[future]
                     try:
                         results[endpoint] = future.result()
                     except TraceError as error:
                         results[endpoint] = error
                         if isinstance(error, StopRun):
                             stop = error
+                # Inspect every completed error before invoking consumers or
+                # replenishing, so a hard limit never permits another batch.
+                for future in completed:
+                    endpoint = pending[future]
+                    deliver(endpoint)
+                    pending.pop(future)
                 if stop is None:
                     submit()
             for endpoint in remaining:
-                results[endpoint] = StopRun(str(stop))
-        except BaseException:
+                results[endpoint] = StopRun("prefetch_stopped" if callback_stopped else str(stop))
+        except BaseException as error:
             # Interruptions must not let a response race the run snapshot or
             # Store.close(). close() also catches a job interrupted between
             # pool.submit() and recording its future in the local pending map.
-            self.close()
+            try:
+                self.close()
+            except BaseException:
+                # Preserve the original failure, including a consumer error.
+                pass
+            if isinstance(error, KeyboardInterrupt):
+                for future, endpoint in pending.items():
+                    if future.cancelled() or not future.done():
+                        continue
+                    try:
+                        results[endpoint] = future.result()
+                    except BaseException:
+                        continue
+                    try:
+                        deliver(endpoint)
+                    except BaseException:
+                        break
             raise
         return {endpoint: results[endpoint] for endpoint in endpoints}
 

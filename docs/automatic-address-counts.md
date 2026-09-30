@@ -35,16 +35,40 @@ never go into browser responses or the ELK/Mermaid renderer environment.
 ## Caching, limits and failures
 
 `address-counts.json` and existing address-review observations are reused. Lookups
-are deduplicated by full address. Requests run concurrently using the selected
-run's saved API worker count, from 1 to 8; older runs without a worker setting
-use 8. All workers share the saved request pacing, retry cooldowns, and lookup
-budget, so concurrency does not multiply the configured request-rate limit.
+are deduplicated by full address. Count requests now scale automatically. A run
+using the usual eight API workers starts with up to eight and can grow to 64
+when response latency and the configured request rate justify more overlap.
+Saved worker settings below eight remain explicit ceilings, including serial
+operation at one. Older runs without a worker setting start with eight.
+
+The automatic target uses measured HTTP response time, excluding rate-limit
+waits, authentication, and local cache writes. It aims for the configured
+requests per second multiplied by response latency, with modest headroom.
+Throttling, retryable server errors, and network errors reduce the target.
+All workers still share the saved request pacing, retry cooldowns, and lookup
+budget. Extra workers never increase the request-rate allowance.
+
+The resource ceiling is rechecked during the lookup: at most eight network
+workers per available CPU (respecting affinity and CPU quotas), and a planning
+budget of 32 MiB per worker from one quarter of available memory. The ceiling
+also respects the number of requested addresses and an absolute maximum of 64.
+This is a concurrency planning allowance, not a process memory limit. If memory
+cannot be measured, the memory-based ceiling is eight. Shrinking the target
+lets existing requests finish before starting replacements.
+
+`LIQUID_COUNT_WORKERS=auto` is the default. Set this nonsecret variable in
+`devenv.nix` to a whole number from 1 to 64 for a fixed requested target. Resource
+limits and pressure backoff still apply. This setting controls address counts;
+ordinary transaction collection keeps its existing worker setting.
 
 A separate ancillary-cache lock permits one count lookup per investigation.
-Requests run in batches of at most the worker count, while cache writes and
-progress updates stay on the coordinating thread. Each successful result is
-checkpointed before the next batch. The code does not recursively reacquire the
-trace lock when a trace immediately exports or syncs its graph.
+Completed requests are processed immediately, without waiting for a fixed batch.
+Cache writes and progress updates stay on the coordinating thread. Raw responses
+are archived individually; the count cache is checkpointed every 32 successes
+or on the next completed response after one second, and on completion, errors,
+or orderly interruption. This avoids rewriting a large growing cache for every
+address. The code does not recursively reacquire the trace lock when a trace
+immediately exports or syncs its graph.
 
 Automatic statistics are a separate reported API phase, using the investigation's
 saved request/time settings (or the selected run's settings for legacy cases).
@@ -53,10 +77,17 @@ contains an `address_counts` report with fetched/known/total/remaining/failed,
 requests used, and a stop reason. Budget exhaustion or an API failure is visible
 in terminal progress and the browser result. Good counts are retained; missing
 ones are retried automatically on the next normal visual operation. A global
-network/authentication failure stops new batches after the current batch drains;
-successful responses from that batch are still saved, including on an explicit
-lookup that raises an error. Interrupted/error traces are not followed by a new
-count lookup.
+network/authentication failure stops new scheduling when observed; already
+started requests drain and their successful responses are still saved, including
+on an explicit lookup that raises an error. Interrupted/error traces are not
+followed by a new count lookup. An abrupt process kill can leave the latest cache
+checkpoint behind its archived responses; missing counts remain eligible for a
+later lookup.
+
+Progress shows the current concurrency target and observed counts per second.
+The result also records automatic/fixed mode, peak requested concurrency,
+resource ceiling, elapsed time, and observed throughput. These are measurements
+of this lookup, not a promise of provider performance or a published API quota.
 
 Counts remain dated observations, not a live feed. `0` is an observed zero; `??`
 means no usable count is available. The optional explicit count command supports

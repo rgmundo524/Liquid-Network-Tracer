@@ -87,6 +87,22 @@ def _public_elk_workers(event, attempt_total):
     return value
 
 
+def _public_count_workers(event):
+    """Expose count-only scheduling telemetry without provider-controlled text."""
+    value = {}
+    for field in ("worker_count", "worker_limit"):
+        number = event.get(field)
+        if type(number) is int and 1 <= number <= 64:
+            value[field] = number
+    if ("worker_count" in value and "worker_limit" in value
+            and value["worker_count"] > value["worker_limit"]):
+        value.clear()
+    rate = event.get("observed_rps")
+    if type(rate) in (int, float) and 0 <= rate <= 2 ** 53 - 1 and math.isfinite(rate):
+        value["observed_rps"] = rate
+    return value
+
+
 def public_progress(event):
     """Allow only known phases and bounded numbers across the browser boundary.
 
@@ -101,6 +117,13 @@ def public_progress(event):
         return None
     value = {"phase": event["phase"], "completed": done, "total": total,
              "message": MESSAGES[event["phase"]]}
+    if value["phase"].startswith("address_counts"):
+        value.update(_public_count_workers(event))
+        if "worker_count" in value:
+            noun = "request" if value["worker_count"] == 1 else "requests"
+            value["message"] += f"; up to {value['worker_count']} concurrent {noun}"
+        if "observed_rps" in value:
+            value["message"] += f"; {value['observed_rps']:.1f} counts/s"
     if value["phase"] in COLLECTION_PHASES:
         value["message"] = COLLECTION_PHASES[value["phase"]].format(**value)
         from .group_hops import normalize_reference_name

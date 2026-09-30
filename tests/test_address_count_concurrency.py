@@ -1,12 +1,16 @@
 """Count lookups share bounded explorer workers and retain completed observations."""
 import copy
+import os
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from liquid_tracer.address_counts import _collect_counts, addresses, apply_saved_counts, fetch_counts
+from liquid_tracer.address_counts import (_collect_counts, _failure_reason, addresses,
+                                           apply_saved_counts, fetch_counts)
 from liquid_tracer.common import TraceError, canonical, read_json, save_json
 from liquid_tracer.investigations import create_investigation, read_case
 from tests.test_attribution_convergence import graph_state
@@ -24,13 +28,14 @@ def statistics(address, confirmed=19):
 class CountTransport:
     """A fake provider whose barrier proves actual request overlap."""
 
-    def __init__(self, workers=1, *, outcomes=None, confirmed=19):
+    def __init__(self, workers=1, *, outcomes=None, confirmed=19, failure_seen=None):
         self.barrier = threading.Barrier(workers)
         self.lock = threading.Lock()
         self.calls = []
         self.active = self.maximum = 0
         self.outcomes = outcomes or {}
         self.confirmed = confirmed
+        self.failure_seen = failure_seen
 
     def __call__(self, method, url, headers, body, timeout):
         if method != "GET" or not url.startswith(SOURCE + "/address/"):
@@ -47,6 +52,8 @@ class CountTransport:
                 raise result
             if result is not None:
                 return result
+            if self.failure_seen is not None and not self.failure_seen.wait(timeout=5):
+                raise AssertionError("Failure was not observed before draining other results")
             return 200, {}, canonical(statistics(address, self.confirmed))
         finally:
             with self.lock:
@@ -66,6 +73,11 @@ class AddressCountConcurrencyTests(unittest.TestCase):
         pacing = patch("liquid_tracer.api.default_min_interval", return_value=0.000001)
         pacing.start()
         self.addCleanup(pacing.stop)
+        for setting in (patch.dict(os.environ, {"LIQUID_COUNT_WORKERS": "auto"}),
+                        patch("liquid_tracer.count_concurrency._available_bytes", return_value=8 * 1024 ** 3),
+                        patch("liquid_tracer.count_concurrency._available_cpu_count", return_value=8)):
+            setting.start()
+            self.addCleanup(setting.stop)
 
     def wanted(self, count):
         return [f"SYNTHETIC-count-{index:02d}" for index in range(count)]
@@ -93,10 +105,15 @@ class AddressCountConcurrencyTests(unittest.TestCase):
 
         self.assertEqual(transport.maximum, 3)
         self.assertCountEqual(transport.calls, wanted)
-        self.assertEqual(writing_threads, [caller] * len(wanted))
+        self.assertTrue(writing_threads)
+        self.assertLess(len(writing_threads), len(wanted))
+        self.assertEqual(set(writing_threads), {caller})
         self.assertEqual(report["requests_this_lookup"], len(wanted))
         self.assertEqual((report["fetched"], report["remaining"]), (6, 0))
-        self.assertEqual(events[-1], {"phase": "address_counts_ready", "completed": 6, "total": 6})
+        self.assertEqual({key: events[-1][key] for key in ("phase", "completed", "total")},
+                         {"phase": "address_counts_ready", "completed": 6, "total": 6})
+        self.assertTrue(any(event.get("worker_count") == 3 and event.get("worker_limit") == 3
+                            for event in events))
         self.assertEqual(set(apply_saved_counts(self.case, self.state)), set(wanted))
         self.assertEqual(len({record["observation_ids"][0] for record in self.cached().values()}), 6)
 
@@ -107,12 +124,12 @@ class AddressCountConcurrencyTests(unittest.TestCase):
         self.assertEqual(transport.maximum, 1)
         self.assertEqual((report["fetched"], report["remaining"]), (4, 0))
 
-    def test_legacy_run_without_fetch_options_defaults_to_eight_workers(self):
+    def test_legacy_run_without_fetch_options_starts_eight_workers(self):
         self.state.pop("fetch_options")
         transport = CountTransport(workers=8)
-        report = self.collect(self.wanted(16), transport)
+        report = self.collect(self.wanted(8), transport)
         self.assertEqual(transport.maximum, 8)
-        self.assertEqual((report["fetched"], report["remaining"]), (16, 0))
+        self.assertEqual((report["fetched"], report["remaining"]), (8, 0))
 
     def test_repeated_addresses_and_saved_counts_do_not_issue_duplicate_requests(self):
         wanted = self.wanted(6)
@@ -139,21 +156,27 @@ class AddressCountConcurrencyTests(unittest.TestCase):
         self.assertEqual((report["fetched"], report["known"], report["remaining"]), (2, 2, 6))
         self.assertEqual(set(self.cached()), set(transport.calls))
 
-    def test_global_failure_stops_next_batch_but_keeps_other_batch_successes(self):
+    def test_global_failure_stops_new_requests_and_keeps_inflight_successes(self):
         wanted = self.wanted(6)
         failures = ((TraceError("Network request failed: TimeoutError"), "network_failed"),
                     ((401, {}, b"unauthorized"), "authentication_failed"))
         for failure, reason in failures:
             with self.subTest(reason=reason):
-                transport = CountTransport(workers=3, outcomes={wanted[0]: failure})
-                report = self.collect(wanted, transport, refresh=True)
+                failure_seen = threading.Event()
+                transport = CountTransport(workers=3, outcomes={wanted[0]: failure},
+                                           failure_seen=failure_seen)
+                def observed(error):
+                    failure_seen.set()
+                    return _failure_reason(error)
+                with patch("liquid_tracer.address_counts._failure_reason", side_effect=observed):
+                    report = self.collect(wanted, transport, refresh=True)
                 self.assertCountEqual(transport.calls, wanted[:3])
                 self.assertEqual(report["stop_reason"], reason)
                 self.assertEqual((report["fetched"], report["remaining"], report["failed"]), (2, 4, 1))
                 self.assertEqual(set(self.cached()), set(wanted[1:3]))
                 self.assertEqual(report["errors"], [{"address": wanted[0], "reason": reason}])
 
-    def test_explicit_refresh_saves_other_batch_successes_before_raising(self):
+    def test_explicit_refresh_saves_inflight_successes_before_raising(self):
         state = graph_state(seeds=tuple(name + ":0" for name in "abcdef"))
         state.update(source=SOURCE, fetch_options={"workers": 3})
         self.state, _ = saved_case(self.case, state)
@@ -165,9 +188,15 @@ class AddressCountConcurrencyTests(unittest.TestCase):
             with self.subTest(failure=failure):
                 self.collect(wanted, CountTransport(workers=3), refresh=True)
                 original = copy.deepcopy(self.cached())
-                transport = CountTransport(workers=3, outcomes={wanted[0]: failure}, confirmed=42)
-                with self.assertRaises(TraceError):
-                    fetch_counts(self.case, refresh=True, transport=transport)
+                failure_seen = threading.Event()
+                transport = CountTransport(workers=3, outcomes={wanted[0]: failure}, confirmed=42,
+                                           failure_seen=failure_seen)
+                def observed(error):
+                    failure_seen.set()
+                    return _failure_reason(error)
+                with patch("liquid_tracer.address_counts._failure_reason", side_effect=observed):
+                    with self.assertRaises(TraceError):
+                        fetch_counts(self.case, refresh=True, transport=transport)
                 self.assertCountEqual(transport.calls, wanted[:3])
                 cached = self.cached()
                 for address in wanted[1:3]:
@@ -185,6 +214,115 @@ class AddressCountConcurrencyTests(unittest.TestCase):
         self.assertEqual(report["stop_reason"], "lookup_failed")
         self.assertEqual((report["fetched"], report["remaining"], report["failed"]), (5, 1, 1))
         self.assertEqual(set(self.cached()), set(wanted[1:]))
+
+    def test_completed_count_progress_streams_before_a_slower_request_finishes(self):
+        self.state["fetch_options"]["workers"] = 2
+        wanted = self.wanted(3)
+        both_started = threading.Barrier(2)
+        progress_received = threading.Event()
+        slow_finished = threading.Event()
+        callback_threads = []
+
+        def transport(method, url, headers, body, timeout):
+            address = url.rsplit("/", 1)[1]
+            if address in wanted[:2]:
+                both_started.wait(timeout=5)
+            if address == wanted[0]:
+                if not progress_received.wait(timeout=5):
+                    raise AssertionError("Fast completion was held behind the slow response")
+                slow_finished.set()
+            return 200, {}, canonical(statistics(address))
+
+        def progress(event):
+            callback_threads.append(threading.get_ident())
+            if event["phase"] == "address_counts" and event["completed"] == 1:
+                self.assertFalse(slow_finished.is_set())
+                progress_received.set()
+
+        report = self.collect(wanted, transport, progress=progress)
+        self.assertTrue(progress_received.is_set())
+        self.assertEqual(set(callback_threads), {threading.get_ident()})
+        self.assertEqual((report["fetched"], report["remaining"]), (3, 0))
+
+    def test_large_lookup_checkpoints_the_cache_instead_of_rewriting_every_response(self):
+        self.state["fetch_options"]["workers"] = 1
+        wanted = self.wanted(130)
+        saved_sizes = []
+
+        def save(path, data):
+            saved_sizes.append(len(data["counts"]))
+            save_json(path, data)
+
+        # Freeze only the count checkpoint clock. The API keeps its real budget,
+        # request metrics, and pacing clock, so this isolates the size threshold.
+        clock = SimpleNamespace(monotonic=lambda: 100.)
+        with patch("liquid_tracer.address_counts.time", clock), \
+                patch("liquid_tracer.address_counts.save_json", side_effect=save):
+            report = self.collect(wanted, CountTransport(), max_requests=200)
+
+        self.assertEqual(saved_sizes, [32, 64, 96, 128, 130])
+        self.assertEqual((report["fetched"], report["remaining"]), (130, 0))
+        self.assertEqual(set(apply_saved_counts(self.case, self.state)), set(wanted))
+        self.assertEqual(len({record["observation_ids"][0] for record in self.cached().values()}), 130)
+
+    def test_checkpoint_time_threshold_saves_progress_before_lookup_finishes(self):
+        self.state["fetch_options"]["workers"] = 1
+        wanted = self.wanted(3)
+        now = [100.]
+        saved_sizes = []
+
+        def save(path, data):
+            saved_sizes.append(len(data["counts"]))
+            save_json(path, data)
+
+        def progress(event):
+            if event["phase"] == "address_counts" and event["completed"] == 1:
+                now[0] += 1.1
+
+        with patch("liquid_tracer.address_counts.time", SimpleNamespace(monotonic=lambda: now[0])), \
+                patch("liquid_tracer.address_counts.save_json", side_effect=save):
+            self.collect(wanted, CountTransport(), progress=progress)
+        self.assertEqual(saved_sizes, [2, 3])
+
+    def test_auto_mode_grows_above_eight_from_measured_transport_latency(self):
+        self.state["fetch_options"]["workers"] = 8
+        wanted = self.wanted(48)
+        lock = threading.Lock()
+        active = maximum = 0
+        events = []
+
+        def transport(method, url, headers, body, timeout):
+            nonlocal active, maximum
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            try:
+                # Fake network latency feeds the actual Esplora EWMA. Assertions
+                # use observed overlap, not a wall-clock speed threshold.
+                time.sleep(.015)
+                return 200, {}, canonical(statistics(url.rsplit("/", 1)[1]))
+            finally:
+                with lock:
+                    active -= 1
+
+        report = self.collect(wanted, transport, progress=events.append)
+        self.assertGreater(maximum, 8)
+        self.assertLessEqual(maximum, 48)
+        self.assertEqual(report["concurrency_mode"], "auto")
+        self.assertGreater(report["peak_workers"], 8)
+        self.assertEqual(report["worker_limit"], 48)
+        self.assertGreater(report["observed_rps"], 0)
+        self.assertTrue(any(event.get("worker_count", 0) > 8 for event in events))
+        self.assertEqual((report["fetched"], report["remaining"]), (48, 0))
+
+    def test_environment_can_select_more_than_eight_count_workers(self):
+        transport = CountTransport(workers=12)
+        with patch.dict(os.environ, {"LIQUID_COUNT_WORKERS": "12"}):
+            report = self.collect(self.wanted(12), transport)
+        self.assertEqual(transport.maximum, 12)
+        self.assertEqual(report["concurrency_mode"], "fixed")
+        self.assertEqual(report["worker_limit"], 12)
+        self.assertEqual((report["fetched"], report["remaining"]), (12, 0))
 
 
 if __name__ == "__main__":

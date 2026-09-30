@@ -5,6 +5,8 @@ No address-history scan, UTXO expansion or attribution follows from a count.
 """
 import copy
 import fcntl
+import math
+import time
 import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -131,10 +133,10 @@ def _transaction_counts(body, address):
     return values
 
 
-def _progress(progress, phase, done, total):
+def _progress(progress, phase, done, total, **metrics):
     if progress is not None:
         try:
-            progress({"phase": phase, "completed": done, "total": total})
+            progress({"phase": phase, "completed": done, "total": total, **metrics})
         except Exception:
             pass  # Progress is advisory; never lose a successful observation.
 
@@ -162,6 +164,7 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
     A visual job uses a separate, reported statistics budget, not trace hops.
     """
     from .api import ENTERPRISE, Esplora, Limits
+    from .count_concurrency import CountConcurrency
     from .store import Store
     limits = Limits(max_hops=0, max_transactions=1, max_outpoints=1,
                     max_requests=max_requests, max_seconds=max_seconds)
@@ -189,6 +192,7 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
         source = state["source"]
         fetched, examined, stop = 0, 0, None
         failures = []
+        concurrency_report = {}
         store, api = None, None
         _progress(progress, "address_counts", len(wanted)-len(todo), len(wanted))
         try:
@@ -205,54 +209,77 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
                     store = Store(case)
                     api = Esplora(store, "counts-"+uuid.uuid4().hex, limits, base=base, auth=auth,
                                   fixture=fixture, tx_cache_seconds=0, workers=fetch_options.get("workers", 8),
+                                  adaptive_workers=True,
                                   advertised_rps=fetch_options.get("advertised_rps"),
                                   min_interval=fetch_options.get("min_interval"), **options)
                     if api.base != source:
                         raise TraceError("Address-count source does not match the saved run")
-                    # Bound each batch so a global failure cannot enqueue the
-                    # remaining investigation. The shared client owns pacing,
-                    # retries, request budgets, and evidence synchronization.
-                    for start in range(0, len(todo), api.workers):
-                        batch = todo[start:start + api.workers]
-                        results = api.prefetch(["/address/" + address for address in batch])
-                        failure = None
-                        for address in batch:
-                            try:
-                                result = results["/address/" + address]
-                                if isinstance(result, TraceError):
-                                    raise result
-                                body, oid = result
-                                confirmed, mempool = _transaction_counts(body, address)
-                            except StopRun as error:
-                                stop = stop or str(error)
-                                continue
-                            except TraceError as error:
-                                if not best_effort and failure is None:
-                                    failure = error
-                                reason = _failure_reason(error)
-                                failures.append({"address": address, "reason": reason})
-                                examined += 1
-                                _progress(progress, "address_counts", len(wanted)-len(todo)+examined, len(wanted))
-                                if reason in ("authentication_failed", "network_failed"):
-                                    stop = stop or reason
-                                continue
+                    scaling = CountConcurrency(api.workers, len(todo),
+                                               0 if api.fixture is not None else api.effective_rps)
+                    started = last_saved = time.monotonic()
+                    dirty = 0
+                    failure = None
+
+                    def checkpoint(*, force=False):
+                        nonlocal dirty, last_saved
+                        if dirty and (force or dirty >= 32 or time.monotonic() - last_saved >= 1):
+                            data = {"schema_version": 1, "case_id": state["case_id"], "source": source, "counts": counts}
+                            data["sha256"] = digest(canonical(data))
+                            save_json(case/"address-counts.json", data)
+                            dirty = 0
+                            last_saved = time.monotonic()
+
+                    def workers():
+                        return scaling.target(api.request_metrics())
+
+                    def metrics():
+                        return {"worker_count": workers(), "worker_limit": scaling.ceiling,
+                                "observed_rps": fetched / max(.001, time.monotonic() - started)}
+
+                    def receive(endpoint, result):
+                        nonlocal fetched, examined, stop, failure, dirty
+                        address = endpoint.removeprefix("/address/")
+                        try:
+                            if isinstance(result, TraceError):
+                                raise result
+                            body, oid = result
+                            confirmed, mempool = _transaction_counts(body, address)
+                        except StopRun as error:
+                            stop = stop or str(error)
+                            return False
+                        except TraceError as error:
+                            if not best_effort and failure is None:
+                                failure = error
+                            reason = _failure_reason(error)
+                            failures.append({"address": address, "reason": reason})
+                            if reason in ("authentication_failed", "network_failed"):
+                                stop = stop or reason
+                        else:
                             observation = next(store.observations([oid]))
                             counts[address] = {"address": address, "source": source,
                                 "observed_at": observation["fetched_at"],
                                 "confirmed_tx_count": confirmed, "mempool_tx_count": mempool,
                                 "observation_ids": [oid]}
-                            data = {"schema_version": 1, "case_id": state["case_id"], "source": source, "counts": counts}
-                            data["sha256"] = digest(canonical(data))
-                            save_json(case/"address-counts.json", data)
+                            dirty += 1
                             fetched += 1
-                            examined += 1
-                            _progress(progress, "address_counts", len(wanted)-len(todo)+examined, len(wanted))
-                        # Drain and save every successful result, even if an
-                        # earlier address hit a limit or failed in this batch.
-                        if failure is not None:
-                            raise failure
-                        if stop is not None:
-                            break
+                            checkpoint()
+                        examined += 1
+                        _progress(progress, "address_counts", len(wanted)-len(todo)+examined, len(wanted), **metrics())
+                        # Stop replenishing the window after a global failure;
+                        # the API still delivers all already-started results.
+                        return stop is None and failure is None
+
+                    _progress(progress, "address_counts", len(wanted)-len(todo), len(wanted), **metrics())
+                    try:
+                        api.prefetch(["/address/" + address for address in todo],
+                                     on_result=receive, concurrency=workers)
+                    finally:
+                        checkpoint(force=True)
+                    concurrency_report = {"concurrency_mode": scaling.mode, "peak_workers": scaling.peak,
+                        "worker_limit": scaling.ceiling, "elapsed_seconds": time.monotonic() - started,
+                        "observed_rps": fetched / max(.001, time.monotonic() - started)}
+                    if failure is not None:
+                        raise failure
             known = sum(address in counts for address in wanted)
             remaining = len(todo)-fetched
             reason = stop or ("lookup_failed" if failures else None)
@@ -263,7 +290,7 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
             return {"run_id": state["run_id"], "fetched": fetched, "known": known,
                     "total": len(wanted), "remaining": remaining, "failed": len(failures),
                     "stop_reason": reason, "errors": failures,
-                    "requests_this_lookup": api.budget.requests if api is not None else 0,
+                    **concurrency_report, "requests_this_lookup": api.budget.requests if api is not None else 0,
                     "notice": notice}
         finally:
             if api is not None:
@@ -361,4 +388,14 @@ def public_count_report(report):
     allowed = {"authentication_failed", "network_failed", "fixture_unavailable", "http_failed",
                "invalid_response", "lookup_failed", "lookup_in_progress", "request_limit", "time_limit", "server_retry_later", "interrupted"}
     value["stop_reason"] = reason if isinstance(reason, str) and reason in allowed else None
+    if report.get("concurrency_mode") in ("auto", "fixed"):
+        value["concurrency_mode"] = report["concurrency_mode"]
+    for key in ("peak_workers", "worker_limit"):
+        number = report.get(key)
+        if type(number) is int and 1 <= number <= 64:
+            value[key] = number
+    for key in ("elapsed_seconds", "observed_rps"):
+        number = report.get(key)
+        if type(number) in (int, float) and math.isfinite(number) and 0 <= number <= 2**53-1:
+            value[key] = number
     return value
