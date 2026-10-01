@@ -1,8 +1,8 @@
 import {beginFrameRecovery, frameRecoveryStarted, frameRecoveryComplete, frameRecoveryDialog, frameRecoveryApproval, resetFrameRecovery} from "./frame-recovery";
-import {nameColorsPanel, nameColorsInput, nameColorsAction, nameColorsFile, resetNameColors} from "./name-colors";
-import { addressImportPanel, addressImportInput, addressImportFile, addressImportAction, resetAddressImport } from "./address-import";
-import {changeOutputsPanel, changeOutputsInput, changeOutputsFile, changeOutputsAction, changeOutputsLookupComplete, changeOutputsPending, resetChangeOutputs} from "./change-outputs";
-import {inputImportPanel, inputImportInput, inputImportFiles, inputImportAction, inputImportPending, resetInputImport} from "./input-import";
+import {nameColorsPanel, nameColorsInput, nameColorsAction, nameColorsFile, resetNameColors, selectNameColors} from "./name-colors";
+import { addressImportPanel, addressImportInput, addressImportFile, addressImportAction, resetAddressImport, selectAddressImport } from "./address-import";
+import {changeOutputsPanel, changeOutputsInput, changeOutputsFile, changeOutputsAction, changeOutputsLookupComplete, changeOutputsPending, resetChangeOutputs, selectChangeOutputs} from "./change-outputs";
+import {inputImportPanel, inputImportInput, inputImportFiles, inputImportAction, inputImportPending, selectInputImport} from "./input-import";
 import {collectionPerformancePanel, type CollectionPerformance} from "./collection-performance";
 export {};
 
@@ -97,6 +97,10 @@ type JobProgress = {
 };
 type PlotGoal = "full" | "connections" | "pegouts";
 type PlotLayoutMode = "fresh" | "update";
+type PegoutLbtcSummary = {
+  lbtc: string; value_base_units: string; pegout_count: number; valued_lbtc_count: number;
+  unknown_amount_count: number; unknown_asset_count: number; non_lbtc_count: number;
+};
 type Plot = {
   preview_id: string; goal: PlotGoal; run_id: string; min_hops: number; max_hops: number | null;
   hop_reference_name?: string;
@@ -104,6 +108,7 @@ type Plot = {
   match_count?: number; connection_count?: number; source_max_hops?: number; source_run_status?: string;
   query?: {include_unspent?: boolean; include_unspendable?: boolean; include_context?: boolean};
   endpoint_count?: number; endpoint_counts?: {pegout: number; unspent: number; unspendable: number};
+  pegout_lbtc_summary?: PegoutLbtcSummary;
   context_edge_count?: number;
   layout_mode?: PlotLayoutMode; board_record_id?: string; board_id?: string; board_name?: string;
   update_counts?: Record<string, number>;
@@ -274,6 +279,7 @@ const state = {
   cases: [] as Case[],
   page: "dashboard" as Page,
   activeCase: null as Case | null,
+  openCases: [] as string[],
   openingCase: null as {id: string; name: string; generation: number} | null,
   selectedRun: "latest",
   addressReview: {
@@ -315,6 +321,101 @@ let pageGeneration = 0;
 let viewRevision = 0;
 let workflowDraft = {caseId: "", goal: "full" as PlotGoal, minHops: "0", maxHops: "10", includeUnspent: false, includeUnspendable: false, includeContext: false, layoutMode: "fresh" as PlotLayoutMode, layoutBoard: "", plot: "", board: "", boardPlot: "", boardGoal: "full" as PlotGoal, boardName: "", savedBoardName: "", linkedBoardName: "", boardUrl: ""};
 let pegoutDraft = {caseId: "", custom: false, txid: "", minHops: "0", maxHops: "10", selected: "", board: "", approved: ""};
+const pegoutDrafts = new Map<string, typeof pegoutDraft>();
+type InvestigationView = {
+  page: "case" | "case-settings" | "addresses"; caseView: CaseView; selectedRun: string;
+  addressReview?: typeof state.addressReview; scrollY?: number;
+};
+const investigationViews = new Map<string, InvestigationView>();
+const importedInputEditors = new Set<string>();
+const investigationTabsKey = "liquid-tracer:investigation-tabs:v1";
+
+function invalidateAddressReview(caseId: string): void {
+  const remembered = investigationViews.get(caseId)?.addressReview;
+  if (remembered) {remembered.selected = null; remembered.data = null;}
+  if (state.activeCase?.id === caseId) {
+    state.addressReview.selected = null; state.addressReview.data = null;
+  }
+}
+
+function resetImportedInputEditors(caseId: string): void {
+  resetAddressImport(caseId); resetNameColors(caseId); resetChangeOutputs(caseId);
+  importedInputEditors.delete(caseId);
+}
+
+function invalidateImportedInputs(caseId: string): void {
+  invalidateAddressReview(caseId);
+  importedInputEditors.add(caseId);
+  if (state.activeCase?.id === caseId) resetImportedInputEditors(caseId);
+}
+
+function persistInvestigationTabs(): void {
+  try {
+    // Only navigation is persisted. Evidence and unsaved form contents stay in memory.
+    window.sessionStorage.setItem(investigationTabsKey, JSON.stringify({ids: state.openCases,
+      views: state.openCases.map(id => {
+        const view = viewingCase(id) ? {page: state.page, caseView: state.caseView, selectedRun: currentRun()?.id || state.selectedRun} : investigationViews.get(id);
+        return {id, page: view?.page, caseView: view?.caseView, selectedRun: view?.selectedRun};
+      })}));
+  } catch { /* Tabs still work when browser storage is unavailable. */ }
+}
+
+function restoreInvestigationTabs(): void {
+  try {
+    const saved = JSON.parse(window.sessionStorage.getItem(investigationTabsKey) || "null");
+    if (!saved || !Array.isArray(saved.ids)) return;
+    const available = new Set(state.cases.map(item => item.id));
+    state.openCases = [...new Set<string>(saved.ids.filter((id: unknown): id is string => typeof id === "string" && available.has(id)))];
+    if (Array.isArray(saved.views)) for (const view of saved.views) {
+      if (!view || !state.openCases.includes(view.id)) continue;
+      investigationViews.set(view.id, {
+        page: ["case", "case-settings", "addresses"].includes(view.page) ? view.page : "case",
+        caseView: ["collect", "plots", "history"].includes(view.caseView) ? view.caseView : "collect",
+        selectedRun: typeof view.selectedRun === "string" ? view.selectedRun : "latest",
+      });
+    }
+  } catch { /* Ignore unavailable or outdated session data. */ }
+}
+
+function addOpenInvestigation(id: string): void {
+  if (!state.openCases.includes(id)) state.openCases.push(id);
+  persistInvestigationTabs();
+}
+
+function rememberInvestigationView(): void {
+  const id = state.activeCase?.id;
+  if (!id || !viewingCase(id) || !state.openCases.includes(id)) return;
+  savePlotLayoutDraft(); saveSettingsDraft(); saveAddressDraft();
+  investigationViews.set(id, {page: state.page as InvestigationView["page"], caseView: state.caseView,
+    selectedRun: currentRun()?.id || state.selectedRun,
+    addressReview: {...state.addressReview, loading: false}, scrollY: window.scrollY || 0});
+  persistInvestigationTabs();
+}
+
+function investigationTabs(): string {
+  if (!state.openCases.length) return "";
+  return `<nav class="investigation-tabs" aria-label="Open investigations"><div class="investigation-tab-list">${state.openCases.map(id => {
+    const name = state.cases.find(item => item.id === id)?.name || (state.activeCase?.id === id ? state.activeCase.name : id);
+    const active = viewingCase(id), count = runningJobs().filter(job => job.caseId === id).length;
+    return `<div class="investigation-tab${active ? " active" : ""}"><button class="investigation-tab-open" data-case="${esc(id)}" title="${esc(name)}"${active ? ' aria-current="page"' : ""}${disabled(isCaseOpening(id))}><span class="investigation-tab-name">${esc(name)}</span><span class="investigation-tab-status"${count ? ' role="status"' : ""}>${count ? `${count} running` : ""}</span></button><button class="investigation-tab-close" data-action="close-investigation-tab" data-id="${esc(id)}" aria-label="Close ${esc(name)} tab" title="Close tab; running tasks continue">${icon("close")}</button></div>`;
+  }).join("")}</div><button class="investigation-tab-add" data-page="new" aria-label="New investigation" title="New investigation">${icon("plus")}</button></nav>`;
+}
+
+async function closeInvestigationTab(id: string): Promise<void> {
+  const index = state.openCases.indexOf(id);
+  if (index < 0) return;
+  const active = viewingCase(id);
+  rememberInvestigationView();
+  state.openCases.splice(index, 1);
+  investigationViews.delete(id);
+  persistInvestigationTabs();
+  if (state.openingCase?.id === id) cancelCaseOpening();
+  if (active) {
+    const next = state.openCases[Math.min(index, state.openCases.length - 1)];
+    navigate("dashboard");
+    if (next) await openCase(next);
+  } else render();
+}
 
 const esc = (value: unknown): string =>
   String(value ?? "").replace(
@@ -335,9 +436,10 @@ const human = (value: unknown): string =>
 const runningJobs = (): ActiveJob[] => [...state.jobs.values()].filter(job => job.status === "running" || job.status === "cancelling");
 const viewingCase = (caseId?: string): boolean => !!caseId && state.activeCase?.id === caseId && ["case", "case-settings", "addresses"].includes(state.page);
 const scopeBusy = (caseId?: string): boolean => runningJobs().some(job => job.caseId === caseId);
-const isBusy = (): boolean => submitting || changeOutputsPending() || inputImportPending() ||
+const investigationEditorBusy = (): boolean => viewingCase(state.activeCase?.id) && (changeOutputsPending() || inputImportPending());
+const isBusy = (): boolean => submitting || investigationEditorBusy() ||
   (state.page === "new" ? scopeBusy() : viewingCase(state.activeCase?.id) ? scopeBusy(state.activeCase!.id) : false);
-const draftBusy = (): boolean => submitting || changeOutputsPending() || inputImportPending();
+const draftBusy = (): boolean => submitting || investigationEditorBusy();
 function requestedResource(action: string, body: Record<string, unknown> = {}, caseId: string | null | undefined = state.activeCase?.id): JobResource {
   if (["trace", "address-counts"].includes(action)) return {resource_kind: "collection"};
   if (action === "plot" && body.layout_mode !== "update") return {resource_kind: "plot"};
@@ -728,6 +830,13 @@ function jobBanner(): string {
 }
 
 function updateJobProgress(): void {
+  for (const id of state.openCases) {
+    const status = document.querySelector<HTMLElement>(`.investigation-tab-open[data-case="${id}"] .investigation-tab-status`);
+    if (status) {
+      const count = runningJobs().filter(job => job.caseId === id).length;
+      status.textContent = count ? `${count} running` : "";
+    }
+  }
   const container = document.querySelector("#job-tasks");
   if (!container) return;
   const focused = document.activeElement as HTMLElement | null;
@@ -760,6 +869,7 @@ function cancelCaseOpening(): void {
 }
 
 function render(focus = false): void {
+  const tabScroll = document.querySelector(".investigation-tab-list")?.scrollLeft || 0;
   const focused = document.activeElement as HTMLInputElement | HTMLTextAreaElement | null;
   const focusedId = !focus && focused?.closest?.("#main") ? focused.id : undefined;
   const selection = focusedId && typeof focused?.selectionStart === "number"
@@ -775,8 +885,11 @@ function render(focus = false): void {
     "case-settings": "Investigation settings",
     addresses: "Address review",
   };
-  app.innerHTML = `<div class="layout">${sidebar()}<div class="main-shell"><header class="workspace-header"><div class="topbar"><div class="breadcrumb">${icon("folder")}<span>Workspace</span>${icon("chevron")}<strong>${esc(names[state.page])}</strong></div><div class="topbar-right"><span class="local-pill">${icon("lock")} LOCAL SESSION</span><span class="avatar" aria-label="Investigation workspace">LT</span></div></div>${jobBanner()}${caseOpeningBanner()}</header><main id="main" class="content" tabindex="-1">${state.error ? `<div class="alert error" role="alert">${icon("info")}<div><strong>Unable to complete the action</strong><p>${esc(state.error)}</p></div><button class="dismiss" data-action="dismiss-error" aria-label="Dismiss error">${icon("close")}</button></div>` : ""}${miroEditConflictsPanel()}${state.page === "dashboard" ? dashboard() : state.page === "new" ? newCase() : state.page === "case" ? workspace() : state.page === "addresses" ? addressReviewPage() : settingsPage()}</main></div></div>`;
+  app.innerHTML = `<div class="layout">${sidebar()}<div class="main-shell"><header class="workspace-header"><div class="topbar"><div class="breadcrumb">${icon("folder")}<span>Workspace</span>${icon("chevron")}<strong>${esc(names[state.page])}</strong></div><div class="topbar-right"><span class="local-pill">${icon("lock")} LOCAL SESSION</span><span class="avatar" aria-label="Investigation workspace">LT</span></div></div>${investigationTabs()}${jobBanner()}${caseOpeningBanner()}</header><main id="main" class="content" tabindex="-1">${state.error ? `<div class="alert error" role="alert">${icon("info")}<div><strong>Unable to complete the action</strong><p>${esc(state.error)}</p></div><button class="dismiss" data-action="dismiss-error" aria-label="Dismiss error">${icon("close")}</button></div>` : ""}${miroEditConflictsPanel()}${state.page === "dashboard" ? dashboard() : state.page === "new" ? newCase() : state.page === "case" ? workspace() : state.page === "addresses" ? addressReviewPage() : settingsPage()}</main></div></div>`;
   workspaceHeaderObserver?.disconnect();
+  const tabList = document.querySelector(".investigation-tab-list");
+  if (tabList) tabList.scrollLeft = tabScroll;
+  if (focus) document.querySelector(".investigation-tab.active")?.scrollIntoView({block: "nearest", inline: "nearest"});
   const header = document.querySelector(".workspace-header");
   if (header) workspaceHeaderObserver?.observe(header);
   renderedSettingsKey = ["case-settings", "settings"].includes(state.page) ? settingsKey() : "";
@@ -939,7 +1052,8 @@ function connectionsGraph(artifact: Artifact | undefined, saved: boolean): strin
 
 function currentPegoutSearch(detail: Case): PegoutSearch | undefined {
   if (pegoutDraft.caseId !== detail.id) {
-    pegoutDraft = {caseId: detail.id, custom: false, txid: "", minHops: "0",
+    if (pegoutDraft.caseId) pegoutDrafts.set(pegoutDraft.caseId, pegoutDraft);
+    pegoutDraft = pegoutDrafts.get(detail.id) || {caseId: detail.id, custom: false, txid: "", minHops: "0",
       maxHops: "10", selected: "", board: "", approved: ""};
   }
   return detail.pegout_searches?.find(search => search.id === pegoutDraft.selected) || detail.pegout_searches?.[0];
@@ -1608,6 +1722,24 @@ function seedTransactionsPanel(detail: Case, run?: Run): string {
   return `<section class="panel seed-panel" aria-label="Seed transactions"><div class="panel-head"><div><h2>Seed transactions</h2><p>${recorded ? "Starting outputs recorded in this snapshot." : "Selected starting outputs for this investigation."} Vout indexes start at 0.</p></div><span class="badge gray">${transactions.size} transaction${transactions.size === 1 ? "" : "s"} · ${count} selected output${count === 1 ? "" : "s"}</span></div>${rows ? `<div class="table-wrap seed-table-wrap" tabindex="0" aria-label="Seed transaction IDs and selected output indexes"><table class="seed-table"><thead><tr><th scope="col">Transaction ID</th><th scope="col">Selected vout</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="panel-body small muted">No seed outputs are recorded for this ${recorded ? "snapshot" : "investigation"}.</div>`}</section>`;
 }
 
+function pegoutLbtcTotal(detail: Case, run?: Run): string {
+  if (!run) return "";
+  const plot = detail.plots?.filter(item => item.goal === "pegouts" && item.run_id === run.id)
+    .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""))[0];
+  if (!plot) return "";
+  const summary = plot.pegout_lbtc_summary;
+  if (!summary) return '<div class="pegout-total"><div><span>Peg-out LBTC total</span><p>Generate a new peg-out trace to calculate the total for this snapshot.</p></div></div>';
+  const unknown = summary.unknown_amount_count + summary.unknown_asset_count;
+  const amount = unknown && !summary.valued_lbtc_count ? "Unknown" : `${summary.lbtc} LBTC`;
+  const notes = [`${summary.pegout_count} unique peg-out${summary.pegout_count === 1 ? "" : "s"}`];
+  if (unknown) notes.push(`Known amounts only: ${summary.valued_lbtc_count} valued in LBTC`);
+  if (summary.unknown_amount_count) notes.push(`${summary.unknown_amount_count} hidden or unavailable amount${summary.unknown_amount_count === 1 ? "" : "s"}`);
+  if (summary.unknown_asset_count) notes.push(`${summary.unknown_asset_count} unidentified asset${summary.unknown_asset_count === 1 ? "" : "s"}`);
+  if (summary.non_lbtc_count) notes.push(`${summary.non_lbtc_count} non-LBTC output${summary.non_lbtc_count === 1 ? "" : "s"} excluded`);
+  const endpoints = plot.artifact?.downloads.find(item => item.name === "trace-endpoints.csv");
+  return `<div class="pegout-total" role="group" aria-label="Peg-out LBTC total"><div><span>Peg-out LBTC total</span><strong>${esc(amount)}</strong><p>${esc(notes.join(" · "))}.</p><p class="small muted">Latest peg-out trace for this snapshot${plot.max_hops != null ? ` · Hops ${esc(plot.min_hops)}–${esc(plot.max_hops)}` : ""}${plot.created_at ? ` · ${esc(formatDate(plot.created_at))}` : ""}. Sums full endpoint values in the saved trace.</p></div>${downloadLink(endpoints, "Endpoint CSV", "small")}</div>`;
+}
+
 function workspace(): string {
   const detail = state.activeCase;
   if (!detail)
@@ -1635,7 +1767,7 @@ function workspace(): string {
   return `<div class="page-heading case-heading"><div><div class="eyebrow">Investigation workspace</div><h1 id="page-title" tabindex="-1">${esc(detail.name)}</h1><div class="workspace-meta"><span class="badge ${detail.fixture ? "purple" : ""}">${detail.fixture ? "Synthetic data" : "Live Liquid"}</span><span class="badge gray">${(detail.runs || []).length} saved runs</span></div></div><div class="heading-actions">${button("Investigation settings", "case-settings", "settings", "", isBusy())}</div></div>
     <nav class="case-navigation" aria-label="Investigation tools">${views.map(([view, label]) => `<button type="button" class="case-nav${(state.caseView === view || view === "plots" && state.caseView === "boards") ? " active" : ""}" data-action="view-${view}"${state.caseView === view || view === "plots" && state.caseView === "boards" ? ' aria-current="page"' : ""}>${label}</button>`).join("")}</nav>
     ${last ? resultBanner(last.action, last.result) : ""}
-    <section class="panel"><div class="panel-head"><div><h2>${saved ? "Collected data" : "Ready to collect"}</h2><p>${saved ? "Choose the collected data used for plots and downloads." : "Your starting outputs and limits are saved."}</p></div>${saved ? `<label class="run-picker">Snapshot<select class="input" id="run-picker" aria-label="Saved run snapshot">${runOptions}</select></label>` : '<span class="badge gray">No runs yet</span>'}</div>${saved ? `<div class="run-summary"><div><span>Hops collected</span><strong${run?.collected_hops === undefined ? ' class="text-value"' : ""}>${esc(run?.collected_hops ?? "Not recorded")}</strong><span>${run?.hop_reference_name ? "Deepest collected group-relative hop" : "Deepest saved transaction hop"}</span></div><div><span>Tracked transactions</span><strong>${esc(run?.transaction_count ?? "—")}</strong></div><div><span>Unfinished branches</span><strong>${esc(run?.frontier_count ?? "—")}</strong></div><div><span>Run status</span><strong class="text-value">${esc(human(run?.status || "saved"))}</strong></div></div><div class="run-note">${icon("clock")}<span>${esc(formatDate(run?.created_at))}${run?.max_hops !== undefined ? ` · Collection hop limit: ${run.max_hops}` : ""}${run?.stop_reason ? ` · ${esc(human(run.stop_reason))}` : ""} · ${esc(hopBasis(run?.hop_reference_name))}.${run?.collected_hops !== undefined ? ` ${esc(hopBasisExplanation(run?.hop_reference_name))}` : ""}</span></div>${collectionPerformancePanel(run?.performance)}` : `<div class="empty-state" style="padding:31px 24px"><div class="empty-icon">${icon("graph")}</div><h2>${detail.seed_count ?? detail.seeds?.length ?? "Your"} starting output${(detail.seed_count ?? detail.seeds?.length) === 1 ? "" : "s"} selected</h2><p>Collect data first, then choose a plotting goal and its Miro board.</p></div>`}</section>
+    <section class="panel"><div class="panel-head"><div><h2>${saved ? "Collected data" : "Ready to collect"}</h2><p>${saved ? "Choose the collected data used for plots and downloads." : "Your starting outputs and limits are saved."}</p></div>${saved ? `<label class="run-picker">Snapshot<select class="input" id="run-picker" aria-label="Saved run snapshot">${runOptions}</select></label>` : '<span class="badge gray">No runs yet</span>'}</div>${saved ? `<div class="run-summary"><div><span>Hops collected</span><strong${run?.collected_hops === undefined ? ' class="text-value"' : ""}>${esc(run?.collected_hops ?? "Not recorded")}</strong><span>${run?.hop_reference_name ? "Deepest collected group-relative hop" : "Deepest saved transaction hop"}</span></div><div><span>Tracked transactions</span><strong>${esc(run?.transaction_count ?? "—")}</strong></div><div><span>Unfinished branches</span><strong>${esc(run?.frontier_count ?? "—")}</strong></div><div><span>Run status</span><strong class="text-value">${esc(human(run?.status || "saved"))}</strong></div></div><div class="run-note">${icon("clock")}<span>${esc(formatDate(run?.created_at))}${run?.max_hops !== undefined ? ` · Collection hop limit: ${run.max_hops}` : ""}${run?.stop_reason ? ` · ${esc(human(run.stop_reason))}` : ""} · ${esc(hopBasis(run?.hop_reference_name))}.${run?.collected_hops !== undefined ? ` ${esc(hopBasisExplanation(run?.hop_reference_name))}` : ""}</span></div>${pegoutLbtcTotal(detail, run)}${collectionPerformancePanel(run?.performance)}` : `<div class="empty-state" style="padding:31px 24px"><div class="empty-icon">${icon("graph")}</div><h2>${detail.seed_count ?? detail.seeds?.length ?? "Your"} starting output${(detail.seed_count ?? detail.seeds?.length) === 1 ? "" : "s"} selected</h2><p>Collect data first, then choose a plotting goal and its Miro board.</p></div>`}</section>
     ${seedTransactionsPanel(detail, run)}
     <div class="workspace-content">${content}</div>`;
 }
@@ -1914,7 +2046,7 @@ async function refreshCaseDetail(caseId: string, followLatest: () => boolean = (
   caseRefreshSequence.set(caseId, sequence);
   const generation = pageGeneration;
   const detail = await api<Case>(`/api/cases/${encodeURIComponent(caseId)}`);
-  const applied = caseRefreshSequence.get(caseId) === sequence && generation === pageGeneration && state.activeCase?.id === caseId;
+  const applied = caseRefreshSequence.get(caseId) === sequence && generation === pageGeneration && state.activeCase?.id === caseId && !state.openingCase;
   if (applied) {
     const priorRun = currentRun()?.id;
     if (followLatest()) state.selectedRun = "latest";
@@ -1945,6 +2077,7 @@ async function discoverJobs(): Promise<void> {
 
 async function openCase(id: string): Promise<void> {
   if (isCaseOpening(id)) return;
+  rememberInvestigationView();
   saveSettingsDraft(); saveAddressDraft(); saveDraft();
   resetFrameRecovery();
   state.editConflicts = null;
@@ -1968,23 +2101,29 @@ async function openCase(id: string): Promise<void> {
   if (generation !== pageGeneration) return;
   state.openingCase = null;
   saveDraft();
+  const remembered = investigationViews.get(id);
   state.activeCase = detail;
-  state.addressReview = { query: "", suspectedOnly: false, data: null, selected: null,
+  state.addressReview = remembered?.addressReview || { query: "", suspectedOnly: false, data: null, selected: null,
     loading: false, name: "", notes: "", enabled: false, pasted: "",
     confidence: "suspected", source: "Investigator designation", observedAt: "", stopTracing: true, hopLimit: "" };
-  resetInputImport(detail.id);
-  resetAddressImport(detail.id);
-  resetNameColors(detail.id);
-  resetChangeOutputs(detail.id);
-  state.selectedRun = "latest";
-  state.caseView = "collect";
-  state.page = "case";
+  if (importedInputEditors.has(detail.id)) resetImportedInputEditors(detail.id);
+  selectInputImport(detail.id);
+  selectAddressImport(detail.id);
+  selectNameColors(detail.id);
+  selectChangeOutputs(detail.id);
+  state.selectedRun = detail.runs?.some(run => run.id === remembered?.selectedRun) ? remembered!.selectedRun : "latest";
+  state.caseView = remembered?.caseView || "collect";
+  state.page = remembered?.page || "case";
   state.error = "";
+  addOpenInvestigation(id);
   history.replaceState(null, "", `#case/${encodeURIComponent(id)}`);
   render(true);
+  window.scrollTo?.({top: remembered?.scrollY || 0, behavior: "instant"});
+  if (state.page === "addresses") void loadAddresses(state.addressReview.data?.offset || 0).catch(handleError);
 }
 
 function navigate(page: Page): void {
+  rememberInvestigationView();
   saveSettingsDraft(); saveAddressDraft();
   resetFrameRecovery();
   state.editConflicts = null;
@@ -1997,7 +2136,7 @@ function navigate(page: Page): void {
   history.replaceState(
     null,
     "",
-    page === "dashboard" ? location.pathname : `#${page}`,
+    page === "dashboard" ? location.pathname : viewingCase(state.activeCase?.id) ? `#case/${encodeURIComponent(state.activeCase!.id)}` : `#${page}`,
   );
   render(true);
 }
@@ -2169,7 +2308,7 @@ async function pollJob(identity: string): Promise<void> {
           toast("Frame lookup completed. Choose Recover interrupted frame again to review it in this investigation.");
         }
       } else if (active.action === "change-output-lookup" && active.caseId) {
-        const applied = state.activeCase?.id === active.caseId && changeOutputsLookupComplete(active.caseId, active.id, result);
+        const applied = changeOutputsLookupComplete(active.caseId, active.id, result);
         toast(applied ? "Transaction outputs loaded. Choose the change output, then save." : "Transaction lookup completed. Open Change outputs and load the transaction again to review it.");
       } else if (active.action === "lookup") {
         if (!active.live || job.live === false) {
@@ -2412,6 +2551,10 @@ async function caseAction(action: string): Promise<void> {
 }
 
 async function dispatch(action: string, element?: HTMLElement): Promise<void> {
+  if (action === "close-investigation-tab") {
+    await closeInvestigationTab(element?.dataset.id || "");
+    return;
+  }
   if (["open-job", "dismiss-job", "load-job-outputs"].includes(action)) {
     const job = state.jobs.get(element?.dataset.id || "");
     if (!job) return;
@@ -2447,15 +2590,11 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
   if (action === "input-import-open" && state.activeCase && !isBusy()) {
     saveSettingsDraft(); saveAddressDraft(); cancelCaseOpening(); state.page = "case-settings";
   }
-  if (state.activeCase && await inputImportAction(action, {
-      caseId: state.activeCase.id, busy: isBusy(), render,
+  const inputImportCaseId = state.activeCase?.id;
+  if (inputImportCaseId && await inputImportAction(action, {
+      caseId: inputImportCaseId, busy: isBusy(), render,
       post: (path, body) => api(path, body as Record<string, unknown>),
-      refresh: async () => {
-        const detail = state.activeCase;
-        if (!detail) return;
-        resetAddressImport(detail.id); resetNameColors(detail.id); resetChangeOutputs(detail.id);
-        state.addressReview.selected = null; state.addressReview.data = null;
-      }
+      refresh: async () => {invalidateImportedInputs(inputImportCaseId);}
     }, element)) return;
   if (action === "miro-frame-review") {
     const detail = state.activeCase;
@@ -2479,10 +2618,14 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
   if (action === "name-colors-open" && state.activeCase && !isBusy()) {saveSettingsDraft(); saveAddressDraft(); cancelCaseOpening(); if (state.page !== "case-settings") navigate("case-settings");}
   if (state.activeCase && await nameColorsAction(action, {caseId: state.activeCase.id, busy: isBusy(), render,
       post: (path, body) => api(path, body as Record<string, unknown>)}, element)) return;
-  if (state.activeCase && await addressImportAction(action, {
-      caseId: state.activeCase.id, busy: isBusy(), render,
+  const addressImportCaseId = state.activeCase?.id, addressImportGeneration = pageGeneration;
+  if (addressImportCaseId && await addressImportAction(action, {
+      caseId: addressImportCaseId, busy: isBusy(), render,
       post: (path, body) => api(path, body as Record<string, unknown>),
-      refresh: async () => { state.addressReview.selected = null; await loadAddresses(0); }
+      refresh: async () => {
+        invalidateAddressReview(addressImportCaseId);
+        if (viewingCase(addressImportCaseId) && addressImportGeneration === pageGeneration) await loadAddresses(0);
+      }
     })) return;
   if (action === "address-merge-dialog") {
     await openAddressMergeDialog();
@@ -2752,6 +2895,7 @@ app.addEventListener("submit", (event) => {
         throw new Error(
           "Each starting output must be a 64-character transaction hash followed by a numeric output index, such as :0.",
         );
+      const generation = pageGeneration;
       submitting = true;
       render();
       try {
@@ -2763,47 +2907,66 @@ app.addEventListener("submit", (event) => {
           settings: state.draft.settings,
         });
         await refreshSession();
-        await openCase(created.id);
-        state.draft = {
-          name: "",
-          txids: "",
-          seeds: "",
-          blockchain: "liquid",
-          settings: { ...state.settings },
-          reports: [],
-          selected: new Set(),
-        };
+        addOpenInvestigation(created.id);
+        if (generation === pageGeneration) {
+          const opening = openCase(created.id);
+          const openingGeneration = pageGeneration;
+          await opening;
+          if (openingGeneration === pageGeneration) {
+            state.draft = {
+              name: "",
+              txids: "",
+              seeds: "",
+              blockchain: "liquid",
+              settings: { ...state.settings },
+              reports: [],
+              selected: new Set(),
+            };
+          }
+        }
         toast(
           "Investigation created. Import your data or start the first run.",
         );
+      } catch (error) {
+        if (generation === pageGeneration) throw error;
+        toast(`Could not finish creating the investigation. ${error instanceof Error ? error.message : "Check the launching terminal."}`, true);
       } finally {
         submitting = false;
         render();
       }
     } else if (form.id === "settings-form") {
+      const generation = pageGeneration;
       const savedKey = settingsKey();
+      saveSettingsDraft();
+      const submittedDraft = JSON.stringify(settingsDrafts.get(savedKey));
       const previous = {...defaults, ...(state.page === "case-settings" ? state.activeCase?.run_defaults : state.settings)};
       const settings = {...readSettings(form, previous), ...(state.page === "case-settings" ? selectLayoutSettings(previous) : {})};
       const data = new FormData(form);
-      if (state.page === "case-settings" && state.activeCase) {
-        const caseId = state.activeCase.id;
-        await api(`/api/cases/${encodeURIComponent(caseId)}/settings`, {
-          name: String(data.get("name") || ""),
-          board: state.activeCase.miro_board || "",
-          settings,
-        });
-        state.activeCase = await api<Case>(
-          `/api/cases/${encodeURIComponent(caseId)}`,
-        );
-      } else {
-        await api("/api/settings", { settings });
-        state.draft.settings = { ...settings };
+      try {
+        if (state.page === "case-settings" && state.activeCase) {
+          const caseId = state.activeCase.id;
+          await api(`/api/cases/${encodeURIComponent(caseId)}/settings`, {
+            name: String(data.get("name") || ""),
+            board: state.activeCase.miro_board || "",
+            settings,
+          });
+          await refreshCaseDetail(caseId);
+        } else {
+          await api("/api/settings", { settings });
+          state.draft.settings = { ...settings };
+        }
+        await refreshSession();
+        saveSettingsDraft();
+        if (JSON.stringify(settingsDrafts.get(savedKey)) === submittedDraft) {
+          settingsDrafts.delete(savedKey);
+          if (renderedSettingsKey === savedKey) renderedSettingsKey = "";
+        }
+        render();
+        toast("Settings saved locally.");
+      } catch (error) {
+        if (generation === pageGeneration) throw error;
+        toast(`Could not finish saving settings. ${error instanceof Error ? error.message : "Check the launching terminal."}`, true);
       }
-      await refreshSession();
-      settingsDrafts.delete(savedKey);
-      renderedSettingsKey = "";
-      render();
-      toast("Settings saved locally.");
     }
   })().catch(handleError);
 });
@@ -2939,11 +3102,14 @@ window.addEventListener("hashchange", () => {
 
 async function initialize(): Promise<void> {
   await refreshSession();
+  restoreInvestigationTabs();
   state.draft.settings = { ...state.settings };
   const match = location.hash.match(/^#case\/([a-z0-9]+)$/);
   if (match) await openCase(match[1]);
   else render();
 }
+
+window.addEventListener("pagehide", rememberInvestigationView);
 
 app.addEventListener("toggle", event => {
   const target = event.target as HTMLDetailsElement;

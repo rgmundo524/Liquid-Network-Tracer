@@ -217,15 +217,15 @@ test('successful apply stays reported if list refresh fails; approval is consume
   const count = calls; await apply(ctx); assert.equal(calls, count);
 });
 
-test('late apply or saved-list responses cannot overwrite a different case', async () => {
-  const response = deferred(); let refreshed = false;
-  const ctx = context(async (_path, body) => {
+test('late apply refreshes its owning saved list without overwriting a different case', async () => {
+  const response = deferred(); const refreshPaths = [];
+  const ctx = context(async (path, body) => {
     if ('approve_plan' in body) return response.promise;
-    if ('query' in body) {refreshed = true; return catalog();}
+    if ('query' in body) {refreshPaths.push(path); return catalog();}
     return review();
   });
   await preview(ctx); const work = apply(ctx);
   reset('case B'); response.resolve({changed: 1}); await work;
-  assert.equal(refreshed, false);
+  assert.deepEqual(refreshPaths, ['/api/cases/case%20A/change-outputs']);
   await open({...context(), caseId: 'case B'}); assert.doesNotMatch(panel('case B', false), /Saved 1/);
 });

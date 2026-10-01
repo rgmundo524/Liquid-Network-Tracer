@@ -21,9 +21,10 @@ const txid = 'a'.repeat(64);
 const defaults = {hops: 1, hop_reference_name: '', max_transactions: 20, max_outpoints: 100, max_requests: 30,
   max_seconds: 60, max_new_items: 750, layout_attempts: 25, connector_style: 'straight'};
 
-async function harness(respond = () => undefined, {hash = ''} = {}) {
+async function harness(respond = () => undefined, {hash = '', storage = new Map(), importAction, importPending = () => false} = {}) {
   frameRecovery.resetFrameRecovery();
-  const calls = [], listeners = {}, dialogListeners = {}, notifications = [], importActions = [];
+  const calls = [], listeners = {}, windowListeners = {}, dialogListeners = {}, notifications = [], importActions = [];
+  const editorResets = [];
   const elements = new Map();
   let currentForm = null;
   const app = {innerHTML: '', addEventListener(name, callback) {listeners[name] = callback;}};
@@ -31,9 +32,13 @@ async function harness(respond = () => undefined, {hash = ''} = {}) {
     close() {if (this.open) {this.open = false; dialogListeners.close?.();}}, showModal() {this.open = true;}, querySelector() {return null;}};
   const context = vm.createContext({
     Error, URL, console, ...frameRecovery, collectionPerformancePanel,
-    resetNameColors() {}, resetAddressImport() {}, resetChangeOutputs() {}, resetInputImport() {},
-    inputImportPending() {return false;}, inputImportPanel() {return "";},
+    resetNameColors(caseId) {editorResets.push({editor: 'colors', caseId});},
+    resetAddressImport(caseId) {editorResets.push({editor: 'addresses', caseId});},
+    resetChangeOutputs(caseId) {editorResets.push({editor: 'change-outputs', caseId});}, resetInputImport() {},
+    selectNameColors() {}, selectAddressImport() {}, selectChangeOutputs() {}, selectInputImport() {},
+    inputImportPending: importPending, inputImportPanel() {return "";},
     inputImportAction(action, context) {
+      if (importAction) return importAction(action, context);
       if (!action.startsWith('input-import-')) return false;
       if (!context.busy) importActions.push({action, caseId: context.caseId});
       return true;
@@ -57,7 +62,8 @@ async function harness(respond = () => undefined, {hash = ''} = {}) {
       addEventListener() {},
       createElement() {return {remove() {}};},
     },
-    window: {addEventListener() {}},
+    window: {addEventListener(name, callback) {windowListeners[name] = callback;}, scrollY: 0, scrollTo() {},
+      sessionStorage: {getItem(key) {return storage.get(key) ?? null;}, setItem(key, value) {storage.set(key, value);}}},
     history: {replaceState() {}},
     location: {hash, pathname: '/', reload() {}},
     setInterval() {}, setTimeout() {return 1;}, clearTimeout() {},
@@ -77,7 +83,7 @@ async function harness(respond = () => undefined, {hash = ''} = {}) {
   script.runInContext(context);
   await context.startup;
   return {
-    ...context.appTest, app, dialog, calls, notifications, importActions, elements,
+    ...context.appTest, app, dialog, calls, notifications, importActions, elements, storage, windowListeners, editorResets,
     async submitDialog(values = {}) {
       dialogListeners.submit({target: {values, reportValidity: () => true}, preventDefault() {}});
       await new Promise(setImmediate);
@@ -3286,4 +3292,273 @@ test('a delayed older job refresh cannot replace newer board and run details', a
   assert.equal(view.state.activeCase.boards[0].id, 'new-board');
   assert.equal(view.state.selectedRun, 'saved1');
   assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'new-layout');
+});
+
+const tabCases = [
+  {id: 'a1', name: 'Alpha & partners', run_defaults: defaults, latest_run: 'a-new',
+    runs: [{id: 'a-new', status: 'bounded_complete'}, {id: 'a-old', status: 'bounded_complete'}]},
+  {id: 'b2', name: 'Beta', run_defaults: defaults, latest_run: 'b-new',
+    runs: [{id: 'b-new', status: 'bounded_complete'}]},
+];
+const tabResponse = path => structuredClone(path === '/api/session' ? {csrf: 'test', settings: defaults, cases: tabCases}
+  : tabCases.find(item => path === `/api/cases/${item.id}`));
+
+test('investigation tabs restore views, snapshots, address edits and plot drafts independently', async () => {
+  const view = await harness(tabResponse);
+  await view.openCase('a1');
+  view.state.selectedRun = 'a-old';
+  await view.dispatch('view-plots');
+  Object.assign(view.currentWorkflow(view.state.activeCase), {goal: 'pegouts', maxHops: '12', boardName: 'Alpha board'});
+  view.state.addressReview.notes = 'Keep this attribution draft';
+  await view.openCase('b2');
+  await view.dispatch('view-history');
+  Object.assign(view.currentWorkflow(view.state.activeCase), {goal: 'connections', maxHops: '3'});
+  await view.openCase('a1');
+  assert.equal(view.state.caseView, 'plots');
+  assert.equal(view.state.selectedRun, 'a-old');
+  assert.equal(view.state.addressReview.notes, 'Keep this attribution draft');
+  assert.equal(view.currentWorkflow(view.state.activeCase).goal, 'pegouts');
+  assert.equal(view.currentWorkflow(view.state.activeCase).boardName, 'Alpha board');
+  assert.deepEqual([...view.state.openCases], ['a1', 'b2']);
+  assert.match(view.app.innerHTML, /aria-label="Open investigations"/);
+  assert.match(view.app.innerHTML, /Alpha &amp; partners/);
+  assert.match(view.app.innerHTML, /aria-label="Close Alpha &amp; partners tab"/);
+  await view.openCase('b2');
+  assert.equal(view.state.caseView, 'history');
+  assert.equal(view.currentWorkflow(view.state.activeCase).goal, 'connections');
+  assert.equal(view.state.addressReview.notes, '');
+});
+
+test('closing investigation tabs selects a neighbor and never cancels background jobs', async () => {
+  const view = await harness(tabResponse);
+  await view.openCase('a1');
+  view.state.jobs.set('working', {id: 'working', action: 'trace', caseId: 'a1', status: 'running', started: Date.now()});
+  await view.openCase('b2');
+  assert.match(view.app.innerHTML, /1 running/);
+  await view.dispatch('close-investigation-tab', {dataset: {id: 'b2'}});
+  assert.equal(view.state.activeCase.id, 'a1');
+  assert.deepEqual([...view.state.openCases], ['a1']);
+  await view.dispatch('close-investigation-tab', {dataset: {id: 'a1'}});
+  assert.equal(view.state.page, 'dashboard');
+  assert.deepEqual([...view.state.openCases], []);
+  assert.equal(view.state.jobs.get('working').status, 'running');
+  assert.equal(view.calls.some(call => call.path.includes('/cancel')), false);
+  await view.dispatch('open-job', {dataset: {id: 'working'}});
+  assert.deepEqual([...view.state.openCases], ['a1']);
+});
+
+test('closing a background investigation tab leaves the active view intact', async () => {
+  const view = await harness(tabResponse);
+  await view.openCase('a1');
+  await view.openCase('b2');
+  await view.dispatch('view-history');
+  await view.dispatch('close-investigation-tab', {dataset: {id: 'a1'}});
+  assert.equal(view.state.activeCase.id, 'b2');
+  assert.equal(view.state.caseView, 'history');
+});
+
+test('browser refresh restores investigation tabs and navigation without form contents', async () => {
+  const view = await harness(tabResponse);
+  await view.openCase('a1');
+  view.state.selectedRun = 'a-old';
+  await view.dispatch('view-plots');
+  view.state.addressReview.notes = 'Private unsaved notes';
+  await view.openCase('b2');
+  await view.dispatch('view-history');
+  view.windowListeners.pagehide();
+  assert.doesNotMatch(view.storage.get('liquid-tracer:investigation-tabs:v1'), /Private unsaved notes/);
+  const refreshed = await harness(tabResponse, {storage: view.storage, hash: '#case/b2'});
+  assert.deepEqual([...refreshed.state.openCases], ['a1', 'b2']);
+  assert.equal(refreshed.state.caseView, 'history');
+  await refreshed.openCase('a1');
+  assert.equal(refreshed.state.selectedRun, 'a-old');
+  assert.equal(refreshed.state.caseView, 'plots');
+});
+
+test('tab restoration tolerates removed cases, duplicates, corrupt storage and disabled storage', async () => {
+  const key = 'liquid-tracer:investigation-tabs:v1';
+  const filtered = await harness(tabResponse, {storage: new Map([[key, JSON.stringify({ids: ['gone', 'a1', 'a1'],
+    views: [{id: 'a1', page: 'unknown', caseView: 'unknown', selectedRun: 'gone-run'}]})]])});
+  assert.deepEqual([...filtered.state.openCases], ['a1']);
+  await filtered.openCase('a1');
+  assert.equal(filtered.state.caseView, 'collect');
+  assert.equal(filtered.state.selectedRun, 'latest');
+  for (const storage of [new Map([[key, '{broken']]), {get() {throw Error('disabled');}, set() {throw Error('disabled');}}]) {
+    const view = await harness(tabResponse, {storage});
+    await view.openCase('a1');
+    assert.equal(view.state.activeCase.id, 'a1');
+  }
+});
+
+test('a late tab opening cannot replace a more recently selected investigation', async () => {
+  let release;
+  const slow = new Promise(resolve => {release = resolve;});
+  const view = await harness(path => path === '/api/cases/a1' ? slow : tabResponse(path));
+  const opening = view.openCase('a1');
+  await view.openCase('b2');
+  release(tabCases[0]);
+  await opening;
+  assert.equal(view.state.activeCase.id, 'b2');
+  assert.deepEqual([...view.state.openCases], ['b2']);
+});
+
+test('returning to a tab pins its displayed snapshot when another collection finishes', async () => {
+  let completed = false;
+  const view = await harness(path => path === '/api/cases/a1' && completed
+    ? {...tabCases[0], latest_run: 'a-newer', runs: [{id: 'a-newer', status: 'bounded_complete'}, ...tabCases[0].runs]}
+    : tabResponse(path));
+  await view.openCase('a1');
+  await view.openCase('b2');
+  completed = true;
+  await view.openCase('a1');
+  assert.equal(view.state.activeCase.latest_run, 'a-newer');
+  assert.equal(view.state.selectedRun, 'a-new');
+});
+
+test('a settings save finishing after a tab switch cannot replace the selected investigation', async () => {
+  let release;
+  const pending = new Promise(resolve => {release = resolve;});
+  const view = await harness(path => path === '/api/cases/a1/settings' ? pending : tabResponse(path));
+  await view.openCase('a1');
+  view.navigate('case-settings');
+  await view.submitSettings({...defaults, name: 'Alpha renamed'});
+  await view.openCase('b2');
+  await view.dispatch('view-history');
+  release({});
+  await new Promise(setImmediate);
+  assert.equal(view.state.activeCase.id, 'b2');
+  assert.equal(view.state.caseView, 'history');
+  assert.equal(view.state.error, '');
+});
+
+test('creating an investigation in the background opens its tab without switching away from current work', async () => {
+  let release;
+  const pending = new Promise(resolve => {release = resolve;});
+  const view = await harness(path => path === '/api/cases' ? pending : tabResponse(path));
+  view.navigate('new');
+  await view.submit({name: 'Alpha new', seeds: `${txid}:0`});
+  await view.openCase('b2');
+  release(tabCases[0]);
+  await new Promise(setImmediate);
+  assert.equal(view.state.activeCase.id, 'b2');
+  assert.deepEqual([...view.state.openCases], ['b2', 'a1']);
+  assert.equal(view.state.error, '');
+});
+
+test('switching to settings and back retains both cases unsaved settings', async () => {
+  const view = await harness(tabResponse);
+  await view.openCase('a1');
+  view.navigate('case-settings');
+  view.elements.set('#settings-form', {values: {...defaults, name: 'Unsaved Alpha', hops: 17}});
+  await view.openCase('b2');
+  view.elements.delete('#settings-form');
+  view.navigate('case-settings');
+  view.elements.set('#settings-form', {values: {...defaults, name: 'Unsaved Beta', hops: 4}});
+  await view.openCase('a1');
+  view.elements.delete('#settings-form');
+  assert.equal(view.state.page, 'case-settings');
+  assert.match(view.settingsPage(), /value="Unsaved Alpha"/);
+  assert.match(view.settingsPage(), /name="hops"[^>]*value="17"/);
+  await view.openCase('b2');
+  assert.match(view.settingsPage(), /value="Unsaved Beta"/);
+});
+
+test('a background CSV import invalidates only its owning investigation caches on return', async () => {
+  const started = Promise.withResolvers(), pending = Promise.withResolvers();
+  const view = await harness(tabResponse, {importAction: async (action, context) => {
+    if (action !== 'input-import-apply') return false;
+    started.resolve(context.caseId);
+    await pending.promise;
+    await context.refresh();
+    return true;
+  }});
+  await view.openCase('a1');
+  view.state.addressReview.selected = {address: 'alpha-address'};
+  view.state.addressReview.data = {rows: [{address: 'alpha-address'}], offset: 0, limit: 25, total: 1};
+  const applying = view.dispatch('input-import-apply');
+  assert.equal(await started.promise, 'a1');
+  await view.openCase('b2');
+  view.state.addressReview.selected = {address: 'beta-address'};
+  view.state.addressReview.data = {rows: [{address: 'beta-address'}], offset: 0, limit: 25, total: 1};
+  view.state.addressReview.notes = 'Keep unsaved Beta notes';
+  pending.resolve();
+  await applying;
+  assert.equal(view.state.activeCase.id, 'b2');
+  assert.equal(view.state.addressReview.selected.address, 'beta-address');
+  assert.equal(view.state.addressReview.notes, 'Keep unsaved Beta notes');
+  assert.deepEqual(view.editorResets, []);
+  await view.openCase('a1');
+  assert.equal(view.state.addressReview.selected, null);
+  assert.equal(view.state.addressReview.data, null);
+  assert.deepEqual(view.editorResets, [
+    {editor: 'addresses', caseId: 'a1'}, {editor: 'colors', caseId: 'a1'}, {editor: 'change-outputs', caseId: 'a1'},
+  ]);
+  await view.openCase('b2');
+  assert.equal(view.state.addressReview.selected.address, 'beta-address');
+  assert.equal(view.state.addressReview.notes, 'Keep unsaved Beta notes');
+});
+
+test('an investigation import in progress does not block new-investigation output loading', async () => {
+  const view = await harness(path => path === '/api/lookup'
+    ? activeTask('independent-lookup', null, {action: 'lookup', live: true}) : tabResponse(path),
+    {importPending: () => true});
+  await view.openCase('a1');
+  assert.equal(view.isBusy(), true);
+  view.navigate('new');
+  view.state.draft.txids = txid;
+  assert.equal(view.isBusy(), false);
+  await view.dispatch('lookup');
+  assert.equal(view.calls.filter(call => call.path === '/api/lookup').length, 1);
+});
+
+const valueSummary = (lbtc, extra = {}) => ({lbtc, value_base_units: '123456789', pegout_count: 2,
+  valued_lbtc_count: 2, unknown_amount_count: 0, unknown_asset_count: 0, non_lbtc_count: 0, ...extra});
+const valuePlot = (preview_id, run_id, created_at, summary) => ({preview_id, run_id, created_at, goal: 'pegouts',
+  min_hops: 0, max_hops: 10, pegout_lbtc_summary: summary, node_count: 4, edge_count: 4, transaction_count: 2,
+  status: 'matches_found', reviewable: true, artifact: {downloads: [{name: 'trace-endpoints.csv', url: '/files/endpoints.csv'}]}});
+
+test('collected data shows the newest peg-out LBTC total for only the selected snapshot', async () => {
+  const view = await harness(tabResponse);
+  await view.openCase('a1');
+  view.state.activeCase.plots = [
+    valuePlot('old', 'a-new', '2026-10-01T01:00:00Z', valueSummary('9')),
+    valuePlot('unrelated', 'a-old', '2026-10-01T03:00:00Z', valueSummary('88')),
+    valuePlot('latest', 'a-new', '2026-10-01T02:00:00Z', valueSummary('1.23456789')),
+    {...valuePlot('full', 'a-new', '2026-10-01T04:00:00Z', valueSummary('1000')), goal: 'full'},
+  ];
+  const metric = () => view.workspace().match(/<div class="pegout-total"[\s\S]*?<\/a><\/div>/)[0];
+  assert.match(metric(), /1\.23456789 LBTC/);
+  assert.match(metric(), /2 unique peg-outs/);
+  assert.match(metric(), /Hops 0–10/);
+  assert.match(metric(), /Endpoint CSV/);
+  assert.doesNotMatch(metric(), /<strong>(?:9|88|1000) LBTC/);
+  view.state.selectedRun = 'a-old';
+  assert.match(metric(), /88 LBTC/);
+});
+
+test('peg-out LBTC total distinguishes partial values, undisclosed values and a genuine zero', async () => {
+  const view = await harness(tabResponse);
+  await view.openCase('a1');
+  const plot = valuePlot('partial', 'a-new', '2026-10-01T02:00:00Z', valueSummary('1.23456789', {
+    pegout_count: 4, valued_lbtc_count: 1, unknown_amount_count: 1, unknown_asset_count: 1, non_lbtc_count: 1,
+  }));
+  view.state.activeCase.plots = [plot];
+  assert.match(view.workspace(), /Known amounts only: 1 valued in LBTC/);
+  assert.match(view.workspace(), /1 hidden or unavailable amount/);
+  assert.match(view.workspace(), /1 unidentified asset/);
+  assert.match(view.workspace(), /1 non-LBTC output excluded/);
+  plot.pegout_lbtc_summary = valueSummary('0', {pegout_count: 1, valued_lbtc_count: 0, unknown_amount_count: 1});
+  assert.match(view.workspace(), /<strong>Unknown<\/strong>/);
+  plot.pegout_lbtc_summary = valueSummary('0', {pegout_count: 0, valued_lbtc_count: 0});
+  assert.match(view.workspace(), /<strong>0 LBTC<\/strong>/);
+  assert.match(view.workspace(), /0 unique peg-outs/);
+});
+
+test('old peg-out plots request a new trace instead of showing an invented LBTC total', async () => {
+  const view = await harness(tabResponse);
+  await view.openCase('a1');
+  assert.doesNotMatch(view.workspace(), /Peg-out LBTC total/);
+  view.state.activeCase.plots = [valuePlot('legacy', 'a-new', '2026-10-01T02:00:00Z', undefined)];
+  assert.match(view.workspace(), /Generate a new peg-out trace to calculate the total for this snapshot/);
+  assert.doesNotMatch(view.workspace(), /<strong>0 LBTC/);
 });

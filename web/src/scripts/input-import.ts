@@ -22,12 +22,21 @@ function emptyDraft(caseId: string) {
     pending: false, version: 0, message: '', offsets: [] as number[]};
 }
 let draft = emptyDraft('');
+const cases = new Map<string, typeof draft>();
+export function selectInputImport(caseId: string): void {
+  if (!cases.has(caseId)) cases.set(caseId, emptyDraft(caseId));
+  draft = cases.get(caseId)!;
+}
+const retained = (owner: typeof draft): boolean => cases.get(owner.caseId) === owner;
 
-export function resetInputImport(caseId: string): void { draft = emptyDraft(caseId); }
+export function resetInputImport(caseId: string): void {
+  cases.set(caseId, emptyDraft(caseId)); selectInputImport(caseId);
+}
 export function inputImportPending(): boolean { return draft.pending; }
 
-function invalidate(): void {
-  draft.version += 1; draft.review = null; draft.offsets = []; draft.message = '';
+function invalidate(owner = draft): void {
+  owner.version += 1; owner.review = null; owner.offsets = []; owner.message = '';
+  if (owner !== draft) return;
   const apply = document.querySelector<HTMLButtonElement>('#input-import-apply');
   if (apply) apply.disabled = true;
   const review = document.querySelector('#input-import-review');
@@ -92,7 +101,7 @@ export async function inputImportFiles(input: HTMLInputElement, render: () => vo
       catch { throw new Error(`${file.name}: must contain valid UTF-8 text.`); }
       return {name: file.name, text, kind: 'auto' as Kind, policy: 'keep' as Policy};
     }));
-    if (owner !== draft || version !== draft.version) return;
+    if (!retained(owner) || version !== owner.version) return;
     const files = new Map(owner.files.map(file => [file.name, file]));
     loaded.forEach(file => {
       const previous = files.get(file.name);
@@ -100,7 +109,7 @@ export async function inputImportFiles(input: HTMLInputElement, render: () => vo
     });
     owner.files = [...files.values()];
   } catch (error) {
-    if (owner === draft && version === draft.version) owner.message = error instanceof Error ? error.message : 'Could not read the selected files.';
+    if (retained(owner) && version === owner.version) owner.message = error instanceof Error ? error.message : 'Could not read the selected files.';
   } finally {
     owner.pending = false;
     if (owner === draft) render();
@@ -142,7 +151,7 @@ function reviewFile(file: FileReview, index: number, locked: boolean): string {
 }
 
 export function inputImportPanel(caseId: string, busy: boolean): string {
-  if (draft.caseId !== caseId) resetInputImport(caseId);
+  selectInputImport(caseId);
   if (!draft.open) return '';
   const locked = busy || draft.pending, review = draft.review;
   return `<section class="panel" id="input-import-panel" aria-labelledby="input-import-title"><div class="panel-head"><div><h2 id="input-import-title" tabindex="-1">Import CSV files</h2><p>Add attributions, name colors, and change outputs together.</p></div><button class="btn" data-action="input-import-close"${off(locked)}>Close</button></div><div class="panel-body">
@@ -166,8 +175,8 @@ export function inputImportPanel(caseId: string, busy: boolean): string {
 
 export async function inputImportAction(action: string, context: Context, element?: HTMLElement): Promise<boolean> {
   if (!action.startsWith('input-import-')) return false;
+  selectInputImport(context.caseId);
   if (context.busy || draft.pending) return true;
-  if (draft.caseId !== context.caseId) resetInputImport(context.caseId);
   if (action === 'input-import-open' || action === 'input-import-close') {
     draft.open = action === 'input-import-open'; context.render();
     if (draft.open) document.querySelector<HTMLElement>('#input-import-title')?.focus();
@@ -198,17 +207,17 @@ export async function inputImportAction(action: string, context: Context, elemen
     const path = `/api/cases/${encodeURIComponent(context.caseId)}/input-import`;
     if (applying) {
       const result = await context.post<{changed: number; notice: string}>(path, payload);
-      if (owner !== draft || version !== draft.version) return true;
-      invalidate();
-      draft.message = `Saved ${result.changed} changes from ${payload.files.length} CSV file${payload.files.length === 1 ? '' : 's'}. Continue tracing to use revised stops or hop limits. Regenerate previews or sync Miro to refresh colors; change-output layout updates use Sync and reorganize.`;
+      if (!retained(owner) || version !== owner.version) return true;
+      invalidate(owner);
+      owner.message = `Saved ${result.changed} changes from ${payload.files.length} CSV file${payload.files.length === 1 ? '' : 's'}. Continue tracing to use revised stops or hop limits. Regenerate previews or sync Miro to refresh colors; change-output layout updates use Sync and reorganize.`;
       await context.refresh();
     } else {
       const result = await context.post<Review>(path, payload);
-      if (owner === draft && version === draft.version) {draft.review = result; draft.offsets = [];}
+      if (retained(owner) && version === owner.version) {owner.review = result; owner.offsets = [];}
     }
   } catch (error) {
-    if (owner === draft && version === draft.version) {
-      invalidate(); draft.message = error instanceof Error ? error.message : 'Could not import CSV files. Preview again and retry.';
+    if (retained(owner) && version === owner.version) {
+      invalidate(owner); owner.message = error instanceof Error ? error.message : 'Could not import CSV files. Preview again and retry.';
     }
   } finally {
     owner.pending = false;

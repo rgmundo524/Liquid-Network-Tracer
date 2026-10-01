@@ -179,13 +179,15 @@ test('case switching discards late previews and file reads even when returning t
   assert.doesNotMatch(panel('case A', false), /colors\.csv/);
 });
 
-test('late apply from another case does not refresh the new case', async () => {
+test('late apply refreshes its owning case while leaving the new case untouched', async () => {
   const response = deferred(); let refreshed = 0;
   const ctx = context(async (_path, body) => body.approve_plan ? response.promise : makeReview());
   ctx.refresh = async () => {refreshed += 1;};
   await open(ctx); await choose(); await preview(ctx);
   const request = apply(ctx); reset('case B'); response.resolve({changed: 3}); await request;
-  assert.equal(refreshed, 0);
+  assert.equal(refreshed, 1);
+  assert.doesNotMatch(panel('case B', false), /Saved/);
+  assert.match(panel('case A', false), /Saved 3 changes/);
 });
 
 test('busy and pending actions prevent double requests and file selection', async () => {

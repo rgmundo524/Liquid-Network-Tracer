@@ -1,24 +1,33 @@
 /** Case-local role and attribution-name colors; no changes to tracing evidence. */
 import {invalidateNameColorImport, nameColorImportAction, nameColorImportFile, nameColorImportInput,
-  nameColorImportPanel, nameColorImportPending, resetNameColorImport} from './name-color-import';
+  nameColorImportPanel, nameColorImportPending, resetNameColorImport, selectNameColorImport} from './name-color-import';
 type Row = {key: string; name: string; variants: string[]; addresses: number; enabled_addresses: number; color: string | null};
 type RoleRow = {role: string; name: string; color: string | null; default_color: string};
 type Catalog = {revision: number; rows: Row[]; roles?: RoleRow[]; role_notice?: string; total: number; offset: number; limit: number; presets: [string, string][]; notice: string};
 type Context = {caseId: string; busy: boolean; render: () => void;
   post: <T>(path: string, body: unknown) => Promise<T>};
-let state = {caseId: '', open: false, query: '', offset: 0, pending: false, data: null as Catalog | null,
-  drafts: new Map<string, string>(), roleDrafts: new Map<string, string>(), message: ''};
+function empty(caseId: string) {
+  return {caseId, open: false, query: '', offset: 0, pending: false, data: null as Catalog | null,
+    drafts: new Map<string, string>(), roleDrafts: new Map<string, string>(), message: ''};
+}
+let state = empty('');
+const cases = new Map<string, typeof state>();
+export function selectNameColors(caseId: string): void {
+  if (!cases.has(caseId)) cases.set(caseId, empty(caseId));
+  state = cases.get(caseId)!;
+  selectNameColorImport(caseId);
+}
+const retained = (owner: typeof state): boolean => cases.get(owner.caseId) === owner;
 const esc = (v: unknown): string => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]!));
 const safeColor = (v: unknown): v is string => typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v);
 
 export function resetNameColors(caseId: string): void {
   resetNameColorImport(caseId);
-  state = {caseId, open: false, query: '', offset: 0, pending: false, data: null,
-    drafts: new Map(), roleDrafts: new Map(), message: ''};
+  cases.set(caseId, empty(caseId)); selectNameColors(caseId);
 }
 
 export function nameColorsPanel(caseId: string, busy: boolean): string {
-  if (state.caseId !== caseId) resetNameColors(caseId);
+  selectNameColors(caseId);
   if (!state.open) return '';
   const disabled = busy || state.pending || nameColorImportPending() ? ' disabled' : '';
   const data = state.data;
@@ -75,18 +84,19 @@ export async function nameColorsFile(element: HTMLInputElement, render: () => vo
 }
 
 export async function nameColorsAction(action: string, context: Context, element?: HTMLElement): Promise<boolean> {
+  if (!action.startsWith('name-color-import-') && !action.startsWith('name-colors-')) return false;
+  selectNameColors(context.caseId);
   if (action.startsWith('name-color-import-')) {
     const owner = state;
     return nameColorImportAction(action, {...context, busy: context.busy || owner.pending,
       refresh: async () => {
         const catalog = await context.post<Catalog>(`/api/cases/${encodeURIComponent(context.caseId)}/name-colors`,
           {query: owner.query, offset: owner.offset, limit: 100});
-        if (owner === state) {owner.data = catalog; owner.drafts.clear();}
+        if (retained(owner)) {owner.data = catalog; owner.drafts.clear();}
       }});
   }
   if (!action.startsWith('name-colors-')) return false;
   if (context.busy || state.pending || nameColorImportPending()) return true;
-  if (state.caseId !== context.caseId) resetNameColors(context.caseId);
   if (action === 'name-colors-close') {state.open = false; context.render(); return true;}
   const owner = state;
   const path = `/api/cases/${encodeURIComponent(context.caseId)}/name-colors`;
@@ -114,7 +124,7 @@ export async function nameColorsAction(action: string, context: Context, element
       owner.drafts.clear(); owner.roleDrafts.clear();
     }
     const catalog = await context.post<Catalog>(path, {query: owner.query, offset: owner.offset, limit: 100});
-    if (owner === state) state.data = catalog;
+    if (retained(owner)) owner.data = catalog;
   } catch (error) {
     owner.message = error instanceof Error ? error.message : 'Could not save colors. Refresh and try again.';
   } finally {
