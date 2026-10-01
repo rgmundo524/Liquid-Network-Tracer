@@ -1762,6 +1762,20 @@ test('standalone Starter preview starts without a hop input', async () => {
   assert.deepEqual(view.calls.at(-1), {path: '/api/cases/case1/actions', body: {action: 'connections', run_id: 'saved1'}});
 });
 
+test('standalone Starter history labels only marked snapshots as complete transaction accounting', async () => {
+  for (const complete of [true, false]) {
+    const view = await harness();
+    view.state.activeCase = workflowCase({artifacts: {saved1: {connections: {downloads: [],
+      include_fees: complete, connection_scope: 'all_saved', connection_count: 2, group_context_inputs: true,
+      ...(complete ? {transaction_io: 'complete', context_edge_count: 9} : {})}}}});
+    await view.dispatch('view-history');
+    assert.match(view.workspace(), complete
+      ? /Saved layout: All transaction inputs and outputs, including fees\. Isolated context inputs grouped\. 9 context connections, excluded from starter-pair counts\./
+      : /Saved layout: Paths only\./);
+    assert.doesNotMatch(view.workspace(), /undefined context connections|NaN context connections/);
+  }
+});
+
 test('plot views explain missing collection, retain all goals, and reject invalid bounds locally', async () => {
   const view = await harness();
   view.state.activeCase = workflowCase({runs: [], latest_run: undefined});
@@ -1855,7 +1869,7 @@ test('peg-out layouts always describe complete I/O without an optional context t
 
 const contextGroupingFields = view => view.workspace().match(/<fieldset class="layout-fields context-grouping-fields"[^>]*>[\s\S]*?<\/fieldset>/)?.[0];
 
-test('peg-out context grouping is always available and preserves edits across goals', async () => {
+test('context grouping is available for every plot goal and preserves edits across goals', async () => {
   const view = await harness();
   view.state.activeCase = workflowCase();
   await view.dispatch('view-plots');
@@ -1870,7 +1884,7 @@ test('peg-out context grouping is always available and preserves edits across go
     group_context_inputs_present: '1'});
   await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
   view.elements.delete('#plot-layout-form');
-  assert.match(contextGroupingFields(view), /disabled/);
+  assert.doesNotMatch(contextGroupingFields(view), /disabled/);
   assert.doesNotMatch(contextGroupingFields(view), /name="group_context_inputs"[^>]*checked/);
   assert.match(view.workspace(), /name="layout_attempts"[^>]*value="47"/);
   assert.match(view.workspace(), /value="Draft treasury"/);
@@ -1880,7 +1894,7 @@ test('peg-out context grouping is always available and preserves edits across go
   view.plotForm({group_context_inputs_present: '1', group_context_inputs: 'on'});
   await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
   view.elements.delete('#plot-layout-form');
-  assert.match(contextGroupingFields(view), /disabled/);
+  assert.doesNotMatch(contextGroupingFields(view), /disabled/);
   assert.match(contextGroupingFields(view), /name="group_context_inputs"[^>]*checked/);
   for (const goal of ['full', 'pegouts']) {
     await view.dispatch('plot-goal', {dataset: {goal}});
@@ -1889,6 +1903,61 @@ test('peg-out context grouping is always available and preserves edits across go
     assert.match(view.workspace(), /value="Draft treasury"/);
   }
   assert.equal(view.calls.length, 1, 'draft changes neither save nor queue work');
+});
+
+test('Starter connections includes complete accounting and captures context grouping without enabling fee or hub options', async () => {
+  for (const grouped of [true, false]) {
+    const view = await harness(path => path.endsWith('/actions') ? {id: 'plotjob', status: 'running'} : undefined);
+    view.state.activeCase = workflowCase({run_defaults: {...defaults, group_context_inputs: !grouped}});
+    await view.dispatch('view-plots');
+    await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
+    const html = view.workspace();
+    assert.match(html, /Every included transaction shows all its inputs and outputs, including fees/);
+    assert.match(html, /Outputs on excluded branches remain visible without continuing those branches/);
+    assert.match(html, /The transaction CSV includes this complete accounting; extra context does not add starter-pair matches/);
+    assert.match(html, /Starter connection layouts always show every transaction input and output, including fees/);
+    assert.doesNotMatch(html, /id="workflow-include-context"|id="workflow-include-unspent"/);
+    assert.doesNotMatch(contextGroupingFields(view), /disabled/);
+    const fullOnly = html.match(/<fieldset class="layout-fields full-trace-fields"[^>]*>[\s\S]*?<\/fieldset>/)?.[0];
+    assert.match(fullOnly, /disabled/);
+    for (const key of ['include_fees', 'hub_addresses']) assert.match(fullOnly, new RegExp(`name="${key}"`));
+    view.plotForm({group_context_inputs_present: '1', ...(grouped ? {group_context_inputs: 'on'} : {})});
+    await view.dispatch('workflow-plot');
+    assert.deepEqual(view.calls.at(-1).body, {action: 'plot', layout_mode: 'fresh', goal: 'connections', run_id: 'saved1',
+      min_hops: 0, max_hops: 0, layout_settings: {...layoutDefaults, group_context_inputs: grouped}});
+    assert.equal(view.calls.filter(call => call.body).length, 1, 'plotting does not collect or mutate preferences');
+  }
+});
+
+test('saved Starter layouts distinguish complete transaction context from legacy paths across plots, downloads and boards', async () => {
+  for (const complete of [true, false]) {
+    const view = await harness();
+    const plot = workflowPlot('connections', 'starter-context', {max_hops: null,
+      query: {connection_scope: 'all_saved', ...(complete ? {transaction_io: 'complete'} : {})},
+      layout_settings: {...layoutDefaults, group_context_inputs: true, include_fees: complete},
+      connection_count: 2, ...(complete ? {context_edge_count: 9} : {})});
+    view.state.activeCase = workflowCase({plots: [plot],
+      boards: [workflowBoard('connections', 'starter-board', {preview_id: plot.preview_id})]});
+    await view.dispatch('view-plots');
+    await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
+    for (const page of ['plots', 'history', 'boards']) {
+      await view.dispatch('view-' + page);
+      const html = view.workspace();
+      assert.match(html, /All verified saved connections/);
+      assert.match(html, complete
+        ? /Saved layout: All transaction inputs and outputs · isolated inputs grouped\. 9 context connections, excluded from starter-pair counts\./
+        : /Saved layout: Paths only\./);
+      const picker = html.match(/<select id="workflow-(?:plot-picker|board-plot-[^"\s]+)"[^>]*>[\s\S]*?<\/select>/)?.[0];
+      assert.match(picker, complete ? /All transaction inputs and outputs · isolated inputs grouped/ : /Paths only/);
+      assert.doesNotMatch(html, /undefined context connections|NaN context connections/);
+      if (page === 'plots') {
+        const summary = html.match(/<details class="tool-details"><summary>Saved layout settings<\/summary>[\s\S]*?<\/details>/)?.[0];
+        if (complete) assert.match(summary, /Isolated context inputs grouped/);
+        else assert.doesNotMatch(summary, /Isolated context inputs/);
+      }
+    }
+    assert.equal(view.calls.length, 1, 'new defaults do not rewrite saved layouts');
+  }
 });
 
 test('peg-out generation captures grouped and separate context preferences for each job', async () => {

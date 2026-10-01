@@ -99,11 +99,11 @@ def validate_layout_settings(value):
 def _effective_settings(settings, goal, query=None):
     result = validate_layout_settings(settings)
     if goal != "full":
-        # New peg-out plots select transactions, then display their complete
+        # New focused plots select transactions, then display their complete
         # local I/O. Legacy snapshots retain their original optional context.
-        complete = goal == "pegouts" and (query or {}).get("transaction_io") == "complete"
+        complete = goal in ("pegouts", "connections") and (query or {}).get("transaction_io") == "complete"
         result.update(include_fees=complete, hub_addresses=[])
-        if goal != "pegouts" or not (complete or (query or {}).get("include_context")):
+        if not complete and not (goal == "pegouts" and (query or {}).get("include_context")):
             result["group_context_inputs"] = False
     return result
 
@@ -223,11 +223,14 @@ def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_un
                               transaction_io=transaction_io, attribution_hop_limits=attribution_hop_limits)
     reference = {"hop_reference_name": reference_name(state)} if reference_name(state) else {}
     if goal == "connections":
+        if transaction_io not in (None, "complete"):
+            raise TraceError("Starter connection transaction inputs and outputs must be complete")
+        io = {"transaction_io": transaction_io} if transaction_io is not None else {}
         if validate_connection_scope(connection_scope) == "all_saved":
             if max_hops is not None:
                 validate_hops(max_hops)  # Old clients may supply an unused, valid hop value.
-            return {"connection_scope": "all_saved", **reference}
-        return {"max_hops": validate_hops(max_hops), **reference}
+            return {"connection_scope": "all_saved", **io, **reference}
+        return {"max_hops": validate_hops(max_hops), **io, **reference}
     return reference
 
 
@@ -253,7 +256,9 @@ def _graph(state, goal, query, settings):
     from .plot_scope import project_full_scope
     options = {key: settings[key] for key in ("color_attribution_arrows", "center_name")}
     if goal == "connections":
-        return connection_graph(state, query.get("max_hops"), connection_scope=query.get("connection_scope"), **options)
+        return connection_graph(state, query.get("max_hops"), connection_scope=query.get("connection_scope"),
+                                transaction_io=query.get("transaction_io"),
+                                group_context_inputs=settings["group_context_inputs"], **options)
     if goal == "pegouts":
         return pegout_graph(state, query, group_context_inputs=settings["group_context_inputs"], **options)
     return build_graph(project_full_scope(state), merge_addresses=True, **options,
@@ -394,6 +399,9 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
             report.update(connection_count=graph["connections"]["connection_count"], status=graph["connections"]["status"])
             if "connection_scope" in query:
                 report["connection_scope"] = query["connection_scope"]
+            if query.get("transaction_io") == "complete":
+                report["transaction_io"] = "complete"
+                report["context_edge_count"] = graph["connections"]["context_edge_count"]
         elif goal == "pegouts":
             from .pegout_csv import pegout_lbtc_summary
             report.update(match_count=graph["pegouts"]["match_count"], status=graph["pegouts"]["status"])
@@ -489,6 +497,9 @@ def _snapshot(case, preview_id, *, with_inputs=False):
         query, connections, options = report["query"], graph.get("connections", {}), graph.get("graph_options", {})
         if (any(canonical(value.get("connection_scope")) != canonical(query.get("connection_scope"))
                 for value in (report, connections, options))
+                or any(canonical(value.get("transaction_io")) != canonical(query.get("transaction_io"))
+                       for value in (report, connections, options))
+                or canonical(report.get("context_edge_count")) != canonical(connections.get("context_edge_count"))
                 or any(canonical(value) != canonical(query.get("max_hops")) for value in
                        (report.get("max_hops"), connections.get("max_hops"), options.get("connection_hops")))
                 or any(canonical(report.get(key)) != canonical(connections.get(key))

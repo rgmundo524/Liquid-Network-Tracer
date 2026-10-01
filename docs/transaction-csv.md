@@ -58,10 +58,13 @@ Current local attribution settings apply. Manual edits made only in Miro are
 not imported, and a browser-only temporary visibility toggle is not a saved
 export selection. No API calls, ELK recalculation or retracing are needed.
 
-For a connection-only graph, regenerate **Starter connections** and select its
-**Transaction CSV** download. Only its connecting arrows are exported. No-match
-results have the header and zero data rows. Existing connection snapshots remain
-readable/publishable; regenerate a preview to obtain its new transaction CSV.
+For **Starter connections**, generate a new plot and select its **Transaction
+CSV** download. The connection search selects relevant transactions; the CSV
+contains every input and output of those transactions, including context inputs,
+off-path outputs, and fees. Context grouping preserves individual input rows.
+No-match results have the header and zero data rows. Older connection snapshots
+retain their original connecting-arrows-only selection; generate a new layout
+to obtain complete transaction accounting.
 
 New trace archives also include `transactions.csv`. Internal legacy graph and
 raw evidence tables stay in those archives for reproducibility and compatibility;

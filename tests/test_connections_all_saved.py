@@ -149,7 +149,7 @@ class AllSavedConnectionSnapshotTests(unittest.TestCase):
             set_service(case, "SYNTHETIC-c-address", name="Stopped in collection", stop_tracing=True, hop_limit=0)
 
             def bounded_query(*args, **kwargs):
-                return _query(*args, **{**kwargs, "connection_scope": None})
+                return _query(*args, **{**kwargs, "connection_scope": None, "transaction_io": None})
 
             with patch("liquid_tracer.plots._query", side_effect=bounded_query):
                 old = preview_plot(case, "connections", max_hops=1)
@@ -158,7 +158,7 @@ class AllSavedConnectionSnapshotTests(unittest.TestCase):
             new = preview_plot(case, "connections", max_hops=0)
             new_graph, _ = reviewed_plot(case, new["preview_id"])
             self.assertEqual(old["query"], {"max_hops": 1})
-            self.assertEqual(new["query"], {"connection_scope": "all_saved"})
+            self.assertEqual(new["query"], {"connection_scope": "all_saved", "transaction_io": "complete"})
             self.assertIsNone(new["max_hops"])
             self.assertEqual(len(old_graph["connections"]["outpoints"]), 1)
             self.assertEqual(len(new_graph["connections"]["outpoints"]), 4)
@@ -166,7 +166,7 @@ class AllSavedConnectionSnapshotTests(unittest.TestCase):
             self.assertEqual(original, {p.name: p.read_bytes() for p in Path(old["directory"]).iterdir()})
             self.assertTrue(all(item["reviewable"] for item in list_plots(case)))
             with (Path(new["directory"]) / "transactions.csv").open(newline="") as stream:
-                self.assertEqual(len(list(csv.DictReader(stream))), 8)
+                self.assertEqual(len(list(csv.DictReader(stream))), 9)
 
     def test_legacy_cli_new_preview_uses_saved_inputs_while_old_snapshot_stays_reviewable(self):
         with tempfile.TemporaryDirectory() as temporary, patch("liquid_tracer.elk_layout.optimize_graph",
@@ -179,7 +179,7 @@ class AllSavedConnectionSnapshotTests(unittest.TestCase):
             before = {p.name: p.read_bytes() for p in archive.iterdir()}
 
             def bounded_graph(state, maximum, **kwargs):
-                return connection_graph(state, maximum, **{**kwargs, "connection_scope": None})
+                return connection_graph(state, maximum, **{**kwargs, "connection_scope": None, "transaction_io": None})
 
             with patch("liquid_tracer.connections.connection_graph", side_effect=bounded_graph):
                 old = preview_connections(case, max_hops=1)
@@ -191,7 +191,7 @@ class AllSavedConnectionSnapshotTests(unittest.TestCase):
             self.assertEqual(new["connection_scope"], "all_saved")
             self.assertIsNone(new["max_hops"])
             with (Path(new["directory"]) / "transactions.csv").open(newline="") as stream:
-                self.assertEqual(len(list(csv.DictReader(stream))), 2)
+                self.assertEqual(len(list(csv.DictReader(stream))), 3)
             self.assertEqual(reviewed_connections(case, old["preview_id"]), (old_graph, old_plan))
             self.assertEqual(before, {p.name: p.read_bytes() for p in archive.iterdir()})
 

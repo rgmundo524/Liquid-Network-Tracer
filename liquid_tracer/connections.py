@@ -47,6 +47,12 @@ def validate_connection_scope(value):
     return value
 
 
+def validate_transaction_io(value):
+    if value not in (None, "complete"):
+        raise TraceError("Starter connection transaction I/O must use complete transaction context")
+    return value
+
+
 def _saved_connection_evidence(state):
     """Add exact saved input references to an isolated display state.
 
@@ -295,13 +301,22 @@ def _connecting_outpoints(state, max_hops=10, *, connection_scope=None):
             "status": "connections_found" if retained else "no_connection_found"}
 
 
-def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, center_name=None, connection_scope=None):
-    """Generate only connecting transaction/UTXO nodes; keep the archive intact."""
+def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, center_name=None,
+                     connection_scope=None, transaction_io=None, group_context_inputs=False):
+    """Select connecting transactions, then display their requested local I/O.
+
+    Complete I/O is explicit so historical path-only snapshots retain their
+    original display semantics. Extra context never changes path membership.
+    """
     from .export import build_graph
+    from .context_groups import group_context_inputs as group_inputs
     from .layout import arrange
     from .miro_frames import activity_frames
 
     connection_scope = validate_connection_scope(connection_scope)
+    complete_io = validate_transaction_io(transaction_io) == "complete"
+    if type(group_context_inputs) is not bool:
+        raise TraceError("Context input grouping must be enabled or disabled")
     all_saved = connection_scope == "all_saved"
     if all_saved:
         state = _saved_connection_evidence(state)
@@ -318,25 +333,56 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
             record["reference_hops"] = report["transaction_reference_hops"][key]
         for key, record in reduced["outputs"].items():
             record["trace_scope_depth"] = report["output_reference_hops"][key]
-    # A separate circle per outpoint avoids visual cross-spends between different
-    # UTXOs at a reused address. The ordinary merged-address graph is unchanged.
-    graph = build_graph(reduced, merge_addresses=False, include_fees=False,
-                        color_attribution_arrows=color_attribution_arrows, center_name=center_name,
-                        respect_attribution_hops=not all_saved, respect_stops=not all_saved,
-                        resolve_saved_inputs=all_saved)
     edge_ids = {"out:" + key for key in outpoints}
     edge_ids.update(f"in:{state['links'][key]['spending_txid']}:{state['links'][key]['vin']}" for key in outpoints)
+    context_edge_ids = set()
+    if complete_io:
+        # Membership is already final. Only these transactions gain local I/O;
+        # their other branches and context funders are never expanded here.
+        context_edge_ids = {f"{side}:{txid}:{index}"
+                            for txid, record in reduced["transactions"].items()
+                            for side, field in (("in", "vin"), ("out", "vout"))
+                            for index in range(len(record["data"][field]))} - edge_ids
+    # Keep one circle per UTXO so existing Starter Connections boards retain
+    # their identities when updated to complete transaction I/O.
+    graph = build_graph(reduced, merge_addresses=False, include_fees=complete_io,
+                        color_attribution_arrows=color_attribution_arrows, center_name=center_name,
+                        respect_attribution_hops=not all_saved, respect_stops=not all_saved,
+                        resolve_saved_inputs=all_saved or complete_io,
+                        saved_transactions=state["transactions"] if complete_io else None)
+    path_nodes = {edge[field] for edge in graph["edges"] if edge["id"] in edge_ids
+                  for field in ("source", "target")}
+    edge_ids.update(context_edge_ids)
     graph["edges"] = [e for e in graph["edges"] if e["id"] in edge_ids]
+    for edge in graph["edges"]:
+        if edge["id"] in context_edge_ids:
+            # An ending starter's selected output still identifies its seed,
+            # but displaying it does not establish another connecting path.
+            edge["role"] = "context_input" if edge["id"].startswith("in:") else "context_output"
+    if complete_io:
+        # Preserve every displayed starter's identity while restricting branch
+        # provenance to selected outputs that actually establish a connection.
+        # In particular, an ending starter's own seed is only local context.
+        branch = graph["branch_structure"]
+        branch["edge_memberships"] = {key: value for key, value in branch["edge_memberships"].items()
+                                       if key not in context_edge_ids}
+        branch["node_memberships"] = {key: value for key, value in branch["node_memberships"].items()
+                                       if key in path_nodes or key.startswith("tx:")}
     keep_nodes = {e[field] for e in graph["edges"] for field in ("source", "target")}
     graph["nodes"] = [n for n in graph["nodes"] if n["id"] in keep_nodes]
-    graph["fee_items"] = {}
-    graph["layout"] = arrange({n["id"]: n for n in graph["nodes"]}, graph["edges"], reduced["transactions"], {})
+    if not complete_io:
+        graph["fee_items"] = {}
+    graph["layout"] = arrange({n["id"]: n for n in graph["nodes"]}, graph["edges"],
+                              reduced["transactions"], graph["fee_items"])
     graph["activity_frames"] = activity_frames(graph)
     report.update(transaction_count=len(selected), connection_count=len(report["pairs"]))
     graph["connections"] = report
     graph["graph_options"].update(view="starter_connections", connection_hops=report["max_hops"])
     if all_saved:
         graph["graph_options"]["connection_scope"] = "all_saved"
+    if complete_io:
+        report.update(transaction_io="complete", context_edge_count=len(context_edge_ids))
+        graph["graph_options"]["transaction_io"] = "complete"
     units = "group-relative hops" if report.get("hop_reference_name") else "transaction hops"
     introduction = ((f"All saved starter-to-starter paths. {len(report['pairs'])} ordered starter pair(s) connected. "
                      if outpoints else "No starter-to-starter connection found in saved evidence. Nothing is plotted. ")
@@ -344,14 +390,23 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
                     (f"Starter-to-starter paths of at most {max_hops} {units}. "
                          f"{len(report['pairs'])} ordered starter pair(s) connected. " if outpoints else
                          f"No connection found within {max_hops} hops in the saved searched data. Nothing is plotted. "))
-    graph["notice"] = (introduction + report["scope"] + " One circle per connecting UTXO, not address clustering. "
-                        "Every displayed edge belongs to a qualifying path; their union may also form longer routes. "
+    context_notice = (" Every input and output of each qualifying transaction is displayed, including fees. "
+                      "Context arrows do not establish a qualifying starter connection. Unfollowed branch outputs "
+                      "are shown without inferring unspent status or expanding their transactions. "
+                      "One circle per UTXO; repeated addresses do not imply additional traced connections. "
+                      "Every traced path edge belongs to a qualifying path; " if complete_io else
+                      " One circle per connecting UTXO, not address clustering. "
+                      "Every displayed edge belongs to a qualifying path; ")
+    graph["notice"] = (introduction + report["scope"] + context_notice + "their union may also form longer routes. "
                         "UTXO reachability does not prove ownership or allocate confidential values.")
     if report.get("hop_reference_name"):
         graph["notice"] += (f" Hops count away from attribution group {report['hop_reference_name']}; "
                             "each reached output in that group resets its own path to 0. "
                             + ("Distances describe saved paths without imposing a plot cutoff." if all_saved else
                                "Outside outputs beyond the boundary are not followed."))
+    if complete_io and group_context_inputs:
+        graph = group_inputs(graph, enabled=True)
+        graph["activity_frames"] = activity_frames(graph)
     return graph
 
 
@@ -368,7 +423,7 @@ def connection_plan(graph):
 
 def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=False, progress=None):
     from .cli import (attribution_arrow_coloring, centered_name_group, resolve_latest, run_path, verify_export,
-                      connector_appearance, layout_search_attempts, open_preview)
+                      connector_appearance, context_input_grouping, layout_search_attempts, open_preview)
     from .investigations import read_case
     from .services import apply_service_labels, load_services
     from .elk_layout import optimize_graph
@@ -392,7 +447,8 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
     from .address_counts import apply_saved_counts
     apply_saved_counts(case, state)
     graph = connection_graph(state, max_hops, color_attribution_arrows=attribution_arrow_coloring(metadata),
-                              center_name=centered_name_group(metadata), connection_scope="all_saved")
+                              center_name=centered_name_group(metadata), connection_scope="all_saved",
+                              transaction_io="complete", group_context_inputs=context_input_grouping(metadata))
     counts = None
     if graph["nodes"]:
         graph = optimize_graph(graph, connector_style=connector_appearance(metadata), progress=progress,
@@ -428,7 +484,10 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
     if "layout_attempts" in graph.get("graph_options", {}):
         result["layout_attempts"] = graph["graph_options"]["layout_attempts"]
     return {**result, "address_counts": counts, "directory": str(destination.resolve()), "preview_id": destination.name,
-            "run_id": run_id, "include_fees": False, "max_hops": report["max_hops"],
+            "run_id": run_id, "include_fees": graph["include_fees"], "max_hops": report["max_hops"],
+            **({"transaction_io": "complete", "context_edge_count": report["context_edge_count"]}
+               if report.get("transaction_io") == "complete" else {}),
+            "group_context_inputs": graph["graph_options"].get("group_context_inputs", False),
             **({"connection_scope": "all_saved"} if report.get("connection_scope") == "all_saved" else {}),
             "color_attribution_arrows": graph["graph_options"]["color_attribution_arrows"],
             "center_name": graph["graph_options"]["center_name"],
@@ -468,7 +527,7 @@ def reviewed_connections(case, preview_id):
             or graph.get("graph_options", {}).get("view") != "starter_connections"
             or plan.get("schema_version") != 1):
         raise TraceError("Connection preview does not match this investigation")
-    from .cli import attribution_arrow_coloring, centered_name_group, run_path, verify_export
+    from .cli import attribution_arrow_coloring, centered_name_group, context_input_grouping, run_path, verify_export
     from .services import load_services
     from .miro import make_plan
     archive = run_path(case, graph["run_id"])
@@ -476,6 +535,11 @@ def reviewed_connections(case, preview_id):
     settings = load_services(case)
     report = graph.get("connections", {})
     scope = validate_connection_scope(report.get("connection_scope"))
+    transaction_io = validate_transaction_io(report.get("transaction_io"))
+    if (graph["graph_options"].get("transaction_io") != transaction_io
+            or (transaction_io == "complete" and
+                (graph.get("include_fees") is not True or graph["graph_options"].get("include_fees") is not True))):
+        raise TraceError("Saved connection transaction I/O disagrees with its graph; regenerate the preview")
     if (graph["graph_options"].get("connection_scope") != scope
             or graph["graph_options"].get("connection_hops") != report.get("max_hops")
             or (scope == "all_saved" and report.get("max_hops") is not None)):
@@ -485,7 +549,9 @@ def reviewed_connections(case, preview_id):
     if (report.get("archive_sha256") != digest((archive / "SHA256SUMS").read_bytes())
             or report.get("service_sha256") != digest(canonical({k: v for k, v in settings.items() if k != "history"}))
             or graph["graph_options"].get("color_attribution_arrows", False) is not attribution_arrow_coloring(metadata)
-            or graph["graph_options"].get("center_name", "") != centered_name_group(metadata)):
+            or graph["graph_options"].get("center_name", "") != centered_name_group(metadata)
+            or (transaction_io == "complete" and graph["graph_options"].get("group_context_inputs", False)
+                is not context_input_grouping(metadata))):
         raise TraceError("Source evidence, colors, layout settings or stop rules changed; regenerate the connection preview")
     validate_plan(plan)
     if connection_plan(graph) != plan or read_json(directory / "connections.json") != report:

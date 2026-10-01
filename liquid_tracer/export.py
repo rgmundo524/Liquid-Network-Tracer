@@ -68,6 +68,10 @@ def legend_lines(graph=None):
     ]
     if all_saved_connections:
         lines.append("Starter connections use all verified saved paths, including unconfirmed spends, without stop rules, attribution hop limits or a plot hop cutoff. No additional data is fetched.")
+    if ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
+            and (graph or {}).get("connections", {}).get("transaction_io") == "complete"):
+        lines.append("Every input and output of each connecting transaction is included, including fees. "
+                     "Thinner context arrows and unfollowed branch outputs do not establish additional starter connections.")
     return lines
 
 
@@ -161,7 +165,8 @@ def _reference_fields(item, enabled):
 
 def build_graph(state, merge_addresses=True, include_fees=False, *, group_context_inputs=False, hub_addresses=None,
                 color_attribution_arrows=None, center_name=None, edge_ids=None,
-                respect_attribution_hops=True, respect_stops=True, resolve_saved_inputs=False):
+                respect_attribution_hops=True, respect_stops=True, resolve_saved_inputs=False,
+                saved_transactions=None):
     """Build display nodes, optionally limited to exact input/output edges.
 
     Apply a path's edge selection before shared-address aggregation so excluded
@@ -175,6 +180,12 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
         raise TraceError("Stop-tracing rules must be respected or explicitly ignored for graph lineage")
     if type(resolve_saved_inputs) is not bool:
         raise TraceError("Saved input resolution must be enabled or disabled")
+    if saved_transactions is not None and not isinstance(saved_transactions, dict):
+        raise TraceError("Saved input evidence must be a transaction mapping")
+    # A filtered view may need metadata from an excluded funding transaction.
+    # Resolve its exact output without adding that transaction to the graph or
+    # altering the original vin data retained for CSV evidence verification.
+    input_transactions = state["transactions"] if saved_transactions is None else saved_transactions
     if edge_ids is not None:
         edge_ids = frozenset(edge_ids)
     if center_name is None:
@@ -277,7 +288,7 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
             prevout = vin.get("prevout") or {}
             if resolve_saved_inputs:
                 from .saved_inputs import saved_input_output
-                prevout = saved_input_output(state["transactions"], vin)
+                prevout = saved_input_output(input_transactions, vin)
             if vin.get("is_coinbase"):
                 input_node = add_node("coinbase:" + txid + ":" + str(index), "event", "COINBASE", column - 1, vin)
             else:

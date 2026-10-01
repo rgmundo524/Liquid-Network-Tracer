@@ -448,14 +448,12 @@ class PlotTests(unittest.TestCase):
                 result = preview_plot(self.case, goal)
                 graph, _ = reviewed_plot(self.case, result["preview_id"])
                 settings = result["layout_settings"]
-                self.assertEqual(settings["include_fees"], goal == "pegouts")
-                self.assertEqual(settings["group_context_inputs"], goal == "pegouts")
+                self.assertTrue(settings["include_fees"])
+                self.assertTrue(settings["group_context_inputs"])
                 self.assertEqual(settings["hub_addresses"], [])
                 self.assertEqual(settings["center_name"], "Example")
                 self.assertTrue(settings["color_attribution_arrows"])
-                if goal == "connections":
-                    self.assertFalse(any(edge["role"].startswith("context") for edge in graph["edges"]))
-                self.assertEqual(graph["include_fees"], goal == "pegouts")
+                self.assertTrue(graph["include_fees"])
                 self.assertFalse(any(node["kind"] == "context_group" for node in graph["nodes"]))
 
     def test_context_grouping_effective_settings_follow_goal_and_saved_query(self):
@@ -469,7 +467,7 @@ class PlotTests(unittest.TestCase):
                           {"transaction_io": "complete"}, {"transaction_io": "complete", "include_context": False}):
                 with self.subTest(goal=goal, query=query):
                     settings = _effective_settings(preferences, goal, query)
-                    complete = goal == "pegouts" and bool(query and query.get("transaction_io") == "complete")
+                    complete = goal in ("connections", "pegouts") and bool(query and query.get("transaction_io") == "complete")
                     expected_grouping = goal == "full" or complete or (goal == "pegouts" and bool(query and query.get("include_context")))
                     self.assertEqual(settings["group_context_inputs"], expected_grouping)
                     self.assertEqual(settings["include_fees"], goal == "full" or complete)

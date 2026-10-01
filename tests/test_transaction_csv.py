@@ -222,7 +222,8 @@ class TransactionCSVTests(unittest.TestCase):
             directory = Path(result["directory"])
             graph, plan = reviewed_connections(case, result["preview_id"])
             self.assertEqual({p.name for p in directory.glob("*.csv")}, {"transactions.csv"})
-            self.assertEqual(len(list(csv.DictReader(io.StringIO((directory/"transactions.csv").read_text())))), 4)
+            # Complete I/O also retains the ending starter's local output.
+            self.assertEqual(len(list(csv.DictReader(io.StringIO((directory/"transactions.csv").read_text())))), 5)
             (directory/"transactions.csv").unlink()
             write_csv(directory/"nodes.csv", node_csv_rows(graph), NODE_CSV_FIELDS)
             write_csv(directory/"edges.csv", graph["edges"], ("id", "source", "target"))

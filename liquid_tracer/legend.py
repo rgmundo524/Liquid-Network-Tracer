@@ -102,6 +102,14 @@ def legend_notes(graph=None):
             "Saved unconfirmed spends are included and may change. No additional transaction data is fetched; "
             "branches absent from the saved collection cannot establish a connection.",
         ])
+    if ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
+            and (graph or {}).get("connections", {}).get("transaction_io") == "complete"):
+        notes.extend([
+            "Every input and output of each connecting transaction is displayed, including fees. "
+            "Thinner context arrows and unfollowed branch outputs do not establish additional starter connections.",
+            "Separate UTXO occurrences keep their existing identities; optional context groups summarize "
+            "isolated inputs without combining their evidence or CSV rows.",
+        ])
     if (graph or {}).get("graph_options", {}).get("view") == "pegout_paths":
         from .common import TraceError
         from .pegout_paths import validate_query

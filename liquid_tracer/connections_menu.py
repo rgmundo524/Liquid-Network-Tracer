@@ -42,7 +42,8 @@ def connection_screen(base, button, case, *, publish=False):
                 else:
                     yield Static("Uses all verified connections in the latest saved run, with no plotting hop cutoff. "
                                  "Attribution stops and hop limits do not prune this view; labels and recorded confirmation status remain. "
-                                 "Unconnected starters, side branches and context are omitted. "
+                                 "Each connecting transaction shows all inputs and outputs, including fees and context. "
+                                 "Other branch outputs stay visible without following their descendants. Unconnected starters are omitted. "
                                  "Only verified UTXO spends create paths. No blockchain requests or Miro changes are made here.", markup=False)
                 yield Static("", id="connection-error", markup=False)
             with Horizontal(classes="buttons form-actions"):

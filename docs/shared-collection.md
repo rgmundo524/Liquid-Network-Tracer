@@ -79,6 +79,12 @@ seeds and applies its investigation's display rules. Starter connections and
 Paths to peg-outs retain their own documented selection rules. Sharing evidence
 does not bypass a plotting goal's scope.
 
+New Starter connections and Paths to peg-outs plots select transactions within
+that investigation's scope, then include every input and output of those
+transactions in their graph and transaction CSV. Side-branch outputs remain
+visible as context without expanding unrelated transactions. Selecting shared
+data does not automatically include every shared seed or export the whole pool.
+
 A stop applied during shared collection can prevent evidence from being fetched
 for every investigation using that dataset. Removing the stop in an individual
 plot only exposes evidence that is already saved; it cannot fill the missing
