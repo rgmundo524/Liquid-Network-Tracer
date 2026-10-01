@@ -182,6 +182,47 @@ class PegoutCSVTests(unittest.TestCase):
         self.assertEqual([row["Outpoint"] for row in endpoints], [endpoint])
         self.assertEqual(state, original)
 
+    def test_complete_transaction_io_keeps_endpoint_exports_and_amounts_path_scoped(self):
+        from liquid_tracer.pegout_csv import pegout_lbtc_summary
+        from liquid_tracer.transaction_csv import transaction_csv_rows
+
+        state = graph_state((("a:0", "b"), ("b:0", "c"), ("a:1", "d")), seeds=("a:0",),
+                            raw_links=(("e:0", "b"), ("f:0", "b")))
+        # These peg-outs are displayed siblings, but neither is in the chosen
+        # hop range. The unrelated d transaction must remain absent altogether.
+        for name, value in (("a", 700_000_000), ("b", 500_000_000),
+                            ("c", 200_000_000), ("d", 900_000_000)):
+            set_value(state, add_pegout(state, tx(name)), value)
+        mark_unspent(state, tx("c") + ":0")
+        add_unspendable(state, tx("c"))
+        state["transactions"][tx("c")]["data"]["vout"].append(
+            {"scriptpubkey": "", "scriptpubkey_type": "fee", "asset": LBTC, "value": 100})
+        original = deepcopy(state)
+        expected = pegout_csv_rows(graph(state, minimum=2, maximum=2), state)
+        for grouped in (False, True):
+            with self.subTest(grouped=grouped):
+                complete = pegout_graph(state, validate_query(seeds=state["seeds"], min_hops=2,
+                    max_hops=2, transaction_io="complete"), group_context_inputs=grouped)
+                self.assertEqual(pegout_csv_rows(complete, state), expected)
+                self.assertEqual(pegout_lbtc_summary(complete, state)["lbtc"], "2")
+                self.assertEqual([row["Status"] for row in endpoint_table_rows(complete, state)], ["Pegout"])
+                rows = transaction_csv_rows(complete, state)
+                expected_ios = {(tx(name), direction, index) for name in "abc"
+                                for direction, field in (("IN", "vin"), ("OUT", "vout"))
+                                for index in range(len(state["transactions"][tx(name)]["data"][field]))}
+                self.assertEqual({(row["Transaction Hash"], row["Direction"], row["Number of I/O"])
+                                  for row in rows}, expected_ios)
+                self.assertTrue(any("FEE" in row["Address Flags"] for row in rows))
+                self.assertTrue(any("CONTEXT" in row["Address Flags"] and "PEG-OUT REQUEST" in row["Address Flags"]
+                                    for row in rows))
+                self.assertFalse(any("UNSPENT AT OBSERVATION" in row["Address Flags"] for row in rows))
+                missing = deepcopy(complete)
+                missing["edges"] = [edge for edge in missing["edges"]
+                                    if edge["id"] != "out:" + tx("a") + ":1"]
+                with self.assertRaisesRegex(TraceError, "complete transaction"):
+                    pegout_csv_rows(missing, state)
+        self.assertEqual(state, original)
+
     def test_multiple_selected_outputs_same_transaction_preserve_exact_source_membership(self):
         state = graph_state((("a:0", "b"), ("a:1", "c"), ("b:0", "d"), ("c:0", "d")),
                             seeds=("a:0", "a:1"))

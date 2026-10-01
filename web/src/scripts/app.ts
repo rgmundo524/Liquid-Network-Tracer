@@ -4,6 +4,7 @@ import { addressImportPanel, addressImportInput, addressImportFile, addressImpor
 import {changeOutputsPanel, changeOutputsInput, changeOutputsFile, changeOutputsAction, changeOutputsLookupComplete, changeOutputsPending, resetChangeOutputs, selectChangeOutputs} from "./change-outputs";
 import {inputImportPanel, inputImportInput, inputImportFiles, inputImportAction, inputImportPending, selectInputImport} from "./input-import";
 import {collectionPerformancePanel, type CollectionPerformance} from "./collection-performance";
+import {createTaskNotifications} from "./task-notifications";
 export {};
 
 type ConnectorStyle = "straight" | "curved" | "elbowed";
@@ -111,7 +112,7 @@ type Plot = {
   hop_reference_name?: string;
   created_at: string; status: string; node_count: number; edge_count: number; transaction_count: number;
   match_count?: number; connection_count?: number; source_max_hops?: number; source_run_status?: string;
-  query?: {include_unspent?: boolean; include_unspendable?: boolean; include_context?: boolean};
+  query?: {include_unspent?: boolean; include_unspendable?: boolean; include_context?: boolean; transaction_io?: "complete"};
   endpoint_count?: number; endpoint_counts?: {pegout: number; unspent: number; unspendable: number};
   pegout_lbtc_summary?: PegoutLbtcSummary;
   context_edge_count?: number;
@@ -312,6 +313,7 @@ const state = {
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const dialog = document.querySelector<HTMLDialogElement>("#action-dialog")!;
+const taskNotifications = createTaskNotifications(window);
 const pollTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const pollingJobs = new Set<string>();
 const caseRefreshSequence = new Map<string, number>();
@@ -325,7 +327,7 @@ let dialogRebuild: { caseId: string; sourceBoard: string; runId: string } | null
 let submitting = false;
 let pageGeneration = 0;
 let viewRevision = 0;
-let workflowDraft = {caseId: "", goal: "full" as PlotGoal, minHops: "0", maxHops: "10", includeUnspent: false, includeUnspendable: false, includeContext: false, layoutMode: "fresh" as PlotLayoutMode, layoutBoard: "", plot: "", board: "", boardPlot: "", boardGoal: "full" as PlotGoal, boardName: "", savedBoardName: "", linkedBoardName: "", boardUrl: ""};
+let workflowDraft = {caseId: "", goal: "full" as PlotGoal, minHops: "0", maxHops: "10", includeUnspent: false, includeUnspendable: false, layoutMode: "fresh" as PlotLayoutMode, layoutBoard: "", plot: "", board: "", boardPlot: "", boardGoal: "full" as PlotGoal, boardName: "", savedBoardName: "", linkedBoardName: "", boardUrl: ""};
 let pegoutDraft = {caseId: "", custom: false, txid: "", minHops: "0", maxHops: "10", selected: "", board: "", approved: ""};
 const pegoutDrafts = new Map<string, typeof pegoutDraft>();
 type InvestigationView = {
@@ -594,11 +596,30 @@ function button(
 }
 
 function toast(message: string, error = false): void {
-  const element = document.createElement("div");
+  const element = document.createElement("button");
+  element.type = "button";
   element.className = `toast${error ? " error" : ""}`;
   element.textContent = message;
+  element.title = "Dismiss notification";
+  element.setAttribute("aria-label", `Dismiss notification: ${message}`);
+  element.onclick = () => element.remove();
   document.querySelector("#notifications")!.append(element);
   setTimeout(() => element.remove(), error ? 9000 : 5500);
+}
+
+function notificationControl(): string {
+  const control = taskNotifications.control();
+  return `<button type="button" class="notification-control" data-action="toggle-system-notifications" aria-pressed="${control.enabled}" title="${esc(control.hint)}"${disabled(control.disabled)}>${esc(control.label)}</button>`;
+}
+
+function notifyTaskResult(job: ActiveJob): void {
+  if (!["succeeded", "failed", "canceled"].includes(job.status)) return;
+  taskNotifications.notify({id: job.id, status: job.status as "succeeded" | "failed" | "canceled",
+    investigation: taskName(job), action: human(job.action), open: () => {
+      tasksOpen = true;
+      if (job.caseId) void openCase(job.caseId).catch(handleError);
+      else render();
+    }});
 }
 
 class ApiError extends Error {
@@ -659,19 +680,19 @@ function budgetFields(settings: Settings): string {
   ] as [keyof Settings, string, string][]).map(([key, label, hint]) => numericField(settings, key, label, hint)).join("")}</div>`;
 }
 
-function graphFields(settings: Settings, suggest = false, goal: PlotGoal = "full", includeContext = false): string {
+function graphFields(settings: Settings, suggest = false, goal: PlotGoal = "full"): string {
   const check = (key: "include_fees" | "color_attribution_arrows" | "group_context_inputs", label: string, hint: string): string =>
     `<input type="hidden" name="${key}_present" value="1"/><label class="check-line"><input name="${key}" type="checkbox"${settings[key] ? " checked" : ""}/><span><strong>${label}</strong><small>${hint}</small></span></label>`;
-  const canGroupContext = goal === "full" || goal === "pegouts" && includeContext;
+  const canGroupContext = goal === "full" || goal === "pegouts";
   return `<div class="field-row"><label class="field"><span>Connector appearance</span><select name="connector_style">${connectorOptions(settings.connector_style)}</select></label>${numericField(settings, "layout_attempts", "Layout attempts", "More attempts compare more arrangements and take longer.")}</div>
     ${check("color_attribution_arrows", "Color arrows by attribution", "Use each named address's assigned color for its arrows.")}
     ${centerNameFields(settings, suggest)}
     <fieldset class="layout-fields context-grouping-fields"${disabled(!canGroupContext)}><legend>Context input grouping</legend>
     ${check("group_context_inputs", "Group isolated context inputs", "Combine isolated external input addresses used by one transaction. Shared or named addresses and context outputs stay separate. Changing this grouping replaces generated context objects; preserve any Miro comments on them first.")}</fieldset>
-    ${goal === "pegouts" && !includeContext ? '<p class="small muted">Enable Include context addresses above to group isolated context inputs.</p>' : goal === "connections" ? '<p class="small muted">Context input grouping applies to Full trace and peg-out layouts with context addresses included.</p>' : ""}
+    ${goal === "connections" ? '<p class="small muted">Context input grouping applies to Full trace and Paths to peg-outs.</p>' : ""}
     <fieldset class="layout-fields full-trace-fields"${disabled(goal !== "full")}><legend>Full trace options</legend>
     ${check("include_fees", "Include transaction fee flows", "Show fees above the graph.")}
-    ${hubAddressFields(settings)}</fieldset>${goal !== "full" ? '<p class="small muted">Fee flows and separate branch hubs apply to Full trace.</p>' : ""}`;
+    ${hubAddressFields(settings)}</fieldset>${goal === "pegouts" ? '<p class="small muted">Peg-out layouts always show every transaction input and output, including fees. Separate branch hubs apply to Full trace.</p>' : goal === "connections" ? '<p class="small muted">Fee flows and separate branch hubs apply to Full trace.</p>' : ""}`;
 }
 
 function traceSummary(settings: Settings): string {
@@ -928,7 +949,7 @@ function render(focus = false): void {
     "case-settings": "Investigation settings",
     addresses: "Address review",
   };
-  app.innerHTML = `<div class="layout">${sidebar()}<div class="main-shell"><header class="workspace-header"><div class="topbar"><div class="breadcrumb">${icon("folder")}<span>Workspace</span>${icon("chevron")}<strong>${esc(names[state.page])}</strong></div><div class="topbar-right"><span class="local-pill">${icon("lock")} LOCAL SESSION</span><span class="avatar" aria-label="Investigation workspace">LT</span></div></div>${investigationTabs()}${endpointExportNotice()}${jobBanner()}${caseOpeningBanner()}</header><main id="main" class="content" tabindex="-1">${state.error ? `<div class="alert error" role="alert">${icon("info")}<div><strong>Unable to complete the action</strong><p>${esc(state.error)}</p></div><button class="dismiss" data-action="dismiss-error" aria-label="Dismiss error">${icon("close")}</button></div>` : ""}${miroEditConflictsPanel()}${state.page === "dashboard" ? dashboard() : state.page === "new" ? newCase() : state.page === "case" ? workspace() : state.page === "addresses" ? addressReviewPage() : settingsPage()}</main></div></div>`;
+  app.innerHTML = `<div class="layout">${sidebar()}<div class="main-shell"><header class="workspace-header"><div class="topbar"><div class="breadcrumb">${icon("folder")}<span>Workspace</span>${icon("chevron")}<strong>${esc(names[state.page])}</strong></div><div class="topbar-right">${notificationControl()}<span class="local-pill">${icon("lock")} LOCAL SESSION</span><span class="avatar" aria-label="Investigation workspace">LT</span></div></div>${investigationTabs()}${endpointExportNotice()}${jobBanner()}${caseOpeningBanner()}</header><main id="main" class="content" tabindex="-1">${state.error ? `<div class="alert error" role="alert">${icon("info")}<div><strong>Unable to complete the action</strong><p>${esc(state.error)}</p></div><button class="dismiss" data-action="dismiss-error" aria-label="Dismiss error">${icon("close")}</button></div>` : ""}${miroEditConflictsPanel()}${state.page === "dashboard" ? dashboard() : state.page === "new" ? newCase() : state.page === "case" ? workspace() : state.page === "addresses" ? addressReviewPage() : settingsPage()}</main></div></div>`;
   workspaceHeaderObserver?.disconnect();
   const tabList = document.querySelector(".investigation-tab-list");
   if (tabList) tabList.scrollLeft = tabScroll;
@@ -1305,7 +1326,7 @@ const workflowDrafts = new Map<string, typeof workflowDraft>();
 function currentWorkflow(detail: Case): typeof workflowDraft {
   if (workflowDraft.caseId !== detail.id) {
     if (workflowDraft.caseId) workflowDrafts.set(workflowDraft.caseId, workflowDraft);
-    workflowDraft = workflowDrafts.get(detail.id) || {caseId: detail.id, goal: "full", minHops: "0", maxHops: "10", includeUnspent: false, includeUnspendable: false, includeContext: false, layoutMode: "fresh" as PlotLayoutMode, layoutBoard: "", plot: "", board: "", boardPlot: "", boardGoal: "full", boardName: "", savedBoardName: "", linkedBoardName: "", boardUrl: ""};
+    workflowDraft = workflowDrafts.get(detail.id) || {caseId: detail.id, goal: "full", minHops: "0", maxHops: "10", includeUnspent: false, includeUnspendable: false, layoutMode: "fresh" as PlotLayoutMode, layoutBoard: "", plot: "", board: "", boardPlot: "", boardGoal: "full", boardName: "", savedBoardName: "", linkedBoardName: "", boardUrl: ""};
   }
   return workflowDraft;
 }
@@ -1343,7 +1364,7 @@ function chosenBoardPlot(detail: Case, board: InvestigationBoard): Plot | undefi
 }
 
 const plotLayoutDrafts = new Map<string, LayoutSettings>();
-type LayoutFormDraft = Pick<typeof workflowDraft, "goal" | "minHops" | "maxHops" | "includeUnspent" | "includeUnspendable" | "includeContext"> & {settings: LayoutSettings};
+type LayoutFormDraft = Pick<typeof workflowDraft, "goal" | "minHops" | "maxHops" | "includeUnspent" | "includeUnspendable"> & {settings: LayoutSettings};
 const layoutFormDrafts = new Map<string, Map<string, LayoutFormDraft>>();
 
 function layoutDraftKey(detail: Case): string {
@@ -1359,7 +1380,7 @@ function saveDestinationDraft(detail: Case): void {
   if (!drafts) {drafts = new Map(); layoutFormDrafts.set(detail.id, drafts);}
   drafts.set(key, {goal: draft.goal, minHops: draft.minHops, maxHops: draft.maxHops,
     includeUnspent: draft.includeUnspent, includeUnspendable: draft.includeUnspendable,
-    includeContext: draft.includeContext, settings: currentLayoutSettings(detail)});
+    settings: currentLayoutSettings(detail)});
 }
 
 function selectLayoutDestination(detail: Case, mode: PlotLayoutMode, board?: InvestigationBoard): void {
@@ -1373,7 +1394,6 @@ function selectLayoutDestination(detail: Case, mode: PlotLayoutMode, board?: Inv
   const restored = remembered || (plot ? {goal: board!.goal,
     minHops: String(plot.min_hops ?? 0), maxHops: String(plot.max_hops ?? 10),
     includeUnspent: Boolean(plot.query?.include_unspent), includeUnspendable: Boolean(plot.query?.include_unspendable),
-    includeContext: Boolean(plot.query?.include_context),
     settings: selectLayoutSettings({...defaults, ...detail.run_defaults, ...plot.layout_settings})} : undefined);
   if (restored) {
     const {settings, ...query} = restored;
@@ -1436,6 +1456,7 @@ function plotEndpointLabel(plot: Plot | undefined): string {
 }
 
 function plotContextScope(plot: Plot): string {
+  if (plot.query?.transaction_io === "complete") return `All transaction inputs and outputs · isolated inputs ${plot.layout_settings?.group_context_inputs ? "grouped" : "separate"}`;
   return plot.query?.include_context
     ? `Context addresses included · isolated inputs ${plot.layout_settings?.group_context_inputs ? "grouped" : "separate"}`
     : "Paths only";
@@ -1446,7 +1467,7 @@ function plotEndpointSummary(plot: Plot | undefined): string {
   const counts = plot.endpoint_counts;
   const matches = counts ? `${counts.pegout} peg-out requests · ${counts.unspent} unspent UTXOs · ${counts.unspendable} unspendable outputs`
     : plot.match_count === undefined ? "" : `${plot.match_count} peg-out requests`;
-  const contextCount = plot.query?.include_context && plot.context_edge_count !== undefined
+  const contextCount = (plot.query?.transaction_io === "complete" || plot.query?.include_context) && plot.context_edge_count !== undefined
     ? ` ${plot.context_edge_count} context connections, excluded from endpoint counts.` : "";
   return `<p class="small muted">Endpoint types: ${esc(plotEndpointScope(plot))}.${matches ? ` Results: ${esc(matches)}.` : ""}</p><p class="small muted">Saved layout: ${plotContextScope(plot)}.${contextCount}</p>`;
 }
@@ -1509,15 +1530,13 @@ function plotEndpointFields(draft: typeof workflowDraft): string {
     <label class="check-line"><input id="workflow-include-unspent" type="checkbox"${draft.includeUnspent ? " checked" : ""}/><span>Include unspent UTXOs</span></label>
     <label class="check-line"><input id="workflow-include-unspendable" type="checkbox"${draft.includeUnspendable ? " checked" : ""}/><span>Include unspendable outputs</span></label>
     <p class="small muted">Peg-out requests are always included. Unspent means observed unspent in the selected collection run. Unchecked outputs and outputs stopped only by a hop limit are not counted as unspent. These choices are saved with each generated layout.</p></fieldset>
-    <fieldset class="layout-fields"${disabled(draftBusy())}><legend>Context display</legend>
-    <label class="check-line"><input id="workflow-include-context" type="checkbox"${draft.includeContext ? " checked" : ""}/><span>Include context addresses</span></label>
-    <p class="small muted">Show other input addresses and sibling output addresses of displayed transactions. Context adds no tracing or fetching and is excluded from endpoint match counts. Generate a layout to save this choice; existing layouts stay unchanged.</p></fieldset>`;
+    <p class="artifact-note">Every included transaction shows all its inputs and outputs, including fees. Outputs on excluded branches remain visible without continuing those branches. These extra objects do not add endpoint matches or change the peg-out total.</p>`;
 }
 
 function savedLayoutSummary(plot: Plot): string {
   const settings = plot.layout_settings;
   if (!settings) return "";
-  const contextGrouping = plot.goal === "full" || plot.goal === "pegouts" && plot.query?.include_context;
+  const contextGrouping = plot.goal === "full" || plot.goal === "pegouts" && (plot.query?.transaction_io === "complete" || plot.query?.include_context);
   return `<details class="tool-details"><summary>Saved layout settings</summary><p>${esc(human(settings.connector_style))} connectors · ${esc(settings.layout_attempts)} layout attempts · Attribution arrow colors ${settings.color_attribution_arrows ? "on" : "off"}.</p><p>Centered group: ${esc(settings.center_name || "None")}.${contextGrouping ? ` Isolated context inputs ${settings.group_context_inputs ? "grouped" : "separate"}.` : ""}${plot.goal === "full" ? ` Fee flows ${settings.include_fees ? "shown" : "hidden"}; ${esc(settings.hub_addresses.length)} separate branch hubs.` : ""}</p></details>`;
 }
 
@@ -1530,7 +1549,7 @@ function plotLayoutsPanel(detail: Case, saved: boolean): string {
   const unavailable = !saved || actionBusy("plot", workflowResourceBody(detail)) || draft.layoutMode === "update" && !updateLayoutBoards(detail, draft.goal).some(board => board.id === draft.layoutBoard);
   const pending = pendingFreshCreation(detail);
   const settings = {...defaults, ...detail.run_defaults, ...currentLayoutSettings(detail)};
-  return `<section class="panel" id="plot-layouts-panel"><div class="panel-head"><div><h2>Generate a Miro graph</h2><p>Choose the goal and destination, then generate and sync in one step.</p></div><span class="badge gray">Saved transactions</span></div><div class="panel-body"><div class="plot-goals" role="group" aria-label="Plotting goal">${plotGoals.map(goal => `<button class="plot-goal${draft.goal === goal.id ? " selected" : ""}" data-action="plot-goal" data-goal="${goal.id}" aria-pressed="${draft.goal === goal.id}"${disabled(draftBusy())}><strong>${goal.name}</strong><span>${goal.description}</span></button>`).join("")}</div>${draft.goal !== "full" ? `<div class="field-row">${draft.goal === "pegouts" ? `<label class="field"><span>Minimum hops</span><input id="workflow-min-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.minHops)}"${disabled(draftBusy())}/></label>` : ""}<label class="field"><span>Maximum hops</span><input id="workflow-max-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.maxHops)}"${disabled(draftBusy())}/></label></div>` : ""}<p class="artifact-note">Plotting makes no blockchain requests. A hop filter cannot reveal data beyond your collection coverage. If a path is missing, collect more data first and generate another plot.</p><p class="small muted">${esc(hopBasis(currentRun()?.hop_reference_name))}. ${esc(hopBasisExplanation(currentRun()?.hop_reference_name))} Uses the selected collection run’s hop basis with current attribution rules.</p>${draft.goal === "pegouts" ? '<p class="small muted">Only selected starting UTXOs are followed. A peg-out request does not confirm the separate Bitcoin payout.</p>' : ""}${plotEndpointFields(draft)}${plotDestinationFields(detail)}<form id="plot-layout-form" data-case-id="${esc(detail.id)}"><fieldset class="layout-fields"${disabled(draftBusy())}><legend>Layout settings</legend>${graphFields(settings, true, draft.goal, draft.includeContext)}</fieldset><p class="small muted">Each generation captures this selected run, investigation rules, and layout settings. Other jobs can continue independently. Use Save layout settings to set the defaults for future layouts.</p><div class="task-actions">${button(draft.layoutMode === "update" ? "Generate & update board" : "Generate & create board", "workflow-plot-sync", "graph", "primary", unavailable || actionBusy("plot-sync", workflowResourceBody(detail)) || draft.layoutMode === "fresh" && Boolean(pending))}${button("Save layout settings", "plot-settings-save", "check", "", isBusy())}</div>${draft.layoutMode === "fresh" && pending ? `<p class="artifact-note">The creation of ${esc(pending.name)} has an uncertain result. Check Miro and link the created board to its saved entry below before starting another new board.</p>` : ""}<p class="small muted">Miro credentials are retrieved through the launching terminal. The saved preview remains available after syncing.</p><details class="tool-details"><summary>Preview without syncing</summary><p class="small muted">Save a layout and SVG without publishing. A new-board preview works offline; an update preview reads Miro to preserve the current arrangement.</p>${button("Generate preview only", "workflow-plot", "graph", "", unavailable)}</details></form>${!saved ? '<p class="artifact-note">Collect transaction data before generating a plot.</p>' : ""}</div></section>`;
+  return `<section class="panel" id="plot-layouts-panel"><div class="panel-head"><div><h2>Generate a Miro graph</h2><p>Choose the goal and destination, then generate and sync in one step.</p></div><span class="badge gray">Saved transactions</span></div><div class="panel-body"><div class="plot-goals" role="group" aria-label="Plotting goal">${plotGoals.map(goal => `<button class="plot-goal${draft.goal === goal.id ? " selected" : ""}" data-action="plot-goal" data-goal="${goal.id}" aria-pressed="${draft.goal === goal.id}"${disabled(draftBusy())}><strong>${goal.name}</strong><span>${goal.description}</span></button>`).join("")}</div>${draft.goal !== "full" ? `<div class="field-row">${draft.goal === "pegouts" ? `<label class="field"><span>Minimum hops</span><input id="workflow-min-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.minHops)}"${disabled(draftBusy())}/></label>` : ""}<label class="field"><span>Maximum hops</span><input id="workflow-max-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.maxHops)}"${disabled(draftBusy())}/></label></div>` : ""}<p class="artifact-note">Plotting makes no blockchain requests. A hop filter cannot reveal data beyond your collection coverage. If a path is missing, collect more data first and generate another plot.</p><p class="small muted">${esc(hopBasis(currentRun()?.hop_reference_name))}. ${esc(hopBasisExplanation(currentRun()?.hop_reference_name))} Uses the selected collection run’s hop basis with current attribution rules.</p>${draft.goal === "pegouts" ? '<p class="small muted">Only selected starting UTXOs are followed. A peg-out request does not confirm the separate Bitcoin payout.</p>' : ""}${plotEndpointFields(draft)}${plotDestinationFields(detail)}<form id="plot-layout-form" data-case-id="${esc(detail.id)}"><fieldset class="layout-fields"${disabled(draftBusy())}><legend>Layout settings</legend>${graphFields(settings, true, draft.goal)}</fieldset><p class="small muted">Each generation captures this selected run, investigation rules, and layout settings. Other jobs can continue independently. Use Save layout settings to set the defaults for future layouts.</p><div class="task-actions">${button(draft.layoutMode === "update" ? "Generate & update board" : "Generate & create board", "workflow-plot-sync", "graph", "primary", unavailable || actionBusy("plot-sync", workflowResourceBody(detail)) || draft.layoutMode === "fresh" && Boolean(pending))}${button("Save layout settings", "plot-settings-save", "check", "", isBusy())}</div>${draft.layoutMode === "fresh" && pending ? `<p class="artifact-note">The creation of ${esc(pending.name)} has an uncertain result. Check Miro and link the created board to its saved entry below before starting another new board.</p>` : ""}<p class="small muted">Miro credentials are retrieved through the launching terminal. The saved preview remains available after syncing.</p><details class="tool-details"><summary>Preview without syncing</summary><p class="small muted">Save a layout and SVG without publishing. A new-board preview works offline; an update preview reads Miro to preserve the current arrangement.</p>${button("Generate preview only", "workflow-plot", "graph", "", unavailable)}</details></form>${!saved ? '<p class="artifact-note">Collect transaction data before generating a plot.</p>' : ""}</div></section>`;
 }
 
 function savedPlotsPanel(detail: Case): string {
@@ -1636,11 +1655,6 @@ function workflowInput(element: HTMLInputElement | HTMLSelectElement): boolean {
   else if (element.id === "workflow-board-goal" && plotGoals.some(goal => goal.id === element.value)) draft.boardGoal = element.value as PlotGoal;
   else if (element.id === "workflow-include-unspent") draft.includeUnspent = (element as HTMLInputElement).checked;
   else if (element.id === "workflow-include-unspendable") draft.includeUnspendable = (element as HTMLInputElement).checked;
-  else if (element.id === "workflow-include-context") {
-    savePlotLayoutDraft();
-    draft.includeContext = (element as HTMLInputElement).checked;
-    render();
-  }
   else if (fields[element.id]) draft[fields[element.id]] = element.value;
   else return false;
   if (["workflow-plot-picker", "workflow-board-goal"].includes(element.id)) render();
@@ -1703,7 +1717,6 @@ async function workflowAction(action: string, element?: HTMLElement): Promise<bo
     if (draft.goal === "pegouts") {
       if (draft.includeUnspent) body.include_unspent = true;
       if (draft.includeUnspendable) body.include_unspendable = true;
-      if (draft.includeContext) body.include_context = true;
     }
     const form = document.querySelector<HTMLFormElement>("#plot-layout-form");
     if (form && !form.reportValidity()) return true;
@@ -2067,6 +2080,8 @@ function rememberJob(job: Job, local?: {action: string; caseId?: string; live: b
     outcome: ["succeeded", "failed", "canceled"].includes(job.status) ? job : undefined,
   };
   state.jobs.set(job.id, active);
+  // Discovered terminal history stays silent because it is never polled. Do not
+  // consume its notification ID: its initiating POST may still be in flight.
   if (active.status === "running" || active.status === "cancelling") schedulePoll(active.id);
   pruneFinishedJobs();
   return active;
@@ -2285,6 +2300,7 @@ async function pollJob(identity: string): Promise<void> {
     active.message = job.message;
     active.outcome = job;
     active.finishedAt = Number.isFinite(job.finished_at) ? job.finished_at! * 1000 : Date.now();
+    notifyTaskResult(active);
     pruneFinishedJobs();
     active.cancellable = false;
     if (job.status === "canceled") {
@@ -2485,6 +2501,7 @@ async function pollJob(identity: string): Promise<void> {
       pruneFinishedJobs();
       active.cancellable = false;
       active.outcomeError = "The local server no longer tracks this action. Review the saved investigation before starting it again.";
+      notifyTaskResult(active);
       if (viewingCase(active.caseId)) state.error = active.outcomeError;
       try { await refreshSession(); } catch { /* Retry from the next discovery poll. */ }
       refreshJobView();
@@ -2595,6 +2612,13 @@ async function caseAction(action: string): Promise<void> {
 }
 
 async function dispatch(action: string, element?: HTMLElement): Promise<void> {
+  if (action === "toggle-system-notifications") {
+    const result = taskNotifications.toggle();
+    render();
+    toast(await result);
+    render();
+    return;
+  }
   if (action === "export-open-endpoints") {await exportOpenEndpoints(); return;}
   if (action === "dismiss-endpoint-export") {
     if (!state.endpointExport.pending) {state.endpointExport.result = null; state.endpointExport.error = ""; render();}

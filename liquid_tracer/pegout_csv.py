@@ -167,6 +167,7 @@ def pegout_csv_rows(graph, state, *, observations=None):
                                include_unspent=raw_query.get("include_unspent", False),
                                include_unspendable=raw_query.get("include_unspendable", False),
                                include_context=raw_query.get("include_context", False),
+                               transaction_io=raw_query.get("transaction_io"),
                                hop_reference_name=name)
         if canonical(query) != canonical(raw_query) or reference_name(graph) != name:
             raise TraceError("Endpoint CSV hop reference or query disagrees with the saved graph")
@@ -193,8 +194,15 @@ def pegout_csv_rows(graph, state, *, observations=None):
         transactions = {node["id"][3:] for node in graph["nodes"] if node["kind"] == "transaction"}
         if transactions != set(depths) or not expected_edges <= actual_edges:
             raise TraceError("Endpoint CSV graph is missing qualifying transactions or path arrows")
+        complete = query.get("transaction_io") == "complete"
+        if complete:
+            local_edges = {f"{direction}:{txid}:{index}"
+                           for txid in transactions for direction, field in (("in", "vin"), ("out", "vout"))
+                           for index in range(len(state["transactions"][txid]["data"][field]))}
+            if actual_edges != local_edges:
+                raise TraceError("Endpoint CSV graph is missing complete transaction inputs or outputs")
         if any(edge["id"] not in expected_edges and
-               (not query.get("include_context") or not edge.get("role", "").startswith("context_"))
+               (not (complete or query.get("include_context")) or not edge.get("role", "").startswith("context_"))
                for edge in graph["edges"]):
             raise TraceError("Endpoint CSV graph contains an unrelated path arrow")
         # Reuse the established exact-I/O and grouped-context validation, as

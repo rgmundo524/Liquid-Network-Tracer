@@ -99,10 +99,11 @@ def validate_layout_settings(value):
 def _effective_settings(settings, goal, query=None):
     result = validate_layout_settings(settings)
     if goal != "full":
-        # Filtered plots never add fee flows or hub branches. Context grouping
-        # applies only when a peg-out query explicitly includes local context.
-        result.update(include_fees=False, hub_addresses=[])
-        if goal != "pegouts" or not (query or {}).get("include_context"):
+        # New peg-out plots select transactions, then display their complete
+        # local I/O. Legacy snapshots retain their original optional context.
+        complete = goal == "pegouts" and (query or {}).get("transaction_io") == "complete"
+        result.update(include_fees=complete, hub_addresses=[])
+        if goal != "pegouts" or not (complete or (query or {}).get("include_context")):
             result["group_context_inputs"] = False
     return result
 
@@ -201,7 +202,7 @@ def _source(case, run_id):
 
 
 def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_unspendable=False,
-           include_context=False):
+           include_context=False, transaction_io="complete"):
     from .connections import validate_hops
     from .pegout_paths import validate_query
     if not isinstance(goal, str) or goal not in GOALS:
@@ -217,7 +218,8 @@ def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_un
     if goal == "pegouts":
         return validate_query(seeds=state["seeds"], min_hops=min_hops, max_hops=max_hops,
                               include_unspent=include_unspent, include_unspendable=include_unspendable,
-                              include_context=include_context, hop_reference_name=reference_name(state))
+                              include_context=include_context, hop_reference_name=reference_name(state),
+                              transaction_io=transaction_io)
     reference = {"hop_reference_name": reference_name(state)} if reference_name(state) else {}
     if goal == "connections":
         return {"max_hops": validate_hops(max_hops), **reference}
@@ -515,7 +517,8 @@ def _review_source(case, graph, source_cache=None, inputs=None):
     expected = _query(report["goal"], state, query.get("min_hops", 0), query.get("max_hops", 10),
                       include_unspent=query.get("include_unspent", False),
                       include_unspendable=query.get("include_unspendable", False),
-                      include_context=query.get("include_context", False))
+                      include_context=query.get("include_context", False),
+                      transaction_io=query.get("transaction_io"))
     settings = _snapshot_settings(graph)
     if settings is not None:
         from .export import PRESENTATION_VERSION

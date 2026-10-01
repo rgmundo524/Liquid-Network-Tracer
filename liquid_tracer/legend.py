@@ -101,7 +101,9 @@ def legend_notes(graph=None):
                                seeds=query.get("seeds"), include_unspent=query.get("include_unspent", False),
                                include_unspendable=query.get("include_unspendable", False),
                                include_context=query.get("include_context", False),
-                               hop_reference_name=query.get("hop_reference_name", ""))
+                               hop_reference_name=query.get("hop_reference_name", ""),
+                               transaction_io=query.get("transaction_io"))
+        complete_io = query.get("transaction_io") == "complete"
         if "seeds" in query:
             count = len({seed.split(":")[0] for seed in query["seeds"]})
             origin = (f"Peg-out search: {len(query['seeds'])} selected seed UTXO(s) "
@@ -122,7 +124,7 @@ def legend_notes(graph=None):
             + " hops, inclusive. " + hop_zero,
             ("Qualifying paths are shown with transaction context. Thinner context arrows do not establish traced paths "
              "or add endpoint matches. Combined path edges can also form routes outside the selected range."
-             if query.get("include_context") else
+             if complete_io or query.get("include_context") else
              "Only qualifying paths are plotted. Their combined edges can also form routes outside the selected range."),
             "Peg-out diamonds are Liquid requests, not confirmation of Bitcoin payouts.",
             coverage + "Stopped, unconfirmed or unsearched branches may contain undiscovered peg-outs; no result does not prove absence.",
@@ -130,7 +132,11 @@ def legend_notes(graph=None):
         if graph.get("address_mode") == "merged":
             notes.append("One circle per full address per network; each UTXO keeps its own arrows. "
                          "Sharing a circle does not establish a spend between unrelated outputs.")
-        if query.get("include_context"):
+        if complete_io:
+            notes.append("Every input and output of displayed transactions is included, including fees. "
+                         "Context branch outputs do not become endpoint matches or imply unspent status. "
+                         "Earlier and later transactions are only included when they belong to a qualifying path.")
+        elif query.get("include_context"):
             notes.append("Context includes other input addresses and spendable sibling outputs of displayed transactions. "
                          "It does not expand the trace to their earlier or later transactions.")
         if query.get("include_unspent") or query.get("include_unspendable"):
@@ -144,7 +150,8 @@ def legend_notes(graph=None):
                 notes.append("Unspent means observed unspent in the selected saved run, not a live balance. "
                              "Unchecked and hop-limited outputs do not qualify.")
             if query.get("include_unspendable"):
-                notes.append("Unspendable diamonds identify outputs whose scripts cannot be spent. Fee outputs are excluded.")
+                notes.append("Unspendable diamonds identify outputs whose scripts cannot be spent. Fee outputs are excluded"
+                             + (" from endpoint selection." if complete_io else "."))
     return notes
 
 

@@ -124,7 +124,7 @@ Current stop-tracing and attribution hop limits are reapplied when generating a 
 
 **Investigation settings** collects this case's tracing limits, Miro sync budget, and colors. Its **Investigation data** section contains CSV imports, address review, change outputs, and input CSV exports. **Workspace defaults** sets collection, plot layout, and Miro sync defaults copied into future investigations; existing cases keep their saved settings. Both scopes persist across restarts. Changing the hop allowance in a run dialog applies only to that run. Imports use **Preview → Apply**; changing a file or import option requires a fresh preview. Imported data and color edits save through their own controls; **Save settings** saves the investigation preferences.
 
-**Plots & Miro** edits this investigation's layout attempts, connector appearance, attribution arrow coloring, named-group centering, separate branch hubs, isolated context grouping, and fee-flow visibility. The same controls in **Workspace defaults** set the starting values for new investigations. **Save layout settings** persists these preferences as defaults for the investigation, including before its first collection. **Generate** captures the current form settings for that layout without changing shared defaults, so simultaneous jobs can use different settings. Unsaved edits survive tab navigation in the current browser session. Separate branch hubs and fee flows apply to **Full trace** only. Isolated context grouping also applies to **Paths to peg-outs** when **Include context addresses** is enabled. Other filtered layouts preserve the grouping preference without applying it. Existing saved layouts and Miro boards keep their appearance until you generate and sync a new layout.
+**Plots & Miro** edits this investigation's layout attempts, connector appearance, attribution arrow coloring, named-group centering, separate branch hubs, isolated context grouping, and fee-flow visibility. The same controls in **Workspace defaults** set the starting values for new investigations. **Save layout settings** persists these preferences as defaults for the investigation, including before its first collection. **Generate** captures the current form settings for that layout without changing shared defaults, so simultaneous jobs can use different settings. Unsaved edits survive tab navigation in the current browser session. Separate branch hubs and optional fee-flow visibility apply to **Full trace** only; **Paths to peg-outs** always shows fees with the rest of each included transaction. Isolated context grouping applies to both **Full trace** and **Paths to peg-outs**. Other filtered layouts preserve the grouping preference without applying it. Existing saved layouts and Miro boards keep their appearance until you generate and sync a new layout.
 
 The task tabs are **Collect data**, **Plots & Miro**, and **History & downloads**. The selected saved snapshot stays selected across tabs. **Collected data** shows **Hops collected**, the deepest recorded transaction hop in that snapshot, separately from its collection hop limit. Starting transactions are hop 0; this maximum does not imply every branch reached that depth. Collection is the separate fetching phase. Plotting uses saved evidence; updating a board also reads its current arrangement. Combined generation and publication actions require Miro credentials. Linking and listing boards are local actions.
 
@@ -137,6 +137,13 @@ During sync, the browser and launching terminal show the current stage and compl
 After generating a Paths to peg-outs plot, Collected data shows the latest peg-out LBTC total for its selected run, with the endpoint CSV alongside it. The total counts each peg-out output once using its full disclosed LBTC value. Hidden amounts, unidentified assets, and non-LBTC outputs are reported separately; dormant and unspendable outputs do not contribute. Older plots without this summary need a new peg-out plot to calculate it.
 
 Open investigations appear as tabs in the header. Switch tabs to return to each investigation’s selected snapshot, tool view, plot/board selections, and unsaved settings or import drafts. Closing a tab only closes its view; running tasks continue and the investigation can be reopened from the list or Tasks. The tab list and navigation selections survive a refresh in the same browser tab. Unsaved form contents remain in memory only, so save edits before refreshing. The + button opens New investigation.
+
+Click an in-app notification to dismiss it, or focus it and press Enter or Space.
+Use **Notifications off** in the header to enable system alerts for completed,
+failed, or canceled tasks. Permission is requested only when you enable alerts;
+the preference is remembered in this browser. Clicking a system alert focuses
+Liquid Tracer and opens its investigation. Keep the browser tab open to receive
+alerts; notifications do not run after the page closes.
 
 Use **Export endpoints** beside the investigation tabs to download one CSV across all open investigations. Each tab contributes its selected collection run’s latest saved Paths to peg-outs trace, including whichever dormant or unspendable endpoints that trace selected. The usual endpoint columns are preserved, followed by investigation, run, plot, and filter details. Shared endpoints remain separate rows for each investigation. The UI lists included and skipped investigations; a missing trace is reported, and a damaged selected trace blocks the download. Exporting reads saved data and can run alongside collection or Miro tasks.
 
@@ -162,7 +169,7 @@ endpoint type. Unspent requires a saved observation that the exact UTXO was
 unspent; unchecked outputs and branches paused at a hop limit do not qualify.
 It describes the selected collection run, not the current live balance. A saved
 spending transaction overrides an older unspent observation. Unspendable outputs
-appear as separate event diamonds; fees are excluded.
+appear as separate event diamonds. These options select qualifying endpoint paths; they do not hide other outputs of a transaction already included in the graph.
 
 Each saved layout records these choices and reports counts by endpoint type.
 Regenerate the layout to change them, then sync that layout to its managed board
@@ -170,22 +177,28 @@ or download its ELK SVG. The endpoint choices do not change collection or fetch
 new observations. The CLI equivalents are `plot --goal pegouts --include-unspent`
 and `--include-unspendable`.
 
-Enable **Include context addresses** to show the other input addresses and
-spendable sibling output addresses around transactions on matching paths. Their
-thinner arrows identify context; they do not extend the trace, change hop
-distances, or add endpoint matches. This uses the saved transaction I/O without
-fetching earlier or later activity. Fee outputs and additional event outputs
-remain excluded. The setting is off by default and saved with each layout;
-the CLI equivalent is `plot --goal pegouts --include-context`.
+Paths to peg-outs selects which transactions belong in the graph, then shows
+**every input and output** of those transactions. This includes named service
+addresses, external inputs, sibling outputs, fees, peg-ins, and other event
+outputs. An excluded branch retains its first output object without adding its
+later transactions. Context outputs do not acquire endpoint or hop labels just
+because they are visible; known address attribution remains available.
 
-With context enabled, select **Group isolated context inputs** to summarize two
+The extra objects do not change matched endpoints, endpoint CSV rows, or the
+peg-out LBTC total. No additional blockchain data is fetched. The **All trace
+transactions CSV** includes every displayed input and output, while **Endpoints
+only CSV** remains limited to the qualifying endings. Earlier saved layouts keep
+their original display scope; generate a new layout to apply the complete I/O
+display. The older `--include-context` argument remains accepted for compatibility
+but is unnecessary when creating a new peg-out layout.
+
+Select **Group isolated context inputs** to summarize two
 or more eligible external input addresses used only by one displayed transaction.
 Traced, shared, attributed, and otherwise protected addresses stay individual;
 sibling output addresses are not grouped. Every input keeps its own connector,
 UTXO reference, and transaction CSV row, and the original addresses remain in
 local details. Grouping uses the saved investigation preference and is captured
-with the generated layout. Regenerate and choose **Sync and reorganize** to apply
-the grouped arrangement to a managed board.
+with the generated layout. Choose **Generate & update board** to apply the new grouping to a managed board.
 
 Peg-out layouts use one circle per full address per network while retaining
 every qualifying UTXO connector and CSV row. Regenerate an older layout to
