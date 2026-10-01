@@ -99,7 +99,7 @@ def main():
                         help="Include production SQLite request admission in an isolated temporary directory")
     parser.add_argument("--network-delay-ms", type=float, default=40)
     parser.add_argument("--evidence-delay-ms", type=float, default=0,
-                        help="Legacy delay per evidence-write method; use commit delay to model durable storage")
+                        help="Legacy delay before each evidence-write call, outside its locks; use commit/sync delay to model durable storage")
     parser.add_argument("--evidence-commit-delay-ms", type=float, default=0,
                         help="Additional latency per actual evidence COMMIT")
     parser.add_argument("--quota-commit-delay-ms", type=float, default=0,
@@ -222,9 +222,16 @@ def main():
             return super().__exit__(*values)
 
         def execute(self, sql, *values):
-            if sql.strip().upper().rstrip(";") in ("COMMIT", "END"):
+            if is_commit(sql):
                 return self._measure_commit(super().execute, sql, *values)
             return super().execute(sql, *values)
+
+    def is_commit(sql):
+        # SAVEPOINT/RELEASE inside a BEGIN transaction are not durable commits.
+        # Both Python's connection context and explicit COMMIT/END paths emit
+        # one of these statements through SQLite's trace callback.
+        return tuple(sql.strip().rstrip(";").upper().split()) in (
+            ("COMMIT",), ("END",), ("COMMIT", "TRANSACTION"), ("END", "TRANSACTION"))
 
     def connect(database, *values, **options):
         path = Path(database)
@@ -237,7 +244,7 @@ def main():
         delay = getattr(args, kind + "_commit_delay_ms") / 1000
 
         def trace_statement(sql):
-            if sql.strip().upper().rstrip(";") != "COMMIT":
+            if not is_commit(sql):
                 return
             begun = time.monotonic()
             if delay:
@@ -287,13 +294,12 @@ def main():
 
     def delayed(original):
         def wrapped(store, *values, **options):
-            if not args.evidence_delay_ms:
-                # Preserve production lock-wait telemetry when this legacy
-                # method-delay model is disabled (including sync benchmarks).
-                return original(store, *values, **options)
-            with store._lock:
+            if args.evidence_delay_ms:
+                # Never hold Store's database lock while submitting a write.
+                # A caller-led group may need another thread to acquire that
+                # lock before this caller can receive its durable result.
                 time.sleep(args.evidence_delay_ms / 1000)
-                return original(store, *values, **options)
+            return original(store, *values, **options)
         return wrapped
 
     with tempfile.TemporaryDirectory(prefix="liquid-count-benchmark-") as directory:
@@ -354,6 +360,9 @@ def main():
         if not evidence_storage or any(details["observed_synchronous"] not in (2, 3)
                                        for details in evidence_storage):
             raise AssertionError("Evidence durability below SQLite FULL was observed")
+        if all(type(details.get("evidence_commits")) is int for details in evidence_storage):
+            if sum(details["evidence_commits"] for details in evidence_storage) != commits["evidence"]["count"]:
+                raise AssertionError("Evidence commit telemetry does not match actual SQLite COMMIT statements")
         rolling = deque()
         peak_successful_rps = 0
         for timestamp in sorted(successful_responses):

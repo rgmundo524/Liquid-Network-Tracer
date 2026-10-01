@@ -189,6 +189,32 @@ class ExplorerProbeMeasurementTests(unittest.TestCase):
                 "pacing_wait_seconds_total": 99})
         self.assertEqual(windows.series[0]["deltas"], {"evidence_seconds_total": 5})
 
+    def test_group_commit_windows_delta_logical_work_and_physical_commits_but_not_maxima(self):
+        clock = [0.]
+        windows = _Windows()
+        with patch("liquid_tracer.explorer_probe.time", SimpleNamespace(monotonic=lambda: clock[0])):
+            for at, jobs, batches, commits, wait, group_max, queue_peak in (
+                    (0, 100, 26, 25, 10, 8, 16),
+                    (5, 300, 76, 75, 30, 12, 24),
+                    (10, 500, 116, 115, 48, 12, 24)):
+                clock[0] = at
+                windows.observe({"phase": "address_counts", "fetched": jobs // 2,
+                    "evidence_write_operations": jobs, "evidence_write_batches": batches,
+                    "evidence_commits": commits, "evidence_queue_wait_seconds_total": wait,
+                    "evidence_batch_size_max": group_max, "evidence_queue_depth_peak": queue_peak})
+        first, last = windows.series
+        self.assertEqual(first["deltas"], {"evidence_write_operations": 200,
+            "evidence_write_batches": 50, "evidence_commits": 50,
+            "evidence_queue_wait_seconds_total": 20})
+        self.assertEqual(last["deltas"], {"evidence_write_operations": 200,
+            "evidence_write_batches": 40, "evidence_commits": 40,
+            "evidence_queue_wait_seconds_total": 18})
+        for window in (first, last):
+            self.assertEqual(window["evidence_batch_size_max"], 12)
+            self.assertEqual(window["evidence_queue_depth_peak"], 24)
+            self.assertNotIn("evidence_batch_size_max", window["deltas"])
+            self.assertNotIn("evidence_queue_depth_peak", window["deltas"])
+
     def test_window_history_is_bounded_and_preserves_all_180_second_samples(self):
         clock = [0.]
         windows = _Windows()
@@ -238,10 +264,14 @@ class ExplorerProbeMeasurementTests(unittest.TestCase):
                 shared_api_active_clients=65536, shared_api_peak_active_clients=65536,
                 in_flight=65, api_rate_mode="PRIVATE",
                 evidence_journal_mode="PRIVATE", evidence_sqlite_version="3.50.0 PRIVATE",
+                evidence_batch_size_max="PRIVATE", evidence_queue_depth_peak=True,
+                evidence_write_batches=-1, evidence_queue_wait_seconds_total=float("inf"),
                 evidence_write_lock_wait_seconds_total=float("inf"))):
             result = probe_explorer("case")
         for key in ("shared_api_active_clients", "shared_api_peak_active_clients", "in_flight", "api_rate_mode",
                     "evidence_journal_mode", "evidence_sqlite_version",
+                    "evidence_batch_size_max", "evidence_queue_depth_peak",
+                    "evidence_write_batches", "evidence_queue_wait_seconds_total",
                     "evidence_write_lock_wait_seconds_total"):
             self.assertNotIn(key, result)
         self.assertNotIn("PRIVATE", json.dumps(result, allow_nan=False))
