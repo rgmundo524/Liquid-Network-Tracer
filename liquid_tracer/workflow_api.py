@@ -42,6 +42,13 @@ def public_plot(value):
         result["update_counts"] = dict(counts)
     if value.get("goal") == "pegouts":
         from .pegout_paths import validate_query
+        from .pegout_csv import validate_pegout_lbtc_summary
+        if "pegout_lbtc_summary" in value:
+            try:
+                result["pegout_lbtc_summary"] = validate_pegout_lbtc_summary(
+                    value["pegout_lbtc_summary"], value.get("match_count"))
+            except TraceError:
+                pass
         query = value.get("query")
         if isinstance(query, dict):
             try:

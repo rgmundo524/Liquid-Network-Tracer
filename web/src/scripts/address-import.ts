@@ -7,17 +7,26 @@ type Context = { caseId: string; busy: boolean; render: () => void;
   post: <T>(path: string, body: unknown) => Promise<T>; refresh: () => Promise<void> };
 const MAX_BYTES = 512 * 1024;
 const TEMPLATE = 'Address,Name,confidence,stop_tracing,hop_limit,source,notes\nREPLACE_WITH_LIQUID_ADDRESS_1,Example Exchange,suspected,true,,Investigator research,Explain the evidence\nREPLACE_WITH_LIQUID_ADDRESS_2,Client wallet,confirmed,false,,Client records,Continue tracing\nREPLACE_WITH_LIQUID_ADDRESS_3,Service deposit,suspected,false,1,Research,Include consolidation then stop\n';
-let draft = { caseId: '', text: '', filename: '', format: 'auto', policy: 'keep',
-  review: null as Review | null, pending: false, message: '', offset: 0 };
+function emptyDraft(caseId: string) {
+  return {caseId, text: '', filename: '', format: 'auto', policy: 'keep',
+    review: null as Review | null, pending: false, message: '', offset: 0, version: 0};
+}
+let draft = emptyDraft('');
+const cases = new Map<string, typeof draft>();
+export function selectAddressImport(caseId: string): void {
+  if (!cases.has(caseId)) cases.set(caseId, emptyDraft(caseId));
+  draft = cases.get(caseId)!;
+}
+const retained = (owner: typeof draft): boolean => cases.get(owner.caseId) === owner;
 const esc = (value: unknown): string => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]!));
 
 export function resetAddressImport(caseId: string): void {
-  draft = { caseId, text: '', filename: '', format: 'auto', policy: 'keep',
-    review: null, pending: false, message: '', offset: 0 };
+  cases.set(caseId, emptyDraft(caseId)); selectAddressImport(caseId);
 }
 
-function invalidate(): void {
-  draft.review = null; draft.message = ''; draft.offset = 0;
+function invalidate(owner = draft): void {
+  owner.version += 1; owner.review = null; owner.message = ''; owner.offset = 0;
+  if (owner !== draft) return;
   const button = document.querySelector<HTMLButtonElement>('#attribution-apply');
   if (button) button.disabled = true;
   const preview = document.querySelector('#attribution-review');
@@ -37,14 +46,21 @@ export async function addressImportFile(input: HTMLInputElement, render: () => v
   const file = input.files?.[0];
   if (!file || draft.pending) return;
   if (file.size > MAX_BYTES) throw new Error('Address import exceeds 512 KiB. Split it into smaller files.');
-  const owner = draft.caseId;
-  const text = await file.text();
-  if (owner !== draft.caseId) return;
-  invalidate(); draft.text = text; draft.filename = file.name; draft.format = 'auto'; render();
+  invalidate();
+  const owner = draft, version = draft.version;
+  owner.pending = true; render();
+  try {
+    const text = await file.text();
+    if (!retained(owner) || version !== owner.version) return;
+    if (new TextEncoder().encode(text).length > MAX_BYTES) throw new Error('Address import exceeds 512 KiB.');
+    owner.text = text; owner.filename = file.name; owner.format = 'auto';
+  } catch (error) {
+    if (retained(owner) && version === owner.version) owner.message = error instanceof Error ? error.message : 'Could not read the selected file.';
+  } finally {owner.pending = false; if (owner === draft) render();}
 }
 
 export function addressImportPanel(caseId: string, busy: boolean): string {
-  if (draft.caseId !== caseId) resetAddressImport(caseId);
+  selectAddressImport(caseId);
   const locked = busy || draft.pending;
   const disabled = locked ? ' disabled' : '';
   const review = draft.review;
@@ -67,7 +83,8 @@ export function addressImportPanel(caseId: string, busy: boolean): string {
 
 export async function addressImportAction(action: string, context: Context): Promise<boolean> {
   if (!action.startsWith('attribution-')) return false;
-  if (context.busy || draft.pending || draft.caseId !== context.caseId) return true;
+  selectAddressImport(context.caseId);
+  if (context.busy || draft.pending) return true;
   if (action === 'attribution-template') {
     invalidate(); draft.text = TEMPLATE; draft.filename = ''; draft.format = 'csv';
     draft.message = 'Replace the placeholder addresses before previewing.'; context.render(); return true;
@@ -82,24 +99,26 @@ export async function addressImportAction(action: string, context: Context): Pro
   if (action === 'attribution-apply' && (!draft.review?.valid || !draft.review.approval_sha256)) throw new Error('Preview the import before applying it.');
   const payload = { text: draft.text, format: draft.format, policy: draft.policy,
     ...(action === 'attribution-apply' ? { approve_plan: draft.review!.approval_sha256 } : {}) };
-  const owner = draft;
+  const owner = draft, version = draft.version;
   draft.pending = true; draft.message = ''; context.render();
   try {
     const path = `/api/cases/${encodeURIComponent(context.caseId)}/address-import`;
     if (action === 'attribution-preview') {
       const reviewed = await context.post<Review>(path, payload);
-      if (owner === draft) { draft.review = reviewed; draft.offset = 0; }
+      if (retained(owner) && version === owner.version) {owner.review = reviewed; owner.offset = 0;}
     } else {
       const result = await context.post<{ changed: number }>(path, payload);
-      if (owner === draft) {
-        invalidate(); draft.message = `Saved ${result.changed} assessments. Choose Assign name colors below to color the imported names. No trace was started.`;
+      if (retained(owner) && version === owner.version) {
+        invalidate(owner); owner.message = `Saved ${result.changed} assessments. Choose Assign name colors below to color the imported names. No trace was started.`;
         // Refresh the selected assessment as well as the list in the owning view.
         await context.refresh();
       }
     }
   } catch (error) {
-    if (owner === draft) invalidate();
-    throw error;
+    if (retained(owner) && version === owner.version) {
+      invalidate(owner); owner.message = error instanceof Error ? error.message : 'Could not import addresses.';
+    }
+    if (owner === draft) throw error;
   } finally {
     owner.pending = false;
     if (owner === draft) context.render();

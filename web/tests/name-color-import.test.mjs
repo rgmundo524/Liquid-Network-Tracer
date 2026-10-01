@@ -128,15 +128,16 @@ test('busy or pending handlers do not issue requests or double-apply', async () 
   response.resolve({changed: 1, revision: 3}); await work;
 });
 
-test('an apply response from a previous case cannot refresh the active case', async () => {
+test('an apply response refreshes its owner while leaving the active case untouched', async () => {
   const response = deferred(); let refreshes = 0;
   const ctx = context(async (_path, payload) => 'approve_plan' in payload ? response.promise : makeReview());
   ctx.refresh = async () => {refreshes += 1;};
   await open(ctx); await preview(ctx);
   const work = apply(ctx); reset('case B');
   response.resolve({changed: 1}); await work;
-  assert.equal(refreshes, 0);
+  assert.equal(refreshes, 1);
   assert.doesNotMatch(panel('case B', false), /Saved/);
+  assert.match(panel('case A', false), /Saved 1 name color assignment/);
 });
 
 test('stale plan errors remove approval and require a new preview', async () => {

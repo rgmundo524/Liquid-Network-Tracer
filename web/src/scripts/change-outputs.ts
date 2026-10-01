@@ -28,18 +28,28 @@ function empty(caseId: string) {
     review: null as Review | null, importOffset: 0, importVersion: 0};
 }
 let state = empty('');
-export function resetChangeOutputs(caseId: string): void {state = empty(caseId);}
+const cases = new Map<string, typeof state>();
+export function selectChangeOutputs(caseId: string): void {
+  if (!cases.has(caseId)) cases.set(caseId, empty(caseId));
+  state = cases.get(caseId)!;
+}
+const retained = (owner: typeof state): boolean => cases.get(owner.caseId) === owner;
+export function resetChangeOutputs(caseId: string): void {
+  cases.set(caseId, empty(caseId)); selectChangeOutputs(caseId);
+}
 export function changeOutputsPending(): boolean {return state.pending;}
 
-function invalidateImport(): void {
-  state.importVersion += 1; state.review = null; state.importOffset = 0;
+function invalidateImport(owner = state): void {
+  owner.importVersion += 1; owner.review = null; owner.importOffset = 0;
+  if (owner !== state) return;
   const apply = document.querySelector<HTMLButtonElement>('#change-outputs-import-apply');
   if (apply) apply.disabled = true;
   const review = document.querySelector('#change-outputs-import-review');
   if (review) review.textContent = 'Preview again before applying.';
 }
-function invalidateLookup(): void {
-  state.version += 1; state.lookup = null; state.lookupJob = null; state.selection = null; state.notes = '';
+function invalidateLookup(owner = state): void {
+  owner.version += 1; owner.lookup = null; owner.lookupJob = null; owner.selection = null; owner.notes = '';
+  if (owner !== state) return;
   const save = document.querySelector<HTMLButtonElement>('#change-outputs-save');
   if (save) save.disabled = true;
   const outputs = document.querySelector('#change-outputs-lookup');
@@ -75,23 +85,24 @@ export async function changeOutputsFile(input: HTMLInputElement, render: () => v
   owner.pending = true; render();
   try {
     const text = await file.text();
-    if (owner !== state || version !== state.importVersion) return;
+    if (!retained(owner) || version !== owner.importVersion) return;
     if (new TextEncoder().encode(text).length > MAX_BYTES) throw new Error('Change-output import exceeds 512 KiB.');
     owner.text = text; owner.filename = file.name; owner.format = 'auto';
   } catch (error) {
-    if (owner === state && version === state.importVersion) owner.message = error instanceof Error ? error.message : 'Could not read the selected file.';
+    if (retained(owner) && version === owner.importVersion) owner.message = error instanceof Error ? error.message : 'Could not read the selected file.';
   } finally {owner.pending = false; if (owner === state) render();}
 }
 
-/** Only the job started by the current editor may populate it. Recovered or old jobs stay read-only. */
+/** Only the job started by its retained case editor may populate it, including offscreen tabs. */
 export function changeOutputsLookupComplete(caseId: string, jobId: string, result?: unknown, error?: string): boolean {
-  if (state.caseId !== caseId || state.lookupJob !== jobId) return false;
-  state.lookupJob = null;
-  if (error) {state.message = error; return true;}
+  const owner = cases.get(caseId);
+  if (!owner || owner.lookupJob !== jobId) return false;
+  owner.lookupJob = null;
+  if (error) {owner.message = error; return true;}
   const report = result as Lookup;
-  if (!report || report.txid !== state.txid.trim().toLowerCase() || !Array.isArray(report.outputs)) return false;
-  state.lookup = report; state.selection = report.current_vout; state.notes = report.current_notes || '';
-  state.message = 'Outputs loaded. Select one change output or None, then save.';
+  if (!report || report.txid !== owner.txid.trim().toLowerCase() || !Array.isArray(report.outputs)) return false;
+  owner.lookup = report; owner.selection = report.current_vout; owner.notes = report.current_notes || '';
+  owner.message = 'Outputs loaded. Select one change output or None, then save.';
   return true;
 }
 
@@ -113,7 +124,7 @@ function importPanel(locked: boolean): string {
 }
 
 export function changeOutputsPanel(caseId: string, busy: boolean): string {
-  if (state.caseId !== caseId) resetChangeOutputs(caseId);
+  selectChangeOutputs(caseId);
   if (!state.open) return '';
   const locked = busy || state.pending, lookup = state.lookup, catalog = state.catalog;
   return `<section class="panel" id="change-outputs-panel"><div class="panel-head"><h2 tabindex="-1" id="change-outputs-title">Change outputs</h2><div class="form-actions"><a class="btn" href="/api/cases/${esc(encodeURIComponent(caseId))}/input-exports/change-outputs" download>Export saved CSV</a><button class="btn" data-action="change-outputs-close"${off(locked)}>Close</button></div></div><div class="panel-body">
@@ -135,7 +146,7 @@ export function changeOutputsPanel(caseId: string, busy: boolean): string {
 async function loadCatalog(owner: typeof state, context: Context): Promise<void> {
   const catalog = await context.post<Catalog>(`/api/cases/${encodeURIComponent(context.caseId)}/change-outputs`,
     {query: owner.query, offset: owner.offset, limit: 100});
-  if (owner === state) owner.catalog = catalog;
+  if (retained(owner)) owner.catalog = catalog;
 }
 async function lookup(context: Context): Promise<void> {
   const txid = state.txid.trim().toLowerCase();
@@ -144,9 +155,9 @@ async function lookup(context: Context): Promise<void> {
   const owner = state, version = state.version;
   try {
     const jobId = await context.startLookup(txid);
-    if (owner === state && version === state.version) state.lookupJob = jobId;
+    if (retained(owner) && version === owner.version) owner.lookupJob = jobId;
   } catch (error) {
-    if (owner === state && version === state.version) owner.message = error instanceof Error ? error.message : 'Could not load transaction outputs.';
+    if (retained(owner) && version === owner.version) owner.message = error instanceof Error ? error.message : 'Could not load transaction outputs.';
   }
   if (owner === state) context.render();
 }
@@ -181,27 +192,27 @@ async function importAction(action: string, context: Context): Promise<void> {
     const path = `/api/cases/${encodeURIComponent(context.caseId)}/change-output-import`;
     if (!applying) {
       const review = await context.post<Review>(path, payload);
-      if (owner === state && version === state.importVersion) owner.review = review;
+      if (retained(owner) && version === owner.importVersion) owner.review = review;
     } else {
       const result = await context.post<{changed: number}>(path, payload);
-      if (owner === state) {
-        invalidateImport(); invalidateLookup();
+      if (retained(owner)) {
+        invalidateImport(owner); invalidateLookup(owner);
         owner.message = `Saved ${result.changed} change-output annotation(s). ${REFRESH}`;
         try {await loadCatalog(owner, context);}
-        catch (error) {if (owner === state) owner.message += ` The saved list could not refresh: ${error instanceof Error ? error.message : 'try again.'}`;}
+        catch (error) {if (retained(owner)) owner.message += ` The saved list could not refresh: ${error instanceof Error ? error.message : 'try again.'}`;}
       }
     }
   } catch (error) {
-    if (owner === state && (applying || version === state.importVersion)) {
-      invalidateImport(); owner.message = error instanceof Error ? error.message : 'Could not import change outputs. Preview again and retry.';
+    if (retained(owner) && (applying || version === owner.importVersion)) {
+      invalidateImport(owner); owner.message = error instanceof Error ? error.message : 'Could not import change outputs. Preview again and retry.';
     }
   } finally {owner.pending = false; if (owner === state) context.render();}
 }
 
 export async function changeOutputsAction(action: string, context: Context, element?: HTMLElement): Promise<boolean> {
   if (!action.startsWith('change-outputs-')) return false;
+  selectChangeOutputs(context.caseId);
   if (context.busy || state.pending) return true;
-  if (state.caseId !== context.caseId) resetChangeOutputs(context.caseId);
   if (action.startsWith('change-outputs-import-')) {await importAction(action, context); return true;}
   if (action === 'change-outputs-close') {state.open = false; context.render(); return true;}
   if (action === 'change-outputs-lookup' || action === 'change-outputs-edit') {
@@ -226,7 +237,7 @@ export async function changeOutputsAction(action: string, context: Context, elem
       invalidateImport();
       const result = await context.post<{changed: number; revision: number}>(`/api/cases/${encodeURIComponent(context.caseId)}/change-outputs`,
         {txid, vout, notes: clearing ? '' : owner.notes, expected_revision: revision});
-      if (owner !== state) return true;
+      if (!retained(owner)) return true;
       if (owner.lookup) {
         owner.lookup.revision = result.revision;
         if (owner.lookup.txid === txid) {owner.lookup.current_vout = vout; owner.selection = vout; if (clearing) owner.notes = '';}
@@ -237,12 +248,12 @@ export async function changeOutputsAction(action: string, context: Context, elem
     else owner.offset = 0;
     try {await loadCatalog(owner, context);}
     catch (error) {
-      if (owner === state && owner.message.startsWith('Saved ')) owner.message += ` The saved list could not refresh: ${error instanceof Error ? error.message : 'try again.'}`;
+      if (retained(owner) && owner.message.startsWith('Saved ')) owner.message += ` The saved list could not refresh: ${error instanceof Error ? error.message : 'try again.'}`;
       else throw error;
     }
   } catch (error) {
-    if (owner === state) {
-      if (action === 'change-outputs-save' || action === 'change-outputs-clear') {invalidateLookup(); invalidateImport();}
+    if (retained(owner)) {
+      if (action === 'change-outputs-save' || action === 'change-outputs-clear') {invalidateLookup(owner); invalidateImport(owner);}
       owner.message = error instanceof Error ? error.message : 'Could not load or save change outputs.';
     }
   } finally {

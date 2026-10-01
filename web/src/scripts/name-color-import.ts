@@ -16,12 +16,21 @@ function emptyDraft(caseId: string) {
     review: null as Review | null, pending: false, message: '', offset: 0, version: 0};
 }
 let draft = emptyDraft('');
+const cases = new Map<string, typeof draft>();
+export function selectNameColorImport(caseId: string): void {
+  if (!cases.has(caseId)) cases.set(caseId, emptyDraft(caseId));
+  draft = cases.get(caseId)!;
+}
+const retained = (owner: typeof draft): boolean => cases.get(owner.caseId) === owner;
 
-export function resetNameColorImport(caseId: string): void { draft = emptyDraft(caseId); }
+export function resetNameColorImport(caseId: string): void {
+  cases.set(caseId, emptyDraft(caseId)); selectNameColorImport(caseId);
+}
 export function nameColorImportPending(): boolean { return draft.pending; }
 
-export function invalidateNameColorImport(): void {
-  draft.version += 1; draft.review = null; draft.message = ''; draft.offset = 0;
+export function invalidateNameColorImport(owner = draft): void {
+  owner.version += 1; owner.review = null; owner.message = ''; owner.offset = 0;
+  if (owner !== draft) return;
   const apply = document.querySelector<HTMLButtonElement>('#name-color-import-apply');
   if (apply) apply.disabled = true;
   const review = document.querySelector('#name-color-import-review');
@@ -50,11 +59,11 @@ export async function nameColorImportFile(input: HTMLInputElement, render: () =>
   owner.pending = true; render();
   try {
     const text = await file.text();
-    if (owner !== draft || version !== draft.version) return;
+    if (!retained(owner) || version !== owner.version) return;
     if (new TextEncoder().encode(text).length > MAX_BYTES) throw new Error('Name color import exceeds 512 KiB.');
     owner.text = text; owner.filename = file.name; owner.format = 'auto';
   } catch (error) {
-    if (owner === draft && version === draft.version) owner.message = error instanceof Error ? error.message : 'Could not read the selected file.';
+    if (retained(owner) && version === owner.version) owner.message = error instanceof Error ? error.message : 'Could not read the selected file.';
   } finally {
     owner.pending = false;
     if (owner === draft) render();
@@ -66,7 +75,7 @@ function swatch(color: string | null, fallback: string): string {
 }
 
 export function nameColorImportPanel(caseId: string, busy: boolean): string {
-  if (draft.caseId !== caseId) resetNameColorImport(caseId);
+  selectNameColorImport(caseId);
   const locked = busy || draft.pending, disabled = locked ? ' disabled' : '';
   if (!draft.open) return `<div class="form-actions"><button class="btn" data-action="name-color-import-open"${disabled}>Import name colors</button></div>`;
   const review = draft.review;
@@ -88,7 +97,8 @@ export function nameColorImportPanel(caseId: string, busy: boolean): string {
 
 export async function nameColorImportAction(action: string, context: Context): Promise<boolean> {
   if (!action.startsWith('name-color-import-')) return false;
-  if (context.busy || draft.pending || draft.caseId !== context.caseId) return true;
+  selectNameColorImport(context.caseId);
+  if (context.busy || draft.pending) return true;
   if (action === 'name-color-import-open' || action === 'name-color-import-close') {
     draft.open = action.endsWith('-open'); context.render();
     if (draft.open) document.querySelector<HTMLElement>('#name-color-import-title')?.focus();
@@ -121,23 +131,23 @@ export async function nameColorImportAction(action: string, context: Context): P
     const path = `/api/cases/${encodeURIComponent(context.caseId)}/name-color-import`;
     if (!applying) {
       const review = await context.post<Review>(path, payload);
-      if (owner === draft && version === draft.version) { owner.review = review; owner.offset = 0; }
+      if (retained(owner) && version === owner.version) { owner.review = review; owner.offset = 0; }
     } else {
       const result = await context.post<{changed: number; revision: number; notice: string}>(path, payload);
-      if (owner === draft) {
-        if (version === draft.version) {
-          invalidateNameColorImport();
+      if (retained(owner)) {
+        if (version === owner.version) {
+          invalidateNameColorImport(owner);
           owner.message = `Saved ${result.changed} name color assignment(s). Regenerate a preview or sync Miro to update graph colors. No trace or sync was started.`;
         }
         try { await context.refresh(); }
         catch (error) {
-          if (owner === draft) owner.message += ` The color list could not refresh: ${error instanceof Error ? error.message : 'refresh the color menu and try again.'}`;
+          if (retained(owner)) owner.message += ` The color list could not refresh: ${error instanceof Error ? error.message : 'refresh the color menu and try again.'}`;
         }
       }
     }
   } catch (error) {
-    if (owner === draft && (applying || version === draft.version)) {
-      invalidateNameColorImport();
+    if (retained(owner) && (applying || version === owner.version)) {
+      invalidateNameColorImport(owner);
       owner.message = error instanceof Error ? error.message : 'Could not import name colors. Preview again and retry.';
     }
   } finally {

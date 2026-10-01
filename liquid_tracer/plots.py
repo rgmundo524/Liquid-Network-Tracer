@@ -377,7 +377,9 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
         if goal == "connections":
             report.update(connection_count=graph["connections"]["connection_count"], status=graph["connections"]["status"])
         elif goal == "pegouts":
+            from .pegout_csv import pegout_lbtc_summary
             report.update(match_count=graph["pegouts"]["match_count"], status=graph["pegouts"]["status"])
+            report["pegout_lbtc_summary"] = pegout_lbtc_summary(graph, state)
             report["csv_export_version"] = 1
             for key in ("endpoint_count", "endpoint_counts", "context_edge_count"):
                 if key in graph["pegouts"]:
@@ -462,6 +464,9 @@ def _snapshot(case, preview_id, *, with_inputs=False):
                 or any(canonical(report.get(key)) != canonical(pegouts.get(key))
                        for key in ("match_count", "endpoint_count", "endpoint_counts", "context_edge_count", "status"))):
             raise TraceError("Saved endpoint options disagree with the graph; regenerate the plot")
+        if "pegout_lbtc_summary" in report:
+            from .pegout_csv import validate_pegout_lbtc_summary
+            validate_pegout_lbtc_summary(report["pegout_lbtc_summary"], report.get("match_count"))
     _snapshot_settings(graph)
     _snapshot_board(graph, plan)
     inputs = _snapshot_inputs(directory, graph)

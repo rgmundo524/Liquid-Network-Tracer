@@ -8,6 +8,7 @@ from collections import defaultdict
 import csv
 import json
 from pathlib import Path
+import re
 
 from .common import TraceError, canonical, output_kind, parse_outpoint
 from .group_hops import reference_name
@@ -42,11 +43,67 @@ def _joined(values):
     return "; ".join(str(value) for value in sorted(set(values)))
 
 
+def _lbtc_units(amount):
+    whole, fraction = divmod(amount, 100_000_000)
+    return str(whole) + (("." + f"{fraction:08d}".rstrip("0")) if fraction else "")
+
+
 def _whole_lbtc(output):
     if _asset(output) != "L-BTC" or _amount(output) == "":
         return ""
-    whole, fraction = divmod(_amount(output), 100_000_000)
-    return str(whole) + (("." + f"{fraction:08d}".rstrip("0")) if fraction else "")
+    return _lbtc_units(_amount(output))
+
+
+def pegout_lbtc_summary(graph, state):
+    """Sum unique matching requests, never inferred assets or source allocation.
+
+    Matching paths are already selected by the peg-out graph. Computing this
+    small report once avoids rerunning path searches when the UI opens a case.
+    """
+    result = {"pegout_count": 0, "valued_lbtc_count": 0, "unknown_amount_count": 0,
+              "unknown_asset_count": 0, "non_lbtc_count": 0}
+    total, seen = 0, set()
+    try:
+        for match in graph["pegouts"]["matches"]:
+            key = match["outpoint"]
+            txid, index = parse_outpoint(key)
+            if key in seen:
+                continue
+            seen.add(key)
+            output = state["transactions"][txid]["data"]["vout"][index]
+            if output_kind(output) != "pegout":
+                raise TraceError("Peg-out amount summary requires actual peg-out outputs")
+            asset, amount = _asset(output), _amount(output)
+            result["pegout_count"] += 1
+            if not asset:
+                result["unknown_asset_count"] += 1
+            elif asset != "L-BTC":
+                result["non_lbtc_count"] += 1
+            elif amount == "":
+                result["unknown_amount_count"] += 1
+            else:
+                result["valued_lbtc_count"] += 1
+                total += amount
+    except (KeyError, TypeError, ValueError, IndexError, AttributeError) as error:
+        raise TraceError("Peg-out amount summary requires complete saved output evidence") from error
+    return {**result, "lbtc": _lbtc_units(total), "value_base_units": str(total)}
+
+
+def validate_pegout_lbtc_summary(value, match_count):
+    """Keep amounts exact in JSON and reject inconsistent saved summaries."""
+    counts = {"valued_lbtc_count", "unknown_amount_count", "unknown_asset_count", "non_lbtc_count"}
+    if (not isinstance(value, dict) or set(value) != counts | {"pegout_count", "lbtc", "value_base_units"}
+            or any(type(value[key]) is not int or not 0 <= value[key] <= 2 ** 53 - 1
+                   for key in counts | {"pegout_count"})
+            or type(match_count) is not int or value["pegout_count"] != match_count
+            or value["pegout_count"] != sum(value[key] for key in counts)
+            or not isinstance(value["value_base_units"], str)
+            or not re.fullmatch(r"0|[1-9][0-9]{0,99}", value["value_base_units"])):
+        raise TraceError("Saved peg-out amount summary is inconsistent; regenerate the plot")
+    amount = int(value["value_base_units"])
+    if value["lbtc"] != _lbtc_units(amount) or (not value["valued_lbtc_count"] and amount):
+        raise TraceError("Saved peg-out amount summary is inconsistent; regenerate the plot")
+    return dict(value)
 
 
 def _hops_by_transaction(depths, output_depths):
