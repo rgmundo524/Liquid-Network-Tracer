@@ -1,6 +1,7 @@
 """Bounded, nonsecret collection timing reports for saved runs and the UI."""
 
 import math
+import re
 
 
 SECONDS = {
@@ -18,6 +19,13 @@ API_COUNTS = {
     "completed_requests", "completed_endpoints", "cache_hits", "coalesced_hits",
     "rate_limit_responses", "retry_responses", "pressure_events",
     "quota_reserve_calls", "quota_admitted", "quota_denied",
+    "local_deadline_timeouts",
+}
+API_STORAGE_ENUMS = {
+    "quota_journal_mode": {"pending", "wal", "delete"},
+    "quota_journal_mode_requested": {"wal", "delete"},
+    "quota_synchronous": {"full"},
+    "quota_connection_mode": {"persistent"},
 }
 
 
@@ -55,6 +63,13 @@ def public_api_diagnostics(value):
     peak = value.get("peak_in_flight")
     if type(peak) is int and 0 <= peak <= 64:
         clean["peak_in_flight"] = peak
+    for key, allowed in API_STORAGE_ENUMS.items():
+        option = value.get(key)
+        if isinstance(option, str) and option in allowed:
+            clean[key] = option
+    version = value.get("quota_sqlite_version")
+    if isinstance(version, str) and re.fullmatch(r"[0-9]{1,6}(?:\.[0-9]{1,6}){2}", version):
+        clean["quota_sqlite_version"] = version
     return clean
 
 

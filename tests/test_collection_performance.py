@@ -1,6 +1,6 @@
 import unittest
 
-from liquid_tracer.performance import (API_COUNTS, API_SECONDS, public_api_diagnostics,
+from liquid_tracer.performance import (API_COUNTS, API_SECONDS, API_STORAGE_ENUMS, public_api_diagnostics,
                                        public_performance)
 
 
@@ -47,7 +47,7 @@ class CollectionPerformanceTests(unittest.TestCase):
                  "peak_in_flight": 12, "cache_hits": 2, "coalesced_hits": 3,
                  "pressure_events": 0, "rate_limit_responses": 0, "retry_responses": 0,
                  "quota_reserve_seconds": .5, "quota_reserve_calls": 1400,
-                 "quota_admitted": 1201, "quota_denied": 199}
+                 "quota_admitted": 1201, "quota_denied": 199, "local_deadline_timeouts": 1}
         self.assertEqual(public_api_diagnostics({**value, "headers": "PRIVATE",
                                                "endpoint": "PRIVATE"}), value)
         expected = {"schema_version": 1, "tracing_seconds": 60, **value}
@@ -62,6 +62,17 @@ class CollectionPerformanceTests(unittest.TestCase):
         for invalid in (None, [], "PRIVATE"):
             self.assertEqual(public_api_diagnostics(invalid), {})
         self.assertEqual(public_api_diagnostics({"peak_in_flight": 65, "completed_requests": 3.5}), {})
+
+    def test_storage_diagnostics_accept_only_known_modes_and_numeric_version(self):
+        value = {"quota_journal_mode": "wal", "quota_journal_mode_requested": "wal",
+                 "quota_synchronous": "full", "quota_connection_mode": "persistent",
+                 "quota_sqlite_version": "3.51.3"}
+        self.assertEqual(public_api_diagnostics(value), value)
+        self.assertEqual(public_performance({"schema_version": 1, **value}), {"schema_version": 1, **value})
+        for invalid in (True, None, "PRIVATE", [], {}, "3.51.3 PRIVATE", "3.5", "1" * 1000):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(public_api_diagnostics({key: invalid for key in
+                    {*API_STORAGE_ENUMS, "quota_sqlite_version"}}), {})
 
 
 if __name__ == "__main__":

@@ -29,6 +29,19 @@ ADAPTIVE_PROBE_SECONDS = 10.
 ADAPTIVE_BACKOFF = .7
 
 
+def _wal_runtime_safe(version=None):
+    """Use WAL only with SQLite's 2026 WAL-reset correction.
+
+    https://sqlite.org/wal.html#walreset names 3.51.3 and later, plus
+    maintained 3.44.6 and 3.50.7 backports. Other older branches remain in
+    DELETE/FULL mode rather than assuming a distributor applied that patch.
+    """
+    version = sqlite3.sqlite_version_info if version is None else version
+    return (version >= (3, 51, 3) or
+            (version[:2] == (3, 44) and version >= (3, 44, 6)) or
+            (version[:2] == (3, 50) and version >= (3, 50, 7)))
+
+
 @dataclass
 class _AdaptiveState:
     target_rps: float
@@ -107,6 +120,11 @@ class Admission:
     generation: int = 0
 
 
+def _sqlite_busy(error):
+    return (isinstance(error, sqlite3.OperationalError) and
+            getattr(error, "sqlite_errorcode", 0) & 0xff in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED))
+
+
 class _Busy(Exception):
     pass
 
@@ -137,6 +155,13 @@ class SharedExplorerQuota(_Feedback):
         self._denied_hint = None
         self._client_id = uuid.uuid4().hex
         self._closed = False
+        self._owner_pid = os.getpid()
+        self._db_lock = threading.RLock()
+        self._connection = None
+        self._schema_ready = False
+        self._sqlite_version = sqlite3.sqlite_version
+        self._journal_requested = "wal" if _wal_runtime_safe() else "delete"
+        self._journal_mode = "pending"
         if directory is None:
             cache = os.environ.get("XDG_CACHE_HOME", "")
             base = Path(cache) if cache and Path(cache).is_absolute() else Path.home() / ".cache"
@@ -168,29 +193,113 @@ class SharedExplorerQuota(_Feedback):
     def __exit__(self, *_):
         self.close()
 
+    def _check_owner(self):
+        if os.getpid() != self._owner_pid:
+            raise TraceError("Create a new explorer quota client after forking a process")
+
+    def success(self, admission):
+        self._check_owner()
+        return super().success(admission)
+
+    def storage_metrics(self):
+        """Non-sensitive settings already observed by this process; no SQL."""
+        return {"quota_sqlite_version": self._sqlite_version,
+                "quota_journal_mode": self._journal_mode,
+                "quota_journal_mode_requested": self._journal_requested,
+                "quota_synchronous": "full",
+                "quota_connection_mode": "persistent"}
+
+    def _check_files(self):
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            path = Path(str(self.path) + suffix)
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                if suffix:
+                    continue
+                raise OSError("missing quota file") from None
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+                raise OSError("unsafe quota file")
+            if info.st_mode & 0o777 != 0o600:
+                descriptor = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    opened = os.fstat(descriptor)
+                    if ((opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino) or
+                            opened.st_uid != os.getuid() or opened.st_nlink != 1):
+                        raise OSError("quota file changed during permission check")
+                    os.fchmod(descriptor, 0o600)
+                finally:
+                    os.close(descriptor)
+
+    def _open_connection(self):
+        if self._connection is not None:
+            return self._connection
+        self._check_files()
+        db = sqlite3.connect(self.path, timeout=LOCK_RETRY_SECONDS,
+                             check_same_thread=False)
+        try:
+            current = str(db.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+            try:
+                # Mode changes occur before BEGIN. FULL is retained on every
+                # connection: admissions and Retry-After survive process exits.
+                desired = self._journal_requested
+                actual = str(db.execute("PRAGMA journal_mode=" + desired).fetchone()[0]).lower()
+            except sqlite3.OperationalError as error:
+                if desired == "delete" and current == "wal" and _sqlite_busy(error):
+                    raise TraceError(
+                        "Explorer quota uses WAL, but SQLite " + self._sqlite_version +
+                        " lacks the WAL-reset fix. Stop other Liquid Tracer instances and retry "
+                        "to use DELETE/FULL, or upgrade SQLite to 3.51.3 or a patched backport.") from None
+                raise
+            if actual not in ("wal", "delete") or (desired == "delete" and actual != "delete"):
+                raise TraceError("Cannot select a safe journal mode for the private explorer quota cache")
+            # A VFS without WAL support may return DELETE. This is a supported
+            # durable fallback, with its actual mode included in diagnostics.
+            db.execute("PRAGMA synchronous=FULL")
+            if actual == "wal":
+                db.execute("PRAGMA wal_autocheckpoint=1000")
+            self._check_files()
+            self._connection = db
+            self._journal_mode = actual
+            return db
+        except BaseException:
+            db.close()
+            raise
+
     @contextmanager
     def _transaction(self):
+        # A SQLite connection must not be reused across fork, even when this
+        # object's Python lock happens to be unlocked in the child process.
+        self._check_owner()
+        if not self._db_lock.acquire(timeout=LOCK_RETRY_SECONDS):
+            raise _Busy()
         db = None
+        initialized = False
         try:
-            # Brief contention is returned to the caller's interruptible wait,
-            # so SQLite's busy timeout cannot hide cancellation or time budgets.
-            db = sqlite3.connect(self.path, timeout=LOCK_RETRY_SECONDS)
+            # Both the local mutex and SQLite writer wait remain brief, letting
+            # callers check cancellation and request budgets between attempts.
+            db = self._open_connection()
             db.execute("BEGIN IMMEDIATE")
-            db.execute("""CREATE TABLE IF NOT EXISTS pacing (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                last_start REAL NOT NULL DEFAULT 0,
-                cooldown REAL NOT NULL DEFAULT 0)""")
-            db.execute("INSERT OR IGNORE INTO pacing (id) VALUES (1)")
-            db.execute("""CREATE TABLE IF NOT EXISTS clients (
-                id TEXT PRIMARY KEY, interval REAL NOT NULL,
-                expires_at REAL NOT NULL)""")
+            if not self._schema_ready:
+                db.execute("""CREATE TABLE IF NOT EXISTS pacing (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    last_start REAL NOT NULL DEFAULT 0,
+                    cooldown REAL NOT NULL DEFAULT 0)""")
+                db.execute("INSERT OR IGNORE INTO pacing (id) VALUES (1)")
+                db.execute("""CREATE TABLE IF NOT EXISTS clients (
+                    id TEXT PRIMARY KEY, interval REAL NOT NULL,
+                    expires_at REAL NOT NULL)""")
+                if self.adaptive:
+                    self._initialize_controller(db)
+                initialized = True
             yield db
             db.commit()
+            if initialized:
+                self._schema_ready = True
         except (OSError, sqlite3.Error) as error:
             if db is not None:
                 db.rollback()
-            if isinstance(error, sqlite3.OperationalError) and getattr(error, "sqlite_errorcode", None) in (
-                    sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            if _sqlite_busy(error):
                 raise _Busy() from None
             raise TraceError("Cannot update the private explorer quota cache; check local cache permissions before retrying") from None
         except BaseException:
@@ -198,12 +307,14 @@ class SharedExplorerQuota(_Feedback):
                 db.rollback()
             raise
         finally:
-            if db is not None:
-                db.close()
+            try:
+                if self._closed and self._connection is not None:
+                    self._connection.close()
+                    self._connection = None
+            finally:
+                self._db_lock.release()
 
-    def _controller(self, db, now):
-        # Additive tables keep the pacing/clients schema usable by older
-        # workers. Their registrations continue to act as fixed limits.
+    def _initialize_controller(self, db):
         db.execute("""CREATE TABLE IF NOT EXISTS adaptive_clients (
             id TEXT PRIMARY KEY)""")
         db.execute("""CREATE TABLE IF NOT EXISTS adaptive_pacing (
@@ -212,7 +323,11 @@ class SharedExplorerQuota(_Feedback):
             window_started REAL NOT NULL, successes INTEGER NOT NULL,
             last_pressure REAL NOT NULL, hold_until REAL NOT NULL)""")
         db.execute("INSERT OR IGNORE INTO adaptive_pacing VALUES (1, ?, 0, ?, 0, 0, 0)",
-                   (1. / self.interval, now))
+                   (1. / self.interval, self._clock()))
+
+    def _controller(self, db, now):
+        # Additive tables keep the pacing/clients schema usable by older
+        # workers. Their registrations continue to act as fixed limits.
         row = db.execute("""SELECT target_rps, generation, window_started,
             successes, last_pressure, hold_until FROM adaptive_pacing WHERE id = 1""").fetchone()
         state = _AdaptiveState(*row)
@@ -247,6 +362,7 @@ class SharedExplorerQuota(_Feedback):
         recent denial can only keep a caller waiting: each possible admission
         still goes through the shared database and rechecks peers and cooldowns.
         """
+        self._check_owner()
         if self._closed:
             raise TraceError("Shared explorer pacing is closed")
         with self._feedback_lock:
@@ -321,6 +437,7 @@ class SharedExplorerQuota(_Feedback):
         """
         if not self.adaptive:
             return self.cooldown(seconds)
+        self._check_owner()
         if self._closed:
             raise TraceError("Shared explorer pacing is closed")
         self._clear_denied_hint()
@@ -343,6 +460,7 @@ class SharedExplorerQuota(_Feedback):
         and budget checks. Invalid infinite Retry-After still blocks other
         clients for a minute instead of allowing an immediate retry storm.
         """
+        self._check_owner()
         if self._closed:
             raise TraceError("Shared explorer pacing is closed")
         self._clear_denied_hint()
@@ -356,6 +474,7 @@ class SharedExplorerQuota(_Feedback):
             return False
 
     def close(self):
+        self._check_owner()
         if self._closed:
             return
         self._closed = True

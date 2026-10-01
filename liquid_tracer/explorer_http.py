@@ -24,6 +24,10 @@ class TransientExplorerConnection(TraceError):
     """A safe read/token request failed transiently; API admission owns retries."""
 
 
+class ExplorerRequestTimeout(TransientExplorerConnection):
+    """A transport timeout, distinguished from resets and remote disconnects."""
+
+
 class StaleExplorerConnection(TransientExplorerConnection):
     """A reused GET connection disconnected; retry only through API admission."""
 
@@ -51,7 +55,10 @@ def network_failure(method, error, *, reused=False, token_request=False):
         }
     exception = TraceError
     if (method == "GET" or (method == "POST" and token_request)) and transient:
-        exception = StaleExplorerConnection if reused and method == "GET" else TransientExplorerConnection
+        if isinstance(error, TimeoutError):
+            exception = ExplorerRequestTimeout
+        else:
+            exception = StaleExplorerConnection if reused and method == "GET" else TransientExplorerConnection
     return exception("Network request failed: " + type(error).__name__)
 
 
