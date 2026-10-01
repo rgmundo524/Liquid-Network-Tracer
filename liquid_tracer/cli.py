@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
@@ -19,6 +20,7 @@ from .investigations import read_case, update_case, validate_settings
 from .inspection import inspect_transaction, inspect_transactions, parse_transaction_hashes
 from .miro import _load_sync_state, _namespace, make_plan, publish, resolve, sync, validate_plan
 from .progress import ProgressReporter, report_progress
+from .performance import public_performance
 from .layout_search import DEFAULT_LAYOUT_ATTEMPTS, MAX_LAYOUT_ATTEMPTS, normalize_layout_attempts
 from .store import Store
 from .trace import new_state, trace
@@ -174,7 +176,8 @@ def parser():
     run.add_argument("--labels", type=Path)
     run.add_argument("--include-unconfirmed", action="store_true")
     run.add_argument("--tx-cache-seconds", type=float, default=86400)
-    run.add_argument("--api-workers", type=int, default=8, help="Concurrent explorer requests, from 1 to 8 (default: 8)")
+    run.add_argument("--api-workers", type=int, default=8,
+                     help="Initial explorer concurrency, 1 to 8 (default: 8, adapts up to 64); values below 8 cap automatic growth")
     run.add_argument("--api-rate-limit", type=float,
                      help="Verified account requests/second; use 95%% of this limit (default: LIQUID_BLOCKSTREAM_API_RPS, otherwise the enterprise target of 49 requests/second or 4 for other endpoints)")
     run.add_argument("--min-interval", type=float,
@@ -788,7 +791,18 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
     result = sync(plan, target, state_path, max_items=max_new_items, dry_run=True, **options)
     if not dry_run:
         with compaction_apply_lock(case, compaction_meta):
-            update_case(case, {"miro_board": target})
+            # Trace-and-sync already owns trace.lock exclusively. Link only
+            # the validated board here, without recursively acquiring that
+            # scope lock through the general settings editor.
+            with (case / "case.lock").open("a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise TraceError("Investigation settings are busy; sync after that operation finishes") from None
+                latest_metadata = read_case(case)
+                if latest_metadata["case_id"] != namespace["case_id"]:
+                    raise TraceError("Saved plan no longer matches this investigation")
+                save_json(case / "case.json", {**latest_metadata, "miro_board": target})
             result = sync(plan, target, state_path, max_items=max_new_items, dry_run=False, **options)
     report = {**result, "run_id": run_id, "board_id": target,
               "board_url": "https://miro.com/app/board/" + quote(target, safe="") + "/",
@@ -928,7 +942,7 @@ def run_trace(args, progress=None):
         try:
             api = Esplora(store, "pending", limits, args.base_url, args.auth, args.fixture,
                           args.tx_cache_seconds, args.min_interval, workers=args.api_workers,
-                          advertised_rps=args.api_rate_limit)
+                          advertised_rps=args.api_rate_limit, adaptive_workers=args.fixture is None)
             state = new_state(seeds, api.base, limits, labels, parent, case_id=identity)
             if reference:
                 state["hop_reference_name"] = reference
@@ -954,11 +968,14 @@ def run_trace(args, progress=None):
             only = {f"{t}:{i}" for t, i in map(parse_outpoint, args.only)} if args.only else None
             state = trace(api, state, limits, destination / "trace.json", args.include_unconfirmed, only,
                           progress=progress)
+            count_started = time.monotonic()
             if state["status"] != "error" and state.get("stop_reason") != "interrupted":
                 count_report = ensure_counts(args.case, state, fixture=args.fixture, progress=progress)
+                state["performance"]["address_counts_seconds"] = time.monotonic() - count_started
             else:
                 apply_saved_counts(args.case, state)
                 count_report = {}
+                state["performance"]["address_counts_seconds"] = 0.0
             preserve_trace_failure = state["status"] == "error" or state.get("stop_reason") == "interrupted"
             if not preserve_trace_failure:
                 report_progress(progress, "exporting_collection", 0, 1)
@@ -968,7 +985,8 @@ def run_trace(args, progress=None):
                 report_progress(progress, "exporting_collection", 1, 1)
             summary = {"run_id": state["run_id"], "status": state["status"],
                 "stop_reason": state.get("stop_reason"), "stats": state["stats"], "errors": state["errors"],
-                "directory": str(destination.resolve()), "address_counts": count_report}
+                "directory": str(destination.resolve()), "address_counts": count_report,
+                "performance": public_performance(state.get("performance"))}
             failed = state["status"] == "error"
             if args.miro_board:
                 try:

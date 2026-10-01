@@ -55,6 +55,7 @@ class ApiConcurrencyTests(unittest.TestCase):
         result = api.prefetch(endpoints + endpoints[:2])
         self.assertEqual(list(result), endpoints)
         self.assertEqual(maximum, 4)
+        self.assertEqual(api.request_metrics()['peak_in_flight'], 4)
         self.assertCountEqual(calls, endpoints)
         self.assertEqual(len(set(pair[1] for pair in result.values())), 8)
         self.assertEqual(len(list(self.store.observations(api.used))), 8)
@@ -157,6 +158,7 @@ class ApiConcurrencyTests(unittest.TestCase):
         # together and fail by roughly the entire 21ms shared interval.
         self.assertTrue(all(b - a >= api.min_interval - .004
                             for a, b in zip(starts, starts[1:])), starts)
+        self.assertGreater(api.request_metrics()['pacing_wait_seconds_total'], .02)
 
     def test_enterprise_operating_target_is_49_shared_across_workers(self):
         lock, starts = threading.Lock(), []
@@ -655,7 +657,7 @@ class ApiConcurrencyTests(unittest.TestCase):
         self.assertEqual(callbacks, ['/tx/fast', '/tx/slow'])
         self.assertEqual(api.budget.requests, 2)
 
-    def test_transport_metrics_exclude_gate_storage_and_oauth(self):
+    def test_transport_latency_excludes_gate_storage_and_oauth_but_totals_include_oauth(self):
         clock = [100.]
 
         def transport(*args):
@@ -677,7 +679,14 @@ class ApiConcurrencyTests(unittest.TestCase):
             api.call('GET', ENTERPRISE + '/one', 'esplora', '/one')
             api.call('POST', 'https://example.invalid/token', 'oauth', '/token')
         self.assertEqual(api.request_metrics(), {'latency_seconds': .25,
-                                                'completed_requests': 1, 'pressure_events': 0})
+                                                'completed_requests': 1, 'pressure_events': 0,
+                                                'network_seconds_total': .5,
+                                                'pacing_wait_seconds_total': 0.,
+                                                'retry_wait_seconds_total': 0.,
+                                                'evidence_seconds_total': 20.,
+                                                'cache_hits': 0, 'coalesced_hits': 0,
+                                                'rate_limit_responses': 0, 'retry_responses': 0,
+                                                'peak_in_flight': 1})
 
     def test_transport_metrics_count_retry_and_network_pressure(self):
         statuses = iter([429, 500, 502, 503, 504, 200])
@@ -695,6 +704,8 @@ class ApiConcurrencyTests(unittest.TestCase):
         metrics = api.request_metrics()
         self.assertEqual(metrics['completed_requests'], 6)
         self.assertEqual(metrics['pressure_events'], 5)
+        self.assertEqual(metrics['rate_limit_responses'], 1)
+        self.assertEqual(metrics['retry_responses'], 5)
         self.assertGreaterEqual(metrics['latency_seconds'], 0)
         with patch.object(api, 'transport', side_effect=TraceError('network error')):
             api.prefetch(['/tx/network'])

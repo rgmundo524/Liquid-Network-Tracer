@@ -22,16 +22,16 @@ class CountConcurrency:
     responsible for pacing requests.
     """
 
-    def __init__(self, initial_workers, total, rate):
+    def __init__(self, initial_workers, total, rate, *, setting=_SETTING, label="Address count"):
         if initial_workers is None:
             initial_workers = 8
         if type(initial_workers) is not int or not 1 <= initial_workers <= 8:
-            raise TraceError("Saved address count workers must be an integer from 1 to 8")
+            raise TraceError(f"Saved {label.lower()} workers must be an integer from 1 to 8")
         if type(total) is not int or total < 1:
-            raise TraceError("Address count backlog must be a positive integer")
+            raise TraceError(f"{label} backlog must be a positive integer")
         if type(rate) not in (int, float) or not math.isfinite(rate) or rate < 0:
-            raise TraceError("Address count request rate must be a non-negative number")
-        value = os.environ.get(_SETTING, "auto").strip().lower()
+            raise TraceError(f"{label} request rate must be a non-negative number")
+        value = os.environ.get(setting, "auto").strip().lower()
         if value == "auto":
             self.mode = "auto"
             # A previously chosen lower worker setting remains an explicit cap.
@@ -41,7 +41,7 @@ class CountConcurrency:
             self.mode = "fixed"
             self._manual_ceiling = starting_workers = int(value)
         else:
-            raise TraceError(f"{_SETTING} must be auto or an integer from 1 to 64; set it in devenv.nix")
+            raise TraceError(f"{setting} must be auto or an integer from 1 to 64; set it in devenv.nix")
         self._total = total
         self._rate = rate
         self._initial = starting_workers

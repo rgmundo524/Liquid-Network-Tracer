@@ -5,6 +5,7 @@ import {stripTypeScriptTypes} from 'node:module';
 import {test} from 'node:test';
 import vm from 'node:vm';
 import * as frameRecovery from '../src/scripts/frame-recovery.ts';
+import {collectionPerformancePanel} from '../src/scripts/collection-performance.ts';
 
 // Execute the real application handlers with a small DOM and offline HTTP stub.
 // The attribution panels are unrelated to new-investigation and lookup behavior.
@@ -29,7 +30,7 @@ async function harness(respond = () => undefined, {hash = ''} = {}) {
   const dialog = {innerHTML: '', open: false, addEventListener(name, callback) {dialogListeners[name] = callback;},
     close() {if (this.open) {this.open = false; dialogListeners.close?.();}}, showModal() {this.open = true;}, querySelector() {return null;}};
   const context = vm.createContext({
-    Error, URL, console, ...frameRecovery,
+    Error, URL, console, ...frameRecovery, collectionPerformancePanel,
     resetNameColors() {}, resetAddressImport() {}, resetChangeOutputs() {}, resetInputImport() {},
     inputImportPending() {return false;}, inputImportPanel() {return "";},
     inputImportAction(action, context) {
@@ -129,6 +130,25 @@ test('startup offers an empty live investigation without fetching bundled sample
   assert.deepEqual(view.calls[1], {path: '/api/lookup', body: {source: 'live', blockchain: 'liquid', txids: txid}});
   assert.equal(view.state.job.live, true);
   assert.match(view.newCase(), /<select name="blockchain" required disabled>/);
+});
+
+test('collected-data timings follow the selected snapshot and stay absent on older runs', async () => {
+  const view = await harness();
+  view.state.activeCase = {id: 'case', name: 'Timing fixture', run_defaults: defaults, latest_run: 'recent',
+    runs: [{id: 'recent', status: 'bounded_complete', performance: {schema_version: 1, tracing_seconds: 125,
+      address_counts_seconds: 20, request_count: 500}},
+      {id: 'earlier', status: 'bounded_complete', performance: {schema_version: 1, tracing_seconds: 65}},
+      {id: 'legacy', status: 'bounded_complete'}]};
+  let html = view.workspace();
+  assert.match(html, /<dt>Tracing<\/dt><dd>2 min 5 s<\/dd>/);
+  assert.match(html, /<dt>Address counts<\/dt><dd>20 s<\/dd>/);
+  view.state.selectedRun = 'earlier';
+  view.state.caseView = 'history';
+  html = view.workspace();
+  assert.match(html, /<dt>Tracing<\/dt><dd>1 min 5 s<\/dd>/);
+  assert.doesNotMatch(html, /<dt>Address counts|2 min 5 s/);
+  view.state.selectedRun = 'legacy';
+  assert.doesNotMatch(view.workspace(), /aria-label="Collection performance"/);
 });
 
 test('successful creation sends live source and resets the draft without sample seeds', async () => {
