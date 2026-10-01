@@ -1,0 +1,257 @@
+"""Immutable investigation-owned projections of a sealed shared collection.
+
+The source's acquisition policy never becomes the recipient's presentation
+policy. Exact saved spend evidence selects descendants; complete transaction
+payloads and observation identities are preserved within this source revision.
+"""
+from collections import deque
+from copy import deepcopy
+import fcntl
+import json
+from pathlib import Path
+import shutil
+import tempfile
+
+from .common import TraceError, canonical, digest, output_kind, parse_outpoint, read_json, save_json
+from .group_hops import normalize_reference_name
+from .investigations import read_case
+
+
+def _project(state, seeds, case_id, hop_reference_name):
+    from .connections import _saved_connection_evidence
+    from .trace import COLLECTION_POLICY
+
+    result = _saved_connection_evidence(state)
+    transactions, outputs, links = result["transactions"], result["outputs"], result["links"]
+    from .layout import transaction_ranks
+    if transaction_ranks(transactions)[1]:
+        raise TraceError("Shared saved spend evidence contains a cycle")
+    for key in seeds:
+        txid, index = parse_outpoint(key)
+        if txid not in transactions:
+            raise TraceError("Shared collection is missing a selected starting transaction; collect shared data for these seeds first")
+        if index >= len(transactions[txid]["data"]["vout"]):
+            raise TraceError("A selected starting output does not exist in the shared transaction evidence")
+
+    depths, tx_depths, selected_links = {}, {}, {}
+    pending = deque((key, 0) for key in seeds)
+    while pending:
+        key, depth = pending.popleft()
+        if depth >= depths.get(key, float("inf")):
+            continue
+        txid, index = parse_outpoint(key)
+        depths[key] = depth
+        tx_depths[txid] = min(depth, tx_depths.get(txid, depth))
+        if key not in links:
+            continue
+        link = links[key]
+        selected_links[key] = deepcopy(link)
+        child = link["spending_txid"]
+        pending.extend((f"{child}:{number}", depth + 1)
+                       for number in range(len(transactions[child]["data"]["vout"])))
+
+    selected_outputs = {}
+    for key, depth in depths.items():
+        txid, index = parse_outpoint(key)
+        item = deepcopy(outputs.get(key, {"outpoint": key, "txid": txid, "vout": index,
+                                          "status": "not_observed", "origin": "saved_transaction_input"}))
+        if (item.get("outpoint", key) != key or item.get("txid") != txid
+                or type(item.get("vout")) is not int or item["vout"] != index):
+            raise TraceError("Shared output bookkeeping disagrees with its exact saved output")
+        control = item.pop("trace_control", None)
+        if isinstance(control, dict) and item.get("status") in {
+                "suspected_service_stop", "analyst_stop", "held_behind_service",
+                "attribution_hop_limit", "named_group_hop_limit"}:
+            item["status"] = control.get("previous_status", "not_observed")
+        for name in ("labels", "trace_scope_depth", "reference_hops", "seed_depth"):
+            item.pop(name, None)
+        if item.get("status") in {"suspected_service_stop", "analyst_stop", "held_behind_service",
+                                  "attribution_hop_limit", "named_group_hop_limit"}:
+            item["status"] = "not_observed"
+        kind = output_kind(transactions[txid]["data"]["vout"][index])
+        if kind != "spendable":
+            item["status"] = kind
+        elif key in selected_links and item.get("status") != "spent":
+            item["status"] = "spent_in_saved_evidence"
+        item.update(outpoint=key, depth=depth)
+        if key in seeds:
+            item["origin"] = "analyst_seed"
+        selected_outputs[key] = item
+
+    result["transactions"] = {key: record for key, record in transactions.items() if key in tx_depths}
+    for key, record in result["transactions"].items():
+        record["depth"] = tx_depths[key]
+        record.pop("reference_hops", None)
+    for key, link in selected_links.items():
+        link["hop"] = depths[key] + 1
+    result.update(case_id=case_id, seeds=seeds, outputs=selected_outputs, links=selected_links,
+                  labels=[], collection_policy=dict(COLLECTION_POLICY), parent_run=None, ancestor_runs=[])
+    for name in ("service_controls", "shared_collection", "selected_frontier", "graph_options", "performance"):
+        result.pop(name, None)
+    if hop_reference_name:
+        result["hop_reference_name"] = hop_reference_name
+    else:
+        result.pop("hop_reference_name", None)
+    addresses = {output.get("scriptpubkey_address") for record in result["transactions"].values()
+                 for output in [*record["data"]["vout"],
+                                *(vin.get("prevout") or {} for vin in record["data"]["vin"])]}
+    result["address_tx_counts"] = {key: value for key, value in result.get("address_tx_counts", {}).items()
+                                   if key in addresses}
+    result["stats"] = {"requests_this_run": 0, "outpoints_examined_this_run": 0,
+                       "new_transactions_this_run": 0, "transactions_cumulative": len(tx_depths),
+                       "outputs_cumulative": len(depths),
+                       "frontier_count": sum(key not in selected_links and
+                                             output_kind(transactions[item["txid"]]["data"]["vout"][item["vout"]]) == "spendable"
+                                             for key, item in selected_outputs.items())}
+    return result
+
+
+def _copy_observations(state, archive, destination, manifest_names):
+    """Copy only referenced observations, keeping IDs in their source namespace."""
+    from .plots import _ordinary
+
+    if "evidence-index.json" not in manifest_names:
+        raise TraceError("Shared collection has no sealed observation index; collect shared data again")
+    rows = read_json(_ordinary(archive / "evidence-index.json"))
+    if (not isinstance(rows, list) or any(not isinstance(row, dict) or type(row.get("id")) is not int
+                                        or row["id"] <= 0 for row in rows)):
+        raise TraceError("Shared collection has an invalid observation index")
+    index = {row["id"]: row for row in rows}
+    if len(index) != len(rows):
+        raise TraceError("Shared collection has duplicate observation identities")
+    referenced = set()
+    expectations = {}
+    for txid, record in state["transactions"].items():
+        oid = record.get("observation_id")
+        if type(oid) is not int or oid <= 0 or oid in expectations:
+            raise TraceError("Shared transactions require distinct original observation identities")
+        expectations[oid] = ("/tx/" + txid, record["data"])
+        referenced.add(oid)
+    for item in state["outputs"].values():
+        oid = item.get("spend_observation_id")
+        if oid is not None:
+            referenced.add(oid)
+    for link in state["links"].values():
+        referenced.update(link[name] for name in ("observation_id", "spending_tx_observation_id")
+                          if link.get(name) is not None)
+    if any(type(oid) is not int or oid <= 0 or oid not in index for oid in referenced):
+        raise TraceError("Shared projection requires every referenced original observation")
+    copied, payloads = [], {}
+    for oid in sorted(referenced):
+        row = index[oid]
+        filename = row.get("file")
+        if (not isinstance(filename, str) or filename not in manifest_names
+                or Path(filename).parts[:1] != ("evidence",)
+                or row.get("source") != state["source"] or row.get("status") != 200):
+            raise TraceError("Shared observation disagrees with its sealed source archive")
+        source = _ordinary(archive / filename)
+        raw = source.read_bytes()
+        if digest(raw) != row.get("sha256"):
+            raise TraceError("Shared observation checksum disagrees with its index")
+        data = json.loads(raw)
+        if oid in expectations:
+            endpoint, expected = expectations[oid]
+            if row.get("endpoint") != endpoint or canonical(data) != canonical(expected):
+                raise TraceError("Shared transaction disagrees with its original observation")
+        payloads[oid] = data
+        output_file = f"evidence/{oid:08d}.response"
+        target = destination / output_file
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(raw)
+        copied.append({**row, "file": output_file})
+    for item in state["outputs"].values():
+        oid = item.get("spend_observation_id")
+        if oid is None:
+            continue
+        rows = payloads[oid]
+        if (index[oid].get("endpoint") != "/tx/" + item["txid"] + "/outspends"
+                or not isinstance(rows, list) or item["vout"] >= len(rows)
+                or canonical(rows[item["vout"]]) != canonical(item.get("observed_spend"))):
+            raise TraceError("Shared outspend disagrees with its original observation")
+    state["observations"] = sorted(referenced)
+    save_json(destination / "evidence-index.json", copied)
+
+
+def materialize_shared_run(case, run_id="latest", dataset_id=None):
+    """Return a sealed local source run; never update private latest/history."""
+    from .cli import verify_export
+    from .export import build_graph
+    from .miro import make_plan
+    from .plots import _locked, _ordinary
+    from .shared_collection import load_shared_run
+
+    case = _ordinary(Path(case))
+    with _locked(case):
+        metadata = read_case(case)
+        raw_seeds = metadata.get("seeds")
+        if not isinstance(raw_seeds, list) or not raw_seeds:
+            raise TraceError("Choose this investigation's starting outputs before plotting shared data")
+        seeds = sorted({f"{txid}:{index}" for txid, index in map(parse_outpoint, raw_seeds)})
+        reference = normalize_reference_name(metadata.get("run_defaults", {}).get("hop_reference_name", ""))
+    _, source, archive = load_shared_run(case, run_id, dataset_id=dataset_id)
+    manifest = (archive / "SHA256SUMS").read_bytes()
+    names = {line.split("  ", 1)[1] for line in manifest.decode().splitlines()}
+    for name in names:
+        _ordinary(archive / name)
+    provenance = source["shared_collection"]
+    identity = {"schema_version": 1, "case_id": metadata["case_id"], "dataset_id": source["case_id"],
+                "run_id": source["run_id"], "archive_sha256": digest(manifest), "seeds": seeds,
+                "hop_reference_name": reference}
+    fingerprint = digest(canonical(identity))
+    derived_id = fingerprint[:16]
+    target = _ordinary(case / "runs" / derived_id)
+    locks = _ordinary(case / "shared-projections")
+    locks.mkdir(exist_ok=True)
+    with _ordinary(locks / (derived_id + ".lock")).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if target.exists():
+            for line in _ordinary(target / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+                parts = line.split("  ", 1)
+                if len(parts) == 2:
+                    _ordinary(target / parts[1])
+            verify_export(target)
+            saved = read_json(_ordinary(target / "trace.json"))
+            if (saved.get("projection_sha256") != fingerprint or saved.get("run_id") != derived_id
+                    or saved.get("case_id") != metadata["case_id"] or saved.get("seeds") != seeds
+                    or saved.get("hop_reference_name", "") != reference
+                    or any(saved.get("collection_source", {}).get(key) != identity[key]
+                           for key in ("dataset_id", "run_id", "archive_sha256"))):
+                raise TraceError("Shared projection identity conflicts with an existing saved run")
+            return derived_id
+        state = _project(source, seeds, metadata["case_id"], reference)
+        state.update(run_id=derived_id, root_run_id=derived_id, projection_sha256=fingerprint,
+                     investigation={"case_id": metadata["case_id"], "name": metadata.get("name"), "miro_board": None})
+        state["collection_source"] = {
+            "schema_version": 1, "kind": "shared", "dataset_id": source["case_id"], "run_id": source["run_id"],
+            "archive_sha256": identity["archive_sha256"], "seeds": source["seeds"],
+            "projection_seeds": seeds, "hop_reference_name": reference,
+            "source_hop_reference_name": source.get("hop_reference_name", ""),
+            "source_max_hops": source.get("limits", {}).get("max_hops"),
+            "source_run_status": source.get("status"), "source_stop_reason": source.get("stop_reason"),
+            "source_collected_depth": max((item.get("depth", 0) for item in source["outputs"].values()), default=0),
+            "member_count": len(provenance.get("members", [])), "members": deepcopy(provenance.get("members", [])),
+            "policy_case_id": provenance.get("policy_case_id"), "policy_case_name": provenance.get("policy_case_name"),
+            "collection_policy": deepcopy(source.get("collection_policy", {})),
+            "policy_settings": deepcopy(provenance.get("settings", {})), "policy_sha256": digest(canonical(provenance)),
+        }
+        target.parent.mkdir(exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix=".shared-projection-", dir=target.parent))
+        try:
+            _copy_observations(state, archive, temporary, names)
+            save_json(temporary / "trace.json", state)
+            display = deepcopy(state)
+            # The neutral evidence archive displays ordinary seed distances.
+            # Plotting applies the recipient's current named-group definitions.
+            display.pop("hop_reference_name", None)
+            graph = build_graph(display, resolve_saved_inputs=True)
+            save_json(temporary / "graph.json", graph)
+            save_json(temporary / "miro-plan.json", make_plan(graph))
+            files = sorted(path for path in temporary.rglob("*") if path.is_file())
+            (temporary / "SHA256SUMS").write_text("".join(
+                digest(path.read_bytes()) + "  " + str(path.relative_to(temporary)) + "\n" for path in files), encoding="utf-8")
+            verify_export(temporary)
+            temporary.rename(target)
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+    return derived_id

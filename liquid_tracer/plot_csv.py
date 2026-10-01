@@ -46,6 +46,7 @@ def _saved_source(case, preview_id):
     if (not isinstance(state, dict) or state.get("case_id") != read_case(case)["case_id"]
             or state.get("run_id") != graph.get("run_id")
             or state.get("source") != graph.get("namespace", {}).get("source")
+            or canonical(state.get("collection_source")) != canonical(report.get("collection_source"))
             or report.get("archive_sha256") != digest((archive / "SHA256SUMS").read_bytes())):
         raise TraceError("Saved endpoint trace does not match its source archive")
     controls = graph.get("service_controls", state.get("service_controls"))

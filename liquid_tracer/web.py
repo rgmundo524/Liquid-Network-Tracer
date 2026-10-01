@@ -434,7 +434,7 @@ class LocalServer(ThreadingHTTPServer):
         if not self.root.is_dir():
             return []
         return sorted(path for path in self.root.iterdir()
-                      if path.is_dir() and not path.is_symlink()
+                      if path.name != ".shared-collection" and path.is_dir() and not path.is_symlink()
                       and (path / "case.json").is_file() and not (path / "case.json").is_symlink())
 
     def case_summary(self, case, metadata, detail=False):
@@ -460,6 +460,8 @@ class LocalServer(ThreadingHTTPServer):
                         continue
                     if state.get("run_id") != path.name or state.get("case_id") != metadata["case_id"]:
                         continue
+                    if isinstance(state.get("collection_source"), dict) and state["collection_source"].get("kind") == "shared":
+                        continue  # A sealed plot source is separate from this case's collection history.
                     stats = state.get("stats", {})
                     if not isinstance(stats, dict):
                         continue
@@ -508,6 +510,7 @@ class LocalServer(ThreadingHTTPServer):
             summary["pegout_searches"] = self.pegout_searches(case)
             from .workflow_api import case_workflow
             summary.update(case_workflow(case))
+            summary["shared_collection"] = self.shared_collection_summary(case)
             summary["miro_recovery"] = miro_recovery_status(case)
             try:
                 rebuild = rebuild_status(case)
@@ -519,6 +522,15 @@ class LocalServer(ThreadingHTTPServer):
                     if key in {"status", "previous_board_id", "board_id", "run_id", "name", "notice"}
                     and isinstance(value, str)}
         return summary
+
+    def shared_collection_summary(self, case):
+        from .shared_collection import read_summary
+        try:
+            return read_summary(self.root, case=case)
+        except (TraceError, OSError, ValueError, TypeError, KeyError):
+            return {"name": "Shared collection", "compatible": False,
+                    "reason": "Shared collection is unavailable. Restore its saved files before continuing.",
+                    "seeds": [], "seed_count": 0, "members": [], "runs": []}
 
     def pegout_artifact(self, case, preview_id):
         from .pegouts import reviewed_pegouts, preview_files as pegout_files
@@ -716,7 +728,8 @@ class LocalServer(ThreadingHTTPServer):
         self.ensure_open()
         if case_id is not None:
             for job in self.jobs.values():
-                if job.get("case_id") == case_id and job["status"] in ACTIVE_JOB_STATUSES:
+                if (job.get("case_id") == case_id and job["status"] in ACTIVE_JOB_STATUSES
+                        and job.get("resource_kind") != "shared_collection"):
                     raise RequestError("This investigation already has an active action (" + job["action"]
                                        + "). Wait for it to finish before changing it. "
                                        "Other investigations remain available.", 409)
@@ -737,6 +750,7 @@ class LocalServer(ThreadingHTTPServer):
         for job in self.jobs.values():
             if job["status"] in ACTIVE_JOB_STATUSES and conflicts(job, requested):
                 scope = ("Miro board" if resource["resource_kind"] == "board"
+                         else "shared collection" if resource["resource_kind"] == "shared_collection"
                          else "collection" if resource["resource_kind"] == "collection"
                          else "investigation")
                 raise RequestError("This " + scope + " already has an active action (" + job["action"]
@@ -946,6 +960,24 @@ class LocalServer(ThreadingHTTPServer):
             pass
 
     def public_result(self, result, action, case, txids):
+        if action == "shared-trace":
+            summary = self.shared_collection_summary(case)
+            run_id = result.get("run_id")
+            if (not isinstance(run_id, str) or not RUN_ID.fullmatch(run_id)
+                    or run_id not in {run["id"] for run in summary.get("runs", [])}):
+                raise RequestError("Shared collection result does not match a saved snapshot.")
+            value = {"run_id": run_id, "data_source": "shared", "shared_collection": summary}
+            for key in ("status", "stop_reason"):
+                if result.get(key) is None or isinstance(result.get(key), str):
+                    value[key] = result.get(key)
+            performance = public_performance(result.get("performance"))
+            if performance:
+                value["performance"] = performance
+            from .address_counts import public_count_report
+            counts = public_count_report(result.get("address_counts"))
+            if counts is not None:
+                value["address_counts"] = counts
+            return value
         if action in ("plot", "plot-sync", "board-create", "board-create-sync", "board-link", "board-sync"):
             from .workflow_api import workflow_result
             return workflow_result(case, result, action)
@@ -1132,6 +1164,28 @@ class LocalServer(ThreadingHTTPServer):
         if action in ("plot", "plot-sync", "board-create", "board-create-sync", "board-link", "board-sync"):
             from .workflow_api import workflow_action
             return workflow_action(self, case, metadata, body)
+        if action == "shared-trace":
+            from .shared_collection import prepare_collection
+            mode = body.get("mode")
+            required = {"action", "mode", "hops"} | ({"case_ids"} if mode == "collect" else {"run_id"})
+            if mode not in ("collect", "continue") or not required <= set(body) or set(body) - required - {"hop_reference_name"}:
+                raise RequestError("Choose shared collection or continuation, a hop allowance, and its seed scope.")
+            settings = validate_settings({**metadata.get("run_defaults", {}), "hops": body["hops"],
+                "hop_reference_name": body.get("hop_reference_name", metadata.get("run_defaults", {}).get("hop_reference_name", ""))})
+            resource = job_resources(["shared-collect", "--case", str(case)], action, case)
+            self.ensure_resources_available(metadata["case_id"], resource)
+            members = body.get("case_ids")
+            if mode == "collect" and (not isinstance(members, list) or not members or len(members) > 100
+                    or any(not isinstance(identity, str) or not CASE_ID.fullmatch(identity) for identity in members)
+                    or metadata["case_id"] not in members):
+                raise RequestError("Choose up to 100 open investigations, including this investigation.")
+            resume = body.get("run_id") if mode == "continue" else None
+            if mode == "continue" and (not isinstance(resume, str) or not RUN_ID.fullmatch(resume)):
+                raise RequestError("Choose the latest shared collection snapshot to continue.")
+            prepared = prepare_collection(case, members, hops=settings["hops"], resume=resume,
+                                          hop_reference_name=settings["hop_reference_name"])
+            arguments = ["shared-collect", "--case", str(case), "--request", prepared["request_id"]]
+            return self.start_job(arguments, action=action, live=prepared["live"], case=case)
         if action in ("pegouts", "pegouts-preview", "miro-pegouts"):
             from .pegouts import SEARCH_ID, reviewed_pegouts
             from .cli import board_id

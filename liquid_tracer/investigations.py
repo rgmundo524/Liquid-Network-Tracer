@@ -233,6 +233,8 @@ def list_investigations(root):
         return []
     entries = []
     for case in root.iterdir():
+        if case.name == ".shared-collection":
+            continue  # Workspace evidence is selected within an investigation, not a case tab.
         if not case.is_dir() or not (case / "case.json").exists():
             continue
         try:

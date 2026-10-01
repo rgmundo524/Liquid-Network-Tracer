@@ -257,6 +257,7 @@ def _graph(state, goal, query, settings):
     if goal == "pegouts":
         return pegout_graph(state, query, group_context_inputs=settings["group_context_inputs"], **options)
     return build_graph(project_full_scope(state), merge_addresses=True, **options,
+                       resolve_saved_inputs=state.get("collection_source", {}).get("kind") == "shared",
                        **{key: settings[key] for key in ("include_fees", "group_context_inputs", "hub_addresses")})
 
 
@@ -317,7 +318,8 @@ def _summary(graph, preview_id, *, reviewable=True, reason=None):
 def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, include_unspent=False,
                  include_unspendable=False, include_context=False, open_browser=False, progress=None,
                  layout_mode="fresh", board_record_id=None, token=None, transport=http,
-                 interval=.02, workers=4, layout_settings=None, _preflight=None, _board_lock_held=False):
+                 interval=.02, workers=4, layout_settings=None, data_source="investigation", dataset_id=None,
+                 _preflight=None, _board_lock_held=False):
     """Plot saved evidence afresh, or review additions against a selected live board."""
     from .cli import open_preview
     from .elk_layout import optimize_graph
@@ -331,6 +333,11 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
             or layout_mode == "update" and not isinstance(board_record_id, str)):
         raise TraceError("Choose a target Miro board only when preparing an update layout")
     case = _ordinary(case)
+    if data_source not in ("investigation", "shared") or (data_source == "investigation" and dataset_id is not None):
+        raise TraceError("Choose investigation data or a saved shared collection")
+    if data_source == "shared":
+        from .shared_projection import materialize_shared_run
+        run_id = materialize_shared_run(case, run_id, dataset_id=dataset_id)
     with ExitStack() as operation:
         if layout_mode == "update" and not _board_lock_held:
             from .investigation_boards import _board_lock
@@ -381,6 +388,8 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
                   "node_count": len(graph["nodes"]), "edge_count": len(graph["edges"]),
                   "transaction_count": sum(node["kind"] == "transaction" for node in graph["nodes"]),
                   "status": "plotted" if graph["nodes"] else "empty"}
+        if state.get("collection_source", {}).get("kind") == "shared":
+            report["collection_source"] = deepcopy(state["collection_source"])
         if goal == "connections":
             report.update(connection_count=graph["connections"]["connection_count"], status=graph["connections"]["status"])
             if "connection_scope" in query:
@@ -527,7 +536,7 @@ def _review_source(case, graph, source_cache=None, inputs=None):
         if source_cache is not None:
             # Several goals commonly share one large archive. Verify its bytes
             # once per listing, retaining only the seed/source identity here.
-            state = {key: state[key] for key in ("seeds", "source", "hop_reference_name") if key in state}
+            state = {key: state[key] for key in ("seeds", "source", "hop_reference_name", "collection_source") if key in state}
             source_cache[cache_key] = state, fingerprints
     query = report.get("query", {})
     expected = _query(report["goal"], state, query.get("min_hops", 0), query.get("max_hops", 10),
@@ -544,7 +553,8 @@ def _review_source(case, graph, source_cache=None, inputs=None):
             raise TraceError("Saved layout uses a different presentation version; regenerate the plot")
     if (any(report.get(key) != value for key, value in fingerprints.items()
             if settings is None or key != "settings_sha256")
-            or query != expected or graph["namespace"].get("source") != state["source"]):
+            or query != expected or graph["namespace"].get("source") != state["source"]
+            or canonical(report.get("collection_source")) != canonical(state.get("collection_source"))):
         raise TraceError("Evidence, address counts, trace controls or plot settings changed; regenerate the plot")
 
 

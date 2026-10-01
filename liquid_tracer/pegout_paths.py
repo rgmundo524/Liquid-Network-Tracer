@@ -340,6 +340,7 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
         context_edge_ids.difference_update(edge_ids)
         edge_ids.update(context_edge_ids)
     graph = build_graph(reduced, merge_addresses=True, include_fees=complete_io,
+                        resolve_saved_inputs=state.get("collection_source", {}).get("kind") == "shared",
                         color_attribution_arrows=color_attribution_arrows, center_name=center_name,
                         edge_ids=edge_ids,
                         respect_attribution_hops=query.get("attribution_hop_limits") != "ignore")

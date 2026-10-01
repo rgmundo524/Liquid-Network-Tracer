@@ -3,6 +3,8 @@
 An investigation owns one set of saved collection runs and can have several Miro
 boards. Each board has a name and a plotting goal. Use the same collected data
 to make a full investigation chart, starter-connection chart, and peg-out chart.
+Investigations can also use a workspace **Shared collection** while keeping
+their own seeds, investigation data, layouts, and boards.
 In the browser, the sequence is **Collect data → Plots & Miro**.
 Upload investigation CSVs before collection, then update them as your analysis
 develops. Choose the destination workflow before generating each layout.
@@ -54,6 +56,27 @@ older snapshot has no usable transaction depths, the summary shows **Not recorde
 
 The **Collect data** tab contains collection actions. Use the **Plots & Miro**
 tab for the next step and the investigation heading to open settings.
+
+### Collect once for several investigations
+
+Open the investigations whose seed outputs should be included, then start
+**Shared collection** from **Collect data**. The job captures the union of their
+configured seeds and the focused investigation's collection policy at launch.
+Review that policy, especially stop-tracing rules and the hop allowance. A
+different investigation's attribution CSV does not silently change the shared
+collector's policy. Opening or closing tabs after launch does not change the run.
+
+Continue the latest shared snapshot to extend its existing seeds and branches.
+To include a new seed set, start a fresh shared collection from the desired open
+investigations. Private collection runs remain available and are not imported
+into or replaced by the shared dataset.
+
+In **Plots & Miro**, choose **Data source → Shared collection** and a saved
+**Shared snapshot**. The current investigation's own seeds and rules determine
+its plot. A case with all ten seeds produces a combined chart; a case with one
+of those seeds produces its individual chart from the same saved evidence.
+Neither plot triggers another collection. See [shared collection](shared-collection.md)
+for coverage limits, source compatibility, and provenance.
 
 ### Count hops from a named group
 

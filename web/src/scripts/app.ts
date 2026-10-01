@@ -58,11 +58,17 @@ type Run = {
   hop_reference_name?: string;
   performance?: CollectionPerformance;
 };
+type SharedCollection = {
+  dataset_id?: string; name: string; compatible: boolean; reason?: string;
+  seeds: string[]; seed_count: number; members: {id: string; name: string}[];
+  latest_run?: string; runs: Run[]; policy_case_name?: string;
+};
+type CollectionSource = {kind: "shared"; dataset_id: string; run_id: string};
 type Download = { name: string; url: string };
 type EndpointExport = {
   filename: string; content_type: string; csv: string; endpoint_count: number;
-  included: {case_id: string; name: string; run_id: string; plot_id: string; endpoint_count: number}[];
-  skipped: {case_id: string; name: string; run_id: string | null; reason: string}[];
+  included: {case_id: string; name: string; run_id: string; plot_id: string; endpoint_count: number; collection_source?: CollectionSource}[];
+  skipped: {case_id: string; name: string; run_id: string | null; reason: string; collection_source?: CollectionSource}[];
 };
 type Artifact = RenderingMetadata & {
   max_hops?: number | null; connection_count?: number; connection_status?: string; connection_scope?: "all_saved";
@@ -108,6 +114,7 @@ type PegoutLbtcSummary = {
   unknown_amount_count: number; unknown_asset_count: number; non_lbtc_count: number;
 };
 type Plot = {
+  collection_source?: CollectionSource;
   preview_id: string; goal: PlotGoal; run_id: string; min_hops: number; max_hops: number | null;
   hop_reference_name?: string;
   created_at: string; status: string; node_count: number; edge_count: number; transaction_count: number;
@@ -128,6 +135,7 @@ type InvestigationBoard = {
   preview_id?: string | null; creation_preview_id?: string | null; run_id?: string | null; legacy_snapshot?: boolean; can_sync: boolean; notice?: string; pending_count?: number;
 };
 type Case = {
+  shared_collection?: SharedCollection;
   id: string;
   name: string;
   blockchain?: string;
@@ -201,7 +209,7 @@ type MiroEditConflictReport = {
     changes: { field: string; saved: MiroConflictValue; current: MiroConflictValue }[] }[];
   truncated?: boolean;
 };
-type JobResource = {resource_kind: "collection" | "plot" | "board" | "exclusive"; resource_key?: string | null};
+type JobResource = {resource_kind: "collection" | "shared_collection" | "plot" | "board" | "exclusive"; resource_key?: string | null};
 type Job = {
   resource_kind?: JobResource["resource_kind"];
   resource_key?: string | null;
@@ -317,17 +325,19 @@ const taskNotifications = createTaskNotifications(window);
 const pollTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const pollingJobs = new Set<string>();
 const caseRefreshSequence = new Map<string, number>();
+const sharedRefreshSequence = new Map<string, number>();
 let discoveringJobs = false;
 const dismissedJobs = new Set<string>();
 let tasksOpen = false;
 let dialogAction = "";
+let sharedDialog: {caseId: string; mode: "collect" | "continue"; runId?: string} | null = null;
 let dialogMergeApproval = "";
 let dialogPreviewId = "";
 let dialogRebuild: { caseId: string; sourceBoard: string; runId: string } | null = null;
 let submitting = false;
 let pageGeneration = 0;
 let viewRevision = 0;
-let workflowDraft = {caseId: "", goal: "full" as PlotGoal, minHops: "0", maxHops: "10", includeUnspent: false, includeUnspendable: false, layoutMode: "fresh" as PlotLayoutMode, layoutBoard: "", plot: "", board: "", boardPlot: "", boardGoal: "full" as PlotGoal, boardName: "", savedBoardName: "", linkedBoardName: "", boardUrl: ""};
+let workflowDraft = {caseId: "", dataSource: "investigation" as "investigation" | "shared", sharedRun: "", datasetId: "", goal: "full" as PlotGoal, minHops: "0", maxHops: "10", includeUnspent: false, includeUnspendable: false, layoutMode: "fresh" as PlotLayoutMode, layoutBoard: "", plot: "", board: "", boardPlot: "", boardGoal: "full" as PlotGoal, boardName: "", savedBoardName: "", linkedBoardName: "", boardUrl: ""};
 let pegoutDraft = {caseId: "", custom: false, txid: "", minHops: "0", maxHops: "10", selected: "", board: "", approved: ""};
 const pegoutDrafts = new Map<string, typeof pegoutDraft>();
 type InvestigationView = {
@@ -416,15 +426,18 @@ function endpointExportNotice(): string {
     : error ? "Endpoint export could not be completed"
     : result!.included.length ? `Exported ${result!.endpoint_count} endpoint row${result!.endpoint_count === 1 ? "" : "s"} from ${result!.included.length} investigation${result!.included.length === 1 ? "" : "s"}`
     : "No saved endpoint traces to export";
-  return `<div class="endpoint-export-notice${error ? " error" : ""}" role="status"><div><strong>${esc(title)}</strong><p>${esc(pending ? `Reading saved traces for ${caseCount} open investigation${caseCount === 1 ? "" : "s"}…` : error || (result!.included.length ? "Shared endpoints remain separate rows for each investigation." : "Generate a Paths to peg-outs plot for the selected snapshots, then export again."))}</p>${result ? `<details${result.skipped.length ? " open" : ""}><summary>Included ${result.included.length} · Skipped ${result.skipped.length}</summary><ul>${result.included.map(item => `<li>${esc(item.name)}: ${item.endpoint_count} endpoint row${item.endpoint_count === 1 ? "" : "s"} · run ${esc(item.run_id)}</li>`).join("")}${result.skipped.map(item => `<li>${esc(item.name)}: skipped. ${esc(item.reason)}</li>`).join("")}</ul></details>` : ""}</div>${!pending ? `<button class="dismiss" data-action="dismiss-endpoint-export" aria-label="Dismiss endpoint export status">${icon("close")}</button>` : ""}</div>`;
+  return `<div class="endpoint-export-notice${error ? " error" : ""}" role="status"><div><strong>${esc(title)}</strong><p>${esc(pending ? `Reading saved traces for ${caseCount} open investigation${caseCount === 1 ? "" : "s"}…` : error || (result!.included.length ? "Shared endpoints remain separate rows for each investigation." : "Generate a Paths to peg-outs plot for the selected snapshots, then export again."))}</p>${result ? `<details${result.skipped.length ? " open" : ""}><summary>Included ${result.included.length} · Skipped ${result.skipped.length}</summary><ul>${result.included.map(item => `<li>${esc(item.name)}: ${item.endpoint_count} endpoint row${item.endpoint_count === 1 ? "" : "s"} · ${item.collection_source?.kind === "shared" ? `shared snapshot ${esc(item.collection_source.run_id)}` : `run ${esc(item.run_id)}`}</li>`).join("")}${result.skipped.map(item => `<li>${esc(item.name)}: skipped. ${esc(item.reason)}</li>`).join("")}</ul></details>` : ""}</div>${!pending ? `<button class="dismiss" data-action="dismiss-endpoint-export" aria-label="Dismiss endpoint export status">${icon("close")}</button>` : ""}</div>`;
 }
 
 async function exportOpenEndpoints(): Promise<void> {
   if (state.endpointExport.pending || !state.openCases.length) return;
   rememberInvestigationView(); saveDraft();
-  const investigations = state.openCases.map(case_id => ({case_id,
-    run_id: viewingCase(case_id) ? currentRun()?.id || state.selectedRun
-      : investigationViews.get(case_id)?.selectedRun || "latest"}));
+  const investigations = state.openCases.map(case_id => {
+    const draft = workflowDraft.caseId === case_id ? workflowDraft : workflowDrafts.get(case_id);
+    if (draft?.dataSource === "shared") return {case_id, data_source: "shared", dataset_id: draft.datasetId, run_id: draft.sharedRun};
+    return {case_id, run_id: viewingCase(case_id) ? currentRun()?.id || state.selectedRun
+      : investigationViews.get(case_id)?.selectedRun || "latest"};
+  });
   state.endpointExport = {pending: true, caseCount: investigations.length, result: null, error: ""};
   render();
   try {
@@ -486,6 +499,7 @@ const isBusy = (): boolean => submitting || investigationEditorBusy() ||
   (state.page === "new" ? scopeBusy() : viewingCase(state.activeCase?.id) ? scopeBusy(state.activeCase!.id) : false);
 const draftBusy = (): boolean => submitting || investigationEditorBusy();
 function requestedResource(action: string, body: Record<string, unknown> = {}, caseId: string | null | undefined = state.activeCase?.id): JobResource {
+  if (action === "shared-trace") return {resource_kind: "shared_collection", resource_key: "workspace-shared"};
   if (["trace", "address-counts"].includes(action)) return {resource_kind: "collection"};
   if (action === "plot" && body.layout_mode !== "update") return {resource_kind: "plot"};
   if (["plot", "plot-sync", "board-sync", "board-create", "board-create-sync"].includes(action)) {
@@ -508,6 +522,8 @@ function actionBusy(action: string, body: Record<string, unknown> = {}, caseId: 
   const requested = requestedResource(action, body, caseId);
   return runningJobs().some(job => {
     const existing = job.resource_kind ? job as JobResource : requestedResource(job.action, {}, job.caseId ?? null);
+    if (requested.resource_kind === "shared_collection" || existing.resource_kind === "shared_collection")
+      return requested.resource_kind === "shared_collection" && existing.resource_kind === "shared_collection";
     if ((job.caseId ?? null) !== (caseId ?? null)) return requested.resource_kind === "board" && existing.resource_kind === "board"
       && requested.resource_key !== "new-board" && requested.resource_key === existing.resource_key;
     if (requested.resource_kind === "exclusive" || existing.resource_kind === "exclusive") return true;
@@ -708,8 +724,8 @@ function hopBasisExplanation(name?: string): string {
     : "Starting transactions are hop 0; individual branches may stop earlier.";
 }
 
-function hopReferenceFields(settings: Settings): string {
-  return `<label class="field"><span>Count hops from named group</span><input name="hop_reference_name" maxlength="120" value="${esc(settings.hop_reference_name)}" placeholder="Blank: count from starting transactions" autocomplete="off" list="hop-reference-name-options"/><datalist id="hop-reference-name-options"></datalist><small>Optional attribution name, ignoring capitalization. Keeps the same starting outputs. Outputs to this group reset to hop 0; transfers outside it add a hop, separately for each branch. At the hop limit, the next spending transaction is checked for a return to the group. This may use more requests; explicit tracing stops and run budgets still apply. Collection ignores attribution CSV hop_limit values.</small><small>Saved for this investigation when collection starts. Changing the group recalculates saved paths and resumes eligible branches. Previous run snapshots stay unchanged. Center named group is a separate layout setting.</small></label>`;
+function hopReferenceFields(settings: Settings, shared = false): string {
+  return `<label class="field"><span>Count hops from named group</span><input name="hop_reference_name" maxlength="120" value="${esc(settings.hop_reference_name)}" placeholder="Blank: count from starting transactions" autocomplete="off" list="hop-reference-name-options"/><datalist id="hop-reference-name-options"></datalist><small>Optional attribution name, ignoring capitalization. Keeps the same starting outputs. Outputs to this group reset to hop 0; transfers outside it add a hop, separately for each branch. At the hop limit, the next spending transaction is checked for a return to the group. This may use more requests; explicit tracing stops and run budgets still apply. Collection ignores attribution CSV hop_limit values.</small><small>${shared ? "Captured for this shared collection; private collection preferences remain unchanged." : "Saved for this investigation when collection starts."} Changing the group recalculates saved paths and resumes eligible branches. Previous run snapshots stay unchanged. Center named group is a separate layout setting.</small></label>`;
 }
 
 let hopReferenceNameTimer: ReturnType<typeof setTimeout> | undefined;
@@ -717,11 +733,11 @@ async function suggestHopReferenceNames(): Promise<void> {
   const detail = state.activeCase;
   const selector = '#action-form input[name="hop_reference_name"]';
   const input = document.querySelector<HTMLInputElement>(selector);
-  if (!detail || !dialog.open || dialogAction !== "trace" || !input) return;
+  if (!detail || !dialog.open || !["trace", "shared-trace"].includes(dialogAction) || !input) return;
   const query = input.value.trim(), generation = pageGeneration;
   const result = await api<{rows?: {name: string; enabled_addresses: number}[]}>(`/api/cases/${encodeURIComponent(detail.id)}/name-colors`,
     {query, offset: 0, limit: 100});
-  if (generation !== pageGeneration || state.activeCase?.id !== detail.id || !dialog.open || dialogAction !== "trace"
+  if (generation !== pageGeneration || state.activeCase?.id !== detail.id || !dialog.open || !["trace", "shared-trace"].includes(dialogAction)
       || input.value.trim() !== query || document.querySelector(selector) !== input) return;
   const list = document.querySelector<HTMLDataListElement>("#hop-reference-name-options");
   if (list) list.innerHTML = (result.rows || []).filter(row => row.enabled_addresses > 0)
@@ -874,7 +890,7 @@ function taskActivitySummary(jobs: ActiveJob[]): string {
 }
 
 function taskName(job: ActiveJob): string {
-  return job.caseId ? state.cases.find(item => item.id === job.caseId)?.name ||
+  return job.action === "shared-trace" ? "Shared collection" : job.caseId ? state.cases.find(item => item.id === job.caseId)?.name ||
     (state.activeCase?.id === job.caseId ? state.activeCase.name : job.caseId) : "New investigation";
 }
 
@@ -1325,9 +1341,35 @@ const workflowDrafts = new Map<string, typeof workflowDraft>();
 function currentWorkflow(detail: Case): typeof workflowDraft {
   if (workflowDraft.caseId !== detail.id) {
     if (workflowDraft.caseId) workflowDrafts.set(workflowDraft.caseId, workflowDraft);
-    workflowDraft = workflowDrafts.get(detail.id) || {caseId: detail.id, goal: "full", minHops: "0", maxHops: "10", includeUnspent: false, includeUnspendable: false, layoutMode: "fresh" as PlotLayoutMode, layoutBoard: "", plot: "", board: "", boardPlot: "", boardGoal: "full", boardName: "", savedBoardName: "", linkedBoardName: "", boardUrl: ""};
+    workflowDraft = workflowDrafts.get(detail.id) || {caseId: detail.id, dataSource: "investigation", sharedRun: "", datasetId: "", goal: "full", minHops: "0", maxHops: "10", includeUnspent: false, includeUnspendable: false, layoutMode: "fresh" as PlotLayoutMode, layoutBoard: "", plot: "", board: "", boardPlot: "", boardGoal: "full", boardName: "", savedBoardName: "", linkedBoardName: "", boardUrl: ""};
   }
   return workflowDraft;
+}
+
+function currentPlotRun(detail: Case): Run | undefined {
+  const draft = currentWorkflow(detail);
+  if (draft.dataSource === "investigation") return currentRun();
+  const shared = detail.shared_collection;
+  if (!shared?.compatible || !shared.dataset_id || shared.dataset_id !== draft.datasetId) return undefined;
+  return shared.runs.find(run => run.id === draft.sharedRun);
+}
+
+function plotDataSourceFields(detail: Case): string {
+  const draft = currentWorkflow(detail), shared = detail.shared_collection;
+  const ready = Boolean(shared?.compatible && shared.dataset_id && shared.runs.length);
+  const missing = draft.dataSource === "shared" && !currentPlotRun(detail);
+  return `<div class="field-row"><label class="field"><span>Data source</span><select id="workflow-data-source"${disabled(draftBusy())}><option value="investigation"${draft.dataSource === "investigation" ? " selected" : ""}>This investigation</option><option value="shared"${draft.dataSource === "shared" ? " selected" : ""}${disabled(!ready)}>Shared collection${ready ? "" : " · unavailable"}</option></select></label>${draft.dataSource === "shared" ? `<label class="field"><span>Shared snapshot</span><select id="workflow-shared-run"${disabled(draftBusy() || !ready)}>${missing ? '<option value="" selected>Choose an available shared snapshot</option>' : ""}${(shared?.runs || []).map(run => `<option value="${esc(run.id)}"${!missing && run.id === draft.sharedRun ? " selected" : ""}>${esc(run.id)}${run.id === shared?.latest_run ? " · Latest" : ""} · ${esc(run.collected_hops ?? "Unknown")} hops collected</option>`).join("")}</select></label>` : ""}</div><p class="small muted">${draft.dataSource === "shared" ? "Uses shared transaction evidence with this investigation’s own selected seed outputs, attribution rules, colors, and board settings." : "Uses the investigation snapshot selected under Collected data."}</p>${draft.dataSource === "shared" && (!ready || missing) ? `<p class="artifact-note">${esc(shared?.reason || "The selected shared snapshot is unavailable. Choose an available snapshot or collect shared data.")}</p>` : ""}`;
+}
+
+async function refreshSharedCollection(caseId: string): Promise<void> {
+  const generation = pageGeneration, sequence = (sharedRefreshSequence.get(caseId) || 0) + 1;
+  const fullSequence = caseRefreshSequence.get(caseId) || 0;
+  sharedRefreshSequence.set(caseId, sequence);
+  const detail = await api<Case>(`/api/cases/${encodeURIComponent(caseId)}`);
+  if (generation !== pageGeneration || state.activeCase?.id !== caseId || sharedRefreshSequence.get(caseId) !== sequence ||
+      (caseRefreshSequence.get(caseId) || 0) !== fullSequence || !("shared_collection" in detail)) return;
+  state.activeCase.shared_collection = detail.shared_collection;
+  render();
 }
 
 function currentPlot(detail: Case): Plot | undefined {
@@ -1363,7 +1405,7 @@ function chosenBoardPlot(detail: Case, board: InvestigationBoard): Plot | undefi
 }
 
 const plotLayoutDrafts = new Map<string, LayoutSettings>();
-type LayoutFormDraft = Pick<typeof workflowDraft, "goal" | "minHops" | "maxHops" | "includeUnspent" | "includeUnspendable"> & {settings: LayoutSettings};
+type LayoutFormDraft = Pick<typeof workflowDraft, "dataSource" | "sharedRun" | "datasetId" | "goal" | "minHops" | "maxHops" | "includeUnspent" | "includeUnspendable"> & {settings: LayoutSettings};
 const layoutFormDrafts = new Map<string, Map<string, LayoutFormDraft>>();
 
 function layoutDraftKey(detail: Case): string {
@@ -1377,7 +1419,7 @@ function saveDestinationDraft(detail: Case): void {
   if (!key) return;
   let drafts = layoutFormDrafts.get(detail.id);
   if (!drafts) {drafts = new Map(); layoutFormDrafts.set(detail.id, drafts);}
-  drafts.set(key, {goal: draft.goal, minHops: draft.minHops, maxHops: draft.maxHops,
+  drafts.set(key, {dataSource: draft.dataSource, sharedRun: draft.sharedRun, datasetId: draft.datasetId, goal: draft.goal, minHops: draft.minHops, maxHops: draft.maxHops,
     includeUnspent: draft.includeUnspent, includeUnspendable: draft.includeUnspendable,
     settings: currentLayoutSettings(detail)});
 }
@@ -1390,7 +1432,8 @@ function selectLayoutDestination(detail: Case, mode: PlotLayoutMode, board?: Inv
   if (board) {draft.goal = board.goal; draft.board = board.id;}
   const remembered = layoutFormDrafts.get(detail.id)?.get(layoutDraftKey(detail));
   const plot = board && detail.plots?.find(item => item.preview_id === board.preview_id);
-  const restored = remembered || (plot ? {goal: board!.goal,
+  const restored = remembered || (plot ? {dataSource: plot.collection_source?.kind === "shared" ? "shared" as const : "investigation" as const,
+    sharedRun: plot.collection_source?.run_id || "", datasetId: plot.collection_source?.dataset_id || "", goal: board!.goal,
     minHops: String(plot.min_hops ?? 0), maxHops: String(plot.max_hops ?? 10),
     includeUnspent: Boolean(plot.query?.include_unspent), includeUnspendable: Boolean(plot.query?.include_unspendable),
     settings: selectLayoutSettings({...defaults, ...detail.run_defaults, ...plot.layout_settings})} : undefined);
@@ -1509,7 +1552,7 @@ function plotHopSummary(plot: Plot): string {
 }
 
 function plotChoiceLabel(plot: Plot): string {
-  return `${plot.layout_mode === "update" ? `Update ${plot.board_name || "board"}` : plot.layout_mode === "fresh" ? "New board" : "Earlier layout"} · ${goalName(plot.goal)} · Run ${short(plot.run_id, 8)}${plotHopSummary(plot)}${plotEndpointLabel(plot)} · ${hopBasis(plotHopReference(plot))} · ${formatDate(plot.created_at)}`;
+  return `${plot.layout_mode === "update" ? `Update ${plot.board_name || "board"}` : plot.layout_mode === "fresh" ? "New board" : "Earlier layout"} · ${goalName(plot.goal)} · ${plot.collection_source?.kind === "shared" ? `Shared snapshot ${short(plot.collection_source.run_id, 8)}` : `Run ${short(plot.run_id, 8)}`}${plotHopSummary(plot)}${plotEndpointLabel(plot)} · ${hopBasis(plotHopReference(plot))} · ${formatDate(plot.created_at)}`;
 }
 
 function plotCanSync(plot: Plot): boolean {
@@ -1550,16 +1593,26 @@ function savedLayoutSummary(plot: Plot): string {
   return `<details class="tool-details"><summary>Saved layout settings</summary><p>${esc(human(settings.connector_style))} connectors · ${esc(settings.layout_attempts)} layout attempts · Attribution arrow colors ${settings.color_attribution_arrows ? "on" : "off"}.</p><p>Centered group: ${esc(settings.center_name || "None")}.${contextGrouping ? ` Isolated context inputs ${settings.group_context_inputs ? "grouped" : "separate"}.` : ""}${plot.goal === "full" ? ` Fee flows ${settings.include_fees ? "shown" : "hidden"}; ${esc(settings.hub_addresses.length)} separate branch hubs.` : ""}</p></details>`;
 }
 
+function sharedCollectionPanel(detail: Case): string {
+  const shared = detail.shared_collection;
+  const latest = shared?.runs.find(run => run.id === shared.latest_run);
+  const members = shared?.members || [];
+  const openIds = [...new Set([...state.openCases, detail.id])];
+  return `<section class="panel" id="shared-collection-panel"><div class="panel-head"><div><h2>Shared collection</h2><p>Collect the starting outputs from open investigations into reusable transaction evidence.</p></div><span class="badge gray">Workspace data</span></div><div class="panel-body">${shared?.dataset_id ? `<p><strong>${esc(shared.name)}</strong> · ${shared.seed_count} starting outputs · ${members.length} investigations</p><p class="small muted">${esc(members.map(member => member.name).join(", "))}</p>${latest ? `<p>Latest snapshot: <span class="mono">${esc(latest.id)}</span> · <strong>${esc(latest.collected_hops ?? "Not recorded")}</strong> hops collected · ${esc(latest.transaction_count ?? "Unknown")} transactions · ${esc(human(latest.status))}</p>` : '<p class="small muted">No shared collection snapshot yet.</p>'}${shared.policy_case_name ? `<p class="small muted">Last collection rules: ${esc(shared.policy_case_name)}.</p>` : ""}` : '<p>No shared collection yet.</p>'}${shared?.compatible === false ? `<p class="artifact-note">${esc(shared.reason || "This shared collection is incompatible with the investigation.")}</p>` : ""}<p class="small muted">Collect from open investigations starts a new shared run from the ${openIds.length} currently open investigation${openIds.length === 1 ? "" : "s"}. Continue shared data keeps the saved seed set. Both use ${esc(detail.name)}’s collection limits and explicit stop rules. Private investigation runs remain separate.</p><div class="task-actions">${button("Collect from open investigations", "shared-collect-dialog", "play", "", actionBusy("shared-trace") || shared?.compatible === false)}${shared?.latest_run ? button("Continue shared data", "shared-continue-dialog", "refresh", "", actionBusy("shared-trace") || !shared.compatible) : ""}</div></div></section>`;
+}
+
 function collectDataPanel(detail: Case, saved: boolean, settings: Settings): string {
-  return `<section class="panel" id="collection-panel"><div class="panel-head"><div><h2>Collect transaction data</h2><p>Collect once, then reuse the saved evidence for every plotting goal.</p></div></div><div class="panel-body"><p>Follow your ${detail.seed_count ?? detail.seeds?.length ?? 0} selected starting outputs and save a new run. Continuing extends the latest run’s hop limit. Choose a named group in the collection form to count distance from that group. The collection hop ceiling, resource budgets and explicit tracing stops apply. Attribution CSV hop_limit values are ignored, including zero. Continue an older run to collect branches previously held by those limits; 0 additional hops fills eligible gaps within its existing ceiling.</p><p class="artifact-note">Collection does not generate plots or update Miro. A paused run can be continued here. Plots &amp; Miro uses saved transaction data and current investigation rules. Updating an existing board also reads its current arrangement.</p><p class="small muted">${esc(hopBasis(settings.hop_reference_name))}. ${esc(hopBasisExplanation(settings.hop_reference_name))}</p>${traceSummary(settings)}<div class="task-actions">${button(saved ? "Continue collecting data" : "Collect transaction data", "trace-dialog", "play", "primary", actionBusy("trace"))}</div><hr/><h3>Address activity</h3><p class="small muted">Missing transaction counts are fetched during collection. Retry any unresolved counts here.</p>${button("Fetch address transaction counts", "address-counts", "refresh", "small", !saved || actionBusy("address-counts"))}</div></section>`;
+  return `<section class="panel" id="collection-panel"><div class="panel-head"><div><h2>Collect transaction data</h2><p>Collect once, then reuse the saved evidence for every plotting goal.</p></div></div><div class="panel-body"><p>Follow your ${detail.seed_count ?? detail.seeds?.length ?? 0} selected starting outputs and save a new run. Continuing extends the latest run’s hop limit. Choose a named group in the collection form to count distance from that group. The collection hop ceiling, resource budgets and explicit tracing stops apply. Attribution CSV hop_limit values are ignored, including zero. Continue an older run to collect branches previously held by those limits; 0 additional hops fills eligible gaps within its existing ceiling.</p><p class="artifact-note">Collection does not generate plots or update Miro. A paused run can be continued here. Plots &amp; Miro uses saved transaction data and current investigation rules. Updating an existing board also reads its current arrangement.</p><p class="small muted">${esc(hopBasis(settings.hop_reference_name))}. ${esc(hopBasisExplanation(settings.hop_reference_name))}</p>${traceSummary(settings)}<div class="task-actions">${button(saved ? "Continue collecting data" : "Collect transaction data", "trace-dialog", "play", "primary", actionBusy("trace"))}</div><hr/><h3>Address activity</h3><p class="small muted">Missing transaction counts are fetched during collection. Retry any unresolved counts here.</p>${button("Fetch address transaction counts", "address-counts", "refresh", "small", !saved || actionBusy("address-counts"))}</div></section>${sharedCollectionPanel(detail)}`;
 }
 
 function plotLayoutsPanel(detail: Case, saved: boolean): string {
   const draft = currentWorkflow(detail);
+  const plotRun = currentPlotRun(detail);
+  saved = Boolean(plotRun);
   const unavailable = !saved || actionBusy("plot", workflowResourceBody(detail)) || draft.layoutMode === "update" && !updateLayoutBoards(detail, draft.goal).some(board => board.id === draft.layoutBoard);
   const pending = pendingFreshCreation(detail);
   const settings = {...defaults, ...detail.run_defaults, ...currentLayoutSettings(detail)};
-  return `<section class="panel" id="plot-layouts-panel"><div class="panel-head"><div><h2>Generate a Miro graph</h2><p>Choose the goal and destination, then generate and sync in one step.</p></div><span class="badge gray">Saved transactions</span></div><div class="panel-body"><div class="plot-goals" role="group" aria-label="Plotting goal">${plotGoals.map(goal => `<button class="plot-goal${draft.goal === goal.id ? " selected" : ""}" data-action="plot-goal" data-goal="${goal.id}" aria-pressed="${draft.goal === goal.id}"${disabled(draftBusy())}><strong>${goal.name}</strong><span>${goal.description}</span></button>`).join("")}</div>${draft.goal === "pegouts" ? `<div class="field-row"><label class="field"><span>Minimum hops</span><input id="workflow-min-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.minHops)}"${disabled(draftBusy())}/></label><label class="field"><span>Maximum hops</span><input id="workflow-max-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.maxHops)}"${disabled(draftBusy())}/></label></div>` : ""}<p class="artifact-note">${draft.goal === "connections" ? "Starter connections shows all verified saved paths between selected starting transactions. Attribution hop limits, stop-tracing rules, and plotting hop cutoffs are ignored; labels remain visible. No additional transactions are fetched." : "Plotting makes no blockchain requests. A hop filter cannot reveal data beyond your collection coverage."} If a path is missing, collect more data first and generate another plot.</p><p class="small muted">${esc(hopBasis(currentRun()?.hop_reference_name))}. ${esc(hopBasisExplanation(currentRun()?.hop_reference_name))} ${draft.goal === "connections" ? "The hop basis changes displayed distances only; it does not limit connections." : "Uses the selected collection run’s hop basis with current attribution rules."}</p>${draft.goal === "pegouts" ? '<p class="small muted">Only selected starting UTXOs are followed. A peg-out request does not confirm the separate Bitcoin payout.</p>' : ""}${plotEndpointFields(draft)}${plotDestinationFields(detail)}<form id="plot-layout-form" data-case-id="${esc(detail.id)}"><fieldset class="layout-fields"${disabled(draftBusy())}><legend>Layout settings</legend>${graphFields(settings, true, draft.goal)}</fieldset><p class="small muted">Each generation captures this selected run, investigation rules, and layout settings. Other jobs can continue independently. Use Save layout settings to set the defaults for future layouts.</p><div class="task-actions">${button(draft.layoutMode === "update" ? "Generate & update board" : "Generate & create board", "workflow-plot-sync", "graph", "primary", unavailable || actionBusy("plot-sync", workflowResourceBody(detail)) || draft.layoutMode === "fresh" && Boolean(pending))}${button("Save layout settings", "plot-settings-save", "check", "", isBusy())}</div>${draft.layoutMode === "fresh" && pending ? `<p class="artifact-note">The creation of ${esc(pending.name)} has an uncertain result. Check Miro and link the created board to its saved entry below before starting another new board.</p>` : ""}<p class="small muted">Miro credentials are retrieved through the launching terminal. The saved preview remains available after syncing.</p><details class="tool-details"><summary>Preview without syncing</summary><p class="small muted">Save a layout and SVG without publishing. A new-board preview works offline; an update preview reads Miro to preserve the current arrangement.</p>${button("Generate preview only", "workflow-plot", "graph", "", unavailable)}</details></form>${!saved ? '<p class="artifact-note">Collect transaction data before generating a plot.</p>' : ""}</div></section>`;
+  return `<section class="panel" id="plot-layouts-panel"><div class="panel-head"><div><h2>Generate a Miro graph</h2><p>Choose the goal and destination, then generate and sync in one step.</p></div><span class="badge gray">Saved transactions</span></div><div class="panel-body">${plotDataSourceFields(detail)}<div class="plot-goals" role="group" aria-label="Plotting goal">${plotGoals.map(goal => `<button class="plot-goal${draft.goal === goal.id ? " selected" : ""}" data-action="plot-goal" data-goal="${goal.id}" aria-pressed="${draft.goal === goal.id}"${disabled(draftBusy())}><strong>${goal.name}</strong><span>${goal.description}</span></button>`).join("")}</div>${draft.goal === "pegouts" ? `<div class="field-row"><label class="field"><span>Minimum hops</span><input id="workflow-min-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.minHops)}"${disabled(draftBusy())}/></label><label class="field"><span>Maximum hops</span><input id="workflow-max-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.maxHops)}"${disabled(draftBusy())}/></label></div>` : ""}<p class="artifact-note">${draft.goal === "connections" ? "Starter connections shows all verified saved paths between selected starting transactions. Attribution hop limits, stop-tracing rules, and plotting hop cutoffs are ignored; labels remain visible. No additional transactions are fetched." : "Plotting makes no blockchain requests. A hop filter cannot reveal data beyond your collection coverage."} If a path is missing, collect more data first and generate another plot.</p><p class="small muted">${esc(hopBasis(plotRun?.hop_reference_name))}. ${esc(hopBasisExplanation(plotRun?.hop_reference_name))} ${draft.goal === "connections" ? "The hop basis changes displayed distances only; it does not limit connections." : "Uses the selected collection run’s hop basis with current attribution rules."}</p>${draft.goal === "pegouts" ? '<p class="small muted">Only selected starting UTXOs are followed. A peg-out request does not confirm the separate Bitcoin payout.</p>' : ""}${plotEndpointFields(draft)}${plotDestinationFields(detail)}<form id="plot-layout-form" data-case-id="${esc(detail.id)}"><fieldset class="layout-fields"${disabled(draftBusy())}><legend>Layout settings</legend>${graphFields(settings, true, draft.goal)}</fieldset><p class="small muted">Each generation captures this selected run, investigation rules, and layout settings. Other jobs can continue independently. Use Save layout settings to set the defaults for future layouts.</p><div class="task-actions">${button(draft.layoutMode === "update" ? "Generate & update board" : "Generate & create board", "workflow-plot-sync", "graph", "primary", unavailable || actionBusy("plot-sync", workflowResourceBody(detail)) || draft.layoutMode === "fresh" && Boolean(pending))}${button("Save layout settings", "plot-settings-save", "check", "", isBusy())}</div>${draft.layoutMode === "fresh" && pending ? `<p class="artifact-note">The creation of ${esc(pending.name)} has an uncertain result. Check Miro and link the created board to its saved entry below before starting another new board.</p>` : ""}<p class="small muted">Miro credentials are retrieved through the launching terminal. The saved preview remains available after syncing.</p><details class="tool-details"><summary>Preview without syncing</summary><p class="small muted">Save a layout and SVG without publishing. A new-board preview works offline; an update preview reads Miro to preserve the current arrangement.</p>${button("Generate preview only", "workflow-plot", "graph", "", unavailable)}</details></form>${!saved ? '<p class="artifact-note">Collect transaction data before generating a plot.</p>' : ""}</div></section>`;
 }
 
 function savedPlotsPanel(detail: Case): string {
@@ -1604,7 +1657,7 @@ function boardCard(detail: Case, board: InvestigationBoard, saved: boolean, arti
   const legacy = Boolean(chosen && !chosen.layout_mode);
   const rejected = board.status === "creation_rejected";
   const creationPlot = detail.plots?.find(plot => plot.preview_id === board.creation_preview_id);
-  return `<article class="board-card${focused ? " is-target" : ""}" data-board-record="${esc(board.id)}" tabindex="-1"><header class="board-card-head"><div><h3>${esc(board.name || goalName(board.goal))}</h3><p>${esc(goalName(board.goal))} · ${esc(human(board.status))}${board.legacy_snapshot ? " · Archived snapshot" : ""}</p></div>${board.board_id ? `<a class="board-link" href="${esc(boardUrl(board.board_id))}" target="_blank" rel="noopener noreferrer">Open Miro board ${icon("external")}</a>` : ""}</header><div class="board-card-body">${board.notice ? `<p class="artifact-note">${esc(board.notice)}</p>` : ""}<p class="board-saved-layout"><strong>${savedLabel}:</strong> ${captured ? esc(plotChoiceLabel(captured)) : board.preview_id ? `Saved plot ${esc(short(board.preview_id, 12))} · unavailable` : board.run_id ? `Run ${esc(short(board.run_id, 8))}` : "Not synced yet"}</p>${!board.board_id && rejected ? `<p class="artifact-note">Miro rejected the board creation. Retry with the saved layout after resolving the error.</p>${button("Retry saved board creation", "workflow-board-retry-create", "refresh", "primary", actionBusy("board-create-sync", {preview_id: creationPlot?.preview_id}) || !creationPlot || !plotCanSync(creationPlot), attrs)}` : !board.board_id ? `<label class="field"><span>Created board URL or ID</span><input id="workflow-recovery-url-${esc(board.id)}" data-board-field="recoveryUrl" ${attrs} maxlength="512" value="${esc(draft.recoveryUrl)}"${disabled(boardBusy)}/><small>If creation was interrupted, locate the board in Miro and link it to this saved entry.</small></label>${button("Link created board to this entry", "workflow-board-recover", "board", "", isBusy(), attrs)}` : ""}${board.can_sync ? `<div class="task-actions">${button("Update this board", "workflow-board-prepare", "graph", "", !saved || actionBusy("plot-sync", {layout_mode: "update", board_record_id: board.id}) || !board.board_id || interruptedBoard(board), attrs)}</div><details class="tool-details"${interruptedBoard(board) || focused && chosen && (board.preview_id !== chosen.preview_id || board.status !== "synced") ? " open" : ""}><summary>${interruptedBoard(board) ? "Resume saved board operation" : "Saved layout sync and recovery"}</summary><label class="field"><span>Plot layout to sync · ${esc(goalName(board.goal))}</span><select id="workflow-board-plot-${esc(board.id)}" data-board-field="plot" ${attrs}${disabled(!plots.length || interruptedBoard(board) || draftBusy())}>${!chosen ? '<option value="" selected>Choose a saved plot layout for this board</option>' : ""}${plots.length ? plots.map(plot => `<option value="${esc(plot.preview_id)}"${plot.preview_id === chosen?.preview_id ? " selected" : ""}>${esc(plotChoiceLabel(plot))}</option>`).join("") : '<option value="">Choose Update this board to generate and sync its next layout.</option>'}</select></label>${plotEndpointSummary(chosen)}${plotBoardSummary(chosen)}${legacy ? '<details class="tool-details"><summary>Earlier layout sync controls</summary>' : ""}<div class="task-actions">${button(interruptedBoard(board) ? "Resume board sync" : legacy ? "Sync to Miro" : chosen?.layout_mode === "fresh" ? "Finish create & sync" : "Apply saved update", "workflow-board-sync", "refresh", "primary", locked, attrs)}${legacy ? button("Sync and reorganize", "workflow-board-organize", "graph", "", locked, attrs) : ""}</div>${legacy ? '<p class="small muted">These controls retain the behavior of earlier layouts. Sync keeps existing positions. Sync and reorganize applies the earlier full layout. Prepare a board update to use the current workflow.</p></details>' : chosen?.layout_mode === "fresh" ? '<p class="small muted">Finish publishing this saved layout to its previously created board. The existing board entry is reused.</p>' : '<p class="small muted">Update board applies the reviewed additions, removals and appearance changes. Existing objects retain their positions; new objects are arranged separately for you to merge.</p>'}${interruptedBoard(board) ? '<p class="artifact-note">This board has an interrupted operation. Its saved plot is locked until the operation is recovered or completed. Retry to resume; uncertain item creation may require recovery first.</p>' : ""}</details>` : board.board_id ? '<p class="artifact-note">This saved board is available to view. Create a managed board below to sync new plots.</p>' : ""}</div>${original ? `<details class="board-original-tools"><summary>Original full trace board tools</summary>${fullBoardMaintenance(detail, saved, artifacts, settings)}</details>` : ""}</article>`;
+  return `<article class="board-card${focused ? " is-target" : ""}" data-board-record="${esc(board.id)}" tabindex="-1"><header class="board-card-head"><div><h3>${esc(board.name || goalName(board.goal))}</h3><p>${esc(goalName(board.goal))} · ${esc(human(board.status))}${board.legacy_snapshot ? " · Archived snapshot" : ""}</p></div>${board.board_id ? `<a class="board-link" href="${esc(boardUrl(board.board_id))}" target="_blank" rel="noopener noreferrer">Open Miro board ${icon("external")}</a>` : ""}</header><div class="board-card-body">${board.notice ? `<p class="artifact-note">${esc(board.notice)}</p>` : ""}<p class="board-saved-layout"><strong>${savedLabel}:</strong> ${captured ? esc(plotChoiceLabel(captured)) : board.preview_id ? `Saved plot ${esc(short(board.preview_id, 12))} · unavailable` : board.run_id ? `Run ${esc(short(board.run_id, 8))}` : "Not synced yet"}</p>${!board.board_id && rejected ? `<p class="artifact-note">Miro rejected the board creation. Retry with the saved layout after resolving the error.</p>${button("Retry saved board creation", "workflow-board-retry-create", "refresh", "primary", actionBusy("board-create-sync", {preview_id: creationPlot?.preview_id}) || !creationPlot || !plotCanSync(creationPlot), attrs)}` : !board.board_id ? `<label class="field"><span>Created board URL or ID</span><input id="workflow-recovery-url-${esc(board.id)}" data-board-field="recoveryUrl" ${attrs} maxlength="512" value="${esc(draft.recoveryUrl)}"${disabled(boardBusy)}/><small>If creation was interrupted, locate the board in Miro and link it to this saved entry.</small></label>${button("Link created board to this entry", "workflow-board-recover", "board", "", isBusy(), attrs)}` : ""}${board.can_sync ? `<div class="task-actions">${button("Update this board", "workflow-board-prepare", "graph", "", !(saved || detail.shared_collection?.compatible && detail.shared_collection.latest_run) || actionBusy("plot-sync", {layout_mode: "update", board_record_id: board.id}) || !board.board_id || interruptedBoard(board), attrs)}</div><details class="tool-details"${interruptedBoard(board) || focused && chosen && (board.preview_id !== chosen.preview_id || board.status !== "synced") ? " open" : ""}><summary>${interruptedBoard(board) ? "Resume saved board operation" : "Saved layout sync and recovery"}</summary><label class="field"><span>Plot layout to sync · ${esc(goalName(board.goal))}</span><select id="workflow-board-plot-${esc(board.id)}" data-board-field="plot" ${attrs}${disabled(!plots.length || interruptedBoard(board) || draftBusy())}>${!chosen ? '<option value="" selected>Choose a saved plot layout for this board</option>' : ""}${plots.length ? plots.map(plot => `<option value="${esc(plot.preview_id)}"${plot.preview_id === chosen?.preview_id ? " selected" : ""}>${esc(plotChoiceLabel(plot))}</option>`).join("") : '<option value="">Choose Update this board to generate and sync its next layout.</option>'}</select></label>${plotEndpointSummary(chosen)}${plotBoardSummary(chosen)}${legacy ? '<details class="tool-details"><summary>Earlier layout sync controls</summary>' : ""}<div class="task-actions">${button(interruptedBoard(board) ? "Resume board sync" : legacy ? "Sync to Miro" : chosen?.layout_mode === "fresh" ? "Finish create & sync" : "Apply saved update", "workflow-board-sync", "refresh", "primary", locked, attrs)}${legacy ? button("Sync and reorganize", "workflow-board-organize", "graph", "", locked, attrs) : ""}</div>${legacy ? '<p class="small muted">These controls retain the behavior of earlier layouts. Sync keeps existing positions. Sync and reorganize applies the earlier full layout. Prepare a board update to use the current workflow.</p></details>' : chosen?.layout_mode === "fresh" ? '<p class="small muted">Finish publishing this saved layout to its previously created board. The existing board entry is reused.</p>' : '<p class="small muted">Update board applies the reviewed additions, removals and appearance changes. Existing objects retain their positions; new objects are arranged separately for you to merge.</p>'}${interruptedBoard(board) ? '<p class="artifact-note">This board has an interrupted operation. Its saved plot is locked until the operation is recovered or completed. Retry to resume; uncertain item creation may require recovery first.</p>' : ""}</details>` : board.board_id ? '<p class="artifact-note">This saved board is available to view. Create a managed board below to sync new plots.</p>' : ""}</div>${original ? `<details class="board-original-tools"><summary>Original full trace board tools</summary>${fullBoardMaintenance(detail, saved, artifacts, settings)}</details>` : ""}</article>`;
 }
 
 function pendingFreshCreation(detail: Case): InvestigationBoard | undefined {
@@ -1653,7 +1706,23 @@ function workflowInput(element: HTMLInputElement | HTMLSelectElement): boolean {
     return true;
   }
   const fields: Record<string, "minHops" | "maxHops" | "plot" | "boardName" | "savedBoardName" | "linkedBoardName" | "boardUrl"> = {"workflow-min-hops": "minHops", "workflow-max-hops": "maxHops", "workflow-plot-picker": "plot", "workflow-board-name": "boardName", "workflow-saved-board-name": "savedBoardName", "workflow-link-board-name": "linkedBoardName", "workflow-board-url": "boardUrl"};
-  if (element.id === "workflow-layout-mode" && ["fresh", "update"].includes(element.value)) {
+  if (element.id === "workflow-data-source" && ["investigation", "shared"].includes(element.value)) {
+    savePlotLayoutDraft();
+    draft.dataSource = element.value as "investigation" | "shared";
+    if (draft.dataSource === "shared" && detail.shared_collection?.compatible) {
+      const shared = detail.shared_collection;
+      if (draft.datasetId !== shared.dataset_id || !shared.runs.some(run => run.id === draft.sharedRun)) {
+        draft.datasetId = shared.dataset_id || ""; draft.sharedRun = shared.latest_run || "";
+      }
+    }
+    render();
+  } else if (element.id === "workflow-shared-run") {
+    const shared = detail.shared_collection;
+    if (shared?.compatible && shared.runs.some(run => run.id === element.value)) {
+      draft.sharedRun = element.value; draft.datasetId = shared.dataset_id || "";
+    }
+    render();
+  } else if (element.id === "workflow-layout-mode" && ["fresh", "update"].includes(element.value)) {
     selectLayoutDestination(detail, element.value as PlotLayoutMode, element.value === "update"
       ? updateLayoutBoards(detail, draft.goal).find(board => board.id === draft.layoutBoard) : undefined);
     render();
@@ -1713,11 +1782,13 @@ async function workflowAction(action: string, element?: HTMLElement): Promise<bo
   }
   let body: Record<string, unknown>;
   if (action === "workflow-plot" || action === "workflow-plot-sync") {
-    if (!currentRun()) throw new Error("Collect transaction data first, then select a saved run to plot.");
+    const sourceRun = currentPlotRun(detail);
+    if (!sourceRun) throw new Error("Collect transaction data first, then select an available saved snapshot for this data source.");
     const min = draft.goal === "pegouts" ? draft.minHops.trim() : "0", max = draft.goal === "pegouts" ? draft.maxHops.trim() : "0";
     if ([min, max].some(value => !/^\d+$/.test(value) || Number(value) > 2147483647) || Number(min) > Number(max)) throw new Error("Enter whole-number hop limits from 0 to 2147483647, with minimum no greater than maximum.");
     if (action === "workflow-plot-sync" && draft.layoutMode === "fresh" && pendingFreshCreation(detail)) throw new Error("Resolve the uncertain board creation below before creating another board.");
-    body = {action: action === "workflow-plot-sync" ? "plot-sync" : "plot", goal: draft.goal, run_id: currentRun()!.id, min_hops: Number(min), max_hops: Number(max), layout_mode: draft.layoutMode};
+    body = {action: action === "workflow-plot-sync" ? "plot-sync" : "plot", goal: draft.goal, run_id: sourceRun.id, min_hops: Number(min), max_hops: Number(max), layout_mode: draft.layoutMode};
+    if (draft.dataSource === "shared") {body.data_source = "shared"; body.dataset_id = draft.datasetId;}
     if (draft.layoutMode === "update") {
       const board = updateLayoutBoards(detail, draft.goal).find(item => item.id === draft.layoutBoard);
       if (!board) throw new Error("Select an available board for this plotting goal before generating an update.");
@@ -1789,8 +1860,11 @@ function seedTransactionsPanel(detail: Case, run?: Run): string {
 }
 
 function pegoutLbtcTotal(detail: Case, run?: Run): string {
-  if (!run) return "";
-  const plot = detail.plots?.filter(item => item.goal === "pegouts" && item.run_id === run.id)
+  const draft = currentWorkflow(detail), shared = draft.dataSource === "shared";
+  if (!shared && !run) return "";
+  const plot = detail.plots?.filter(item => item.goal === "pegouts" && (shared
+    ? item.collection_source?.kind === "shared" && item.collection_source.dataset_id === draft.datasetId && item.collection_source.run_id === draft.sharedRun
+    : !item.collection_source && item.run_id === run!.id))
     .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""))[0];
   if (!plot) return "";
   const summary = plot.pegout_lbtc_summary;
@@ -1804,7 +1878,7 @@ function pegoutLbtcTotal(detail: Case, run?: Run): string {
   if (summary.non_lbtc_count) notes.push(`${summary.non_lbtc_count} non-LBTC output${summary.non_lbtc_count === 1 ? "" : "s"} excluded`);
   const endpoints = plot.artifact?.downloads.find(item => item.name === "endpoints.csv")
     || plot.artifact?.downloads.find(item => item.name === "trace-endpoints.csv");
-  return `<div class="pegout-total" role="group" aria-label="Peg-out LBTC total"><div><span>Peg-out LBTC total</span><strong>${esc(amount)}</strong><p>${esc(notes.join(" · "))}.</p><p class="small muted">Latest peg-out trace for this snapshot${plot.max_hops != null ? ` · Hops ${esc(plot.min_hops)}–${esc(plot.max_hops)}` : ""}${plot.created_at ? ` · ${esc(formatDate(plot.created_at))}` : ""}. Sums full endpoint values in the saved trace.</p></div>${downloadLink(endpoints, "Endpoint CSV", "small")}</div>`;
+  return `<div class="pegout-total" role="group" aria-label="Peg-out LBTC total"><div><span>Peg-out LBTC total</span><strong>${esc(amount)}</strong><p>${esc(notes.join(" · "))}.</p><p class="small muted">${shared ? `Latest peg-out trace from shared snapshot ${esc(draft.sharedRun)}` : "Latest peg-out trace for this snapshot"}${plot.max_hops != null ? ` · Hops ${esc(plot.min_hops)}–${esc(plot.max_hops)}` : ""}${plot.created_at ? ` · ${esc(formatDate(plot.created_at))}` : ""}. Sums full endpoint values in the saved trace.</p></div>${downloadLink(endpoints, "Endpoint CSV", "small")}</div>`;
 }
 
 function workspace(): string {
@@ -1834,8 +1908,8 @@ function workspace(): string {
   return `<div class="page-heading case-heading"><div><div class="eyebrow">Investigation workspace</div><h1 id="page-title" tabindex="-1">${esc(detail.name)}</h1><div class="workspace-meta"><span class="badge ${detail.fixture ? "purple" : ""}">${detail.fixture ? "Synthetic data" : "Live Liquid"}</span><span class="badge gray">${(detail.runs || []).length} saved runs</span></div></div><div class="heading-actions">${button("Investigation settings", "case-settings", "settings", "", isBusy())}</div></div>
     <nav class="case-navigation" aria-label="Investigation tools">${views.map(([view, label]) => `<button type="button" class="case-nav${(state.caseView === view || view === "plots" && state.caseView === "boards") ? " active" : ""}" data-action="view-${view}"${state.caseView === view || view === "plots" && state.caseView === "boards" ? ' aria-current="page"' : ""}>${label}</button>`).join("")}</nav>
     ${last ? resultBanner(last.action, last.result) : ""}
-    <section class="panel"><div class="panel-head"><div><h2>${saved ? "Collected data" : "Ready to collect"}</h2><p>${saved ? "Choose the collected data used for plots and downloads." : "Your starting outputs and limits are saved."}</p></div>${saved ? `<label class="run-picker">Snapshot<select class="input" id="run-picker" aria-label="Saved run snapshot">${runOptions}</select></label>` : '<span class="badge gray">No runs yet</span>'}</div>${saved ? `<div class="run-summary"><div><span>Hops collected</span><strong${run?.collected_hops === undefined ? ' class="text-value"' : ""}>${esc(run?.collected_hops ?? "Not recorded")}</strong><span>${run?.hop_reference_name ? "Deepest collected group-relative hop" : "Deepest saved transaction hop"}</span></div><div><span>Tracked transactions</span><strong>${esc(run?.transaction_count ?? "—")}</strong></div><div><span>Unfinished branches</span><strong>${esc(run?.frontier_count ?? "—")}</strong></div><div><span>Run status</span><strong class="text-value">${esc(human(run?.status || "saved"))}</strong></div></div><div class="run-note">${icon("clock")}<span>${esc(formatDate(run?.created_at))}${run?.max_hops !== undefined ? ` · Collection hop limit: ${run.max_hops}` : ""}${run?.stop_reason ? ` · ${esc(human(run.stop_reason))}` : ""} · ${esc(hopBasis(run?.hop_reference_name))}.${run?.collected_hops !== undefined ? ` ${esc(hopBasisExplanation(run?.hop_reference_name))}` : ""}</span></div>${pegoutLbtcTotal(detail, run)}${collectionPerformancePanel(run?.performance)}` : `<div class="empty-state" style="padding:31px 24px"><div class="empty-icon">${icon("graph")}</div><h2>${detail.seed_count ?? detail.seeds?.length ?? "Your"} starting output${(detail.seed_count ?? detail.seeds?.length) === 1 ? "" : "s"} selected</h2><p>Collect data first, then choose a plotting goal and its Miro board.</p></div>`}</section>
-    ${seedTransactionsPanel(detail, run)}
+    <section class="panel"><div class="panel-head"><div><h2>${saved ? "Collected data" : "Ready to collect"}</h2><p>${saved ? "Choose the collected data used for plots and downloads." : "Your starting outputs and limits are saved."}</p></div>${saved ? `<label class="run-picker">Snapshot<select class="input" id="run-picker" aria-label="Saved run snapshot">${runOptions}</select></label>` : '<span class="badge gray">No runs yet</span>'}</div>${saved ? `<div class="run-summary"><div><span>Hops collected</span><strong${run?.collected_hops === undefined ? ' class="text-value"' : ""}>${esc(run?.collected_hops ?? "Not recorded")}</strong><span>${run?.hop_reference_name ? "Deepest collected group-relative hop" : "Deepest saved transaction hop"}</span></div><div><span>Tracked transactions</span><strong>${esc(run?.transaction_count ?? "—")}</strong></div><div><span>Unfinished branches</span><strong>${esc(run?.frontier_count ?? "—")}</strong></div><div><span>Run status</span><strong class="text-value">${esc(human(run?.status || "saved"))}</strong></div></div><div class="run-note">${icon("clock")}<span>${esc(formatDate(run?.created_at))}${run?.max_hops !== undefined ? ` · Collection hop limit: ${run.max_hops}` : ""}${run?.stop_reason ? ` · ${esc(human(run.stop_reason))}` : ""} · ${esc(hopBasis(run?.hop_reference_name))}.${run?.collected_hops !== undefined ? ` ${esc(hopBasisExplanation(run?.hop_reference_name))}` : ""}</span></div>${collectionPerformancePanel(run?.performance)}` : `<div class="empty-state" style="padding:31px 24px"><div class="empty-icon">${icon("graph")}</div><h2>${detail.seed_count ?? detail.seeds?.length ?? "Your"} starting output${(detail.seed_count ?? detail.seeds?.length) === 1 ? "" : "s"} selected</h2><p>Collect data first, or choose an available shared collection in Plots &amp; Miro.</p></div>`}${pegoutLbtcTotal(detail, run)}</section>
+    ${seedTransactionsPanel(detail, ["plots", "boards"].includes(state.caseView) && currentWorkflow(detail).dataSource === "shared" ? undefined : run)}
     <div class="workspace-content">${content}</div>`;
 }
 
@@ -2112,6 +2186,7 @@ async function refreshSession(): Promise<void> {
 
 async function refreshCaseDetail(caseId: string, followLatest: () => boolean = () => false): Promise<{detail: Case; applied: boolean}> {
   const sequence = (caseRefreshSequence.get(caseId) || 0) + 1;
+  const sharedSequence = sharedRefreshSequence.get(caseId) || 0;
   caseRefreshSequence.set(caseId, sequence);
   const generation = pageGeneration;
   const detail = await api<Case>(`/api/cases/${encodeURIComponent(caseId)}`);
@@ -2121,6 +2196,9 @@ async function refreshCaseDetail(caseId: string, followLatest: () => boolean = (
     if (followLatest()) state.selectedRun = "latest";
     else if (state.selectedRun === "latest" && priorRun && detail.latest_run !== state.activeCase?.latest_run)
       state.selectedRun = priorRun;
+    // A newer shared-only request owns this field even while other case data refreshes.
+    if ((sharedRefreshSequence.get(caseId) || 0) !== sharedSequence)
+      detail.shared_collection = state.activeCase?.shared_collection;
     state.activeCase = detail;
   }
   return {detail: !applied && state.activeCase?.id === caseId ? state.activeCase : detail, applied};
@@ -2134,6 +2212,8 @@ async function discoverJobs(): Promise<void> {
     const response = await api<{jobs: Job[]}>("/api/jobs");
     const discovered = response.jobs.filter(job => !dismissedJobs.has(job.id) && !state.jobs.has(job.id));
     for (const job of discovered) rememberJob(job);
+    if (state.activeCase?.id && discovered.some(job => job.action === "shared-trace" && !["running", "cancelling"].includes(job.status)))
+      await refreshSharedCollection(state.activeCase.id);
     if (discovered.length) await refreshSession();
     const currentId = state.activeCase?.id;
     if (currentId && discovered.some(job => job.case_id === currentId && !["running", "cancelling"].includes(job.status)))
@@ -2220,7 +2300,7 @@ async function startJob(
   const request = typeof body === "object" && body !== null ? {...body} as Record<string, unknown> : {};
   // An unscoped seed lookup must not inherit the previously viewed case.
   if (actionBusy(action, request, caseId ?? null)) return null;
-  if (request.run_id === "latest" && action !== "trace" && caseId === state.activeCase?.id)
+  if (request.run_id === "latest" && !["trace", "shared-trace"].includes(action) && caseId === state.activeCase?.id)
     request.run_id = currentRun()?.id || state.activeCase?.latest_run || "latest";
   const resource = requestedResource(action, request, caseId ?? null);
   if (action !== "miro-frame-review") resetFrameRecovery();
@@ -2318,7 +2398,7 @@ async function pollJob(identity: string): Promise<void> {
       if (active.action === "change-output-lookup" && active.caseId) changeOutputsLookupComplete(active.caseId, active.id, undefined, job.message || "Transaction lookup canceled.");
       if (canApplyJobView(active)) state.error = "";
       toast(`${taskName(active)}: ${job.message || "Calculation canceled. Saved investigation runs are unchanged."}`);
-      if ((active.action.startsWith("board-") || ["plot-sync", "pegouts", "pegouts-preview"].includes(active.action)) && active.caseId && state.activeCase?.id === active.caseId) {
+      if ((active.action.startsWith("board-") || ["plot-sync", "pegouts", "pegouts-preview", "shared-trace"].includes(active.action)) && active.caseId && state.activeCase?.id === active.caseId) {
         try {
           await refreshCaseDetail(active.caseId);
         } catch { /* Preserve the cancellation message if refresh is unavailable. */ }
@@ -2340,7 +2420,7 @@ async function pollJob(identity: string): Promise<void> {
       if (viewingCase(active.caseId)) state.error = active.outcomeError;
       toast(`${taskName(active)}: ${active.outcomeError}`, true);
       if (active.action === "change-output-lookup" && active.caseId) changeOutputsLookupComplete(active.caseId, active.id, undefined, active.outcomeError);
-      if ((active.action.startsWith("miro-") || active.action.startsWith("board-") || ["plot-sync", "pegouts", "pegouts-preview"].includes(active.action)) && active.caseId && state.activeCase?.id === active.caseId) {
+      if ((active.action.startsWith("miro-") || active.action.startsWith("board-") || ["plot-sync", "pegouts", "pegouts-preview", "shared-trace"].includes(active.action)) && active.caseId && state.activeCase?.id === active.caseId) {
         try {
           const previousBoards = new Set((state.activeCase?.boards || []).map(board => board.id));
           const {detail, applied} = await refreshCaseDetail(active.caseId);
@@ -2464,6 +2544,7 @@ async function pollJob(identity: string): Promise<void> {
           (
             {
               trace: "Collected data saved. Choose Plots & Miro to generate a chart.",
+              "shared-trace": "Shared collection saved. Choose Shared collection as the data source in Plots & Miro.",
               plot: "Plot generated from saved collection data.",
               "plot-sync": result.published === false ? "No matching paths. The empty preview was saved; no Miro board was created." : result.layout_mode === "update" ? "Layout generated and the selected Miro board updated." : "Layout generated and synced to the new Miro board.",
               "board-create": "Miro board created. Prepare a board update to add its graph.",
@@ -2499,6 +2580,8 @@ async function pollJob(identity: string): Promise<void> {
           "Local action completed. Refresh the investigation to review its results.",
         );
     }
+    if (active.action === "shared-trace" && state.activeCase?.id && state.activeCase.id !== active.caseId)
+      await refreshSharedCollection(state.activeCase.id);
     await refreshSession();
     refreshJobView();
   } catch (error) {
@@ -2559,6 +2642,22 @@ async function openAddressMergeDialog(): Promise<void> {
   dialog.innerHTML = `<form id="action-form"><header class="dialog-head"><div><h2 id="dialog-title">${reviewed.resume ? "Resume" : "Review"} address conversion</h2><p>This preview is local. Applying changes the linked Miro graph.</p></div></header><div class="dialog-body"><div class="dialog-board"><span>Board</span><strong>${esc(reviewed.board_id)}</strong><span>Last synced run</span><strong>${esc(reviewed.run_id)}</strong><span>Address circles</span><strong>${reviewed.address_objects_before} → ${reviewed.address_objects_after}</strong><span>${reviewed.connectors_to_redirect} connectors redirected; ${reviewed.duplicates_to_remove} redundant circles removed</span></div><p>${esc(reviewed.notice)}</p><label class="check-line"><input type="checkbox" name="confirm_merge" required/><span>I reviewed this conversion and preserved any comments on redundant circles.</span></label><p>Manual edits to redundant circles or unmanaged connectors block conversion. SecretSpec and Proton Pass prompts appear in the launching terminal.</p></div><footer class="dialog-footer"><button type="button" class="btn" data-action="close-dialog">Cancel</button><button type="submit" class="btn primary">${reviewed.resume ? "Resume" : "Apply"} address conversion</button></footer></form>`;
   dialog.showModal();
   dialog.querySelector<HTMLButtonElement>('[data-action="close-dialog"]')?.focus();
+}
+
+function openSharedCollectionDialog(mode: "collect" | "continue"): void {
+  const detail = state.activeCase;
+  if (!detail || actionBusy("shared-trace")) return;
+  const shared = detail.shared_collection;
+  if (shared?.compatible === false || mode === "continue" && (!shared?.compatible || !shared.dataset_id || !shared.latest_run)) return;
+  resetFrameRecovery();
+  sharedDialog = {caseId: detail.id, mode, runId: mode === "continue" ? shared!.latest_run : undefined};
+  dialogAction = "shared-trace";
+  const settings = {...defaults, ...detail.run_defaults};
+  const ids = [...new Set([...state.openCases, detail.id])];
+  const names = ids.map(id => state.cases.find(item => item.id === id)?.name || (id === detail.id ? detail.name : id));
+  dialog.innerHTML = `<form id="action-form"><header class="dialog-head"><div><h2>${mode === "collect" ? "Collect from open investigations" : "Continue shared data"}</h2><p>${mode === "collect" ? "Start a shared collection using the selected seed outputs of the open investigations." : "Continue the saved shared seed set and frontier. Open tabs do not change its membership."}</p></div><button type="button" class="dialog-close" data-action="close-dialog" aria-label="Close dialog">${icon("close")}</button></header><div class="dialog-body"><p>${esc(mode === "collect" ? names.join(", ") : (shared?.members || []).map(member => member.name).join(", "))}</p>${sharedDialog.runId ? `<p>Continue snapshot: <span class="mono">${esc(sharedDialog.runId)}</span></p>` : ""}<p class="artifact-note">Uses ${esc(detail.name)}’s collection limits and explicit stop-tracing rules. Attribution CSV hop limits are ignored. Each investigation later plots with its own seeds and rules.</p>${numericField(settings, "hops", mode === "collect" ? "Maximum hops" : "Additional hops", mode === "collect" ? "Maximum hop depth for this new shared collection." : "Adds to this shared snapshot’s ceiling; 0 retries eligible paths. Changing the named group sets a new maximum instead.")}${hopReferenceFields(settings, true)}${traceSummary(settings)}<p class="small muted">${detail.fixture ? "Uses the investigation’s saved synthetic source." : "Uses Blockstream API credits. Complete any credential prompt in the launching terminal."}</p></div><footer class="dialog-footer"><button type="button" class="btn" data-action="close-dialog">Cancel</button><button type="submit" class="btn primary">${mode === "collect" ? "Collect shared data" : "Continue shared data"}</button></footer></form>`;
+  dialog.showModal();
+  void suggestHopReferenceNames().catch(() => {});
 }
 
 function openActionDialog(action: string): void {
@@ -2622,6 +2721,9 @@ async function caseAction(action: string): Promise<void> {
 }
 
 async function dispatch(action: string, element?: HTMLElement): Promise<void> {
+  if (["shared-collect-dialog", "shared-continue-dialog"].includes(action)) {
+    openSharedCollectionDialog(action === "shared-collect-dialog" ? "collect" : "continue"); return;
+  }
   if (action === "toggle-system-notifications") {
     const result = taskNotifications.toggle();
     render();
@@ -2664,6 +2766,8 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
       pageGeneration++;
       state.caseView = view === "boards" ? "plots" : view as CaseView; state.page = "case"; render();
       if (view === "plots" || view === "boards") void suggestCenterNames().catch(() => {});
+      if (["collect", "plots", "boards"].includes(view) && state.activeCase.shared_collection !== undefined)
+        await refreshSharedCollection(state.activeCase.id);
     }
     return;
   }
@@ -3074,6 +3178,16 @@ dialog.addEventListener("submit", (event) => {
   const detail = state.activeCase;
   if (!detail || actionBusy(dialogAction) || !form.reportValidity()) return;
   const action = dialogAction;
+  if (action === "shared-trace") {
+    if (!sharedDialog || sharedDialog.caseId !== detail.id) return;
+    const data = new FormData(form), captured = {...sharedDialog};
+    const body: Record<string, unknown> = {action, mode: captured.mode, hops: Number(data.get("hops")),
+      hop_reference_name: String(data.get("hop_reference_name") || "").trim()};
+    if (captured.mode === "collect") body.case_ids = [...new Set([...state.openCases, detail.id])];
+    else body.run_id = captured.runId;
+    void startJob(`/api/cases/${encodeURIComponent(detail.id)}/actions`, body, action, !detail.fixture, detail.id).catch(handleError);
+    return;
+  }
   if (action === "miro-frames" && (!currentRun() || !detail.miro_board || detail.miro_recovery?.pending_count)) return;
   if (action === "miro-frame-recover") {
     try {

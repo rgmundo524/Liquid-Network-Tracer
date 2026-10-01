@@ -191,6 +191,13 @@ def parser():
     run.add_argument("--offline-preview", action="store_true", help="Also save optional HTML/SVG inspection files")
     run.add_argument("--miro-board", help="Sync the saved run to this Miro board URL or ID")
     run.add_argument("--max-new-items", type=int, default=750, help="Maximum new Miro shapes plus connectors")
+    shared = commands.add_parser("shared-collect", help="Collect shared workspace evidence using one investigation's policy")
+    shared.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    shared.add_argument("--request", help="Prepared immutable collection request ID")
+    shared.add_argument("--members-json", help="JSON array of open investigation IDs for a fresh collection")
+    shared.add_argument("--resume", help="Pinned shared run ID; retains its saved seeds and members")
+    shared.add_argument("--hops", type=int, help="Fresh hop ceiling or additional hops for continuation")
+    shared.add_argument("--hop-reference-name", default=None)
     export = commands.add_parser("export", help="Regenerate a run export, fetching missing address transaction counts")
     export.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                         help="Case directory (default: LIQUID_CASE_DIR)")
@@ -223,6 +230,9 @@ def parser():
         plot.add_argument("--case", type=Path, default=case_default, required=case_default is None)
         plot.add_argument("--goal", choices=("full", "connections", "pegouts"), required=True)
         plot.add_argument("--run", default="latest")
+        plot.add_argument("--data-source", choices=("investigation", "shared"), default="investigation",
+                          help="Plot this investigation's collection or a saved shared collection using this investigation's seeds")
+        plot.add_argument("--dataset-id", help="Pinned shared collection identity")
         plot.add_argument("--layout-mode", choices=("fresh", "update"), default="fresh",
                           help="Create a fresh layout, or preserve a selected Miro board and arrange additions separately")
         plot.add_argument("--board-record-id", help="Investigation board record to read for an update layout")
@@ -896,6 +906,7 @@ def frame_run(case, run_id="latest", board=None, max_new_items=750, dry_run=Fals
 
 
 def run_trace(args, progress=None):
+    shared_request = getattr(args, "_shared_request", None)
     if args.miro_board:
         args.miro_board = board_id(args.miro_board)
         if args.max_new_items < 0:
@@ -922,6 +933,8 @@ def run_trace(args, progress=None):
             args.resume = resolve_latest(args.case, args.resume)
             verify_export(run_path(args.case, args.resume))
         parent = read_json(run_path(args.case, args.resume) / "trace.json") if args.resume else None
+        if parent and parent.get("collection_source", {}).get("kind") == "shared":
+            raise TraceError("This run is a shared evidence view; continue the shared collection instead of a private trace")
         identity = case_identity(args.case)
         if parent and parent.get("case_id", identity) != identity:
             raise TraceError("The resumed run belongs to a different case")
@@ -929,6 +942,15 @@ def run_trace(args, progress=None):
             raise TraceError("Saved trace does not match the selected run")
         from .group_hops import normalize_reference_name, reference_addresses, reference_name
         metadata = read_case(args.case)
+        if metadata.get("shared_dataset") is True and shared_request is None:
+            raise TraceError("Use shared-collect with an explicit investigation policy for this dataset")
+        if shared_request is not None:
+            if (metadata.get("shared_dataset") is not True or shared_request["dataset_id"] != identity
+                    or shared_request["resume"] != args.resume):
+                raise TraceError("Prepared collection does not match this shared dataset and parent")
+            if args.resume and metadata.get("latest_run") != args.resume:
+                raise TraceError("Shared collection advanced; continue from its latest saved run")
+            metadata = {**metadata, "run_defaults": shared_request["settings"]}
         reference = normalize_reference_name(args.hop_reference_name if args.hop_reference_name is not None
             else reference_name(parent) if parent else metadata.get("run_defaults", {}).get("hop_reference_name", ""))
         changed_reference = bool(parent and reference.casefold() != reference_name(parent).casefold())
@@ -941,8 +963,9 @@ def run_trace(args, progress=None):
             raise TraceError("Continuation cannot lower its parent's hop ceiling; start a fresh run to narrow scope")
         limits = Limits(hops, args.max_transactions, args.max_outpoints, args.max_requests, args.max_seconds)
         limits.validate()
-        labels = load_labels(args.labels) if args.labels else (parent["labels"] if parent else [])
-        service_settings = load_services(args.case)
+        labels = (shared_request["labels"] if shared_request is not None else
+                  load_labels(args.labels) if args.labels else (parent["labels"] if parent else []))
+        service_settings = (shared_request["service_controls"] if shared_request is not None else load_services(args.case))
         labels = apply_service_labels(labels, service_settings)
         if reference and not reference_addresses({"labels": labels, "hop_reference_name": reference}):
             raise TraceError("The hop reference name has no enabled address attributions; choose an existing named group")
@@ -966,6 +989,11 @@ def run_trace(args, progress=None):
                                       "min_interval": api.min_interval,
                                       "fixture": api.fixture is not None}
             metadata = read_case(args.case)
+            if shared_request is not None:
+                metadata = {**metadata, "run_defaults": shared_request["settings"]}
+                state["shared_collection"] = {key: shared_request[key] for key in (
+                    "schema_version", "dataset_id", "request_id", "captured_at", "policy_case_id", "policy_case_name",
+                    "members", "settings", "service_controls")}
             state["investigation"] = {"case_id": identity, "name": metadata.get("name"),
                                       "miro_board": args.miro_board or metadata.get("miro_board") or None}
             state["address_mode"] = "merged" if merge_addresses else "outpoint_occurrences"
@@ -997,6 +1025,10 @@ def run_trace(args, progress=None):
                 "stop_reason": state.get("stop_reason"), "stats": state["stats"], "errors": state["errors"],
                 "directory": str(destination.resolve()), "address_counts": count_report,
                 "performance": public_performance(state.get("performance"))}
+            if shared_request is not None:
+                summary.update(dataset_id=identity, shared_collection=True,
+                               policy_case_name=shared_request["policy_case_name"],
+                               seed_count=len(state["seeds"]))
             failed = state["status"] == "error"
             if args.miro_board:
                 try:
@@ -1282,6 +1314,20 @@ def main(argv=None, *, progress=None, diagnostics=None):
             return run_menu(args.investigations_dir)
         if args.command == "trace":
             return run_trace(args, progress=progress)
+        if args.command == "shared-collect":
+            from .shared_collection import collect_prepared, prepare_collection
+            if args.request:
+                if any(value is not None for value in (args.members_json, args.resume, args.hops, args.hop_reference_name)):
+                    raise TraceError("A prepared shared collection request cannot be combined with new controls")
+                request_id = args.request
+            else:
+                if args.hops is None:
+                    raise TraceError("Choose a hop allowance for the shared collection")
+                members = json.loads(args.members_json) if args.members_json is not None else None
+                prepared = prepare_collection(args.case, members, hops=args.hops, resume=args.resume,
+                                              hop_reference_name=args.hop_reference_name)
+                request_id = prepared["request_id"]
+            return collect_prepared(args.case, request_id, progress=progress)
         if args.command == "export":
             if args.out.exists():
                 raise TraceError("Choose a new export directory to preserve earlier evidence")
@@ -1324,6 +1370,7 @@ def main(argv=None, *, progress=None, diagnostics=None):
                 include_context=args.include_context,
                 layout_mode=args.layout_mode, board_record_id=args.board_record_id,
                 layout_settings=args.layout_settings_json,
+                data_source=args.data_source, dataset_id=args.dataset_id,
                 open_browser=args.open_browser, progress=progress), indent=2))
         elif args.command == "plot-sync":
             from .investigation_boards import generate_and_sync
@@ -1333,6 +1380,7 @@ def main(argv=None, *, progress=None, diagnostics=None):
                 include_context=args.include_context,
                 layout_mode=args.layout_mode, board_record_id=args.board_record_id,
                 layout_settings=args.layout_settings_json,
+                data_source=args.data_source, dataset_id=args.dataset_id,
                 name=args.name, max_items=args.max_items, progress=progress), indent=2))
         elif args.command == "investigation-boards":
             from .investigation_boards import list_boards
