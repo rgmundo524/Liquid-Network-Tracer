@@ -264,6 +264,11 @@ class Esplora:
         with self._results_lock:
             self.used.add(oid)
 
+    def used_observations(self):
+        """Copy evidence IDs while response workers may still be archiving."""
+        with self._results_lock:
+            return set(self.used)
+
     def request_metrics(self):
         """Snapshot transport feedback and current shared admission status.
 

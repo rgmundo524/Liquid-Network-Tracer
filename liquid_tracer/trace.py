@@ -13,7 +13,7 @@ from .common import (HEX64, StopRun, TraceError, digest, match_labels, now,
 from .services import ServiceScope, is_service_stop
 from .progress import report_progress
 from .trace_checkpoint import TraceCheckpoint
-from .trace_fetch import FrontierFetcher, TraceConcurrency
+from .trace_fetch import FrontierFetcher, TraceConcurrency, heap_prefix
 
 TERMINAL = {"spent", "fee", "pegout", "provably_unspendable"}
 COLLECTION_POLICY = {"schema_version": 1, "attribution_hop_limits": "ignore", "stop_tracing": "respect"}
@@ -80,6 +80,11 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
               if adaptive else None)
     target_workers = policy.target({}) if policy is not None else workers
     last_progress_at = started
+    # Optional finite work budgets retain their conservative cohort reservation
+    # and serial fallback. The default hop-only run can replenish continuously.
+    rolling = (worker_ceiling > 1 and callable(getattr(api, "submit", None))
+               and not any((limits.max_transactions, limits.max_outpoints, limits.max_requests)))
+    fetching = None
 
     def metrics():
         callback = getattr(api, "request_metrics", None)
@@ -109,7 +114,8 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
         nonlocal fetch_wait_seconds
         waiting = time.monotonic()
         try:
-            return api.get(endpoint)
+            api.budget.check()
+            return fetching.get(endpoint) if rolling else api.get(endpoint)
         finally:
             fetch_wait_seconds += max(0., time.monotonic() - waiting)
 
@@ -175,7 +181,9 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
 
     def write_state():
         refresh_reference_hops(state, scope)
-        state["observations"] = sorted(set(state["observations"]) | api.used)
+        snapshot = getattr(api, "used_observations", None)
+        observations = snapshot() if callable(snapshot) else set(api.used)
+        state["observations"] = sorted(set(state["observations"]) | observations)
         state["stats"] = {"requests_this_run": api.budget.requests,
             "outpoints_examined_this_run": count, "new_transactions_this_run": new_transactions,
             "transactions_cumulative": len(state["transactions"]),
@@ -219,15 +227,19 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
     prepared = set()
 
     def prepare_frontier():
-        """Prefetch a bounded same-hop window, advancing each ready dependency.
+        """Replenish bounded lookahead without waiting for the previous tail.
 
         Only selected eligible outputs supply child endpoints. Near a budget
         boundary the ordinary serial path retains the next output's slots.
-        Traversal remains ordered and starts only after this window drains.
+        Finite work budgets retain the existing fully reserved cohort path.
+        Rolling traversal pumps dependencies while waiting for its next result.
         """
         nonlocal fetch_wait_seconds
-        if (worker_ceiling <= 1 or not callable(getattr(api, "submit", None)) or not queue
-                or queue[0][1] in prepared):
+        if rolling:
+            fetching.pump()
+        if (worker_ceiling <= 1 or not callable(getattr(api, "submit", None)) or not queue):
+            return
+        if queue[0][1] in prepared and (not rolling or len(prepared) >= 256):
             return
         target = concurrency()
         if target <= 1:
@@ -236,9 +248,13 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
         window, seen, funding_seen = [], set(), set()
         # Count distinct funding endpoints, not merely eight adjacent outputs
         # from one large transaction. The output cap bounds speculative scope.
-        unique_limit = min(worker_ceiling, max(workers, target * 2))
+        # Keep a second set of eligible funding work ready when slow responses
+        # occupy part of the worker pool. This reserves no extra API capacity.
+        unique_limit = (min(128, max(workers, target * 2)) if rolling else
+                        min(worker_ceiling, max(workers, target * 2)))
         scan_limit = min(256, limits.max_outpoints - count) if limits.max_outpoints else 256
-        for candidate_depth, key in heapq.nsmallest(scan_limit, queue):
+        available = max(0, 256 - len(prepared)) if rolling else scan_limit
+        for candidate_depth, key in heap_prefix(queue, scan_limit):
             item = state["outputs"][key]
             if (candidate_depth != depth or candidate_depth != scope.depth(item)
                     or item["status"] != "pending" or key in seen or scope.blocked(key)):
@@ -247,7 +263,14 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
                 break
             seen.add(key)
             funding_seen.add(item["txid"])
-            window.append(item)
+            if key not in prepared:
+                # Named-group resets can put new low-hop work ahead of older
+                # lookahead. Keep the total reservation bounded across hops;
+                # demanded endpoints still run when no speculative slot fits.
+                if len(window) >= available:
+                    seen.remove(key)
+                    break
+                window.append(item)
         if not window:
             return
         funding_ids = list(dict.fromkeys(item["txid"] for item in window))
@@ -263,7 +286,19 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
         if limits.max_requests and nominal_requests > limits.max_requests - api.budget.requests:
             return
         prepared.update(seen)
-        fetching = FrontierFetcher(api, concurrency, report_activity)
+        scheduler = fetching if rolling else FrontierFetcher(api, concurrency, report_activity)
+        schedule_window(window, scheduler)
+        if rolling:
+            scheduler.pump()
+            return
+        waiting = time.monotonic()
+        try:
+            scheduler.run()
+        finally:
+            fetch_wait_seconds += max(0., time.monotonic() - waiting)
+
+    def schedule_window(window, scheduler):
+        """Validate ready dependencies on the traversal thread, never workers."""
         by_funding = {}
         for item in window:
             by_funding.setdefault(item["txid"], []).append(item)
@@ -296,7 +331,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
                         or type(vin) is not int or vin < 0 or child_id == txid):
                     continue
                 if not state["transactions"].get(child_id, {}).get("data", {}).get("status", {}).get("confirmed"):
-                    fetching.add("/tx/" + child_id)
+                    scheduler.add("/tx/" + child_id)
 
         def funding_ready(txid, result):
             if isinstance(result, Exception):
@@ -307,19 +342,14 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
             except TraceError:
                 return  # Ordered get_tx() surfaces the saved failure later.
             if any(eligible(item, transaction) for item in by_funding[txid]):
-                fetching.add("/tx/" + txid + "/outspends",
+                scheduler.add("/tx/" + txid + "/outspends",
                              lambda rows: spending_ready(txid, transaction, rows))
 
-        for txid in funding_ids:
-            if txid in fetch_ids:
-                fetching.add("/tx/" + txid, lambda result, txid=txid: funding_ready(txid, result))
+        for txid in by_funding:
+            if not state["transactions"].get(txid, {}).get("data", {}).get("status", {}).get("confirmed"):
+                scheduler.add("/tx/" + txid, lambda result, txid=txid: funding_ready(txid, result))
             else:
                 funding_ready(txid, (state["transactions"][txid]["data"], None))
-        waiting = time.monotonic()
-        try:
-            fetching.run()
-        finally:
-            fetch_wait_seconds += max(0., time.monotonic() - waiting)
 
     current = None
     stop_reason = None
@@ -353,6 +383,8 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
             current_hop = depth
             report_progress(progress, "collecting", current_hop, limits.max_hops, **hop_progress, **telemetry())
 
+    if rolling:
+        fetching = FrontierFetcher(api, concurrency, report_activity)
     if had_frontier:
         report_progress(progress, "collecting", current_hop, limits.max_hops, **hop_progress, **telemetry())
     try:
@@ -368,6 +400,8 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
                 report_hop(pending_depth)
             prepare_frontier()
             depth, key = heapq.heappop(queue)
+            if rolling:
+                prepared.discard(key)
             current = state["outputs"][key]
             if depth != scope.depth(current) or current["status"] != "pending" or scope.blocked(key):
                 continue
@@ -454,6 +488,13 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
         state["status"] = "paused"
     finally:
         # No response may update the evidence store after the final snapshot.
+        # Wake active admission waits too. Canceling queued Futures alone cannot
+        # end workers waiting behind an unlimited shared-provider cooldown.
+        if rolling and (stop_reason or state["status"] == "running"):
+            try:
+                api.close()
+            except KeyboardInterrupt:
+                pass  # Preserve the original recoverable stop reason.
         drain = getattr(api, "drain_pending", None)
         if callable(drain):
             try:
