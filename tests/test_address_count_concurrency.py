@@ -10,7 +10,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from liquid_tracer.address_counts import (_collect_counts, _failure_reason, addresses,
-                                           apply_saved_counts, fetch_counts)
+                                           apply_saved_counts, fetch_counts, _saved_min_interval,
+                                           public_count_report)
 from liquid_tracer.address_count_cache import CountCacheJournal
 from liquid_tracer.common import TraceError, canonical, read_json, save_json
 from liquid_tracer.investigations import create_investigation, read_case
@@ -117,6 +118,9 @@ class AddressCountConcurrencyTests(unittest.TestCase):
                             for event in events))
         self.assertEqual(set(apply_saved_counts(self.case, self.state)), set(wanted))
         self.assertEqual(len({record["observation_ids"][0] for record in self.cached().values()}), 6)
+        self.assertEqual(events[-1]["fetched"], 6)
+        self.assertEqual(report["rate_limit_responses"], 0)
+        self.assertEqual(report["retry_responses"], 0)
 
     def test_explicit_single_worker_remains_serial(self):
         self.state["fetch_options"]["workers"] = 1
@@ -350,6 +354,32 @@ class AddressCountConcurrencyTests(unittest.TestCase):
         self.assertEqual(report["concurrency_mode"], "fixed")
         self.assertEqual(report["worker_limit"], 12)
         self.assertEqual((report["fetched"], report["remaining"]), (12, 0))
+
+    def test_saved_implicit_rate_does_not_freeze_adaptive_count_client(self):
+        legacy = {"rate_limit_source": "enterprise_target", "advertised_rps": None,
+                  "min_interval": 1 / 49, "effective_rps": 49}
+        self.assertIsNone(_saved_min_interval(legacy))
+        self.assertEqual(_saved_min_interval({**legacy, "min_interval": .5}), .5)
+        self.assertEqual(_saved_min_interval({**legacy, "advertised_rps": 50}), 1 / 49)
+        self.assertEqual(_saved_min_interval({**legacy, "rate_limit_source": "conservative_default"}), 1 / 49)
+        self.assertEqual(_saved_min_interval({**legacy, "min_interval_explicit": True}), 1 / 49)
+        self.assertEqual(_saved_min_interval({**legacy, "min_interval_explicit": False}), 1 / 49)
+        self.assertIsNone(_saved_min_interval({"rate_limit_source": "enterprise_adaptive",
+            "min_interval": 1 / 128, "min_interval_explicit": False}))
+
+    def test_public_count_report_keeps_pacing_and_retry_counters_but_not_arbitrary_text(self):
+        base = {"fetched": 3, "known": 5, "total": 8, "remaining": 3, "failed": 0,
+                "requests_this_lookup": 4, "stop_reason": None}
+        report = {**base, "api_rate_mode": "adaptive", "api_target_rps": 256,
+                  "shared_api_effective_rps": 128, "rate_limit_responses": 1,
+                  "retry_responses": 2, "observed_rps": 110}
+        self.assertEqual(public_count_report({**report, "message": "PRIVATE"}), report)
+        for invalid in (True, -1, "PRIVATE", [], {}, float("nan"), 10 ** 400):
+            with self.subTest(invalid=invalid):
+                result = public_count_report({**base, "api_rate_mode": invalid,
+                    "api_target_rps": invalid, "rate_limit_responses": invalid,
+                    "retry_responses": invalid})
+                self.assertEqual(result, base)
 
 
 if __name__ == "__main__":

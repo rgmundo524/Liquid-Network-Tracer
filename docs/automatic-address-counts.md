@@ -38,7 +38,7 @@ never go into browser responses or the ELK/Mermaid renderer environment.
 address-review observations are reused. Lookups
 are deduplicated by full address. Count requests now scale automatically. A run
 using the usual eight API workers starts with up to eight and can grow to 64
-when response latency and the configured request rate justify more overlap.
+when endpoint service time and the current request target justify more overlap.
 Saved worker settings below eight remain explicit ceilings, including serial
 operation at one. Older runs without a worker setting start with eight.
 
@@ -48,10 +48,27 @@ authentication, and retry waits so waiting for a shared quota does not inflate
 the worker target. Fast early responses retain the initial eight-worker overlap
 unless an explicit lower setting, resource limit, or retry pressure reduces it.
 Longer service times can grow the target gradually to 64. The target aims for
-configured requests per second multiplied by service time, with modest headroom.
+current requests-per-second target multiplied by service time, with modest headroom.
 Throttling, retryable server errors, and network errors reduce the target.
-All workers still share the saved request pacing, retry cooldowns, and lookup
-budget. Extra workers never increase the request-rate allowance.
+All workers share API pacing, retry cooldowns, and the lookup budget. Enterprise
+auto mode learns a higher target as successful requests demonstrate demand;
+explicit fixed rates and verified account allowances remain enforced.
+
+`LIQUID_BLOCKSTREAM_ENTERPRISE_RPS=auto` is the Enterprise default. The initial
+49 requests/second is a warmup target, not a ceiling. Before throttling, clean
+two-second windows with sufficient demand raise the target by 50%. Pressure
+reduces it by 30%, once per wave of related rejections, and imposes a shared
+cooldown. Subsequent probes use 5% increases per clean ten-second window. The
+learned target is shared and retained across processes; no API keys or addresses
+are stored in the rate coordinator. Older workers and explicit fixed-rate clients
+on the same host can constrain auto clients, so restart older API jobs when
+enabling this mode. Positive numeric values select fixed pacing instead. A
+verified `LIQUID_BLOCKSTREAM_API_RPS` allowance takes precedence at 95% of its value.
+
+Saved runs previously recorded the derived 49 RPS interval as well as the source
+of that rate. That specific implicit default is ignored for later count lookups
+under the new configuration. Explicit minimum intervals, verified allowances and
+other saved numeric targets remain respected; historical archives are unchanged.
 
 The resource ceiling is rechecked during the lookup: at most eight network
 workers per available CPU (respecting affinity and CPU quotas), and a planning
@@ -103,7 +120,8 @@ followed by a new count lookup. An abrupt process kill can leave the latest cach
 checkpoint behind its archived responses; missing counts remain eligible for a
 later lookup.
 
-Progress shows the current concurrency target and observed counts per second.
+Progress shows the current concurrency target and observed counts per second,
+separately from the adaptive or fixed API target.
 The result also records automatic/fixed mode, peak requested concurrency,
 resource ceiling, elapsed time, checkpoint count/time, and observed throughput. These are measurements
 of this lookup, not a promise of provider performance or a published API quota.
@@ -112,6 +130,45 @@ Counts remain dated observations, not a live feed. `0` is an observed zero; `??`
 means no usable count is available. The optional explicit count command supports
 `--refresh` for already-cached values. Bitcoin peg-in context circles are still
 not queried using a Liquid API and retain `??`.
+
+## Measure throughput with useful count requests
+
+After updating and restarting API workers, run a bounded sample against a
+completed saved collection:
+
+```sh
+env LIQUID_BLOCKSTREAM_ENTERPRISE_RPS=auto liquid-live explorer-probe \
+  --case cases/.shared-collection --seconds 60
+```
+
+Use a private investigation's directory for its own collected data, or `--run`
+to choose a particular completed run. This uses the normal authenticated
+`GET /address/:address` API and saves only missing counts. It does not scrape
+webpages or repeat cached requests to create test traffic. Stop any existing
+collection/count worker for the selected dataset first; normal locks apply.
+If an old collection stopped during counts without a finished export, use the
+recovery command below before probing it.
+
+The default sample admits requests for up to 60 seconds or 10,000 HTTP attempts,
+including OAuth and retries. `--max-requests` changes this probe-only budget;
+ordinary collection remains unlimited by default. Archive validation and final
+durable saves can extend the command's total wall time. The JSON result includes
+overall counts/second, peak/latest five-second windows, learned/effective targets,
+worker counts and throttling responses. Compare `counts_per_second` and the
+measurement windows with the requested target; a target alone is not achieved
+throughput. A short or already-cached sample cannot establish available capacity.
+The probe never certifies a provider's maximum or overrides an explicit allowance.
+
+Restart the UI in an existing shell with:
+
+```sh
+env LIQUID_BLOCKSTREAM_ENTERPRISE_RPS=auto liquid-web
+```
+
+This explicitly replaces an old shell's exported `49` value. A newly loaded
+devenv shell gets `auto` from the updated configuration. Verified account limits
+and other active fixed-rate workers still apply. The learned target and saved
+counts from the probe are reused by subsequent work.
 
 ## Recover a collection stopped during address counts
 
@@ -175,6 +232,23 @@ throughput from 35.7 to 46.3 counts/second. Full JSON cache writes fell from 16
 to 1, bytes written from 90.6 MB to 5.7 MB, and retained endpoint futures from
 512 to 8. Count and response-evidence fingerprints matched. This is a synthetic
 measurement, not a prediction for a live provider or a million-address case.
+
+The same benchmark can simulate throttling and exercise the production shared
+SQLite coordinator without making network requests:
+
+```sh
+python scripts/benchmark_address_counts.py --shared-quota --provider-rps 150 --addresses 2400
+python scripts/benchmark_address_counts.py --shared-quota --adaptive --provider-rps 150 --addresses 2400
+```
+
+With 2,400 fresh addresses, 20,000 cached counts and 40 ms simulated responses,
+one local comparison completed in 50.92 seconds at fixed 49 RPS and 25.00 seconds
+in adaptive mode. Measured successful lookup throughput was 47.32 versus 96.85
+counts/second, including warmup and cooldown. Adaptive mode retried two HTTP 429
+responses and preserved all 2,402 response observations. Counts and successful
+response fingerprints matched. The provider's 150 RPS capacity is synthetic;
+this test verifies feedback, persistence and scheduling rather than predicting
+Blockstream performance.
 
 ## Inline display and migration
 

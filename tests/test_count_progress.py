@@ -93,6 +93,41 @@ class CountProgressTests(unittest.TestCase):
             self.assertEqual(saved, public_progress(self.event()))
             self.assertNotIn("PRIVATE", output.getvalue() + path.read_text())
 
+    def test_adaptive_target_is_distinct_from_measured_throughput(self):
+        for phase in ("address_counts", "collecting"):
+            with self.subTest(phase=phase):
+                value = public_progress(self.event(phase=phase, api_rate_mode="adaptive",
+                    api_target_rps=256, shared_api_active_clients=2, shared_api_effective_rps=128))
+                self.assertEqual(value["api_rate_mode"], "adaptive")
+                self.assertEqual(value["api_target_rps"], 256)
+                self.assertEqual(value["observed_rps"], 12.34)
+                self.assertIn("adaptive API target 256.0 requests/s total", value["message"])
+                self.assertIn("API budget shared by 2 clients (128.0 requests/s total)", value["message"])
+
+    def test_invalid_target_and_mode_never_become_provider_text(self):
+        for invalid in (True, False, None, "PRIVATE", [], {}, -1, float("nan"),
+                        float("inf"), 10 ** 400):
+            with self.subTest(invalid=invalid):
+                value = public_progress(self.event(api_rate_mode=invalid, api_target_rps=invalid))
+                self.assertNotIn("api_rate_mode", value)
+                self.assertNotIn("api_target_rps", value)
+                self.assertNotIn("PRIVATE", json.dumps(value))
+
+    def test_api_target_is_not_included_for_non_api_phases(self):
+        value = public_progress(self.event(phase="preflight", api_rate_mode="adaptive", api_target_rps=256))
+        self.assertNotIn("api_rate_mode", value)
+        self.assertNotIn("api_target_rps", value)
+
+    def test_count_sample_distinguishes_new_successes_from_cached_and_failed(self):
+        value = public_progress(self.event(fetched=120, rate_limit_responses=2, retry_responses=3))
+        self.assertEqual(value["completed"], 127)
+        self.assertEqual(value["fetched"], 120)
+        self.assertEqual(value["rate_limit_responses"], 2)
+        self.assertEqual(value["retry_responses"], 3)
+        for invalid in (True, -1, 128, "PRIVATE", []):
+            with self.subTest(invalid=invalid):
+                self.assertNotIn("fetched", public_progress(self.event(fetched=invalid)))
+
 
 if __name__ == "__main__":
     unittest.main()

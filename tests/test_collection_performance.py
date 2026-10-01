@@ -27,6 +27,17 @@ class CollectionPerformanceTests(unittest.TestCase):
                     "request_count": number, "worker_peak": number}), {})
         self.assertEqual(public_performance({"schema_version": 1, "request_count": 1.5, "worker_limit": 65}), {})
 
+    def test_saved_reports_include_validated_rate_mode_and_targets(self):
+        for mode in ("adaptive", "fixed"):
+            with self.subTest(mode=mode):
+                value = {"schema_version": 1, "api_rate_mode": mode, "api_target_rps": 256,
+                         "shared_api_effective_rps": 128, "request_count": 300}
+                self.assertEqual(public_performance(value), value)
+        for invalid in (True, None, "PRIVATE", [], {}, -1, float("nan"), float("inf"), 10 ** 400):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(public_performance({"schema_version": 1, "api_rate_mode": invalid,
+                    "api_target_rps": invalid, "shared_api_effective_rps": invalid}), {})
+
 
 if __name__ == "__main__":
     unittest.main()

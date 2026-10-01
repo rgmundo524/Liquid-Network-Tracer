@@ -179,7 +179,7 @@ def parser():
     run.add_argument("--api-workers", type=int, default=8,
                      help="Initial explorer concurrency, 1 to 8 (default: 8, adapts up to 64); values below 8 cap automatic growth")
     run.add_argument("--api-rate-limit", type=float,
-                     help="Verified account requests/second; use 95%% of this limit (default: LIQUID_BLOCKSTREAM_API_RPS, otherwise the enterprise target of 49 requests/second or 4 for other endpoints)")
+                     help="Verified account requests/second; use 95%% of this limit (default: LIQUID_BLOCKSTREAM_API_RPS, otherwise adaptive enterprise throughput or 4 requests/second for other endpoints)")
     run.add_argument("--min-interval", type=float,
                      help="Additional minimum seconds between requests; cannot exceed the configured rate ceiling")
     address_display = run.add_mutually_exclusive_group()
@@ -323,6 +323,11 @@ def parser():
     counts.add_argument("--max-requests", type=int, default=0, help="HTTP attempt budget; 0 means unlimited (default)")
     counts.add_argument("--max-seconds", type=float, default=0, help="Total duration budget; 0 means unlimited (default)")
     counts.add_argument("--refresh", action="store_true", help="Refresh already cached counts too")
+    probe = commands.add_parser("explorer-probe", help="Measure throughput while saving useful missing address counts")
+    probe.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    probe.add_argument("--run", default="latest", help="Completed saved collection to use (default: latest)")
+    probe.add_argument("--seconds", type=float, default=60, help="Request duration budget for this probe (default: 60); saving can finish afterward")
+    probe.add_argument("--max-requests", type=int, default=10000, help="Maximum probe HTTP attempts, including authentication and retries (default: 10000)")
     csv = commands.add_parser("csv-export", help="Export displayed transaction input/output rows without API calls")
     csv.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                      help="Case directory (default: LIQUID_CASE_DIR)")
@@ -990,6 +995,7 @@ def run_trace(args, progress=None):
                                       "effective_rps": api.effective_rps,
                                       "rate_limit_source": api.rate_limit_source,
                                       "min_interval": api.min_interval,
+                                      "min_interval_explicit": args.min_interval is not None and args.min_interval > 0,
                                       "fixture": api.fixture is not None}
             metadata = read_case(args.case)
             if shared_request is not None:
@@ -1267,6 +1273,12 @@ def main(argv=None, *, progress=None, diagnostics=None):
             from .address_counts import fetch_counts
             result = fetch_counts(args.case, args.run, max_requests=args.max_requests,
                                   max_seconds=args.max_seconds, refresh=args.refresh, progress=progress)
+            print(json.dumps(result, indent=2))
+            return 0
+        if args.command == "explorer-probe":
+            from .explorer_probe import probe_explorer
+            result = probe_explorer(args.case, args.run, seconds=args.seconds,
+                                    max_requests=args.max_requests, progress=progress)
             print(json.dumps(result, indent=2))
             return 0
         if args.command == "address-inspect":

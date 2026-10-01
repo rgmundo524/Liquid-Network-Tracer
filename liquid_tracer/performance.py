@@ -12,6 +12,18 @@ COUNTS = {"checkpoint_count", "request_count", "cache_hits", "rate_limit_respons
 WORKERS = {"worker_peak", "worker_limit", "peak_in_flight"}
 
 
+def public_api_rate(value):
+    """Keep the pacing target distinct from observed request throughput."""
+    clean = {}
+    if value.get("api_rate_mode") in ("adaptive", "fixed"):
+        clean["api_rate_mode"] = value["api_rate_mode"]
+    for key in ("api_target_rps", "shared_api_effective_rps"):
+        number = value.get(key)
+        if type(number) in (int, float) and 0 <= number <= 2 ** 53 - 1 and math.isfinite(number):
+            clean[key] = number
+    return clean
+
+
 def public_performance(value):
     """Drop unknown content and malformed measurements, including booleans.
 
@@ -34,4 +46,5 @@ def public_performance(value):
         number = value.get(key)
         if type(number) is int and 0 <= number <= 64:
             clean[key] = number
+    clean.update(public_api_rate(value))
     return {"schema_version": 1, **clean} if clean else {}

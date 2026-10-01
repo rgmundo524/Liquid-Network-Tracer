@@ -288,7 +288,7 @@ class SharedExplorerApiTests(unittest.TestCase):
             actual = SharedExplorerQuota(ENTERPRISE, .001, directory=Path(self.temp.name) / 'real-quota')
             factory.return_value = actual
             real.get('/real')
-            factory.assert_called_once_with(ENTERPRISE, 1. / 49)
+            factory.assert_called_once_with(ENTERPRISE, 1. / 49, adaptive=True)
 
     def test_prefetch_idle_callback_reports_shared_wait_on_calling_thread(self):
         api = self.client()

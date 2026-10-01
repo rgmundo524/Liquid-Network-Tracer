@@ -2,7 +2,7 @@
 
 Clients using the same endpoint hostname share one target, including clients
 with different credentials. A second key is not assumed to buy another quota.
-Only random client IDs, timing, and requested intervals are persisted.
+Only random client IDs, timing, aggregate feedback, and rate targets are persisted.
 """
 
 import hashlib
@@ -11,6 +11,7 @@ import os
 import sqlite3
 import stat
 import time
+import threading
 import urllib.parse
 import uuid
 from contextlib import contextmanager
@@ -22,6 +23,76 @@ from .common import TraceError
 
 CLIENT_IDLE_SECONDS = 30.
 LOCK_RETRY_SECONDS = .05
+ADAPTIVE_INITIAL_RPS = 49.
+ADAPTIVE_WINDOW_SECONDS = 2.
+ADAPTIVE_PROBE_SECONDS = 10.
+ADAPTIVE_BACKOFF = .7
+
+
+@dataclass
+class _AdaptiveState:
+    target_rps: float
+    generation: int
+    window_started: float
+    successes: int = 0
+    last_pressure: float = 0.
+    hold_until: float = 0.
+
+    def add_successes(self, pending):
+        self.successes += pending.get(self.generation, 0)
+
+    def grow(self, now):
+        elapsed = now - self.window_started
+        window = ADAPTIVE_PROBE_SECONDS if self.generation else ADAPTIVE_WINDOW_SECONDS
+        if elapsed < window or now < self.hold_until:
+            return
+        # Demand, rather than the size of the address list, justifies more
+        # capacity. This also prevents a slow local disk or a fixed peer from
+        # causing an ever-growing target without extra throughput.
+        enough = self.successes >= max(8, self.target_rps * elapsed * .5)
+        if enough:
+            proposed = self.target_rps * (1.05 if self.generation else 1.5)
+            if math.isfinite(proposed):
+                self.target_rps = proposed
+        self.window_started = now
+        self.successes = 0
+
+    def pressure(self, admission, now, seconds):
+        # Generations denote pressure episodes, not increases. A slow 429 from
+        # just before a healthy increase must still reduce the current target,
+        # while dozens of simultaneous rejections reduce it only once.
+        if admission is not None and admission.generation == self.generation:
+            self.target_rps = max(1e-9, self.target_rps * ADAPTIVE_BACKOFF)
+            self.generation += 1
+            self.last_pressure = now
+            self.hold_until = now + max(5., seconds)
+            self.window_started = self.hold_until
+            self.successes = 0
+
+
+class _Feedback:
+    def _setup_feedback(self, adaptive):
+        self.adaptive = bool(adaptive)
+        self._feedback_lock = threading.Lock()
+        self._pending_successes = {}
+
+    def success(self, admission):
+        """Buffer a successful HTTP attempt; no extra disk transaction."""
+        if not self.adaptive or admission is None or not admission.admitted:
+            return
+        with self._feedback_lock:
+            generation = admission.generation
+            self._pending_successes[generation] = self._pending_successes.get(generation, 0) + 1
+
+    def _take_successes(self):
+        with self._feedback_lock:
+            pending, self._pending_successes = self._pending_successes, {}
+            return pending
+
+    def _restore_successes(self, pending):
+        with self._feedback_lock:
+            for generation, count in pending.items():
+                self._pending_successes[generation] = self._pending_successes.get(generation, 0) + count
 
 
 @dataclass(frozen=True)
@@ -31,13 +102,16 @@ class Admission:
     active_clients: int = 0
     effective_rps: float = 0.
     reason: str = ""
+    mode: str = "fixed"
+    target_rps: float = 0.
+    generation: int = 0
 
 
 class _Busy(Exception):
     pass
 
 
-class SharedExplorerQuota:
+class SharedExplorerQuota(_Feedback):
     """Reserve a start atomically, without sleeping under a database lock.
 
     The slowest active client's interval applies to everybody. Registrations are
@@ -48,7 +122,7 @@ class SharedExplorerQuota:
     """
 
     def __init__(self, endpoint, interval, *, directory=None, clock=None,
-                 idle_seconds=CLIENT_IDLE_SECONDS):
+                 idle_seconds=CLIENT_IDLE_SECONDS, adaptive=False):
         parsed = urllib.parse.urlsplit(endpoint)
         host = (parsed.hostname or "").lower().rstrip(".")
         if parsed.scheme != "https" or not host or parsed.username or parsed.query or parsed.fragment:
@@ -56,6 +130,7 @@ class SharedExplorerQuota:
         if not math.isfinite(interval) or interval <= 0 or not math.isfinite(idle_seconds) or idle_seconds <= 0:
             raise TraceError("Shared explorer interval and idle lifetime must be positive")
         self.interval = interval
+        self._setup_feedback(adaptive)
         self._idle_seconds = idle_seconds
         self._clock = clock or time.time
         self._client_id = uuid.uuid4().hex
@@ -124,29 +199,102 @@ class SharedExplorerQuota:
             if db is not None:
                 db.close()
 
+    def _controller(self, db, now):
+        # Additive tables keep the pacing/clients schema usable by older
+        # workers. Their registrations continue to act as fixed limits.
+        db.execute("""CREATE TABLE IF NOT EXISTS adaptive_clients (
+            id TEXT PRIMARY KEY)""")
+        db.execute("""CREATE TABLE IF NOT EXISTS adaptive_pacing (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            target_rps REAL NOT NULL, generation INTEGER NOT NULL,
+            window_started REAL NOT NULL, successes INTEGER NOT NULL,
+            last_pressure REAL NOT NULL, hold_until REAL NOT NULL)""")
+        db.execute("INSERT OR IGNORE INTO adaptive_pacing VALUES (1, ?, 0, ?, 0, 0, 0)",
+                   (1. / self.interval, now))
+        row = db.execute("""SELECT target_rps, generation, window_started,
+            successes, last_pressure, hold_until FROM adaptive_pacing WHERE id = 1""").fetchone()
+        state = _AdaptiveState(*row)
+        if not math.isfinite(state.target_rps) or state.target_rps <= 0:
+            raise TraceError("Invalid learned explorer rate; check the private quota cache")
+        # A long idle period must not dilute the next active learning window.
+        if now - state.window_started > CLIENT_IDLE_SECONDS and not db.execute(
+                "SELECT 1 FROM clients WHERE expires_at > ? LIMIT 1", (now,)).fetchone():
+            state.window_started, state.successes = now, 0
+        return state
+
+    @staticmethod
+    def _save_controller(db, state):
+        db.execute("""UPDATE adaptive_pacing SET target_rps = ?, generation = ?,
+            window_started = ?, successes = ?, last_pressure = ?, hold_until = ? WHERE id = 1""",
+            (state.target_rps, state.generation, state.window_started, state.successes,
+             state.last_pressure, state.hold_until))
+        # Update every adaptive lease so an older worker's ordinary MAX(interval)
+        # query sees the current shared target too. Fixed peers are untouched.
+        db.execute("""UPDATE clients SET interval = ? WHERE id IN
+            (SELECT id FROM adaptive_clients)""", (1. / state.target_rps,))
+
     def reserve(self):
         """Admit now, or return a delay for a cancellable caller-owned wait."""
         if self._closed:
             raise TraceError("Shared explorer pacing is closed")
+        pending = self._take_successes()
         try:
             with self._transaction() as db:
                 now = self._clock()
                 db.execute("DELETE FROM clients WHERE expires_at <= ?", (now,))
+                state = None
+                if self.adaptive:
+                    state = self._controller(db, now)
+                    state.add_successes(pending)
+                    state.grow(now)
+                    db.execute("DELETE FROM adaptive_clients WHERE id NOT IN (SELECT id FROM clients)")
+                    db.execute("INSERT OR IGNORE INTO adaptive_clients VALUES (?)", (self._client_id,))
+                    self._save_controller(db, state)
+                own_interval = 1. / state.target_rps if state else self.interval
                 db.execute("INSERT OR REPLACE INTO clients VALUES (?, ?, ?)",
-                           (self._client_id, self.interval, now + self._idle_seconds))
+                           (self._client_id, own_interval, now + self._idle_seconds))
                 active, interval = db.execute("SELECT COUNT(*), MAX(interval) FROM clients").fetchone()
                 last_start, cooldown = db.execute("SELECT last_start, cooldown FROM pacing WHERE id = 1").fetchone()
                 # Derive the next start from the *current* shared interval.
-                # A faster client cannot use a previous faster reservation to
-                # bypass a slower client's newly registered allowance.
+                # A faster client cannot bypass a newly registered fixed peer.
+                metadata = dict(mode="adaptive" if state else "fixed",
+                                target_rps=state.target_rps if state else 1. / interval,
+                                generation=state.generation if state else 0)
                 deadline = max(last_start + interval, cooldown)
                 if deadline > now:
                     reason = "server_cooldown" if cooldown >= last_start + interval else "shared_rate_limit"
-                    return Admission(False, deadline - now, active, 1. / interval, reason)
+                    return Admission(False, deadline - now, active, 1. / interval, reason, **metadata)
                 db.execute("UPDATE pacing SET last_start = ? WHERE id = 1", (now,))
-                return Admission(True, active_clients=active, effective_rps=1. / interval)
+                return Admission(True, active_clients=active, effective_rps=1. / interval, **metadata)
         except _Busy:
-            return Admission(False, LOCK_RETRY_SECONDS, reason="shared_rate_limit")
+            self._restore_successes(pending)
+            return Admission(False, LOCK_RETRY_SECONDS, reason="shared_rate_limit",
+                             mode="adaptive" if self.adaptive else "fixed")
+        except BaseException:
+            self._restore_successes(pending)
+            raise
+
+    def pressure(self, admission, seconds=0.):
+        """Share rejection/backoff once per pressure generation.
+
+        False denotes brief contention, just like cooldown(). Already completed
+        response evidence is the caller's responsibility before this operation.
+        """
+        if not self.adaptive:
+            return self.cooldown(seconds)
+        if self._closed:
+            raise TraceError("Shared explorer pacing is closed")
+        seconds = max(1., seconds) if math.isfinite(seconds) else 60.
+        try:
+            with self._transaction() as db:
+                now = self._clock()
+                state = self._controller(db, now)
+                state.pressure(admission, now, seconds)
+                self._save_controller(db, state)
+                db.execute("UPDATE pacing SET cooldown = MAX(cooldown, ?) WHERE id = 1", (now + seconds,))
+            return True
+        except _Busy:
+            return False
 
     def cooldown(self, seconds):
         """Share Retry-After even when the reporting run will stop.
@@ -176,3 +324,69 @@ class SharedExplorerQuota:
         except (_Busy, TraceError):
             # A contended or crashed close has the same bounded idle lifetime.
             pass
+
+
+class LocalExplorerQuota(_Feedback):
+    """Equivalent adaptive policy for injected/offline transports without files."""
+
+    def __init__(self, interval, *, adaptive=False, clock=None):
+        if not math.isfinite(interval) or interval <= 0:
+            raise TraceError("Explorer interval must be positive")
+        self.interval = interval
+        self._setup_feedback(adaptive)
+        self._clock = clock or time.time
+        self._lock = threading.Lock()
+        self._closed = False
+        self._last_start = 0.
+        self._cooldown = 0.
+        self._state = _AdaptiveState(1. / interval, 0, self._clock())
+
+    def reserve(self):
+        with self._lock:
+            if self._closed:
+                raise TraceError("Shared explorer pacing is closed")
+            now = self._clock()
+            state = self._state
+            if self.adaptive:
+                state.add_successes(self._take_successes())
+                state.grow(now)
+            interval = 1. / state.target_rps if self.adaptive else self.interval
+            deadline = max(self._last_start + interval, self._cooldown)
+            metadata = dict(active_clients=1, effective_rps=1. / interval,
+                            mode="adaptive" if self.adaptive else "fixed",
+                            target_rps=state.target_rps, generation=state.generation)
+            if deadline > now:
+                reason = "server_cooldown" if self._cooldown >= self._last_start + interval else "shared_rate_limit"
+                return Admission(False, deadline - now, reason=reason, **metadata)
+            self._last_start = now
+            return Admission(True, **metadata)
+
+    def pressure(self, admission, seconds=0.):
+        if not self.adaptive:
+            return self.cooldown(seconds)
+        with self._lock:
+            if self._closed:
+                raise TraceError("Shared explorer pacing is closed")
+            now = self._clock()
+            seconds = max(1., seconds) if math.isfinite(seconds) else 60.
+            self._state.pressure(admission, now, seconds)
+            self._cooldown = max(self._cooldown, now + seconds)
+            return True
+
+    def cooldown(self, seconds):
+        with self._lock:
+            if self._closed:
+                raise TraceError("Shared explorer pacing is closed")
+            seconds = max(0., seconds) if math.isfinite(seconds) else 60.
+            self._cooldown = max(self._cooldown, self._clock() + seconds)
+            return True
+
+    def close(self):
+        with self._lock:
+            self._closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()

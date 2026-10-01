@@ -234,6 +234,61 @@ class CountConcurrencyTests(unittest.TestCase):
             with self.subTest(rate=rate), self.assertRaisesRegex(TraceError, "rate"):
                 CountConcurrency(8, 7956, rate)
 
+    def test_adaptive_api_rate_raises_worker_demand_beyond_initial_forty_nine(self):
+        policy = CountConcurrency(8, 972456, 49)
+        feedback = {"api_rate_mode": "adaptive", "service_latency_seconds": .1}
+        for completed, rate, expected in ((8, 49, 8), (16, 128, 16),
+                                           (24, 256, 32), (32, 512, 64)):
+            feedback.update(completed_endpoints=completed, api_target_rps=rate,
+                            shared_api_effective_rps=rate)
+            self.assertEqual(policy.target(feedback), expected)
+        self.assertEqual(policy.peak, 64)
+
+    def test_adaptive_rate_pressure_reduces_workers_then_holds_a_clean_window(self):
+        policy = CountConcurrency(8, 972456, 49)
+        feedback = {"api_rate_mode": "adaptive", "api_target_rps": 512,
+                    "shared_api_effective_rps": 512, "service_latency_seconds": .1}
+        for completed in (8, 16, 24):
+            feedback["completed_endpoints"] = completed
+            policy.target(feedback)
+        self.assertEqual(policy.peak, 64)
+        feedback.update(completed_endpoints=25, pressure_events=1,
+                        api_target_rps=256, shared_api_effective_rps=256)
+        self.assertEqual(policy.target(feedback), 32)
+        feedback.update(completed_endpoints=33, api_target_rps=512, shared_api_effective_rps=512)
+        self.assertEqual(policy.target(feedback), 32)
+        feedback["completed_endpoints"] = 41
+        self.assertEqual(policy.target(feedback), 64)
+
+    def test_fixed_rate_and_lower_shared_allowance_do_not_inflate_worker_demand(self):
+        feedback = {"api_rate_mode": "fixed", "api_target_rps": 512,
+                    "shared_api_effective_rps": 512, "service_latency_seconds": .1}
+        fixed = CountConcurrency(8, 972456, 49)
+        shared = CountConcurrency(8, 972456, 49)
+        for completed in (8, 16, 24):
+            feedback["completed_endpoints"] = completed
+            self.assertEqual(fixed.target(feedback), 8)
+            self.assertEqual(shared.target({**feedback, "api_rate_mode": "adaptive",
+                                           "shared_api_effective_rps": 49}), 8)
+
+    def test_malformed_adaptive_target_uses_configured_rate(self):
+        for invalid in (None, 0, -1, "512", True, [], {}, float("nan"), float("inf"), 10 ** 400):
+            with self.subTest(invalid=invalid):
+                policy = CountConcurrency(8, 972456, 49)
+                feedback = {"completed_endpoints": 8, "service_latency_seconds": .1,
+                            "api_rate_mode": "adaptive", "api_target_rps": invalid,
+                            "shared_api_effective_rps": invalid}
+                self.assertEqual(policy.target(feedback), 8)
+
+    def test_trace_workers_follow_same_adaptive_api_target(self):
+        from liquid_tracer.trace_fetch import TraceConcurrency
+        with patch.dict(os.environ, {"LIQUID_TRACE_WORKERS": "auto"}):
+            policy = TraceConcurrency(8, 0, 49)
+            feedback = {"api_rate_mode": "adaptive", "api_target_rps": 512,
+                        "shared_api_effective_rps": 512, "service_latency_seconds": .1}
+            for completed, expected in ((8, 16), (16, 32), (24, 64)):
+                self.assertEqual(policy.target({**feedback, "completed_endpoints": completed}), expected)
+
 
 if __name__ == "__main__":
     unittest.main()

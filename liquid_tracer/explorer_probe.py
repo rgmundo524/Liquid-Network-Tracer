@@ -1,0 +1,119 @@
+"""Measure useful missing address-statistics work through the real count pipeline.
+
+This is a bounded sample of local throughput, not a provider load test or a
+claim about an account's maximum capacity. Completed observations remain in the
+ordinary count cache; verified transaction archives are never rewritten.
+"""
+
+import math
+import time
+
+from .address_counts import fetch_counts
+from .common import TraceError
+from .performance import public_api_rate
+
+
+WINDOW_SECONDS = 5.
+
+
+class _Windows:
+    def __init__(self):
+        self.started = None
+        self.fetched = 0
+        self.count = 0
+        self.peak = None
+        self.latest = None
+        self.latest_metrics = {}
+
+    def observe(self, event):
+        self.latest_metrics.update(public_api_rate(event))
+        for key in ("rate_limit_responses", "retry_responses"):
+            number = event.get(key)
+            if type(number) is int and 0 <= number <= 2**53 - 1:
+                self.latest_metrics[key] = number
+        fetched = event.get("fetched")
+        if event.get("phase") != "address_counts" or type(fetched) is not int or fetched < 0:
+            return
+        now = time.monotonic()
+        if self.started is None:
+            self.started, self.fetched = now, fetched
+            return
+        elapsed = now - self.started
+        if elapsed < WINDOW_SECONDS:
+            return
+        # Only successful newly fetched statistics are measured. The generic
+        # progress 'completed' also includes cache hits and examined failures.
+        completed = max(0, fetched - self.fetched)
+        self.latest = {"seconds": elapsed, "fetched": completed,
+                       "counts_per_second": completed / elapsed}
+        self.count += 1
+        if self.peak is None or self.latest["counts_per_second"] > self.peak["counts_per_second"]:
+            self.peak = self.latest
+        self.started, self.fetched = now, fetched
+
+
+def probe_explorer(case, run_id="latest", *, seconds=60, max_requests=10000,
+                   progress=None, transport=None):
+    """Fetch missing counts for a bounded time/request sample and retain them.
+
+    The ordinary ``fetch_counts`` entry point provides archive verification,
+    case identity checks, process locks, request budgets, evidence recording and
+    durable count checkpoints. There is deliberately no refresh option: cached
+    addresses must not be requested again merely to generate test traffic.
+
+    ``seconds`` bounds request admission, not offline archive verification or
+    final cache compaction. An admitted response may need time to finish saving.
+    """
+    if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds <= 0:
+        raise TraceError("Explorer probe seconds must be a finite positive number")
+    if type(max_requests) is not int or max_requests <= 0:
+        raise TraceError("Explorer probe max_requests must be a positive whole number")
+    windows = _Windows()
+
+    def observe(event):
+        windows.observe(event)
+        if progress is not None:
+            try:
+                progress(event)
+            except Exception:
+                pass  # Reporting must not prevent a useful count being saved.
+
+    started = time.monotonic()
+    report = fetch_counts(case, run_id, max_requests=max_requests, max_seconds=seconds,
+                          refresh=False, progress=observe, transport=transport)
+    wall_seconds = max(0., time.monotonic() - started)
+    elapsed = report.get("elapsed_seconds", wall_seconds)
+    metrics = windows.latest_metrics
+    metrics.update(public_api_rate(report))
+    for key in ("rate_limit_responses", "retry_responses"):
+        number = report.get(key)
+        if type(number) is int and 0 <= number <= 2**53 - 1:
+            metrics[key] = number
+    rate_limits = metrics.get("rate_limit_responses")
+    feedback = ("unavailable" if rate_limits is None else
+                "observed" if rate_limits else "not_observed")
+    if report["fetched"] == 0 and report["remaining"] == 0:
+        outcome = "no_missing_counts"
+        explanation = "All address counts were already saved; no API capacity was measured."
+    elif report["remaining"] == 0:
+        outcome = "backlog_exhausted"
+        explanation = "All missing counts were fetched before the probe needed to stop."
+    elif feedback == "observed":
+        outcome = "provider_throttled"
+        explanation = "The API returned rate-limit feedback during this sample."
+    elif windows.count == 0:
+        outcome = "short_sample"
+        explanation = "The sample did not cover a complete five-second measurement window."
+    else:
+        outcome = "bounded_sample"
+        explanation = "The probe measured useful count throughput within its request and time budget."
+    return {**report, **metrics, "schema_version": 1, "kind": "explorer_probe",
+            "probe_seconds": seconds, "probe_max_requests": max_requests,
+            "probe_wall_seconds": wall_seconds,
+            "counts_per_second": report["fetched"] / max(.001, elapsed),
+            "sample_windows": windows.count, "peak_window": windows.peak,
+            "latest_window": windows.latest, "rate_limit_feedback": feedback,
+            "outcome": outcome,
+            "notice": explanation + " Successfully fetched counts are saved for subsequent work. "
+                "Observed throughput and the learned pacing target do not establish a provider or account maximum. "
+                "Other processes sharing this API, local storage and available workers can affect this result."}

@@ -82,9 +82,25 @@ class CountConcurrency:
     @staticmethod
     def _latency(metrics, key):
         value = metrics.get(key)
-        if type(value) in (int, float) and math.isfinite(value) and value > 0:
+        if type(value) in (int, float) and 0 < value <= 2 ** 53 - 1 and math.isfinite(value):
             return value
         return None
+
+    def _request_rate(self, metrics):
+        """Follow the shared adaptive target without changing API admission.
+
+        Fixed clients retain their configured ceiling. A lower effective shared
+        rate can also limit useful overlap, for example when a second client
+        explicitly requests a fixed rate. Zero remains the fixture/no-pacing
+        mode rather than an instruction to infer an unlimited rate.
+        """
+        rate = self._rate
+        if rate and metrics.get("api_rate_mode") == "adaptive":
+            rate = self._latency(metrics, "api_target_rps") or rate
+        effective = self._latency(metrics, "shared_api_effective_rps")
+        if rate and effective is not None:
+            rate = min(rate, effective)
+        return rate
 
     def target(self, metrics):
         """Return a bounded in-flight target, changing at most once per window."""
@@ -111,12 +127,13 @@ class CountConcurrency:
             self._next_adjustment = completed + self._window
             service_latency = self._latency(metrics, "service_latency_seconds")
             latency = service_latency or self._latency(metrics, "latency_seconds")
-            if self.mode == "fixed" or self._rate == 0:
+            rate = self._request_rate(metrics)
+            if self.mode == "fixed" or rate == 0:
                 desired = min(self._initial, self._ceiling)
             elif latency is not None:
                 # Little's law, with modest headroom for response variance.
                 # Clamp before ceil to avoid overflow for extreme rate inputs.
-                demand = self._rate * latency * 1.25
+                demand = rate * latency * 1.25
                 desired = max(1, math.ceil(min(self._ceiling, demand)))
                 if service_latency is not None:
                     # Fast early responses should not collapse the initial
