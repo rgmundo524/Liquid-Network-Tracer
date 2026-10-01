@@ -132,6 +132,56 @@ test('startup offers an empty live investigation without fetching bundled sample
   assert.match(view.newCase(), /<select name="blockchain" required disabled>/);
 });
 
+test('seed transactions show full IDs and grouped numeric vouts across investigation tabs', async () => {
+  const view = await harness();
+  const other = 'b'.repeat(64);
+  const seeds = [`${txid}:10`, `${other}:1`, `${txid}:0`, `${txid}:2`, `${txid.toUpperCase()}:02`];
+  view.state.activeCase = {id: 'case', name: 'Seed fixture', run_defaults: defaults, seeds};
+  for (const tab of ['collect', 'plots', 'history']) {
+    view.state.caseView = tab;
+    const panel = view.workspace().match(/<section class="panel seed-panel"[\s\S]*?<\/section>/)[0];
+    assert.match(panel, /2 transactions · 4 selected outputs/);
+    assert.equal((panel.match(/<tr><td>/g) || []).length, 2);
+    assert.match(panel, new RegExp(`href="https://blockstream.info/liquid/tx/${txid}"[^>]*>${txid}</a>`));
+    assert.match(panel, /<span class="seed-vout">0<\/span> <span class="seed-vout">2<\/span> <span class="seed-vout">10<\/span>/);
+    assert.match(panel, /Selected starting outputs for this investigation/);
+  }
+  assert.deepEqual(view.state.activeCase.seeds, seeds);
+  assert.equal(view.calls.length, 1); // Rendering does not trigger lookup or collection.
+});
+
+test('seed transactions follow snapshot selections and support legacy and explicitly empty runs', async () => {
+  const view = await harness();
+  const earlier = 'b'.repeat(64), configured = 'c'.repeat(64);
+  view.state.activeCase = {id: 'case', name: 'Saved seeds', run_defaults: defaults, latest_run: 'recent',
+    seeds: [], runs: [{id: 'recent', status: 'bounded_complete', seeds: [`${txid}:0`]},
+      {id: 'earlier', status: 'bounded_complete', seeds: [`${earlier}:2`]},
+      {id: 'legacy', status: 'bounded_complete'}, {id: 'empty', status: 'bounded_complete', seeds: []}]};
+  const panel = () => view.workspace().match(/<section class="panel seed-panel"[\s\S]*?<\/section>/)[0];
+  assert.match(panel(), new RegExp(txid));
+  assert.match(panel(), /Starting outputs recorded in this snapshot/);
+  view.state.activeCase.seeds = [`${configured}:3`];
+  view.state.selectedRun = 'earlier';
+  assert.match(panel(), new RegExp(earlier));
+  assert.doesNotMatch(panel(), new RegExp(`${txid}|${configured}`));
+  view.state.selectedRun = 'legacy';
+  assert.match(panel(), new RegExp(configured));
+  assert.match(panel(), /Selected starting outputs for this investigation/);
+  view.state.selectedRun = 'empty';
+  assert.match(panel(), /No seed outputs are recorded for this snapshot/);
+  assert.doesNotMatch(panel(), new RegExp(configured));
+});
+
+test('seed display rejects malformed outpoints and keeps synthetic transaction IDs offline', async () => {
+  const view = await harness();
+  view.state.activeCase = {id: 'case', name: 'Synthetic seeds', run_defaults: defaults, fixture: true,
+    seeds: [`${txid}:0`, `${txid}:4294967296`, `${txid}:-1`, '<img src=x onerror=alert(1)>:0', null]};
+  const panel = view.workspace().match(/<section class="panel seed-panel"[\s\S]*?<\/section>/)[0];
+  assert.match(panel, /1 transaction · 1 selected output/);
+  assert.match(panel, new RegExp(`<span class="mono seed-txid">${txid}</span>`));
+  assert.doesNotMatch(panel, /<a |<img|onerror|4294967296/);
+});
+
 test('collected-data timings follow the selected snapshot and stay absent on older runs', async () => {
   const view = await harness();
   view.state.activeCase = {id: 'case', name: 'Timing fixture', run_defaults: defaults, latest_run: 'recent',
