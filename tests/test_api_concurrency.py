@@ -209,7 +209,7 @@ class ApiConcurrencyTests(unittest.TestCase):
         self.assertEqual(gets.count('Bearer private-token-1'), 4)
         self.assertEqual(gets.count('Bearer private-token-2'), 4)
         self.assertEqual(len(api.used), 8)
-        archive = (self.store.case / 'evidence.sqlite').read_bytes()
+        archive = b''.join(path.read_bytes() for path in self.store.case.glob('evidence.sqlite*') if path.is_file())
         for secret in (b'private-client', b'private-secret', b'private-token'):
             self.assertNotIn(secret, archive)
 
@@ -695,7 +695,8 @@ class ApiConcurrencyTests(unittest.TestCase):
                                                 'local_deadline_timeouts': 0,
                                                 'cache_hits': 0, 'coalesced_hits': 0,
                                                 'rate_limit_responses': 0, 'retry_responses': 0,
-                                                'peak_in_flight': 1})
+                                                'peak_in_flight': 1, 'in_flight': 0,
+                                                **self.store.storage_metrics()})
 
     def test_transport_metrics_count_retry_and_network_pressure(self):
         statuses = iter([429, 500, 502, 503, 504, 200])

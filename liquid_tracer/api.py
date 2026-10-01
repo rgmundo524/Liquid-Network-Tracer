@@ -339,7 +339,8 @@ class Esplora:
                        "service_latency_seconds": self._service_latency_seconds,
                        "completed_endpoints": self._completed_endpoints,
                        "completed_requests": self._completed_requests,
-                       "pressure_events": self._pressure_events}
+                       "pressure_events": self._pressure_events,
+                       "in_flight": self._in_flight}
             metrics.update(self._totals)
             if self._shared_metrics is not None:
                 metrics.update(self._shared_metrics)
@@ -351,6 +352,11 @@ class Esplora:
             storage = storage_metrics()
             if isinstance(storage, dict):
                 metrics.update(storage)
+        evidence_metrics = getattr(self.store, "storage_metrics", None)
+        if callable(evidence_metrics):
+            evidence = evidence_metrics()
+            if isinstance(evidence, dict):
+                metrics.update(evidence)
         return metrics
 
     @contextmanager

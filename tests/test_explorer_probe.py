@@ -1,6 +1,7 @@
 """Bounded useful-work probes preserve caches, evidence and sealed run history."""
 
 import fcntl
+import json
 import os
 import tempfile
 import unittest
@@ -9,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from liquid_tracer.common import TraceError
-from liquid_tracer.explorer_probe import probe_explorer
+from liquid_tracer.explorer_probe import MAX_WINDOW_SAMPLES, _Windows, probe_explorer
 from liquid_tracer.investigations import create_investigation
 from tests.test_address_count_concurrency import CountTransport, SOURCE
 from tests.test_attribution_convergence import graph_state
@@ -129,6 +130,145 @@ class ExplorerProbeMeasurementTests(unittest.TestCase):
         self.assertEqual(result["probe_wall_seconds"], 125.8)
         self.assertAlmostEqual(result["probe_outside_lookup_seconds"], 65.2)
         self.assertIn("Worker timing totals overlap and must not be added together", result["notice"])
+
+    def test_windows_capture_throughput_and_storage_wait_changes_without_worker_time_sums(self):
+        clock = [0.]
+
+        def fetch(case, run_id, **options):
+            for index, (at, fetched, store_wait) in enumerate(((0, 0, 0), (5, 370, 1), (10, 525, 16))):
+                clock[0] = at
+                options["progress"]({"phase": "address_counts", "fetched": fetched,
+                    "completed": fetched, "total": 2000, "worker_count": 24, "worker_limit": 64,
+                    "in_flight": 5 - index, "peak_in_flight": 10,
+                    "api_rate_mode": "adaptive", "api_target_rps": 110.25,
+                    "shared_api_effective_rps": 110.25, "shared_api_active_clients": 1,
+                    "latency_seconds": .08, "service_latency_seconds": .14,
+                    "network_seconds_total": index * 20, "evidence_seconds_total": index * 40,
+                    "pacing_wait_seconds_total": index * 80, "quota_reserve_seconds": index * .1,
+                    "evidence_write_lock_wait_seconds_total": store_wait,
+                    "evidence_read_lock_wait_seconds_total": index * 2,
+                    "evidence_commit_seconds_total": index * .5, "evidence_commits": fetched * 2,
+                    "evidence_journal_mode": "wal", "evidence_synchronous": "full",
+                    "headers": "PRIVATE", "url": "PRIVATE"})
+            return report(fetched=525, elapsed_seconds=10., shared_api_active_clients=1,
+                          evidence_journal_mode="wal", evidence_synchronous="full")
+
+        with patch("liquid_tracer.explorer_probe.time", SimpleNamespace(monotonic=lambda: clock[0])), \
+                patch("liquid_tracer.explorer_probe.fetch_counts", side_effect=fetch):
+            result = probe_explorer("case")
+        first, last = result["window_series"]
+        self.assertEqual((first["start_seconds"], first["end_seconds"], last["end_seconds"]), (0, 5, 10))
+        self.assertEqual((first["counts_per_second"], last["counts_per_second"]), (74, 31))
+        self.assertEqual((last["worker_count"], last["in_flight"], last["shared_api_active_clients"]), (24, 3, 1))
+        self.assertEqual(last["api_target_rps"], 110.25)
+        self.assertEqual(last["deltas"]["network_seconds_total"], 20)
+        self.assertEqual(last["deltas"]["evidence_write_lock_wait_seconds_total"], 15)
+        self.assertEqual(last["deltas"]["evidence_commits"], 310)
+        self.assertEqual(last["deltas"]["pacing_wait_seconds_total"], 80)
+        self.assertNotIn("latency_seconds", last["deltas"])
+        self.assertEqual(result["shared_api_active_clients"], 1)
+        self.assertEqual(result["window_series_dropped"], 0)
+        self.assertNotIn("PRIVATE", json.dumps(result))
+
+    def test_window_deltas_require_both_samples_and_detect_resets_across_missing_events(self):
+        clock = [0.]
+        windows = _Windows()
+        with patch("liquid_tracer.explorer_probe.time", SimpleNamespace(monotonic=lambda: clock[0])):
+            windows.observe({"phase": "address_counts", "fetched": 0,
+                "network_seconds_total": 100, "evidence_seconds_total": 10,
+                "quota_reserve_seconds": 1})
+            clock[0] = 1.
+            windows.observe({"phase": "address_counts", "fetched": 3,
+                             "evidence_seconds_total": 11})
+            clock[0] = 2.
+            windows.observe({"phase": "address_counts", "fetched": 5,
+                "network_seconds_total": 0, "evidence_seconds_total": 12})
+            clock[0] = 5.
+            windows.observe({"phase": "address_counts", "fetched": 10,
+                "network_seconds_total": 120, "evidence_seconds_total": 15,
+                "pacing_wait_seconds_total": 99})
+        self.assertEqual(windows.series[0]["deltas"], {"evidence_seconds_total": 5})
+
+    def test_window_history_is_bounded_and_preserves_all_180_second_samples(self):
+        clock = [0.]
+        windows = _Windows()
+        with patch("liquid_tracer.explorer_probe.time", SimpleNamespace(monotonic=lambda: clock[0])):
+            for index in range(37):
+                clock[0] = index * 5.
+                windows.observe({"phase": "address_counts", "fetched": index * 100})
+            self.assertEqual((windows.count, len(windows.series)), (36, 36))
+            for index in range(37, MAX_WINDOW_SAMPLES + 6):
+                clock[0] = index * 5.
+                windows.observe({"phase": "address_counts", "fetched": index * 100})
+        self.assertEqual(windows.count, MAX_WINDOW_SAMPLES + 5)
+        self.assertEqual(len(windows.series), MAX_WINDOW_SAMPLES)
+        self.assertEqual(windows.series[0]["start_seconds"], 25.)
+        self.assertEqual(windows.series[-1]["end_seconds"], (MAX_WINDOW_SAMPLES + 5) * 5.)
+
+    def test_reset_fetched_counter_restarts_the_window_without_negative_counts(self):
+        clock = [0.]
+        windows = _Windows()
+        with patch("liquid_tracer.explorer_probe.time", SimpleNamespace(monotonic=lambda: clock[0])):
+            for at, fetched in ((0, 100), (5, 200), (7, 0), (12, 10)):
+                clock[0] = at
+                windows.observe({"phase": "address_counts", "fetched": fetched})
+        self.assertEqual(windows.count, 2)
+        self.assertEqual(windows.series[-1]["fetched"], 10)
+        self.assertEqual(windows.series[-1]["start_seconds"], 7)
+
+    def test_invalid_window_gauges_and_provider_strings_are_not_exposed(self):
+        clock = [0.]
+        windows = _Windows()
+        with patch("liquid_tracer.explorer_probe.time", SimpleNamespace(monotonic=lambda: clock[0])):
+            for at, fetched in ((0, 0), (5, 10)):
+                clock[0] = at
+                windows.observe({"phase": "address_counts", "fetched": fetched,
+                    "worker_count": 64, "worker_limit": 8, "in_flight": 1000,
+                    "shared_api_active_clients": 65536, "evidence_journal_mode": "PRIVATE",
+                    "evidence_commit_seconds_total": float("inf"), "body": "PRIVATE"})
+        value = windows.series[0]
+        for key in ("worker_count", "worker_limit", "in_flight", "shared_api_active_clients",
+                    "evidence_journal_mode"):
+            self.assertNotIn(key, value)
+        self.assertEqual(value["deltas"], {})
+        self.assertNotIn("PRIVATE", json.dumps(value))
+
+    def test_invalid_final_report_diagnostics_cannot_bypass_the_sanitizer(self):
+        with patch("liquid_tracer.explorer_probe.fetch_counts", return_value=report(
+                shared_api_active_clients=65536, shared_api_peak_active_clients=65536,
+                in_flight=65, api_rate_mode="PRIVATE",
+                evidence_journal_mode="PRIVATE", evidence_sqlite_version="3.50.0 PRIVATE",
+                evidence_write_lock_wait_seconds_total=float("inf"))):
+            result = probe_explorer("case")
+        for key in ("shared_api_active_clients", "shared_api_peak_active_clients", "in_flight", "api_rate_mode",
+                    "evidence_journal_mode", "evidence_sqlite_version",
+                    "evidence_write_lock_wait_seconds_total"):
+            self.assertNotIn(key, result)
+        self.assertNotIn("PRIVATE", json.dumps(result, allow_nan=False))
+
+    def test_active_client_peaks_capture_short_lived_peers_between_window_boundaries(self):
+        clock = [0.]
+
+        def fetch(case, run_id, **options):
+            for at, fetched, clients in ((0, 0, 1), (2, 20, 3), (5, 50, 1), (10, 100, 1)):
+                clock[0] = at
+                options["progress"]({"phase": "address_counts", "fetched": fetched,
+                                     "shared_api_active_clients": clients})
+            return report(shared_api_active_clients=1)
+
+        with patch("liquid_tracer.explorer_probe.time", SimpleNamespace(monotonic=lambda: clock[0])), \
+                patch("liquid_tracer.explorer_probe.fetch_counts", side_effect=fetch):
+            result = probe_explorer("case")
+        self.assertEqual(result["shared_api_active_clients"], 1)
+        self.assertEqual(result["shared_api_peak_active_clients"], 3)
+        self.assertEqual([window["shared_api_window_peak_active_clients"] for window in result["window_series"]], [3, 1])
+        self.assertEqual([window["shared_api_active_clients"] for window in result["window_series"]], [1, 1])
+
+    def test_final_summary_preserves_peak_from_count_report_without_progress_samples(self):
+        with patch("liquid_tracer.explorer_probe.fetch_counts", return_value=report(
+                shared_api_active_clients=1, shared_api_peak_active_clients=4)):
+            result = probe_explorer("case")
+        self.assertEqual(result["shared_api_peak_active_clients"], 4)
 
 
 class ExplorerProbeIntegrationTests(unittest.TestCase):

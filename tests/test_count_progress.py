@@ -128,6 +128,22 @@ class CountProgressTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 self.assertNotIn("fetched", public_progress(self.event(fetched=invalid)))
 
+    def test_count_progress_preserves_window_diagnostics_through_public_boundary(self):
+        diagnostics = {"network_seconds_total": 10, "evidence_seconds_total": 20,
+                       "pacing_wait_seconds_total": 30, "quota_reserve_seconds": .2,
+                       "evidence_write_lock_wait_seconds_total": 2,
+                       "evidence_read_lock_wait_seconds_total": .5,
+                       "evidence_commit_seconds_total": 1, "evidence_commits": 50,
+                       "in_flight": 3, "shared_api_active_clients": 2,
+                       "evidence_journal_mode": "wal", "evidence_synchronous": "full"}
+        value = public_progress(self.event(**diagnostics, body="PRIVATE"))
+        for key, expected in diagnostics.items():
+            self.assertEqual(value[key], expected)
+        self.assertNotIn("PRIVATE", json.dumps(value))
+        other = public_progress(self.event(phase="preflight", **diagnostics))
+        for key in diagnostics:
+            self.assertNotIn(key, other)
+
 
 if __name__ == "__main__":
     unittest.main()

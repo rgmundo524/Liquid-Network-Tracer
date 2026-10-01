@@ -80,7 +80,8 @@ class ResponseCommitTests(unittest.TestCase):
             client.call('POST', TOKEN_URL, 'oauth', '/token', archive_response=True)
         self.assertEqual(transport.call_count, 1)
         self.assertEqual(client.budget.requests, 1)
-        self.assertNotIn(b'private', (self.case / 'evidence.sqlite').read_bytes())
+        archive = b''.join(path.read_bytes() for path in self.case.glob('evidence.sqlite*') if path.is_file())
+        self.assertNotIn(b'private', archive)
 
 
 if __name__ == '__main__':

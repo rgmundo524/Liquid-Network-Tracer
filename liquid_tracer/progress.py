@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from .layout_search_reporting import layout_search_warning, public_search_counts
-from .performance import public_api_rate
+from .performance import public_api_diagnostics
 
 
 MESSAGES = {
@@ -171,11 +171,7 @@ def public_progress(event):
         if "observed_rps" in value:
             value["message"] += f"; {value['observed_rps']:.1f} requests/s"
     if value["phase"].startswith("address_counts") or value["phase"] in COLLECTION_PHASES:
-        for key in ("rate_limit_responses", "retry_responses"):
-            number = event.get(key)
-            if type(number) is int and 0 <= number <= 2 ** 53 - 1:
-                value[key] = number
-        value.update(public_api_rate(event))
+        value.update(public_api_diagnostics(event))
         if "api_rate_mode" in value and "api_target_rps" in value:
             value["message"] += (f"; {value['api_rate_mode']} API target "
                                  f"{value['api_target_rps']:.1f} requests/s total")

@@ -75,7 +75,7 @@ The coordinator reuses one SQLite connection and uses WAL with FULL synchronous
 commits on supported SQLite versions. This reduces repeated file opens and disk
 synchronizations while preserving committed admissions and cooldowns. Every
 granted request still checks shared state in an atomic transaction. The quota
-cache belongs on a local filesystem. Evidence-store journal settings are unchanged.
+cache belongs on a local filesystem.
 
 SQLite's [WAL-reset fix](https://www.sqlite.org/wal.html#walreset) is required to
 enable this mode: version 3.51.3 or later, or the 3.44.6/3.50.7 maintenance branches
@@ -117,6 +117,15 @@ flush the pending batch. A compatible full `address-counts.json` is written once
 at the end, then the committed journal is compacted. If that write is interrupted,
 the journal remains available for recovery. Preserve the whole case directory,
 including SQLite sidecars, while work is active.
+
+The mutable evidence database also uses WAL/FULL on patched SQLite runtimes.
+It selects the journal mode on the first evidence write, so merely opening an
+existing evidence store for an offline export does not migrate it. Existing
+observations, checksums and request-attempt records are retained. Older runtimes
+use DELETE/FULL; if an existing reader prevents a safe switch to WAL, that lookup
+also retains DELETE/FULL. Both request-start and response commits remain durable
+before the pipeline proceeds. Keep the case on a local filesystem and preserve
+its SQLite sidecars while a worker is active; completed run archives are unchanged.
 
 The count pipeline also releases completed response bodies and futures instead
 of retaining one for every requested address. Pending requests remain bounded by
@@ -209,6 +218,22 @@ inside those checks and is already included in pacing time.
 `quota_sqlite_version`, `quota_journal_mode`, `quota_journal_mode_requested`,
 `quota_synchronous` and `quota_connection_mode` identify the coordinator storage
 configuration without exposing paths or credentials.
+The matching `evidence_*` storage fields identify the evidence database's mode
+and runtime. Evidence diagnostics separate read/write lock waiting, time holding
+the lock, and commit time. Commit time is included in write time; these values
+are not additional elapsed time to add to the other totals.
+
+`window_series` retains the latest 120 complete five-second measurement windows.
+Each includes start/end times, completed counts, throughput, worker and actual
+HTTP concurrency, available rate/storage gauges, and timing-counter deltas.
+Missing measurements and counters that reset within a window are omitted instead
+of reported as zero. `window_series_dropped` identifies older windows omitted by
+the bound. `shared_api_active_clients`, `shared_api_peak_active_clients` and
+`shared_api_window_peak_active_clients` report current and observed peak local
+client counts sharing the coordinator; registrations can remain briefly after
+work stops, and a client can be missed between samples. The window series helps
+distinguish a late slowdown from a healthy early
+peak. Overlapping worker timing deltas are still not wall-time percentages.
 `probe_outside_lookup_seconds` separates archive verification, state/cache
 preparation and cleanup from the measured lookup; this is local work, not an API
 rate-limit delay.
@@ -358,6 +383,22 @@ sync counts were unchanged. Without injected storage delays, throughput was
 essentially unchanged (117.52 versus 117.21 counts/second), while coordinator
 syncs fell from 9,600 to 2,416. These synthetic results isolate coordinator I/O;
 the probe on the investigator's machine measures the actual effect.
+
+To isolate the evidence-store journal change, compare against `27cd0cb` using
+1,200 addresses, 40 ms network latency, `--measure-sync`,
+`--evidence-sync-delay-ms 2` and `--quota-sync-delay-ms 1`, with no per-COMMIT
+delay. One local comparison improved from 63.33 to 111.42 counts/second, with
+wall time falling from 19.16 to 11.01 seconds. Evidence file syncs fell from
+7,209 to 2,430; both versions still committed 2,400 evidence transactions.
+All counts, response bytes and request-attempt fingerprints matched. The
+benchmark observes the actual journal and synchronous modes before closing
+the Store, and rejects durability below FULL. The optional zero-delay method
+wrapper now leaves production lock acquisition untouched so measured Store
+lock waits are not hidden by an instrumentation lock.
+Without injected storage delays, throughput was essentially unchanged
+(118.39 versus 118.28 counts/second), while evidence file syncs still fell
+from 7,209 to 2,430. This isolates a storage improvement; it does not establish
+the cause of any particular slowdown on a live machine.
 
 ## Inline display and migration
 

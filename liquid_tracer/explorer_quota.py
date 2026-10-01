@@ -19,6 +19,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .common import TraceError
+from .sqlite_storage import wal_runtime_safe as _wal_runtime_safe
 
 
 CLIENT_IDLE_SECONDS = 30.
@@ -27,19 +28,6 @@ ADAPTIVE_INITIAL_RPS = 49.
 ADAPTIVE_WINDOW_SECONDS = 2.
 ADAPTIVE_PROBE_SECONDS = 10.
 ADAPTIVE_BACKOFF = .7
-
-
-def _wal_runtime_safe(version=None):
-    """Use WAL only with SQLite's 2026 WAL-reset correction.
-
-    https://sqlite.org/wal.html#walreset names 3.51.3 and later, plus
-    maintained 3.44.6 and 3.50.7 backports. Other older branches remain in
-    DELETE/FULL mode rather than assuming a distributor applied that patch.
-    """
-    version = sqlite3.sqlite_version_info if version is None else version
-    return (version >= (3, 51, 3) or
-            (version[:2] == (3, 44) and version >= (3, 44, 6)) or
-            (version[:2] == (3, 50) and version >= (3, 50, 7)))
 
 
 @dataclass
