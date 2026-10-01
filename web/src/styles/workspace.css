@@ -304,6 +304,14 @@ select.input {
   width: 15px;
   height: 15px;
 }
+.seed-table-wrap { max-height: 20rem; overflow: auto; }
+.seed-table { table-layout: fixed; }
+.seed-table th:last-child { width: 28%; }
+.seed-table th { position: sticky; top: 0; background: #f7faf9; white-space: normal; }
+.seed-table td { padding-top: 10px; padding-bottom: 10px; vertical-align: top; }
+.seed-txid { display: block; overflow-wrap: anywhere; white-space: normal; font-size: 12px; user-select: text; }
+.seed-vouts { display: flex; flex-wrap: wrap; gap: 6px; }
+.seed-vout { padding: 2px 7px; border-radius: 4px; background: #edf4f1; color: #426358; font-family: ui-monospace, monospace; font-size: 12px; }
 .collection-performance {
   padding: 16px 24px;
   border-top: 1px solid #e8efec;

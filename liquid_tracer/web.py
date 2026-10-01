@@ -23,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 
-from .common import TraceError, read_json
+from .common import TraceError, parse_outpoint, read_json
 from .inspection import parse_transaction_hashes
 from .investigations import (create_investigation, default_root, load_settings,
                              read_case, save_collection_reference, save_plot_settings, save_settings, update_case,
@@ -466,6 +466,17 @@ class LocalServer(ThreadingHTTPServer):
                            "stop_reason": state.get("stop_reason"), "created_at": state.get("started_at"),
                            "transaction_count": stats.get("transactions_cumulative", len(state.get("transactions", {}))),
                            "frontier_count": stats.get("frontier_count", 0)}
+                    seeds = state.get("seeds")
+                    if detail and isinstance(seeds, list) and all(isinstance(seed, str) for seed in seeds):
+                        try:
+                            # A selected snapshot owns its starting outputs, including
+                            # older CLI cases without seeds in investigation metadata.
+                            run["seeds"] = [f"{txid}:{index}" for txid, index in
+                                            sorted(set(map(parse_outpoint, seeds)))]
+                        except (TraceError, ValueError):
+                            # An unavailable seed list must not hide the saved run or
+                            # turn into a misleading partially validated selection.
+                            pass
                     performance = public_performance(state.get("performance"))
                     if performance:
                         run["performance"] = performance

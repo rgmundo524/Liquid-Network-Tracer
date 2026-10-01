@@ -46,6 +46,7 @@ const layoutSettingKeys = ["layout_attempts", "connector_style", "include_fees",
 type LayoutSettings = Pick<Settings, typeof layoutSettingKeys[number]>;
 type Run = {
   id: string;
+  seeds?: string[];
   status: string;
   stop_reason?: string;
   created_at?: string;
@@ -1474,6 +1475,29 @@ function investigationDataPanel(detail: Case): string {
   return `<section class="panel" id="settings-data"><div class="panel-head"><div><h2>Investigation data</h2><p>Manage attributions, tracing stops, and change outputs here.</p></div></div><div class="panel-body"><div class="task-actions">${button("Import CSV files", "input-import-open", "plus", "primary", isBusy())}${button("Address review", "addresses", "search", "", isBusy())}${button("Change outputs", "change-outputs-open", "graph", "", isBusy())}${button("Assign colors", "name-colors-open", "", "", isBusy())}<a class="btn" href="/api/cases/${esc(encodeURIComponent(detail.id))}/input-exports/all" download>${icon("download")}Export input CSVs</a></div><p class="small muted">Import attributions, name colors, and change outputs together. Export input CSVs downloads all saved attributions, name colors, and change outputs across every page. Unsaved edits are excluded. Imports, address assessments and color changes save separately from the settings form.</p></div></section>${inputImportPanel(detail.id, isBusy())}${changeOutputsPanel(detail.id, isBusy())}`;
 }
 
+function seedTransactionsPanel(detail: Case, run?: Run): string {
+  const recorded = Array.isArray(run?.seeds);
+  const seeds = recorded ? run!.seeds! : Array.isArray(detail.seeds) ? detail.seeds : [];
+  const transactions = new Map<string, Set<number>>();
+  for (const seed of seeds) {
+    const match = typeof seed === "string" ? /^([0-9a-fA-F]{64}):([0-9]+)$/.exec(seed.trim()) : null;
+    if (!match) continue;
+    const vout = Number(match[2]);
+    if (!Number.isInteger(vout) || vout < 0 || vout > 0xffffffff) continue;
+    const txid = match[1].toLowerCase();
+    if (!transactions.has(txid)) transactions.set(txid, new Set());
+    transactions.get(txid)!.add(vout);
+  }
+  const count = [...transactions.values()].reduce((total, vouts) => total + vouts.size, 0);
+  const rows = [...transactions].map(([txid, selected]) => {
+    const hash = detail.fixture ? `<span class="mono seed-txid">${esc(txid)}</span>`
+      : `<a class="mono seed-txid" href="https://blockstream.info/liquid/tx/${txid}" target="_blank" rel="noopener noreferrer" title="Open transaction in Blockstream Explorer">${esc(txid)}</a>`;
+    const vouts = [...selected].sort((a, b) => a - b).map(vout => `<span class="seed-vout">${vout}</span>`).join(" ");
+    return `<tr><td>${hash}</td><td><div class="seed-vouts">${vouts}</div></td></tr>`;
+  }).join("");
+  return `<section class="panel seed-panel" aria-label="Seed transactions"><div class="panel-head"><div><h2>Seed transactions</h2><p>${recorded ? "Starting outputs recorded in this snapshot." : "Selected starting outputs for this investigation."} Vout indexes start at 0.</p></div><span class="badge gray">${transactions.size} transaction${transactions.size === 1 ? "" : "s"} · ${count} selected output${count === 1 ? "" : "s"}</span></div>${rows ? `<div class="table-wrap seed-table-wrap" tabindex="0" aria-label="Seed transaction IDs and selected output indexes"><table class="seed-table"><thead><tr><th scope="col">Transaction ID</th><th scope="col">Selected vout</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="panel-body small muted">No seed outputs are recorded for this ${recorded ? "snapshot" : "investigation"}.</div>`}</section>`;
+}
+
 function workspace(): string {
   const detail = state.activeCase;
   if (!detail)
@@ -1502,6 +1526,7 @@ function workspace(): string {
     <nav class="case-navigation" aria-label="Investigation tools">${views.map(([view, label]) => `<button type="button" class="case-nav${(state.caseView === view || view === "plots" && state.caseView === "boards") ? " active" : ""}" data-action="view-${view}"${state.caseView === view || view === "plots" && state.caseView === "boards" ? ' aria-current="page"' : ""}>${label}</button>`).join("")}</nav>
     ${last ? resultBanner(last.action, last.result) : ""}
     <section class="panel"><div class="panel-head"><div><h2>${saved ? "Collected data" : "Ready to collect"}</h2><p>${saved ? "Choose the collected data used for plots and downloads." : "Your starting outputs and limits are saved."}</p></div>${saved ? `<label class="run-picker">Snapshot<select class="input" id="run-picker" aria-label="Saved run snapshot">${runOptions}</select></label>` : '<span class="badge gray">No runs yet</span>'}</div>${saved ? `<div class="run-summary"><div><span>Hops collected</span><strong${run?.collected_hops === undefined ? ' class="text-value"' : ""}>${esc(run?.collected_hops ?? "Not recorded")}</strong><span>${run?.hop_reference_name ? "Deepest collected group-relative hop" : "Deepest saved transaction hop"}</span></div><div><span>Tracked transactions</span><strong>${esc(run?.transaction_count ?? "—")}</strong></div><div><span>Unfinished branches</span><strong>${esc(run?.frontier_count ?? "—")}</strong></div><div><span>Run status</span><strong class="text-value">${esc(human(run?.status || "saved"))}</strong></div></div><div class="run-note">${icon("clock")}<span>${esc(formatDate(run?.created_at))}${run?.max_hops !== undefined ? ` · Collection hop limit: ${run.max_hops}` : ""}${run?.stop_reason ? ` · ${esc(human(run.stop_reason))}` : ""} · ${esc(hopBasis(run?.hop_reference_name))}.${run?.collected_hops !== undefined ? ` ${esc(hopBasisExplanation(run?.hop_reference_name))}` : ""}</span></div>${collectionPerformancePanel(run?.performance)}` : `<div class="empty-state" style="padding:31px 24px"><div class="empty-icon">${icon("graph")}</div><h2>${detail.seed_count ?? detail.seeds?.length ?? "Your"} starting output${(detail.seed_count ?? detail.seeds?.length) === 1 ? "" : "s"} selected</h2><p>Collect data first, then choose a plotting goal and its Miro board.</p></div>`}</section>
+    ${seedTransactionsPanel(detail, run)}
     <div class="workspace-content">${content}</div>`;
 }
 
