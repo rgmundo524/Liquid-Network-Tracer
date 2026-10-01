@@ -359,9 +359,11 @@ class ApiConcurrencyTests(unittest.TestCase):
             self.assertIsNone(api.advertised_rps)
             self.assertAlmostEqual(api.effective_rps, 49)
             self.assertEqual(api.min_interval, 1 / 49)
-            self.assertEqual(api.rate_limit_source, 'enterprise_target')
+            self.assertEqual(api.rate_limit_source, 'enterprise_adaptive')
+            self.assertEqual(api.api_rate_mode, 'adaptive')
             slower = self.client(lambda *args: None, advertised_rps=None, min_interval=.25)
             self.assertEqual(slower.effective_rps, 4)
+            self.assertEqual(slower.api_rate_mode, 'fixed')
         with patch.dict(os.environ, {'LIQUID_BLOCKSTREAM_ENTERPRISE_RPS': '25'}, clear=True):
             self.assertEqual(default_min_interval(), 1 / 25)
             self.assertEqual(default_min_interval('https://enterprise.blockstream.info/liquidtestnet/api'), 1 / 25)
@@ -679,6 +681,8 @@ class ApiConcurrencyTests(unittest.TestCase):
             api.call('GET', ENTERPRISE + '/one', 'esplora', '/one')
             api.call('POST', 'https://example.invalid/token', 'oauth', '/token')
         self.assertEqual(api.request_metrics(), {'latency_seconds': .25,
+                                                'api_rate_mode': 'fixed',
+                                                'api_target_rps': api.effective_rps,
                                                 'service_latency_seconds': None,
                                                 'completed_endpoints': 0,
                                                 'completed_requests': 1, 'pressure_events': 0,

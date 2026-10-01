@@ -91,7 +91,8 @@ class CliIntegrationTests(unittest.TestCase):
             saved = read_json(Path(first["directory"]) / "trace.json")["fetch_options"]
             self.assertEqual(saved, {"workers": 2, "advertised_rps": 10.0,
                                     "effective_rps": 9.5, "rate_limit_source": "advertised",
-                                    "min_interval": 0.0, "fixture": True})
+                                    "min_interval": 0.0, "min_interval_explicit": False,
+                                    "fixture": True})
             second = self.start("--hops", "0", "--api-rate-limit", "20", "--api-workers", "1")
             saved = read_json(Path(second["directory"]) / "trace.json")["fetch_options"]
             self.assertEqual((saved["advertised_rps"], saved["effective_rps"], saved["workers"]), (20.0, 19.0, 1))

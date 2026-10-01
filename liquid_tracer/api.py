@@ -13,30 +13,31 @@ from email.utils import parsedate_to_datetime
 from http.client import HTTPException
 
 from .common import StopRun, TraceError, canonical, read_json
-from .explorer_quota import SharedExplorerQuota
+from .explorer_quota import LocalExplorerQuota, SharedExplorerQuota
 from .explorer_http import ExplorerHTTP, TransientExplorerConnection, network_failure
 
 TOKEN_URL = "https://login.blockstream.com/realms/blockstream-public/protocol/openid-connect/token"
 ENTERPRISE = "https://enterprise.blockstream.info/liquid/api"
 MAX_BODY = 32 * 1024 * 1024
+ADAPTIVE_RATE_ATTEMPTS = 16
 
 
-def default_min_interval(base=ENTERPRISE, advertised_rps=None):
-    """Use a verified allowance, or the selected endpoint's operating target.
-
-    The paid endpoint defaults to the user's chosen 49 RPS, not a claim about
-    Blockstream's published quota. Other endpoints retain the prior 4 RPS cap.
-    """
+def _rate_settings(base, advertised_rps=None):
+    """Return the initial interval and mode without claiming a provider quota."""
     if advertised_rps is None:
         advertised_rps = os.getenv("LIQUID_BLOCKSTREAM_API_RPS") or None
     factor = .95
     label = "Advertised Blockstream requests per second"
+    mode, source = "fixed", "advertised"
     if advertised_rps is None:
         if urllib.parse.urlsplit(base).hostname != "enterprise.blockstream.info":
-            return .25
-        advertised_rps = os.getenv("LIQUID_BLOCKSTREAM_ENTERPRISE_RPS") or "49"
+            return .25, "fixed", "conservative_default", None
+        advertised_rps = os.getenv("LIQUID_BLOCKSTREAM_ENTERPRISE_RPS") or "auto"
+        if advertised_rps.strip().lower() == "auto":
+            return 1. / 49., "adaptive", "enterprise_adaptive", None
         factor = 1.
         label = "Blockstream enterprise target requests per second"
+        source = "enterprise_target"
     try:
         advertised_rps = float(advertised_rps)
     except (ValueError, TypeError):
@@ -49,7 +50,17 @@ def default_min_interval(base=ENTERPRISE, advertised_rps=None):
     interval = 1. / effective_rps
     if not math.isfinite(interval):
         raise TraceError(label + " is too small")
-    return interval
+    return interval, mode, source, advertised_rps if source == "advertised" else None
+
+
+def default_min_interval(base=ENTERPRISE, advertised_rps=None):
+    """Initial pacing interval; enterprise auto mode can subsequently grow.
+
+    A verified allowance is enforced at 95 percent. A numeric enterprise target
+    remains fixed, while the default/``auto`` starts at 49 RPS and learns from
+    successful responses and server pressure. Other endpoints retain 4 RPS.
+    """
+    return _rate_settings(base, advertised_rps)[0]
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -136,6 +147,25 @@ class Budget:
         time.sleep(max(0., seconds))
 
 
+class _RetryWindow:
+    """Keep adaptive throttling separate from a broken endpoint's retries."""
+
+    def __init__(self, adaptive):
+        self.adaptive = adaptive
+        self.attempts = self.rate_failures = self.transient_failures = 0
+
+    def feedback(self, status=None):
+        if status == 429:
+            self.rate_failures += 1
+            failures, limit = self.rate_failures, ADAPTIVE_RATE_ATTEMPTS
+        else:
+            self.transient_failures += 1
+            failures, limit = self.transient_failures, 4
+        if self.adaptive:
+            return failures - 1, failures >= limit
+        return self.attempts - 1, self.attempts >= 4
+
+
 class Esplora:
     def __init__(self, store, run_id, limits, base=ENTERPRISE, auth="blockstream",
                  fixture=None, tx_cache_seconds=86400, min_interval=None, transport=http,
@@ -146,15 +176,13 @@ class Esplora:
         self.transport = transport
         self.auth = auth
         self.tx_cache_seconds = tx_cache_seconds
-        configured_rps = advertised_rps
-        if configured_rps is None:
-            configured_rps = os.getenv("LIQUID_BLOCKSTREAM_API_RPS") or None
-        floor = default_min_interval(self.base, configured_rps)
-        self.advertised_rps = float(configured_rps) if configured_rps is not None else None
+        _, self.api_rate_mode, self.rate_limit_source, self.advertised_rps = _rate_settings(
+            self.base, advertised_rps)
+        # Keep the interval helper as the single injectable pacing boundary
+        # used by offline transports and deterministic pipeline tests.
+        floor = default_min_interval(self.base, advertised_rps)
         self.effective_rps = 1. / floor
-        self.rate_limit_source = ("advertised" if self.advertised_rps is not None else
-                                 "enterprise_target" if urllib.parse.urlsplit(self.base).hostname == "enterprise.blockstream.info"
-                                 else "conservative_default")
+        self.min_interval_explicit = min_interval is not None and min_interval > 0
         self.min_interval = floor if min_interval is None else min_interval
         self.last_call = 0.
         self.token = None
@@ -175,6 +203,7 @@ class Esplora:
         self._service_latency_seconds = None
         self._completed_endpoints = 0
         self._service_local = threading.local()
+        self._admission_local = threading.local()
         self._completed_requests = 0
         self._pressure_events = 0
         self._totals = {"network_seconds_total": 0., "pacing_wait_seconds_total": 0.,
@@ -199,9 +228,20 @@ class Esplora:
                 raise TraceError("Use a Liquid or Liquid testnet API path, not the Bitcoin API")
         if not math.isfinite(self.min_interval) or not math.isfinite(tx_cache_seconds) or self.min_interval < 0 or tx_cache_seconds < 0:
             raise TraceError("Interval and cache duration cannot be negative")
+        if self.min_interval_explicit and self.api_rate_mode == "adaptive":
+            # Auto's 49 RPS is only a warmup. A user-supplied interval replaces
+            # it; verified allowances and numeric fixed targets remain floors.
+            floor = 0.
         self.min_interval = 0. if self.fixture is not None else max(floor, self.min_interval)
+        if self.min_interval_explicit or self.fixture is not None:
+            # An explicitly requested spacing is a fixed ceiling, not a
+            # suggestion that an adaptive controller can eventually exceed.
+            self.api_rate_mode = "fixed"
         if self.fixture is None:
             self.effective_rps = 1. / self.min_interval
+            if not math.isfinite(self.effective_rps):
+                raise TraceError("Explorer interval is too small to represent a finite request rate")
+        self.api_target_rps = 0. if self.fixture is not None else self.effective_rps
         if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= 8:
             raise TraceError("Explorer workers must be an integer from 1 to 8")
         if not isinstance(adaptive_workers, bool):
@@ -213,6 +253,8 @@ class Esplora:
         # embedding application supplies its own coordinator.
         self._shared_quota = shared_quota if self.fixture is None else None
         self._automatic_quota = self.fixture is None and transport is http
+        if self.fixture is None and self.api_rate_mode == "adaptive" and not self._automatic_quota and self._shared_quota is None:
+            self._shared_quota = LocalExplorerQuota(self.min_interval, adaptive=True)
         self._owned_transport = ExplorerHTTP(self.base, TOKEN_URL, http) if self._automatic_quota else None
         if self._owned_transport is not None:
             self.transport = self._owned_transport
@@ -289,6 +331,8 @@ class Esplora:
         """
         with self._metrics_lock:
             metrics = {"latency_seconds": self._latency_seconds,
+                       "api_rate_mode": self.api_rate_mode,
+                       "api_target_rps": self.api_target_rps,
                        "service_latency_seconds": self._service_latency_seconds,
                        "completed_endpoints": self._completed_endpoints,
                        "completed_requests": self._completed_requests,
@@ -371,7 +415,9 @@ class Esplora:
         # multiplies the configured request rate or the run's hard budget.
         with self._gate:
             if self._automatic_quota and self._shared_quota is None:
-                self._shared_quota = SharedExplorerQuota(self.base, self.min_interval)
+                self._shared_quota = SharedExplorerQuota(self.base, self.min_interval,
+                                                        adaptive=self.api_rate_mode == "adaptive")
+            self._admission_local.admission = None
             while True:
                 self.budget.check_request()
                 if self._cancelled.is_set():
@@ -384,6 +430,8 @@ class Esplora:
                 if self._shared_quota is not None:
                     admission = self._shared_quota.reserve()
                     with self._metrics_lock:
+                        if getattr(admission, "target_rps", 0):
+                            self.api_target_rps = admission.target_rps
                         if self._shared_metrics is None:
                             self._shared_metrics = {"shared_api_active_clients": 1,
                                                     "shared_api_effective_rps": self.effective_rps}
@@ -393,6 +441,8 @@ class Esplora:
                         self._shared_metrics.update(shared_api_wait_seconds=admission.wait_seconds,
                                                     shared_api_wait_reason=admission.reason)
                     delay = 0. if admission.admitted else admission.wait_seconds
+                    if admission.admitted:
+                        self._admission_local.admission = admission
                 else:
                     delay = max(self.last_call + self.min_interval, self._cooldown_until) - current
                 if delay <= 0:
@@ -418,7 +468,7 @@ class Esplora:
                     if self._cancelled.is_set():
                         raise StopRun("interrupted")
                     self._gate.wait(.05)
-            if not math.isfinite(seconds) or seconds > 30:
+            if not math.isfinite(seconds) or (seconds > 30 and self.api_rate_mode != "adaptive"):
                 self._stop_reason = "server_retry_later"
                 self._gate.notify_all()
                 raise StopRun(self._stop_reason)
@@ -426,7 +476,7 @@ class Esplora:
             self._gate.notify_all()
 
     @staticmethod
-    def _retry_delay(headers, attempt=0):
+    def _retry_delay(headers, attempt=0, *, backoff_cap=None):
         retry = next((v for k, v in headers.items() if k.lower() == "retry-after"), "")
         try:
             delay = float(retry)
@@ -435,7 +485,10 @@ class Esplora:
                 delay = parsedate_to_datetime(retry).timestamp() - time.time()
             except (ValueError, TypeError, OverflowError):
                 delay = 0.
-        return max(2 ** attempt, delay) if math.isfinite(delay) else float("inf")
+        fallback = 2 ** attempt
+        if backoff_cap is not None:
+            fallback = min(backoff_cap, fallback)
+        return max(fallback, delay) if math.isfinite(delay) else float("inf")
 
     def _pause_retry(self, seconds):
         """Wait between retries without hiding attempts or delaying cancellation."""
@@ -467,6 +520,7 @@ class Esplora:
 
     def _call(self, method, url, kind, endpoint, headers=None, body=None):
         timeout = self._admit(kind, endpoint)
+        admission = getattr(self._admission_local, "admission", None)
         started = time.monotonic()
         result = None
         with self._metrics_lock:
@@ -478,9 +532,13 @@ class Esplora:
             finally:
                 self._measure_request(started, kind, result[0] if result is not None else None,
                                       failed=result is None)
-        except (TraceError, OSError, urllib.error.URLError):
+        except (TraceError, OSError, urllib.error.URLError) as error:
             self._evidence(self.store.attempt, self.run_id, kind, endpoint, "network_error")
+            if isinstance(error, (TransientExplorerConnection, OSError, urllib.error.URLError)):
+                self._rate_feedback(admission, failed=True)
             raise
+        if kind == "esplora" or result[0] in (429, 500, 502, 503, 504):
+            self._rate_feedback(admission, status=result[0], headers=result[1])
         if result[0] == 429:
             # Close the shared gate as soon as the response arrives. The caller
             # still archives the response before propagating a long cooldown.
@@ -496,6 +554,37 @@ class Esplora:
                     self._gate.notify_all()
         self._evidence(self.store.attempt, self.run_id, kind, endpoint, result[0])
         return result
+
+    def _rate_feedback(self, admission, *, status=None, failed=False, headers=None):
+        """React to an individual admission, preserving response archival.
+
+        The admission's pressure generation prevents many simultaneous failures
+        from repeatedly reducing the shared rate. Ordinary client errors neither
+        increase the target nor masquerade as provider throttling.
+        """
+        if self.api_rate_mode != "adaptive" or admission is None or self._shared_quota is None:
+            return
+        try:
+            if status is not None and 200 <= status < 300:
+                self._shared_quota.success(admission)
+            elif failed or status in (429, 500, 502, 503, 504):
+                delay = self._retry_delay(headers or {})
+                with self._exclude_service(), self._gate:
+                    while not self._shared_quota.pressure(admission, seconds=delay):
+                        self.budget.check()
+                        if self._cancelled.is_set():
+                            raise StopRun("interrupted")
+                        self._gate.wait(.05)
+        except StopRun as error:
+            # The caller still records a received response before the next
+            # admission fails, including cancellation during quota contention.
+            with self._gate:
+                self._stop_reason = str(error)
+                self._gate.notify_all()
+        except TraceError as error:
+            with self._gate:
+                self._pacing_error = error
+                self._gate.notify_all()
 
     def bearer(self):
         with self._token_lock:
@@ -518,14 +607,18 @@ class Esplora:
                        "grant_type": "client_credentials", "scope": "openid"}).encode()
         # This exact client-credentials acquisition may be repeated safely.
         # No other POST is replayed, and token bodies are never archived.
-        for attempt in range(4):
+        retries = _RetryWindow(self.api_rate_mode == "adaptive")
+        while True:
+            retries.attempts += 1
             try:
                 status, response_headers, raw = self.call(
                     "POST", TOKEN_URL, "oauth", "/token",
                     {"Content-Type": "application/x-www-form-urlencoded"}, payload)
             except TransientExplorerConnection as error:
-                if attempt == 3:
-                    raise type(error)("Blockstream token request network retries exhausted after 4 attempts: "
+                attempt, exhausted = retries.feedback()
+                if exhausted:
+                    raise type(error)("Blockstream token request network retries exhausted after "
+                                      + str(retries.attempts) + " attempts: "
                                       + str(error)) from None
                 self._pause_retry(2 ** attempt)
                 continue
@@ -535,12 +628,18 @@ class Esplora:
                 raise TraceError("Blockstream authentication failed (HTTP " + str(status) + ")")
             if self._pacing_error is not None:
                 raise self._pacing_error
-            delay = self._retry_delay(response_headers, attempt)
+            attempt, exhausted = retries.feedback(status)
+            delay = self._retry_delay(response_headers, attempt,
+                                      backoff_cap=30 if retries.adaptive and status == 429 else None)
             if status == 429:
                 self._cooldown(delay)
-            if attempt == 3:
-                raise TraceError("Blockstream token request retries exhausted after 4 attempts (HTTP " + str(status) + ")")
-            if not math.isfinite(delay) or delay > 30:
+            if exhausted:
+                if retries.adaptive and status == 429:
+                    raise TraceError("Blockstream token request rate-limit retries exhausted after "
+                                     + str(retries.rate_failures) + " HTTP 429 responses")
+                raise TraceError("Blockstream token request retries exhausted after "
+                                 + str(retries.attempts) + " attempts (HTTP " + str(status) + ")")
+            if not math.isfinite(delay) or (delay > 30 and self.api_rate_mode != "adaptive"):
                 raise StopRun("server_retry_later")
             if status != 429:
                 self._pause_retry(delay)
@@ -776,7 +875,9 @@ class Esplora:
             self._remember(oid)
             return json.loads(raw), oid
         auth_retried = False
-        for attempt in range(4):
+        retries = _RetryWindow(self.api_rate_mode == "adaptive")
+        while True:
+            retries.attempts += 1
             from . import __version__
             headers = {"Accept": "application/json", "User-Agent": "liquid-utxo-tracer/" + __version__}
             if self.auth == "blockstream":
@@ -789,10 +890,11 @@ class Esplora:
             except TransientExplorerConnection as error:
                 # Fresh, reused and proxy GET failures all consume the original
                 # request budget and network-error evidence. Their replacements
-                # use the same admission gate and four-attempt ceiling as HTTP
-                # responses, with interruptible 1/2/4 second backoff.
-                if attempt == 3:
-                    raise type(error)("Explorer network retries exhausted after 4 attempts for "
+                # use the same admission gate and four-failure ceiling as HTTP
+                # server errors, with interruptible 1/2/4 second backoff.
+                attempt, exhausted = retries.feedback()
+                if exhausted:
+                    raise type(error)("Explorer network retries exhausted after " + str(retries.attempts) + " attempts for "
                                       + endpoint + ": " + str(error)) from None
                 self._pause_retry(2 ** attempt)
                 continue
@@ -809,18 +911,25 @@ class Esplora:
                         if token_generation == self._token_generation:
                             self.token = None
                 auth_retried = True
+                if not retries.adaptive and retries.attempts >= 4:
+                    break
                 continue
             if status == 429 or status in (500, 502, 503, 504):
                 if self._pacing_error is not None:
                     raise self._pacing_error
-                delay = self._retry_delay(response_headers, attempt)
+                attempt, exhausted = retries.feedback(status)
+                delay = self._retry_delay(response_headers, attempt,
+                                          backoff_cap=30 if retries.adaptive and status == 429 else None)
                 if status == 429:
                     # The service's cooldown applies to every worker, including
                     # unrelated endpoints that have not started their request.
                     self._cooldown(delay)
-                if attempt == 3:
+                if exhausted:
+                    if retries.adaptive and status == 429:
+                        raise TraceError("Explorer rate-limit retries exhausted after "
+                                         + str(retries.rate_failures) + " HTTP 429 responses for " + endpoint)
                     break
-                if not math.isfinite(delay) or delay > 30:
+                if not math.isfinite(delay) or (delay > 30 and self.api_rate_mode != "adaptive"):
                     raise StopRun("server_retry_later")
                 if status != 429:
                     self._pause_retry(delay)

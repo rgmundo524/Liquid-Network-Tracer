@@ -22,13 +22,13 @@
     LIQUID_CASE_DIR = "${config.devenv.root}/cases/current";
     LIQUID_SECRET_PROVIDER = "protonpass";
     LIQUID_SECRET_PROFILE = "development";
-    # Chosen paid-endpoint rate, shared across local workers and instances.
-    # This is an actual target, not an advertised Blockstream quota.
-    LIQUID_BLOCKSTREAM_ENTERPRISE_RPS = "49";
+    # Discover throughput from successful responses and provider backoff,
+    # shared across local workers and instances. A number selects a fixed rate.
+    LIQUID_BLOCKSTREAM_ENTERPRISE_RPS = "auto";
     # Trace fetches adapt to latency and available resources, up to 64 workers.
     # Set 1 for serial fetching or 1..64 as an explicit concurrency ceiling.
     LIQUID_TRACE_WORKERS = "auto";
-    # A verified allowance in LIQUID_BLOCKSTREAM_API_RPS overrides this target
+    # A verified allowance in LIQUID_BLOCKSTREAM_API_RPS overrides auto mode
     # and applies 5% headroom to that allowance instead.
     LIQUID_SECRETSPEC_BIN = "${pkgs.secretspec}/bin/secretspec";
     SECRETSPEC_PROTONPASS_CLI_PATH = "${pkgs.proton-pass-cli}/bin/pass-cli";

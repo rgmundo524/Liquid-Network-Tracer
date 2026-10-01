@@ -14,9 +14,27 @@ from urllib.parse import urlsplit
 from .address_activity import validate_address
 from .address_count_cache import CountCacheJournal, read_snapshot
 from .common import StopRun, TraceError, canonical, digest, read_json, save_json
+from .performance import public_api_rate
 
 COUNT_GAP = 20
 COUNT_HEIGHT = 28
+
+
+def _saved_min_interval(options):
+    """Only replay an intentional interval, not an old computed 49 RPS floor."""
+    interval = options.get("min_interval")
+    if options.get("min_interval_explicit") is False:
+        # New enterprise_target snapshots represent an explicitly configured
+        # numeric rate. Adaptive snapshots use enterprise_adaptive instead.
+        return interval if options.get("rate_limit_source") == "enterprise_target" else None
+    if ("min_interval_explicit" not in options
+            and options.get("rate_limit_source") == "enterprise_target"
+            and options.get("advertised_rps") is None
+            and type(interval) in (int, float)
+            and 0 < interval < 1
+            and math.isclose(interval, 1 / 49, rel_tol=1e-12, abs_tol=0)):
+        return None
+    return interval
 
 
 def label(node):
@@ -224,7 +242,7 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
                                   fixture=fixture, tx_cache_seconds=0, workers=fetch_options.get("workers", 8),
                                   adaptive_workers=True,
                                   advertised_rps=fetch_options.get("advertised_rps"),
-                                  min_interval=fetch_options.get("min_interval"), **options)
+                                  min_interval=_saved_min_interval(fetch_options), **options)
                     if api.base != source:
                         raise TraceError("Address-count source does not match the saved run")
                     scaling = CountConcurrency(api.workers, len(todo),
@@ -250,10 +268,13 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
                         return scaling.target(api.request_metrics())
 
                     def metrics():
+                        feedback = api.request_metrics()
                         return {"worker_count": workers(), "worker_limit": scaling.ceiling,
+                                "fetched": fetched,
                                 "observed_rps": fetched / max(.001, time.monotonic() - started),
-                                **{key: value for key, value in api.request_metrics().items()
-                                   if key.startswith("shared_api_")}}
+                                **{key: value for key, value in feedback.items()
+                                   if key.startswith("shared_api_") or key in (
+                                       "api_rate_mode", "api_target_rps", "rate_limit_responses", "retry_responses")}}
 
                     def idle_progress():
                         _progress(progress, "address_counts", len(wanted)-len(todo)+examined,
@@ -314,6 +335,12 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
                         "worker_limit": scaling.ceiling, "elapsed_seconds": time.monotonic() - started,
                         "checkpoint_count": checkpoint_count, "checkpoint_seconds": checkpoint_seconds,
                         "observed_rps": fetched / max(.001, time.monotonic() - started)}
+                    feedback = api.request_metrics()
+                    concurrency_report.update(public_api_rate(feedback))
+                    for key in ("rate_limit_responses", "retry_responses"):
+                        number = feedback.get(key)
+                        if type(number) is int and 0 <= number <= 2**53-1:
+                            concurrency_report[key] = number
                     if failure is not None:
                         raise failure
             known = sum(address in counts for address in wanted)
@@ -322,7 +349,8 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
             notice = (f"Address transaction counts: {known:,}/{len(wanted):,} available. "
                       + (f"Lookup incomplete ({reason}); unavailable counts remain ??." if remaining
                          else "Confirmed plus mempool totals, at their saved observation times."))
-            _progress(progress, "address_counts_incomplete" if remaining else "address_counts_ready", known, len(wanted))
+            _progress(progress, "address_counts_incomplete" if remaining else "address_counts_ready",
+                      known, len(wanted), **(metrics() if api is not None else {}))
             return {"run_id": state["run_id"], "fetched": fetched, "known": known,
                     "total": len(wanted), "remaining": remaining, "failed": len(failures),
                     "stop_reason": reason, "errors": failures,
@@ -437,11 +465,13 @@ def public_count_report(report):
         number = report.get(key)
         if type(number) is int and 1 <= number <= 64:
             value[key] = number
-    number = report.get("checkpoint_count")
-    if type(number) is int and 0 <= number <= 2**53-1:
-        value["checkpoint_count"] = number
+    for key in ("checkpoint_count", "rate_limit_responses", "retry_responses"):
+        number = report.get(key)
+        if type(number) is int and 0 <= number <= 2**53-1:
+            value[key] = number
     for key in ("elapsed_seconds", "observed_rps", "checkpoint_seconds"):
         number = report.get(key)
         if type(number) in (int, float) and math.isfinite(number) and 0 <= number <= 2**53-1:
             value[key] = number
+    value.update(public_api_rate(report))
     return value

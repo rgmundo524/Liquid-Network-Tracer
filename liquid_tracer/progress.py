@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from .layout_search_reporting import layout_search_warning, public_search_counts
+from .performance import public_api_rate
 
 
 MESSAGES = {
@@ -144,6 +145,9 @@ def public_progress(event):
              "message": MESSAGES[event["phase"]]}
     if value["phase"].startswith("address_counts"):
         value.update(_public_api_workers(event))
+        fetched = event.get("fetched")
+        if type(fetched) is int and 0 <= fetched <= done:
+            value["fetched"] = fetched
         if "worker_count" in value:
             noun = "request" if value["worker_count"] == 1 else "requests"
             value["message"] += f"; up to {value['worker_count']} concurrent {noun}"
@@ -167,6 +171,14 @@ def public_progress(event):
         if "observed_rps" in value:
             value["message"] += f"; {value['observed_rps']:.1f} requests/s"
     if value["phase"].startswith("address_counts") or value["phase"] in COLLECTION_PHASES:
+        for key in ("rate_limit_responses", "retry_responses"):
+            number = event.get(key)
+            if type(number) is int and 0 <= number <= 2 ** 53 - 1:
+                value[key] = number
+        value.update(public_api_rate(event))
+        if "api_rate_mode" in value and "api_target_rps" in value:
+            value["message"] += (f"; {value['api_rate_mode']} API target "
+                                 f"{value['api_target_rps']:.1f} requests/s total")
         value.update(_public_shared_api(event))
         if value.get("shared_api_active_clients", 1) > 1:
             value["message"] += f"; API budget shared by {value['shared_api_active_clients']} clients"

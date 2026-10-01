@@ -11,6 +11,7 @@ from . import __version__
 from .common import (HEX64, StopRun, TraceError, digest, match_labels, now,
                      output_kind, parse_outpoint, save_json)
 from .services import ServiceScope, is_service_stop
+from .performance import public_api_rate
 from .progress import report_progress
 from .trace_checkpoint import TraceCheckpoint
 from .trace_fetch import FrontierFetcher, TraceConcurrency, heap_prefix
@@ -106,10 +107,11 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
                   "worker_peak": policy.peak if policy is not None else workers,
                   "worker_limit": policy.ceiling if policy is not None else workers}
         result.update(metrics())
-        # Optional API snapshots can include descriptive shared-wait reasons;
-        # only numeric measurements belong to the saved performance table.
+        # Optional API snapshots can include descriptive shared-wait reasons.
+        # Preserve only numeric measurements and the validated pacing mode.
         state["performance"] = {key: value for key, value in result.items()
                                 if type(value) in (int, float) and value >= 0 and math.isfinite(value)}
+        state["performance"].update(public_api_rate(result))
 
     def get(endpoint):
         nonlocal fetch_wait_seconds
@@ -367,7 +369,9 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
         return {"worker_count": target_workers,
                 "worker_limit": policy.ceiling if policy is not None else workers,
                 "observed_rps": api.budget.requests / elapsed,
-                **{key: value for key, value in feedback.items() if key.startswith("shared_api_")}}
+                **{key: value for key, value in feedback.items()
+                   if key.startswith("shared_api_") or key in (
+                       "api_rate_mode", "api_target_rps", "rate_limit_responses", "retry_responses")}}
 
     def report_activity():
         nonlocal last_progress_at
