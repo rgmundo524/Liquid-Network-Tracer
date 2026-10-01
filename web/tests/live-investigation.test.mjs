@@ -2970,6 +2970,35 @@ test('discovery of another tab active and short completed jobs refreshes data wi
   await view.discoverJobs(); assert.equal(view.state.jobs.has('b'), false);
 });
 
+for (const action of ['trace', 'address-counts', 'plot-sync']) {
+  test(`new investigation loads outputs while the previously viewed case runs ${action}`, async () => {
+    const collecting = activeTask('existing', 'alpha', {action,
+      resource_kind: action === 'plot-sync' ? 'board' : 'collection', resource_key: action === 'plot-sync' ? 'BOARD=' : undefined});
+    const lookup = activeTask('lookup', null, {action: 'lookup', live: true, resource_kind: 'exclusive'});
+    const view = await harness(path => path === '/api/session'
+      ? {csrf: 'test', settings: defaults, cases: [multiCase('alpha')], active_jobs: [collecting]}
+      : path === '/api/cases/alpha' ? multiCase('alpha')
+      : path === '/api/lookup' ? lookup
+      : path === '/api/jobs/lookup' ? {...lookup, status: 'succeeded', result: {transactions: [{txid, outputs: []}]}}
+      : undefined);
+    await view.openCase('alpha');
+    view.navigate('new');
+    view.newForm({name: 'Independent investigation', txids: txid});
+    assert.equal(view.state.activeCase.id, 'alpha', 'previous case remains cached during new-case entry');
+    assert.equal(view.isBusy(), false);
+    await view.dispatch('lookup');
+    assert.equal(view.calls.filter(call => call.path === '/api/lookup').length, 1);
+    assert.equal(view.runningJobs().length, 2);
+    assert.equal(view.state.jobs.get('lookup').caseId, undefined);
+    await view.dispatch('lookup');
+    assert.equal(view.calls.filter(call => call.path === '/api/lookup').length, 1, 'duplicate lookup stays blocked');
+    await view.pollJob('lookup');
+    assert.equal(view.state.draft.reports[0].txid, txid);
+    assert.equal(view.state.draft.name, 'Independent investigation');
+    assert.equal(view.state.jobs.get('existing').status, 'running');
+  });
+}
+
 test('real null-case lookup gates only new investigation and changed hashes survive completion', async () => {
   const task = activeTask('lookup', null, {action: 'lookup', live: true});
   const view = await harness(path => path === '/api/lookup' ? task : path === '/api/jobs/lookup'

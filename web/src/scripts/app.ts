@@ -338,7 +338,7 @@ const scopeBusy = (caseId?: string): boolean => runningJobs().some(job => job.ca
 const isBusy = (): boolean => submitting || changeOutputsPending() || inputImportPending() ||
   (state.page === "new" ? scopeBusy() : viewingCase(state.activeCase?.id) ? scopeBusy(state.activeCase!.id) : false);
 const draftBusy = (): boolean => submitting || changeOutputsPending() || inputImportPending();
-function requestedResource(action: string, body: Record<string, unknown> = {}, caseId = state.activeCase?.id): JobResource {
+function requestedResource(action: string, body: Record<string, unknown> = {}, caseId: string | null | undefined = state.activeCase?.id): JobResource {
   if (["trace", "address-counts"].includes(action)) return {resource_kind: "collection"};
   if (action === "plot" && body.layout_mode !== "update") return {resource_kind: "plot"};
   if (["plot", "plot-sync", "board-sync", "board-create", "board-create-sync"].includes(action)) {
@@ -356,12 +356,12 @@ function requestedResource(action: string, body: Record<string, unknown> = {}, c
   }
   return {resource_kind: "exclusive"};
 }
-function actionBusy(action: string, body: Record<string, unknown> = {}, caseId = state.activeCase?.id): boolean {
+function actionBusy(action: string, body: Record<string, unknown> = {}, caseId: string | null | undefined = state.activeCase?.id): boolean {
   if (draftBusy()) return true;
   const requested = requestedResource(action, body, caseId);
   return runningJobs().some(job => {
-    const existing = job.resource_kind ? job as JobResource : requestedResource(job.action, {}, job.caseId);
-    if (job.caseId !== caseId) return requested.resource_kind === "board" && existing.resource_kind === "board"
+    const existing = job.resource_kind ? job as JobResource : requestedResource(job.action, {}, job.caseId ?? null);
+    if ((job.caseId ?? null) !== (caseId ?? null)) return requested.resource_kind === "board" && existing.resource_kind === "board"
       && requested.resource_key !== "new-board" && requested.resource_key === existing.resource_key;
     if (requested.resource_kind === "exclusive" || existing.resource_kind === "exclusive") return true;
     if (requested.resource_kind === "collection") return existing.resource_kind === "collection";
@@ -2010,10 +2010,11 @@ async function startJob(
   caseId?: string,
 ): Promise<string | null> {
   const request = typeof body === "object" && body !== null ? {...body} as Record<string, unknown> : {};
-  if (actionBusy(action, request, caseId)) return null;
+  // An unscoped seed lookup must not inherit the previously viewed case.
+  if (actionBusy(action, request, caseId ?? null)) return null;
   if (request.run_id === "latest" && action !== "trace" && caseId === state.activeCase?.id)
     request.run_id = currentRun()?.id || state.activeCase?.latest_run || "latest";
-  const resource = requestedResource(action, request, caseId);
+  const resource = requestedResource(action, request, caseId ?? null);
   if (action !== "miro-frame-review") resetFrameRecovery();
   state.editConflicts = null;
   saveDraft();
