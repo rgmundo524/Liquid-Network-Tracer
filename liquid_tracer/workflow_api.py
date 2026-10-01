@@ -2,6 +2,7 @@
 
 from urllib.parse import quote
 import json
+import re
 
 from .common import TraceError
 from .investigations import read_case
@@ -35,6 +36,12 @@ def public_board(value):
 
 def public_plot(value):
     result = _fields(value, PLOT_FIELDS)
+    source = value.get("collection_source")
+    if (isinstance(source, dict) and source.get("kind") == "shared"
+            and isinstance(source.get("dataset_id"), str) and re.fullmatch(r"[0-9a-f]{32}", source["dataset_id"])
+            and isinstance(source.get("run_id"), str) and re.fullmatch(r"[0-9a-f]{16}", source["run_id"])
+            and isinstance(source.get("archive_sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", source["archive_sha256"])):
+        result["collection_source"] = {key: source[key] for key in ("kind", "dataset_id", "run_id", "archive_sha256")}
     counts = value.get("update_counts")
     count_keys = {"new_nodes", "retained_nodes", "removed_nodes", "new_connectors", "removed_connectors"}
     if (value.get("layout_mode") == "update" and isinstance(counts, dict) and set(counts) == count_keys
@@ -164,7 +171,8 @@ def workflow_action(server, case, metadata, body):
         if body.get("goal") != "connections":
             required.update({"min_hops", "max_hops"})
         endpoint_options = {"include_unspent", "include_unspendable"}
-        allowed = {"include_context", "layout_mode", "board_record_id", "layout_settings", "min_hops", "max_hops"}
+        allowed = {"include_context", "layout_mode", "board_record_id", "layout_settings", "min_hops", "max_hops",
+                   "data_source", "dataset_id"}
         if action == "plot-sync":
             allowed.add("name")
         if not required <= set(body) or set(body) - required - endpoint_options - allowed:
@@ -201,10 +209,24 @@ def workflow_action(server, case, metadata, body):
             raise RequestError("Enter whole-number hops from 0 to 2147483647, with minimum no greater than maximum.")
         if not isinstance(body.get("run_id"), str):
             raise RequestError("Choose a saved collection to plot.")
-        selected = resolve_latest(case, body["run_id"])
-        verify_export(run_path(case, selected))
+        data_source = body.get("data_source", "investigation")
+        if data_source not in ("investigation", "shared"):
+            raise RequestError("Choose this investigation's collection or the shared collection.")
+        if data_source == "shared":
+            from .shared_collection import resolve_shared_run
+            dataset_id = body.get("dataset_id")
+            if not isinstance(dataset_id, str) or not re.fullmatch(r"[0-9a-f]{32}", dataset_id):
+                raise RequestError("Choose a compatible shared collection dataset.")
+            selected, _ = resolve_shared_run(case, body["run_id"], dataset_id=dataset_id)
+        else:
+            if "dataset_id" in body:
+                raise RequestError("A shared dataset ID applies only to shared collection data.")
+            selected = resolve_latest(case, body["run_id"])
+            verify_export(run_path(case, selected))
         arguments = [action, "--case", str(case), "--goal", body["goal"], "--run", selected,
                      "--min-hops", str(lower), "--max-hops", str(upper)]
+        if data_source == "shared":
+            arguments.extend(["--data-source", "shared", "--dataset-id", dataset_id])
         if "layout_settings" in body:
             from .plots import LAYOUT_SETTINGS, validate_layout_settings
             from .export import PRESENTATION_VERSION

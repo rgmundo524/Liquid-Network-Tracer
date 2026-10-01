@@ -17,7 +17,7 @@ const source = stripTypeScriptTypes(
     .replace('void initialize().catch(', 'globalThis.startup = initialize().catch('),
   {mode: 'transform'},
 );
-const script = new vm.Script(source + '\n Object.defineProperty(state, "job", {get() {return runningJobs()[0] || null;}, set(job) {state.jobs.clear(); if (job && state.activeCase && state.page === "dashboard") state.page = "case"; if (job) state.jobs.set(job.id, {status: "running", generation: pageGeneration, caseId: state.activeCase?.id, ...job});}}); globalThis.appTest = {state, dispatch, pollJob: (id) => pollJob(id || runningJobs()[0]?.id), startJob, discoverJobs, runningJobs, jobBanner, jobProgress, cancelJob, openCase, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy, pegoutsGraph, pegoutInput, currentPegoutSearch, suggestCenterNames, suggestHopReferenceNames, render, navigate, workflowInput, currentWorkflow, actionBusy, taskActivity};');
+const script = new vm.Script(source + '\n Object.defineProperty(state, "job", {get() {return runningJobs()[0] || null;}, set(job) {state.jobs.clear(); if (job && state.activeCase && state.page === "dashboard") state.page = "case"; if (job) state.jobs.set(job.id, {status: "running", generation: pageGeneration, caseId: state.activeCase?.id, ...job});}}); globalThis.appTest = {state, dispatch, pollJob: (id) => pollJob(id || runningJobs()[0]?.id), startJob, discoverJobs, runningJobs, jobBanner, jobProgress, cancelJob, openCase, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy, pegoutsGraph, pegoutInput, currentPegoutSearch, suggestCenterNames, suggestHopReferenceNames, render, navigate, workflowInput, currentWorkflow, actionBusy, taskActivity, refreshCaseDetail, refreshSharedCollection};');
 const txid = 'a'.repeat(64);
 const defaults = {hops: 1, hop_reference_name: '', max_transactions: 20, max_outpoints: 100, max_requests: 30,
   max_seconds: 60, max_new_items: 750, layout_attempts: 25, connector_style: 'straight'};
@@ -3835,3 +3835,168 @@ for (const deliveredBeforePost of [false, true]) {
     assert.deepEqual(JSON.parse(storage.get('liquid-tracer:task-notifications:v1')), [task.id]);
   });
 }
+
+const sharedCollection = (extra = {}) => ({dataset_id: 'pool', name: 'Shared collection', compatible: true,
+  seeds: [`${txid}:0`, `${'b'.repeat(64)}:1`], seed_count: 2,
+  members: [{id: 'case1', name: 'Alpha'}, {id: 'case2', name: 'Beta'}], latest_run: 'shared-new',
+  runs: [{id: 'shared-new', status: 'bounded_complete', collected_hops: 12, transaction_count: 80, max_hops: 12},
+    {id: 'shared-old', status: 'bounded_complete', collected_hops: 6, transaction_count: 40, max_hops: 6}], ...extra});
+
+test('shared collection captures open cases once and leaves private preferences unchanged', async () => {
+  let release;
+  const posting = new Promise(resolve => {release = resolve;});
+  const detail = workflowCase({shared_collection: sharedCollection()});
+  const view = await harness(path => path.endsWith('/actions') ? posting : undefined);
+  view.state.activeCase = detail; view.state.page = 'case'; view.state.openCases = ['case2', 'case2'];
+  await view.dispatch('shared-collect-dialog');
+  assert.match(view.dialog.innerHTML, /Uses Shared evidence’s collection limits and explicit stop-tracing rules/);
+  await view.submitDialog({hops: '8', hop_reference_name: 'Perp'});
+  view.state.openCases = ['different'];
+  assert.deepEqual(view.calls.find(call => call.path.endsWith('/actions')).body,
+    {action: 'shared-trace', mode: 'collect', case_ids: ['case2', 'case1'], hops: 8, hop_reference_name: 'Perp'});
+  release({id: 'shared-job', status: 'running', resource_kind: 'shared_collection', resource_key: 'global-pool'});
+  await new Promise(setImmediate);
+  assert.deepEqual(detail.seeds, [`${txid}:0`]);
+  assert.equal(detail.run_defaults.hop_reference_name, '');
+  assert.equal(view.state.jobs.get('shared-job').resource_kind, 'shared_collection');
+});
+
+test('continuing shared data pins its displayed run without open-tab seeds or private run', async () => {
+  const detail = workflowCase({shared_collection: sharedCollection()});
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'continue-shared', status: 'running'} : undefined);
+  view.state.activeCase = detail; view.state.page = 'case'; view.state.selectedRun = 'saved1'; view.state.openCases = ['unrelated'];
+  await view.dispatch('shared-continue-dialog');
+  detail.shared_collection.latest_run = 'changed-after-opening';
+  await view.submitDialog({hops: '0', hop_reference_name: ''});
+  assert.deepEqual(view.calls.find(call => call.path.endsWith('/actions')).body,
+    {action: 'shared-trace', mode: 'continue', run_id: 'shared-new', hops: 0, hop_reference_name: ''});
+  assert.equal(view.state.selectedRun, 'saved1');
+});
+
+test('shared collectors block each other across cases while private collection and plotting stay independent', async () => {
+  const view = await harness(); view.state.activeCase = workflowCase({shared_collection: sharedCollection()}); view.state.page = 'case';
+  view.state.jobs.set('shared', {id: 'shared', action: 'shared-trace', caseId: 'different', status: 'running', resource_kind: 'shared_collection', resource_key: 'global-pool'});
+  assert.equal(view.actionBusy('shared-trace'), true);
+  assert.equal(view.actionBusy('trace'), false);
+  assert.equal(view.actionBusy('plot', {layout_mode: 'fresh'}), false);
+  assert.equal(view.actionBusy('plot-sync', {layout_mode: 'fresh'}), false);
+  view.state.jobs.clear();
+  view.state.jobs.set('private', {id: 'private', action: 'trace', caseId: 'case1', status: 'running', resource_kind: 'collection'});
+  assert.equal(view.actionBusy('shared-trace'), false); assert.equal(view.actionBusy('trace'), true);
+  assert.doesNotMatch(view.workspace(), /data-action="shared-collect-dialog"[^>]*disabled/);
+});
+
+test('shared source generates before private collection and pins the selected shared snapshot', async () => {
+  const detail = workflowCase({runs: [], latest_run: undefined, shared_collection: sharedCollection()});
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'shared-plot', status: 'running'} : path === '/api/cases/case1' ? detail : undefined);
+  view.state.activeCase = detail; await view.dispatch('view-plots');
+  assert.match(view.workspace(), /data-action="workflow-plot"[^>]*disabled/);
+  workflowEdit(view, 'data-source', 'shared'); workflowEdit(view, 'shared-run', 'shared-old');
+  assert.doesNotMatch(view.workspace(), /data-action="workflow-plot"[^>]*disabled/);
+  assert.match(view.workspace(), /own selected seed outputs, attribution rules/);
+  await view.dispatch('workflow-plot');
+  const request = view.calls.find(call => call.path.endsWith('/actions'));
+  assert.equal(request.body.data_source, 'shared'); assert.equal(request.body.dataset_id, 'pool'); assert.equal(request.body.run_id, 'shared-old');
+  assert.equal(view.state.selectedRun, 'latest'); assert.equal(view.state.jobs.get('shared-plot').source_run_id, 'shared-old');
+});
+
+test('shared and private source drafts remain isolated across investigations', async () => {
+  const alpha = workflowCase({shared_collection: sharedCollection()}), beta = workflowCase({id: 'case2', name: 'Beta', shared_collection: sharedCollection()});
+  const view = await harness(path => path === '/api/cases/case1' ? alpha : path === '/api/cases/case2' ? beta : undefined);
+  await view.openCase('case1'); view.state.selectedRun = 'saved1';
+  workflowEdit(view, 'data-source', 'shared'); workflowEdit(view, 'shared-run', 'shared-old');
+  await view.openCase('case2'); assert.equal(view.currentWorkflow(beta).dataSource, 'investigation');
+  workflowEdit(view, 'data-source', 'shared'); assert.equal(view.currentWorkflow(beta).sharedRun, 'shared-new');
+  await view.openCase('case1'); assert.equal(view.currentWorkflow(alpha).sharedRun, 'shared-old');
+  assert.equal(view.currentWorkflow(alpha).dataSource, 'shared'); assert.equal(view.state.selectedRun, 'saved1');
+  workflowEdit(view, 'data-source', 'investigation'); assert.equal(view.state.selectedRun, 'saved1');
+  workflowEdit(view, 'data-source', 'shared'); assert.equal(view.currentWorkflow(alpha).sharedRun, 'shared-old');
+});
+
+test('shared completion refreshes another case pool without changing its source or private snapshot', async () => {
+  const before = sharedCollection(), after = sharedCollection({latest_run: 'newest', runs: [{id: 'newest', status: 'bounded_complete'}, ...before.runs]});
+  const detail = workflowCase({shared_collection: before});
+  const view = await harness(path => path === '/api/jobs/shared-job' ? {id: 'shared-job', status: 'succeeded', result: {run_id: 'newest'}}
+    : path === '/api/cases/other' ? workflowCase({id: 'other', shared_collection: after})
+    : path === '/api/cases/case1' ? {...detail, shared_collection: after} : undefined);
+  view.state.activeCase = detail; view.state.page = 'case'; view.state.caseView = 'plots'; view.state.selectedRun = 'saved1';
+  workflowEdit(view, 'data-source', 'shared'); workflowEdit(view, 'shared-run', 'shared-old');
+  view.state.jobs.set('shared-job', {id: 'shared-job', action: 'shared-trace', caseId: 'other', status: 'running', started: Date.now(), live: false});
+  await view.pollJob('shared-job');
+  assert.equal(view.state.activeCase.id, 'case1'); assert.equal(view.state.activeCase.shared_collection.latest_run, 'newest');
+  assert.equal(view.currentWorkflow(detail).sharedRun, 'shared-old'); assert.equal(view.state.selectedRun, 'saved1'); assert.equal(view.state.caseView, 'plots');
+});
+
+test('shared board update restores original shared provenance instead of its materialized private run', async () => {
+  const plot = workflowPlot('pegouts', 'saved-shared', {run_id: 'projection-123', layout_mode: 'update', board_record_id: 'cashouts', board_id: 'miro-cashouts',
+    collection_source: {kind: 'shared', dataset_id: 'pool', run_id: 'shared-old'}});
+  const detail = workflowCase({shared_collection: sharedCollection(), plots: [plot], boards: [workflowBoard('pegouts', 'cashouts', {preview_id: plot.preview_id})]});
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'board-update', status: 'running'} : undefined);
+  view.state.activeCase = detail; view.state.page = 'case'; view.state.selectedRun = 'saved1';
+  await view.dispatch('workflow-board-prepare', boardControl('cashouts'));
+  assert.equal(view.currentWorkflow(detail).dataSource, 'shared'); assert.equal(view.currentWorkflow(detail).sharedRun, 'shared-old');
+  assert.match(view.workspace(), /Shared snapshot shared-old/);
+  await view.dispatch('workflow-plot-sync');
+  const request = view.calls.find(call => call.path.endsWith('/actions'));
+  assert.equal(request.body.run_id, 'shared-old'); assert.equal(request.body.dataset_id, 'pool'); assert.equal(request.body.board_record_id, 'cashouts');
+  assert.equal(view.state.selectedRun, 'saved1');
+});
+
+test('incompatible shared source cannot fall back silently to private data', async () => {
+  const detail = workflowCase({shared_collection: sharedCollection()}); const view = await harness();
+  view.state.activeCase = detail; view.state.page = 'case'; view.state.caseView = 'plots'; workflowEdit(view, 'data-source', 'shared');
+  detail.shared_collection = sharedCollection({compatible: false, reason: 'Different blockchain source'});
+  assert.match(view.workspace(), /Different blockchain source/); assert.match(view.workspace(), /data-action="workflow-plot"[^>]*disabled/);
+  await assert.rejects(() => view.dispatch('workflow-plot'), /available saved snapshot/);
+  assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 0);
+});
+
+test('shared endpoint totals and combined export match exact provenance rather than private runs', async () => {
+  const descriptor = {kind: 'shared', dataset_id: 'pool', run_id: 'shared-old'};
+  const alpha = workflowCase({shared_collection: sharedCollection(), plots: [
+    valuePlot('private', 'saved1', '2026-10-01T03:00:00Z', valueSummary('99')),
+    {...valuePlot('shared', 'projection', '2026-10-01T02:00:00Z', valueSummary('7')), collection_source: descriptor},
+    {...valuePlot('other-shared', 'another-projection', '2026-10-01T04:00:00Z', valueSummary('88')), collection_source: {...descriptor, run_id: 'shared-new'}},
+  ]});
+  const beta = workflowCase({id: 'case2', name: 'Beta', shared_collection: sharedCollection()});
+  const view = await harness(path => path === '/api/cases/case1' ? alpha : path === '/api/cases/case2' ? beta
+    : path === '/api/endpoint-exports' ? combinedExport() : undefined);
+  await view.openCase('case1'); workflowEdit(view, 'data-source', 'shared'); workflowEdit(view, 'shared-run', 'shared-old');
+  assert.match(view.workspace(), /<strong>7 LBTC<\/strong>/); assert.doesNotMatch(view.workspace(), /<strong>(?:88|99) LBTC<\/strong>/);
+  await view.openCase('case2'); await view.dispatch('export-open-endpoints');
+  assert.deepEqual(view.calls.find(call => call.path === '/api/endpoint-exports').body, {investigations: [
+    {case_id: 'case1', data_source: 'shared', dataset_id: 'pool', run_id: 'shared-old'}, {case_id: 'case2', run_id: 'saved1'},
+  ]});
+});
+
+for (const fullFirst of [true, false]) {
+  test(`shared summary stays current when ${fullFirst ? 'full' : 'shared'} refresh finishes late`, async () => {
+    let resolveOlder, resolveNewer, reads = 0;
+    const older = new Promise(resolve => {resolveOlder = resolve;});
+    const newer = new Promise(resolve => {resolveNewer = resolve;});
+    const detail = workflowCase({shared_collection: sharedCollection()});
+    const view = await harness(path => path === '/api/cases/case1' ? (++reads === 1 ? older : newer) : undefined);
+    view.state.activeCase = detail; view.state.page = 'case'; view.state.selectedRun = 'saved1';
+    const first = fullFirst ? view.refreshCaseDetail('case1') : view.refreshSharedCollection('case1');
+    const second = fullFirst ? view.refreshSharedCollection('case1') : view.refreshCaseDetail('case1');
+    resolveNewer({...detail, shared_collection: sharedCollection({latest_run: 'fresh-revision'})});
+    await second;
+    resolveOlder({...detail, name: 'Updated private metadata', shared_collection: sharedCollection({latest_run: 'stale-revision'})});
+    await first;
+    assert.equal(view.state.activeCase.shared_collection.latest_run, 'fresh-revision');
+    assert.equal(view.state.selectedRun, 'saved1');
+    if (fullFirst) assert.equal(view.state.activeCase.name, 'Updated private metadata');
+  });
+}
+
+test('incompatible shared collection explains and disables fresh collection as well as continuation', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({shared_collection: sharedCollection({compatible: false, reason: 'Different blockchain source'})});
+  view.state.page = 'case';
+  assert.match(view.workspace(), /Different blockchain source/);
+  for (const action of ['shared-collect-dialog', 'shared-continue-dialog']) {
+    assert.match(view.workspace(), new RegExp(`data-action="${action}"[^>]*disabled`));
+    await view.dispatch(action); assert.equal(view.dialog.open, false);
+  }
+  assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 0);
+});

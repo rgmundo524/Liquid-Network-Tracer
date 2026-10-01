@@ -16,6 +16,7 @@ MAX_CSV_BYTES = 64 * 1024 * 1024
 PROVENANCE_FIELDS = (
     "Investigation ID", "Investigation Name", "Run ID", "Plot ID", "Plot Created At",
     "Minimum Hops", "Maximum Hops", "Include Unspent", "Include Unspendable",
+    "Data Source", "Shared Dataset ID", "Shared Run ID",
 )
 FIELDS = (*ENDPOINT_TABLE_FIELDS, *PROVENANCE_FIELDS)
 
@@ -37,22 +38,75 @@ def _selection(value):
         raise TraceError("Choose between 1 and 100 open investigations to export")
     selected, seen = [], set()
     for item in value:
-        if (not isinstance(item, dict) or set(item) - {"case_id", "run_id"}
+        if (not isinstance(item, dict) or set(item) - {"case_id", "run_id", "data_source", "dataset_id"}
                 or not isinstance(item.get("case_id"), str)
                 or not re.fullmatch(r"[0-9a-f]{32}", item["case_id"])):
-            raise TraceError("Endpoint export requires investigation IDs and optional saved run IDs only")
+            raise TraceError("Endpoint export requires investigation IDs and saved collection selections only")
+        mode = item.get("data_source", "investigation")
+        if mode not in ("investigation", "shared"):
+            raise TraceError("Choose investigation or shared data for each endpoint export")
         run = item.get("run_id")
-        if (run is not None and run != "latest"
+        source = None
+        if mode == "shared":
+            source = _shared_source({"kind": "shared", "dataset_id": item.get("dataset_id"), "run_id": run})
+        elif "dataset_id" in item:
+            raise TraceError("A shared dataset ID requires the shared data source")
+        elif (run is not None and run != "latest"
                 and (not isinstance(run, str) or not re.fullmatch(r"[a-zA-Z0-9]{16}", run))):
             raise TraceError("Choose a saved run or latest for each investigation")
         if item["case_id"] in seen:
             raise TraceError("Choose each open investigation only once")
         seen.add(item["case_id"])
-        selected.append((item["case_id"], run))
+        selected.append((item["case_id"], run, source))
     return selected
 
 
-def _pin(case, identity, requested_run):
+def _shared_source(value):
+    """Match one explicit shared revision while retaining richer saved provenance."""
+    if (not isinstance(value, dict) or value.get("kind") != "shared"
+            or not isinstance(value.get("dataset_id"), str)
+            or not re.fullmatch(r"[0-9a-f]{32}", value["dataset_id"])
+            or not isinstance(value.get("run_id"), str)
+            or not re.fullmatch(r"[0-9a-f]{16}", value["run_id"])):
+        raise TraceError("Shared endpoint export requires a dataset ID and a pinned shared run ID")
+    return {key: value[key] for key in ("kind", "dataset_id", "run_id")}
+
+
+def _pin_shared(case, metadata, source):
+    """Select a completed case-owned plot, never fall back to private evidence."""
+    info = {"case_id": metadata["case_id"], "name": metadata.get("name") or case.name,
+            "run_id": source["run_id"], "collection_source": source}
+    candidates = []
+    for directory in _ordinary(case / "previews").glob("*-plots-*"):
+        if not PREVIEW_ID.fullmatch(directory.name):
+            continue
+        _ordinary(directory)
+        if not _ordinary(directory / "SHA256SUMS").is_file():
+            continue
+        report = read_json(_ordinary(directory / "plot.json"))
+        if not isinstance(report, dict):
+            raise TraceError("A saved plot has invalid metadata; restore or regenerate it")
+        selected_source = report.get("collection_source")
+        if selected_source is None or _shared_source(selected_source) != source:
+            continue
+        run = report.get("run_id")
+        if (report.get("case_id") != metadata["case_id"] or report.get("goal") not in GOALS
+                or not isinstance(report.get("created_at"), str)
+                or not isinstance(run, str) or not re.fullmatch(r"[0-9a-f]{16}", run)
+                or not directory.name.startswith(run + "-plots-")):
+            raise TraceError("A saved plot for the selected shared run has invalid metadata; restore or regenerate it")
+        if report["goal"] == "pegouts":
+            candidates.append((report["created_at"], directory.name, run))
+    if not candidates:
+        return info, None, "No completed Path to peg-outs plot exists for the selected shared snapshot."
+    _, preview_id, run = max(candidates)
+    archive = _ordinary(case / "runs" / run)
+    if not archive.is_dir() or not _ordinary(archive / "SHA256SUMS").is_file():
+        raise TraceError("Selected shared plot's investigation evidence is unavailable; restore or regenerate it")
+    return {**info, "run_id": run}, preview_id, None
+
+
+def _pin(case, identity, requested_run, source=None):
     """Resolve one selection without silently falling back from damaged exports."""
     case = _ordinary(Path(case))
     with _locked(case):
@@ -62,6 +116,8 @@ def _pin(case, identity, requested_run):
         name = metadata.get("name") or case.name
         if not isinstance(name, str):
             raise TraceError("Saved investigation name must be text")
+        if source is not None:
+            return _pin_shared(case, metadata, source)
         run = metadata.get("latest_run") if requested_run in (None, "latest") else requested_run
         info = {"case_id": identity, "name": name, "run_id": run}
         if run is None:
@@ -102,11 +158,11 @@ def build_combined_endpoint_csv(investigations, resolve_case):
     """
     selections = _selection(investigations)
     # Resolve every client ID through the server's trusted investigation catalog.
-    cases = [(identity, run, resolve_case(identity)[0]) for identity, run in selections]
+    cases = [(identity, run, source, resolve_case(identity)[0]) for identity, run, source in selections]
     pinned, skipped = [], []
-    for identity, run, case in cases:
+    for identity, run, source, case in cases:
         try:
-            info, preview_id, reason = _pin(case, identity, run)
+            info, preview_id, reason = _pin(case, identity, run, source)
         except (OSError, ValueError, KeyError, TypeError) as error:
             raise TraceError(f"Saved endpoint export for investigation {identity} is unavailable; "
                              "restore its saved run and plot before exporting") from error
@@ -125,6 +181,11 @@ def build_combined_endpoint_csv(investigations, resolve_case):
             # remain free to proceed throughout archive checks and path searches.
             graph, state, observations = _saved_source(case, preview_id)
             report = graph["plot"]
+            source = _shared_source(report["collection_source"]) if "collection_source" in report else None
+            if (report.get("run_id") != info["run_id"]
+                    or info.get("collection_source") is not None and source != info["collection_source"]
+                    or source is not None and _shared_source(state.get("collection_source")) != source):
+                raise TraceError("Saved endpoint plot does not match the selected collection source")
             query = report["query"]
             rows = endpoint_table_rows(graph, state, observations=observations)
             provenance = {
@@ -134,6 +195,9 @@ def build_combined_endpoint_csv(investigations, resolve_case):
                 "Maximum Hops": query["max_hops"],
                 "Include Unspent": str(query.get("include_unspent", False)).lower(),
                 "Include Unspendable": str(query.get("include_unspendable", False)).lower(),
+                "Data Source": "shared" if source else "investigation",
+                "Shared Dataset ID": source["dataset_id"] if source else "",
+                "Shared Run ID": source["run_id"] if source else "",
             }
             for row in rows:
                 writer.writerow({key: _text(value) for key, value in {**row, **provenance}.items()})

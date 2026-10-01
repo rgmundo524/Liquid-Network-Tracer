@@ -6,13 +6,14 @@ and board writers across separate servers and CLI invocations.
 
 from pathlib import Path
 
-PARALLEL_ACTIONS = frozenset({"trace", "address-counts", "plot", "plot-sync",
+PARALLEL_ACTIONS = frozenset({"trace", "shared-trace", "address-counts", "plot", "plot-sync",
                               "board-create", "board-create-sync", "board-link", "board-sync"})
 VALUE_OPTIONS = frozenset({"--case", "--run", "--resume", "--goal", "--min-hops", "--max-hops",
                            "--layout-mode", "--board-record-id", "--record", "--preview", "--board",
                            "--name", "--max-items", "--layout-settings-json", "--seed", "--seeds-file",
                            "--hops", "--additional-hops", "--hop-reference-name", "--fixture",
-                           "--max-transactions", "--max-outpoints", "--max-requests", "--max-seconds"})
+                           "--max-transactions", "--max-outpoints", "--max-requests", "--max-seconds",
+                           "--request", "--data-source", "--dataset-id", "--members-json"})
 
 
 def option(arguments, flag):
@@ -46,7 +47,13 @@ def job_resources(arguments, action, case=None):
         if type(report.get("input_snapshot_version")) is not int or report["input_snapshot_version"] != 1:
             resource["source_run_id"] = preview_id[:16]
             return resource
-    if action in ("trace", "address-counts"):
+    if action == "shared-trace":
+        from .common import digest
+        if case is None:
+            return resource
+        resource.update(resource_kind="shared_collection",
+                        resource_key=digest(str(case.parent.resolve()).encode("utf-8")))
+    elif action in ("trace", "address-counts"):
         resource["resource_kind"] = "collection"
     elif action == "plot" and option(arguments, "--layout-mode") != "update":
         resource["resource_kind"] = "plot"
@@ -70,6 +77,9 @@ def conflicts(first, second):
     """Unknown/legacy operations retain the original exclusive case scope."""
     same_case = first.get("case_id") is not None and first.get("case_id") == second.get("case_id")
     left, right = first.get("resource_kind", "exclusive"), second.get("resource_kind", "exclusive")
+    if "shared_collection" in (left, right):
+        return (left == right and first.get("resource_key") is not None
+                and first.get("resource_key") == second.get("resource_key"))
     if same_case and ("exclusive" in (left, right) or left == right == "collection"):
         return True
     if left == right == "board":
