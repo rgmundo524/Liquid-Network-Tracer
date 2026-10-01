@@ -27,7 +27,7 @@ class ConcurrentWebJobTests(unittest.TestCase):
         self.worker.write_text('''import json, os, sys, time
 from pathlib import Path
 request, result, gates = map(Path, sys.argv[1:])
-label, case = json.loads(request.read_text())["arguments"]
+label, case, *_ = json.loads(request.read_text())["arguments"]
 (gates / (label + ".pid")).write_text(str(os.getpid()))
 progress = request.parent / "progress.json"
 def emit(completed):
@@ -183,6 +183,66 @@ result.write_text(json.dumps({"ok": True, "result": {
             self.assertEqual(self.server.jobs[job["id"]]["status"], "failed")
         self.assertFalse(self.server.processes)
         self.assertFalse(any(thread.is_alive() for thread in self.server.job_threads.values()))
+
+    def test_one_investigation_collects_plots_and_syncs_distinct_boards_at_once(self):
+        path = self.server.case(self.first["id"])[0]
+        run = "a" * 16
+        with patch.object(self.server, "public_result", side_effect=lambda value, *args:
+                          {"name": value["name"], "downloads": []}):
+            jobs = []
+            for label, action, extra in (
+                    ("collector", "trace", ["--resume", run]),
+                    ("plot-a", "plot", ["--run", run]),
+                    ("plot-b", "plot", ["--run", run]),
+                    ("board-a", "board-link", ["--board", "BOARD_A="]),
+                    ("board-b", "board-link", ["--board", "BOARD_B="])):
+                job = self.server.start_job([label, str(path), *extra], action=action, case=path)
+                self.started(job)
+                jobs.append((label, job))
+            # All five workers reached independent gates before any is released.
+            self.assertEqual(len({(self.base / (label + ".pid")).read_text() for label, _ in jobs}), 5)
+            self.assertEqual([job["resource_kind"] for _, job in jobs],
+                             ["collection", "plot", "plot", "board", "board"])
+            self.assertEqual(jobs[0][1]["source_run_id"], run)
+            self.assertEqual(jobs[1][1]["source_run_id"], run)
+            with self.assertRaises(RequestError) as duplicate:
+                self.server.start_job(["duplicate", str(path)], action="trace", case=path)
+            self.assertEqual(duplicate.exception.status, 409)
+            other_case = self.server.case(self.second["id"])[0]
+            with self.assertRaises(RequestError) as board:
+                self.server.start_job(["same-board", str(other_case), "--board", "BOARD_A="],
+                                      action="board-link", case=other_case)
+            self.assertEqual(board.exception.status, 409)
+            route = "/api/cases/" + self.first["id"]
+            self.assertEqual(self.request(route + "/settings", {"name": "Concurrent mutation"})[0], 409)
+            for label, job in reversed(jobs):
+                self.finish(label, job)
+
+    def test_collection_admission_is_atomic_while_saved_plot_is_active(self):
+        path = self.server.case(self.first["id"])[0]
+        with patch.object(self.server, "public_result", side_effect=lambda value, *args:
+                          {"name": value["name"], "downloads": []}):
+            plot = self.start("snapshot", self.first, action="plot")
+            self.started(plot)
+            barrier = threading.Barrier(2)
+
+            def submit(label):
+                barrier.wait(timeout=3)
+                try:
+                    return label, self.start(label, self.first, action="trace")
+                except RequestError as error:
+                    return label, error
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(submit, ("collect-a", "collect-b")))
+            accepted = [(label, value) for label, value in results if isinstance(value, dict)]
+            rejected = [value for _, value in results if isinstance(value, RequestError)]
+            self.assertEqual(len(accepted), 1)
+            self.assertEqual(len(rejected), 1)
+            self.assertEqual(rejected[0].status, 409)
+            self.started(accepted[0][1])
+            self.finish(*accepted[0])
+            self.finish("snapshot", plot)
 
     def test_recent_job_history_never_evicts_an_older_active_worker(self):
         first = self.start("first", self.first)

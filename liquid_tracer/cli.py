@@ -226,6 +226,8 @@ def parser():
         plot.add_argument("--layout-mode", choices=("fresh", "update"), default="fresh",
                           help="Create a fresh layout, or preserve a selected Miro board and arrange additions separately")
         plot.add_argument("--board-record-id", help="Investigation board record to read for an update layout")
+        plot.add_argument("--layout-settings-json", type=json.loads,
+                          help="Validated layout settings snapshot for this operation")
         plot.add_argument("--min-hops", type=int, default=0)
         plot.add_argument("--max-hops", type=int, default=10)
         plot.add_argument("--include-unspent", action="store_true",
@@ -1311,6 +1313,7 @@ def main(argv=None, *, progress=None, diagnostics=None):
                 include_unspent=args.include_unspent, include_unspendable=args.include_unspendable,
                 include_context=args.include_context,
                 layout_mode=args.layout_mode, board_record_id=args.board_record_id,
+                layout_settings=args.layout_settings_json,
                 open_browser=args.open_browser, progress=progress), indent=2))
         elif args.command == "plot-sync":
             from .investigation_boards import generate_and_sync
@@ -1319,6 +1322,7 @@ def main(argv=None, *, progress=None, diagnostics=None):
                 include_unspent=args.include_unspent, include_unspendable=args.include_unspendable,
                 include_context=args.include_context,
                 layout_mode=args.layout_mode, board_record_id=args.board_record_id,
+                layout_settings=args.layout_settings_json,
                 name=args.name, max_items=args.max_items, progress=progress), indent=2))
         elif args.command == "investigation-boards":
             from .investigation_boards import list_boards

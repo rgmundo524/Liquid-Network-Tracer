@@ -13,36 +13,45 @@ GIB = 1024 ** 3
 
 
 class ElkWorkerBudgetTests(unittest.TestCase):
-    def budget(self, attempts=25, workers="auto", heap="8192", cpus=16, peak=512):
+    def budget(self, attempts=25, workers="auto", heap="8192", cpus=16, peak=512, nodes=0, edges=0):
         with patch.dict(os.environ, {"LIQUID_ELK_WORKERS": workers, "LIQUID_RENDER_HEAP_MB": heap}), \
                 patch("liquid_tracer.render_runtime._available_cpu_count", return_value=cpus):
-            return elk_worker_budget(attempts, peak_rss_mb=peak)
+            return elk_worker_budget(attempts, peak_rss_mb=peak, node_count=nodes, edge_count=edges)
 
-    def test_unmeasured_pilot_gets_entire_pool(self):
-        self.assertEqual(self.budget(peak=None), (1, 8192, 8192))
-        self.assertEqual(self.budget(peak=None, workers="64"), (1, 8192, 8192))
+    def test_unmeasured_pilot_reserves_a_graph_sized_part_of_the_pool(self):
+        self.assertEqual(self.budget(peak=None), (1, 1024, 1024))
+        self.assertEqual(self.budget(peak=None, workers="64"), (1, 1024, 1024))
+
+    def test_larger_graph_gets_a_larger_pilot_without_overriding_the_cap(self):
+        self.assertEqual(self.budget(peak=None, nodes=1307, edges=3584), (1, 1792, 1792))
+        self.assertEqual(self.budget(peak=None, nodes=10000, edges=30000), (1, 5632, 5632))
+        self.assertEqual(self.budget(peak=None, nodes=10000, edges=30000, heap="2048"), (1, 2048, 2048))
+
+    def test_small_remaining_batch_leaves_memory_for_other_layouts(self):
+        self.assertEqual(self.budget(attempts=1, heap="64000", peak=768), (1, 1536, 1536))
+        self.assertEqual(self.budget(attempts=2, heap="64000", peak=768), (2, 3072, 1536))
 
     def test_measured_auto_can_use_more_than_four_workers(self):
         self.assertEqual(self.budget(), (8, 8192, 1024))
-        self.assertEqual(self.budget(attempts=100, heap="1000000", cpus=128), (64, 1000000, 15625))
+        self.assertEqual(self.budget(attempts=100, heap="1000000", cpus=128), (64, 65536, 1024))
 
     def test_measured_peak_receives_double_headroom_per_worker(self):
         self.assertEqual(self.budget(peak=1024), (4, 8192, 2048))
-        self.assertEqual(self.budget(peak=1025), (3, 8192, 2730))
-        self.assertEqual(self.budget(peak=3000), (1, 8192, 8192))
+        self.assertEqual(self.budget(peak=1025), (3, 6150, 2050))
+        self.assertEqual(self.budget(peak=3000), (1, 6000, 6000))
 
     def test_explicit_worker_count_is_a_ceiling(self):
         self.assertEqual(self.budget(workers="8"), (8, 8192, 1024))
-        self.assertEqual(self.budget(workers="8", cpus=3), (3, 8192, 2730))
-        self.assertEqual(self.budget(attempts=2, workers="8"), (2, 8192, 4096))
-        self.assertEqual(self.budget(workers="1"), (1, 8192, 8192))
+        self.assertEqual(self.budget(workers="8", cpus=3), (3, 3072, 1024))
+        self.assertEqual(self.budget(attempts=2, workers="8"), (2, 2048, 1024))
+        self.assertEqual(self.budget(workers="1"), (1, 1024, 1024))
 
     def test_auto_is_bounded_by_cpu_count_and_remaining_attempts(self):
-        self.assertEqual(self.budget(cpus=2), (2, 8192, 4096))
-        self.assertEqual(self.budget(attempts=1), (1, 8192, 8192))
+        self.assertEqual(self.budget(cpus=2), (2, 2048, 1024))
+        self.assertEqual(self.budget(attempts=1), (1, 1024, 1024))
 
     def test_less_memory_reduces_workers_before_splitting(self):
-        for heap, expected in ((4095, (3, 4095, 1365)), (2047, (1, 2047, 2047)),
+        for heap, expected in ((4095, (3, 3072, 1024)), (2047, (1, 1024, 1024)),
                                (1024, (1, 1024, 1024)), (511, (1, 511, 511)), (1, (1, 1, 1))):
             with self.subTest(heap=heap):
                 self.assertEqual(self.budget(heap=str(heap)), expected)
@@ -51,18 +60,18 @@ class ElkWorkerBudgetTests(unittest.TestCase):
         for heap in (1025, 3073, 8195, 65535):
             with self.subTest(heap=heap):
                 workers, total, each = self.budget(heap=str(heap), workers="64", cpus=64)
-                self.assertEqual(total, heap)
-                self.assertLessEqual(workers * each, total)
-                self.assertLess(total - workers * each, workers)
+                self.assertLessEqual(total, heap)
+                self.assertEqual(workers * each, total)
+                self.assertEqual(each, 1024)
 
     def test_auto_total_is_90_percent_of_available_memory_not_90_percent_per_worker(self):
         with patch("liquid_tracer.render_runtime._available_bytes", return_value=48 * GIB):
-            self.assertEqual(self.budget(heap="auto", peak=4096), (5, 44236, 8847))
+            self.assertEqual(self.budget(heap="auto", peak=4096), (5, 40960, 8192))
 
     def test_each_new_batch_rechecks_available_memory(self):
         with patch("liquid_tracer.render_runtime._available_bytes", side_effect=[48 * GIB, 2 * GIB]) as available:
-            self.assertEqual(self.budget(heap="auto", peak=4096), (5, 44236, 8847))
-            self.assertEqual(self.budget(heap="auto"), (1, 1843, 1843))
+            self.assertEqual(self.budget(heap="auto", peak=4096), (5, 40960, 8192))
+            self.assertEqual(self.budget(heap="auto"), (1, 1024, 1024))
             self.assertEqual(available.call_count, 2)
 
     def test_unreadable_memory_fallback_is_one_worker(self):
@@ -71,11 +80,11 @@ class ElkWorkerBudgetTests(unittest.TestCase):
 
     def test_explicit_heap_is_shared_without_changing_existing_override_semantics(self):
         with patch("liquid_tracer.render_runtime._available_bytes", side_effect=AssertionError):
-            self.assertEqual(self.budget(heap="32768"), (16, 32768, 2048))
+            self.assertEqual(self.budget(heap="32768"), (16, 16384, 1024))
 
     def test_setting_is_case_insensitive_and_trimmed(self):
         self.assertEqual(self.budget(workers=" AUTO "), (8, 8192, 1024))
-        self.assertEqual(self.budget(workers=" 2 "), (2, 8192, 4096))
+        self.assertEqual(self.budget(workers=" 2 "), (2, 2048, 1024))
 
     def test_invalid_worker_setting_is_actionable_and_not_reflected(self):
         for value in ("", "0", "-1", "1.5", "65", "NaN", "4 --require PRIVATE", "1" * 5000):
@@ -94,6 +103,11 @@ class ElkWorkerBudgetTests(unittest.TestCase):
         for value in (0, -1, True, "4", 1.5, 2147483648):
             with self.subTest(value=value), self.assertRaisesRegex(TraceError, "peak memory must be a positive integer"):
                 self.budget(peak=value)
+
+    def test_invalid_graph_size_is_rejected(self):
+        for value in (-1, True, "4", 1.5):
+            with self.subTest(value=value), self.assertRaisesRegex(TraceError, "graph sizes"):
+                self.budget(nodes=value)
 
 
 class PeakMemoryTelemetryTests(unittest.TestCase):

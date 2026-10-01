@@ -195,7 +195,7 @@ class NamedHopPlotTests(unittest.TestCase):
 
 
 class NamedHopSavedPlotTests(unittest.TestCase):
-    def test_saved_run_basis_survives_preference_change_and_current_labels_invalidate_plot(self):
+    def test_saved_run_basis_and_group_membership_survive_current_preference_and_label_changes(self):
         with tempfile.TemporaryDirectory() as temporary:
             case = create_investigation(Path(temporary), "Named hops", seeds=[tx("a") + ":0"])
             state = named_state((("a:0", "b"), ("b:0", "c")), group=())
@@ -214,9 +214,9 @@ class NamedHopSavedPlotTests(unittest.TestCase):
             save_collection_reference(case, "Different")
             self.assertEqual(reviewed_plot(case, first["preview_id"])[0]["plot"]["hop_reference_name"], "Perp")
             self.assertEqual(reviewed_plot(case, second["preview_id"])[0]["plot"]["hop_reference_name"], "Perp")
+            original = reviewed_plot(case, first["preview_id"])
             set_service(case, "SYNTHETIC-b-address", name="Other", stop_tracing=False)
-            with self.assertRaisesRegex(TraceError, "trace controls"):
-                reviewed_plot(case, first["preview_id"])
+            self.assertEqual(reviewed_plot(case, first["preview_id"]), original)
             with patch("liquid_tracer.elk_layout.optimize_graph", side_effect=lambda value, **_: value):
                 changed = preview_plot(case, "pegouts", max_hops=1)
             self.assertEqual(changed["match_count"], 0)

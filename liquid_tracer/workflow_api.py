@@ -1,6 +1,7 @@
 """Public HTTP representations for the collection, plot, and board workflow."""
 
 from urllib.parse import quote
+import json
 
 from .common import TraceError
 from .investigations import read_case
@@ -10,6 +11,7 @@ PLOT_FIELDS = {"id", "preview_id", "run_id", "goal", "min_hops", "max_hops", "cr
                "connection_count", "source_max_hops", "source_run_status", "source_stop_reason",
                "notice", "coverage_notice", "publication_notice", "reviewable", "review_error", "empty", "saved_data_only",
                "layout_mode", "board_record_id", "board_id", "board_name", "hop_reference_name"}
+PLOT_FIELDS.update({"input_snapshot_version", "input_snapshot_at"})
 BOARD_FIELDS = {"id", "record_id", "name", "goal", "board_id", "status", "preview_id", "run_id",
                 "legacy_snapshot", "can_sync", "notice", "pending_count", "created", "reused",
                 "creation_preview_id", "created_board", "reused_board"}
@@ -138,7 +140,7 @@ def workflow_action(server, case, metadata, body):
     if action in ("plot", "plot-sync"):
         required = {"action", "goal", "run_id", "min_hops", "max_hops"}
         endpoint_options = {"include_unspent", "include_unspendable"}
-        allowed = {"include_context", "layout_mode", "board_record_id"}
+        allowed = {"include_context", "layout_mode", "board_record_id", "layout_settings"}
         if action == "plot-sync":
             allowed.add("name")
         if not required <= set(body) or set(body) - required - endpoint_options - allowed:
@@ -179,6 +181,14 @@ def workflow_action(server, case, metadata, body):
         verify_export(run_path(case, selected))
         arguments = [action, "--case", str(case), "--goal", body["goal"], "--run", selected,
                      "--min-hops", str(lower), "--max-hops", str(upper)]
+        if "layout_settings" in body:
+            from .plots import LAYOUT_SETTINGS, validate_layout_settings
+            from .export import PRESENTATION_VERSION
+            supplied = body["layout_settings"]
+            if not isinstance(supplied, dict) or set(supplied) != LAYOUT_SETTINGS:
+                raise RequestError("Provide the complete layout settings for this plot.")
+            snapshot = validate_layout_settings({**supplied, "presentation_version": PRESENTATION_VERSION})
+            arguments.extend(["--layout-settings-json", json.dumps(snapshot, separators=(",", ":"))])
         for key in ("include_unspent", "include_unspendable", "include_context"):
             if body.get(key):
                 arguments.append("--" + key.replace("_", "-"))

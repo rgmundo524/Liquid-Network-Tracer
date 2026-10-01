@@ -128,6 +128,79 @@ class SharedRenderResourceTests(unittest.TestCase):
         with self.assertRaisesRegex(TraceError, "shared ELK resource"):
             self.search()
 
+    def test_four_graph_sized_pilots_overlap_with_bounded_total_grants(self):
+        barrier = threading.Barrier(4)
+        lock = threading.Lock()
+        live = {}
+        peak_heap = 0
+
+        def run(name):
+            def worker(request, seeds, *, heap_mb, progress, **kwargs):
+                nonlocal peak_heap
+                with lock:
+                    live[name] = heap_mb
+                    peak_heap = max(peak_heap, sum(live.values()))
+                try:
+                    barrier.wait(timeout=5)
+                    self.assertLess(heap_mb, 12000)
+                    progress({"stage": "memory_measured", "peak_rss_mb": 512})
+                    return [{"seed": seeds[0]}]
+                finally:
+                    with lock:
+                        del live[name]
+            return list(iter_attempts({"children": [{}], "edges": []}, [1], worker,
+                                      lambda index, seed: lambda event: None, {}))
+
+        factory = lambda: SharedRenderResources(directory=self.directory, capacity=lambda: (12000, 8))
+        with patch("liquid_tracer.elk_parallel.SharedRenderResources", side_effect=factory), \
+                patch.dict(os.environ, {"LIQUID_RENDER_HEAP_MB": "12000", "LIQUID_ELK_WORKERS": "auto"}), \
+                ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(run, name) for name in range(4)]
+            results = [future.result(10) for future in futures]
+        self.assertEqual(peak_heap, 4 * 1280)
+        self.assertTrue(all(result == [(1, 1, [{"seed": 1}])] for result in results))
+
+    def test_reduced_cpu_share_does_not_inflate_worker_heap(self):
+        first, second = self.search(), self.search()
+        first.acquire(7, 7000, peak_rss_mb=512, worker_heap_mb=1024)
+        second_lease = second.acquire(8, 8192, peak_rss_mb=512, worker_heap_mb=1024)
+        self.assertEqual(second_lease.worker_count, 2)
+        self.assertEqual(second_lease.heap_mb, 1024)
+        self.assertEqual(second_lease.total_heap_mb, 2048)
+
+    def test_wait_status_distinguishes_memory_and_cpu_from_running_layouts(self):
+        for capacity, grant, reason in (((12000, 8), 12000, "memory"), ((12000, 1), 1024, "cpu")):
+            with self.subTest(reason=reason):
+                self.capacity = capacity
+                with self.search() as first, self.search() as second:
+                    first.acquire(1, grant)
+                    self.assertIsNone(second._try_acquire(1, 1024, None)[0])
+                    status = second._last_status
+                    self.assertEqual(status["wait_reason"], reason)
+                    self.assertEqual((status["running_layouts"], status["waiting_layouts"]), (1, 1))
+                    self.assertEqual(status["reserved_heap_mb"], grant)
+                    self.assertEqual(status["available_heap_mb"], 12000 - grant)
+                    self.assertEqual(status["reserved_workers"], 1)
+
+    def test_graph_sized_pilot_has_one_full_allowance_retry_on_memory_failure(self):
+        for succeeds in (True, False):
+            with self.subTest(succeeds=succeeds):
+                calls, metadata = [], {}
+                def worker(request, seeds, *, heap_mb, **kwargs):
+                    calls.append(heap_mb)
+                    if heap_mb < 12000 or not succeeds:
+                        raise ElkWorkerFailure("Synthetic heap exhaustion", failure_code="heap_exhausted")
+                    return [{"seed": seeds[0]}]
+                factory = lambda: SharedRenderResources(directory=self.directory, capacity=lambda: (12000, 8))
+                with patch("liquid_tracer.elk_parallel.SharedRenderResources", side_effect=factory), \
+                        patch.dict(os.environ, {"LIQUID_RENDER_HEAP_MB": "12000"}):
+                    result = list(iter_attempts({"children": [{}]}, [1], worker,
+                                               lambda index, seed: lambda event: None, metadata))
+                self.assertEqual(calls, [1280, 12000])
+                self.assertEqual(metadata["memory_retry_count"], 1)
+                self.assertEqual(len(result), 1)
+                self.assertEqual(isinstance(result[0][2], ElkWorkerFailure), not succeeds)
+
     def test_two_searches_overlap_and_keep_all_seed_results_in_order(self):
         second_waiting, second_pilot, first_parallel = (threading.Event() for _ in range(3))
         lock = threading.Lock()
@@ -165,7 +238,7 @@ class SharedRenderResourceTests(unittest.TestCase):
                                       lambda index, seed: report, {}))
 
         factory = lambda: SharedRenderResources(directory=self.directory, capacity=lambda: (12000, 8))
-        budget = lambda attempts, peak_rss_mb=None: (min(3, attempts) if peak_rss_mb else 1, 12000, 12000)
+        budget = lambda attempts, peak_rss_mb=None, **kwargs: (min(3, attempts) if peak_rss_mb else 1, 12000, 12000)
         with patch("liquid_tracer.elk_parallel.SharedRenderResources", side_effect=factory), \
                 patch("liquid_tracer.elk_parallel.elk_worker_budget", side_effect=budget), \
                 ThreadPoolExecutor(max_workers=2) as executor:

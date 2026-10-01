@@ -1,7 +1,7 @@
 """Same-user ELK CPU/heap leases, without storing graph data or credentials.
 
-Running heaps are immutable. New searches queue until a batch drains, then
-share capacity at the next boundary. Lease locks are inherited by Node, so a
+Running heaps are immutable. New searches use spare capacity immediately or
+share capacity at the next batch boundary. Lease locks are inherited by Node, so a
 killed Python owner cannot make a still-running child's reservation disappear.
 """
 
@@ -209,7 +209,8 @@ class SharedRenderResources:
             if type(job.get("idle_until")) not in (int, float) or not 0 <= job["idle_until"] < 1e20:
                 raise ValueError("invalid resource owner")
 
-    def _try_acquire(self, workers, total_heap_mb, peak_rss_mb, exclusive=False, refresh_heap=None):
+    def _try_acquire(self, workers, total_heap_mb, peak_rss_mb, exclusive=False, refresh_heap=None,
+                     worker_heap_mb=None):
         with self._transaction() as state:
             now = self._clock()
             job = state["jobs"][self.identity]
@@ -249,25 +250,50 @@ class SharedRenderResources:
             # boundary. Use the remaining slots now without shrinking it.
             workers = min(workers, cpu, memory_workers, max(1, cpu_count - workers_used))
             per_worker = heap // workers
+            if worker_heap_mb is not None and not exclusive:
+                # A smaller CPU share must not turn unused sibling allowances
+                # into a larger reservation for the workers that did fit.
+                per_worker = min(per_worker, worker_heap_mb)
             heap = per_worker * workers
-            if (first != self.identity or (exclusive and active)
-                    or heap > min(available_heap, state["pool_heap"] - heap_used) or workers > cpu_count - workers_used):
+            free_heap = max(0, min(available_heap, state["pool_heap"] - heap_used))
+            reason = ("memory_retry" if exclusive and active else
+                      "cpu" if workers > cpu_count - workers_used else
+                      "memory" if heap > free_heap else
+                      "fifo" if first != self.identity else None)
+            self._last_status = {
+                "running_layouts": len(active),
+                "waiting_layouts": sum(other["mode"] == "waiting" for other in state["jobs"].values()),
+                "reserved_heap_mb": heap_used, "available_heap_mb": free_heap,
+                "cpu_slots": cpu_count, "reserved_workers": workers_used,
+            }
+            if reason:
+                self._last_status["wait_reason"] = reason
                 return None, count, state["pool_heap"]
             job.update(mode="active", heap=heap, workers=workers)
+            self._last_status.update(running_layouts=len(active) + 1,
+                                     waiting_layouts=self._last_status["waiting_layouts"] - 1,
+                                     reserved_heap_mb=heap_used + heap,
+                                     available_heap_mb=max(0, free_heap - heap),
+                                     reserved_workers=workers_used + workers)
             return RenderLease(self, workers, heap, per_worker, count, state["pool_heap"]), count, state["pool_heap"]
 
-    def acquire(self, workers, total_heap_mb, *, peak_rss_mb=None, progress=None, exclusive=False, refresh_heap=None):
+    def acquire(self, workers, total_heap_mb, *, peak_rss_mb=None, progress=None, exclusive=False, refresh_heap=None,
+                worker_heap_mb=None):
         if type(workers) is not int or workers < 1 or type(total_heap_mb) is not int or total_heap_mb < 1:
             raise TraceError("ELK resource requests require positive worker and heap limits")
+        if worker_heap_mb is not None and (type(worker_heap_mb) is not int or worker_heap_mb < 1):
+            raise TraceError("ELK resource requests require a positive per-worker heap limit")
         started = self._clock()
         next_report = started
         while True:
-            lease, count, capacity = self._try_acquire(workers, total_heap_mb, peak_rss_mb, exclusive, refresh_heap)
+            lease, count, capacity = self._try_acquire(workers, total_heap_mb, peak_rss_mb, exclusive, refresh_heap,
+                                                       worker_heap_mb)
             now = self._clock()
             if progress and (lease is not None or now >= next_report):
                 event = {"phase": "optimizing", "stage": "resource_allocated" if lease else "resource_wait",
                          "completed": 0, "total": 0, "active_layouts": count,
-                         "machine_heap_mb": capacity, "elapsed_seconds": max(0, int(now - started))}
+                         "machine_heap_mb": capacity, "elapsed_seconds": max(0, int(now - started)),
+                         **self._last_status}
                 if lease:
                     event.update(worker_count=lease.worker_count, active_workers=0,
                                  total_heap_mb=lease.total_heap_mb, heap_mb=lease.heap_mb,

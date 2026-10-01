@@ -3,6 +3,7 @@
 import copy
 import json
 import os
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -10,11 +11,20 @@ from liquid_tracer.common import TraceError
 from liquid_tracer.elk_errors import ElkWorkerFailure
 from liquid_tracer.elk_layout import _worker, optimize_graph
 from liquid_tracer.layout_search import layout_seeds
+from liquid_tracer.shared_render_resources import SharedRenderResources
 from tests.test_elk_layout import ROOT, crossing_graph, synthetic_candidate
 from tests.test_layout_search import disconnected_graph
 
 
 class FailedSeedSearchTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        factory = lambda: SharedRenderResources(directory=directory.name, capacity=lambda: (65536, 8))
+        coordinator = patch("liquid_tracer.elk_parallel.SharedRenderResources", side_effect=factory)
+        coordinator.start()
+        self.addCleanup(coordinator.stop)
+
     @patch.dict(os.environ, {"LIQUID_ELK_WORKERS": "1"})
     def test_failed_third_seed_retains_earlier_best_and_attempts_later_seeds(self):
         graph = disconnected_graph(2)
@@ -73,7 +83,7 @@ class FailedSeedSearchTests(unittest.TestCase):
             self.assertEqual(len(result["nodes"]), 4)
             self.assertEqual(len(result["edges"]), 2)
 
-    @patch.dict(os.environ, {"LIQUID_ELK_WORKERS": "1"})
+    @patch.dict(os.environ, {"LIQUID_ELK_WORKERS": "1", "LIQUID_RENDER_HEAP_MB": "8192"})
     def test_all_failed_seeds_raise_without_a_result_or_mutating_input(self):
         graph = crossing_graph()
         original = copy.deepcopy(graph)
@@ -82,7 +92,10 @@ class FailedSeedSearchTests(unittest.TestCase):
                 "private worker detail", failure_code="heap_exhausted")) as worker:
             with self.assertRaisesRegex(TraceError, "All 4 ELK layout attempts failed") as caught:
                 optimize_graph(graph, layout_attempts=4, progress=events.append)
-        self.assertEqual(worker.call_count, 4)
+        # The smaller pilot receives one recovery attempt with the full pool;
+        # its failure still represents exactly one configured seed.
+        self.assertEqual(worker.call_count, 5)
+        self.assertEqual(sum(event["stage"] == "retrying_memory" for event in events), 1)
         self.assertEqual(graph, original)
         self.assertIn("heap_exhausted", str(caught.exception))
         self.assertIn("Memory exhaustion was reported", str(caught.exception))
