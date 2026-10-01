@@ -6,9 +6,9 @@ Miro, and are populated as part of the normal visual workflow. A separate
 
 After a successful/bounded trace or continuation, missing counts are requested
 before exporting that run's graph. Existing saved runs are also enriched before
-ELK, Mermaid, compact and starter-connection previews, and before ordinary live
-**Sync to Miro**. The connection view requests only its displayed Liquid addresses.
-An empty connection view makes no requests. No blockchain retracing is involved.
+ELK, Mermaid and compact previews, and before ordinary live **Sync to Miro**.
+Starter connections use saved counts without fetching additional statistics.
+No blockchain retracing is involved in a count lookup.
 
 ## Source and calculation
 
@@ -34,16 +34,21 @@ never go into browser responses or the ELK/Mermaid renderer environment.
 
 ## Caching, limits and failures
 
-`address-counts.json` and existing address-review observations are reused. Lookups
+`address-counts.json`, committed incremental count checkpoints, and existing
+address-review observations are reused. Lookups
 are deduplicated by full address. Count requests now scale automatically. A run
 using the usual eight API workers starts with up to eight and can grow to 64
 when response latency and the configured request rate justify more overlap.
 Saved worker settings below eight remain explicit ceilings, including serial
 operation at one. Older runs without a worker setting start with eight.
 
-The automatic target uses measured HTTP response time, excluding rate-limit
-waits, authentication, and local cache writes. It aims for the configured
-requests per second multiplied by response latency, with modest headroom.
+The automatic target uses the complete endpoint service time: network requests,
+evidence recording, cache access, and response decoding. It excludes API pacing,
+authentication, and retry waits so waiting for a shared quota does not inflate
+the worker target. Fast early responses retain the initial eight-worker overlap
+unless an explicit lower setting, resource limit, or retry pressure reduces it.
+Longer service times can grow the target gradually to 64. The target aims for
+configured requests per second multiplied by service time, with modest headroom.
 Throttling, retryable server errors, and network errors reduce the target.
 All workers still share the saved request pacing, retry cooldowns, and lookup
 budget. Extra workers never increase the request-rate allowance.
@@ -64,11 +69,20 @@ ordinary transaction collection keeps its existing worker setting.
 A separate ancillary-cache lock permits one count lookup per investigation.
 Completed requests are processed immediately, without waiting for a fixed batch.
 Cache writes and progress updates stay on the coordinating thread. Raw responses
-are archived individually; the count cache is checkpointed every 32 successes
-or on the next completed response after one second, and on completion, errors,
-or orderly interruption. This avoids rewriting a large growing cache for every
-address. The code does not recursively reacquire the trace lock when a trace
-immediately exports or syncs its graph.
+are archived individually. Every 32 successes, or on the next completed response
+after one second, only new count observations are committed to
+`address-counts.sqlite3`. Records have case/source-bound checksums; concurrent
+readers see committed snapshots. Completion, errors and orderly interruption
+flush the pending batch. A compatible full `address-counts.json` is written once
+at the end, then the committed journal is compacted. If that write is interrupted,
+the journal remains available for recovery. Preserve the whole case directory,
+including SQLite sidecars, while work is active.
+
+The count pipeline also releases completed response bodies and futures instead
+of retaining one for every requested address. Pending requests remain bounded by
+the worker target; the count table itself still grows with the investigation.
+The code does not recursively reacquire the trace lock when a trace immediately
+exports or syncs its graph.
 
 Automatic statistics are a separate reported API phase, using the investigation's
 optional request/time settings when **Use optional run budgets** is on.
@@ -91,13 +105,54 @@ later lookup.
 
 Progress shows the current concurrency target and observed counts per second.
 The result also records automatic/fixed mode, peak requested concurrency,
-resource ceiling, elapsed time, and observed throughput. These are measurements
+resource ceiling, elapsed time, checkpoint count/time, and observed throughput. These are measurements
 of this lookup, not a promise of provider performance or a published API quota.
 
 Counts remain dated observations, not a live feed. `0` is an observed zero; `??`
 means no usable count is available. The optional explicit count command supports
 `--refresh` for already-cached values. Bitcoin peg-in context circles are still
 not queried using a Liquid API and retain `??`.
+
+## Recover a collection stopped during address counts
+
+A collection interrupted during its count phase can have a finished transaction
+checkpoint without a completed export manifest. Ordinary continuation cannot use
+that unsealed run. Once its worker has exited, recover it offline from the project
+directory:
+
+```sh
+liquid-trace recover-collection --case cases/.shared-collection
+```
+
+For a private collection, use its investigation directory instead. The command
+auto-selects only a single eligible run; if several exist, it lists their IDs and
+requires `--run RUN_ID`. It does not call an API or unlock credentials. Active
+collection/count locks prevent it from modifying a running job.
+
+Recovery verifies the finished transaction checkpoint against saved response
+evidence and its investigation/parent identity, overlays the validated count
+cache, preserves the original checkpoint, and seals the export. It records how
+many counts remain missing. It does not claim that unfinished tracing completed
+or overwrite an existing historical archive. A collection that has advanced to
+a different parent is rejected.
+
+This supports an initial collection or a continuation from the current latest
+run. It deliberately rejects a fresh replacement collection over an older latest
+run: older collection requests did not record the baseline needed to verify that
+replacement safely.
+
+After recovery, restart the UI and choose **Continue shared data** with
+**Additional hops = 0** and the same hop reference. Saved confirmed transactions
+and count-cache entries are reused; only missing counts need lookup. Normal
+continuation still refreshes eligible spending observations. Alternatively,
+fetch only missing statistics with `liquid-live address-counts --case
+cases/.shared-collection --run RUN_ID` without `--refresh`.
+
+For an older worker still fetching counts, send SIGINT only to the identified
+collection worker and wait for it to finish cleanup before restarting the server.
+The launching terminal reports `Local web action interrupted.`. The server's
+shutdown fallback can forcibly terminate a slow worker after ten seconds, so
+stopping the worker first gives a large cache time to finish its final save.
 
 ## Offline and immutable operations
 
@@ -110,6 +165,16 @@ a matching completed ELK layout after count hydration.
 
 Tests use synthetic cases and mocked public/Enterprise statistics. No private case
 addresses, provider credentials or live Miro writes are required for the suite.
+
+`python scripts/benchmark_address_counts.py --repo /path/to/checkout` measures
+the same synthetic workload against different checkouts with real request pacing,
+evidence writes and count-cache saves. Its defaults fetch 512 addresses while
+reusing 20,000 saved counts, with a 49 requests/second target and 40 ms simulated
+responses. One local comparison against `061dcc0` improved measured lookup
+throughput from 35.7 to 46.3 counts/second. Full JSON cache writes fell from 16
+to 1, bytes written from 90.6 MB to 5.7 MB, and retained endpoint futures from
+512 to 8. Count and response-evidence fingerprints matched. This is a synthetic
+measurement, not a prediction for a live provider or a million-address case.
 
 ## Inline display and migration
 

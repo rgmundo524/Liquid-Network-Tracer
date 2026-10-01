@@ -198,6 +198,9 @@ def parser():
     shared.add_argument("--resume", help="Pinned shared run ID; retains its saved seeds and members")
     shared.add_argument("--hops", type=int, help="Fresh hop ceiling or additional hops for continuation")
     shared.add_argument("--hop-reference-name", default=None)
+    recovery = commands.add_parser("recover-collection", help="Seal a finished collection interrupted during counts/export; offline")
+    recovery.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    recovery.add_argument("--run", help="Unsealed finished run ID; auto-select only when exactly one exists")
     export = commands.add_parser("export", help="Regenerate a run export, fetching missing address transaction counts")
     export.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                         help="Case directory (default: LIQUID_CASE_DIR)")
@@ -1314,6 +1317,10 @@ def main(argv=None, *, progress=None, diagnostics=None):
             return run_menu(args.investigations_dir)
         if args.command == "trace":
             return run_trace(args, progress=progress)
+        if args.command == "recover-collection":
+            from .collection_recovery import recover_collection
+            print(json.dumps(recover_collection(args.case, args.run, progress=progress), indent=2))
+            return 0
         if args.command == "shared-collect":
             from .shared_collection import collect_prepared, prepare_collection
             if args.request:

@@ -679,6 +679,8 @@ class ApiConcurrencyTests(unittest.TestCase):
             api.call('GET', ENTERPRISE + '/one', 'esplora', '/one')
             api.call('POST', 'https://example.invalid/token', 'oauth', '/token')
         self.assertEqual(api.request_metrics(), {'latency_seconds': .25,
+                                                'service_latency_seconds': None,
+                                                'completed_endpoints': 0,
                                                 'completed_requests': 1, 'pressure_events': 0,
                                                 'network_seconds_total': .5,
                                                 'pacing_wait_seconds_total': 0.,

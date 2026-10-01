@@ -30,6 +30,7 @@ def new_state(seeds, source, limits, labels, parent=None, case_id=None):
     if case_id and state.get("case_id") and state["case_id"] != case_id:
         raise TraceError("The resumed run belongs to a different case")
     state["case_id"] = case_id or state.get("case_id") or uuid.uuid4().hex
+    state.pop("collection_recovery", None)  # This audit belongs to its original sealed run.
     state.update({"run_id": uuid.uuid4().hex[:16], "parent_run": parent["run_id"] if parent else None,
                   "ancestor_runs": parent.get("ancestor_runs", []) + [parent["run_id"]] if parent else [],
                   "started_at": now(), "finished_at": None, "limits": asdict(limits),

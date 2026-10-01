@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from liquid_tracer.address_counts import (_collect_counts, _failure_reason, addresses,
                                            apply_saved_counts, fetch_counts)
+from liquid_tracer.address_count_cache import CountCacheJournal
 from liquid_tracer.common import TraceError, canonical, read_json, save_json
 from liquid_tracer.investigations import create_investigation, read_case
 from tests.test_attribution_convergence import graph_state
@@ -256,6 +257,12 @@ class AddressCountConcurrencyTests(unittest.TestCase):
         self.state["fetch_options"]["workers"] = 1
         wanted = self.wanted(130)
         saved_sizes = []
+        batches = []
+        write = CountCacheJournal.write
+
+        def checkpoint(journal, records):
+            batches.append(len(records))
+            write(journal, records)
 
         def save(path, data):
             saved_sizes.append(len(data["counts"]))
@@ -265,10 +272,13 @@ class AddressCountConcurrencyTests(unittest.TestCase):
         # request metrics, and pacing clock, so this isolates the size threshold.
         clock = SimpleNamespace(monotonic=lambda: 100.)
         with patch("liquid_tracer.address_counts.time", clock), \
-                patch("liquid_tracer.address_counts.save_json", side_effect=save):
+                patch("liquid_tracer.address_counts.save_json", side_effect=save), \
+                patch.object(CountCacheJournal, "write", checkpoint):
             report = self.collect(wanted, CountTransport(), max_requests=200)
 
-        self.assertEqual(saved_sizes, [32, 64, 96, 128, 130])
+        self.assertEqual(batches, [32, 32, 32, 32, 2])
+        self.assertEqual(sum(batches), len(wanted))
+        self.assertEqual(saved_sizes, [130])
         self.assertEqual((report["fetched"], report["remaining"]), (130, 0))
         self.assertEqual(set(apply_saved_counts(self.case, self.state)), set(wanted))
         self.assertEqual(len({record["observation_ids"][0] for record in self.cached().values()}), 130)
@@ -278,6 +288,13 @@ class AddressCountConcurrencyTests(unittest.TestCase):
         wanted = self.wanted(3)
         now = [100.]
         saved_sizes = []
+        committed = []
+        write = CountCacheJournal.write
+
+        def checkpoint(journal, records):
+            write(journal, records)
+            state = {key: value for key, value in self.state.items() if key != "address_tx_counts"}
+            committed.append(len(apply_saved_counts(self.case, state)))
 
         def save(path, data):
             saved_sizes.append(len(data["counts"]))
@@ -288,9 +305,11 @@ class AddressCountConcurrencyTests(unittest.TestCase):
                 now[0] += 1.1
 
         with patch("liquid_tracer.address_counts.time", SimpleNamespace(monotonic=lambda: now[0])), \
-                patch("liquid_tracer.address_counts.save_json", side_effect=save):
+                patch("liquid_tracer.address_counts.save_json", side_effect=save), \
+                patch.object(CountCacheJournal, "write", checkpoint):
             self.collect(wanted, CountTransport(), progress=progress)
-        self.assertEqual(saved_sizes, [2, 3])
+        self.assertEqual(committed, [2, 3])
+        self.assertEqual(saved_sizes, [3])
 
     def test_auto_mode_grows_above_eight_from_measured_transport_latency(self):
         self.state["fetch_options"]["workers"] = 8

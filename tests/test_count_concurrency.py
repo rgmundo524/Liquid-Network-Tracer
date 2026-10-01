@@ -60,6 +60,79 @@ class CountConcurrencyTests(unittest.TestCase):
         self.assertEqual(public.target(self.metrics(8, latency=.25)), 2)
         self.assertEqual(public.target(self.metrics(16, latency=.25)), 2)
 
+    def test_service_time_overlaps_evidence_work_beyond_fast_network_responses(self):
+        policy = CountConcurrency(8, 972456, 49)
+        # Network-only sizing previously selected three workers. A worker is
+        # actually occupied for 400 ms including durable evidence collection.
+        metrics = self.metrics(8, latency=.048)
+        metrics.update(completed_endpoints=7, service_latency_seconds=.4)
+        self.assertEqual(policy.target(metrics), 8)
+        metrics.update(completed_requests=16, completed_endpoints=8)
+        self.assertEqual(policy.target(metrics), 16)
+        self.assertEqual(policy.target(metrics), 16)
+        metrics.update(completed_requests=24, completed_endpoints=16)
+        self.assertEqual(policy.target(metrics), 25)
+        self.assertEqual(policy.ceiling, 64)
+        self.assertEqual(policy._rate, 49)
+
+    def test_network_completions_do_not_advance_service_measurement_window(self):
+        policy = CountConcurrency(8, 972456, 49)
+        metrics = self.metrics(800, latency=2)
+        metrics.update(completed_endpoints=0, service_latency_seconds=None)
+        self.assertEqual(policy.target(metrics), 8)
+        metrics.update(completed_endpoints=8, service_latency_seconds=2)
+        self.assertEqual(policy.target(metrics), 16)
+        metrics["completed_requests"] = 900
+        self.assertEqual(policy.target(metrics), 16)
+
+    def test_fast_service_samples_preserve_initial_overlap_without_quota_feedback(self):
+        policy = CountConcurrency(8, 972456, 49)
+        metrics = self.metrics(8, latency=.001)
+        metrics.update(completed_endpoints=8, service_latency_seconds=.048,
+                       pacing_wait_seconds_total=10000,
+                       retry_wait_seconds_total=50000)
+        self.assertEqual(policy.target(metrics), 8)
+        for completed in (16, 24, 32):
+            metrics["completed_endpoints"] = completed
+            metrics["pacing_wait_seconds_total"] *= 2
+            self.assertEqual(policy.target(metrics), 8)
+        self.assertEqual(policy.peak, 8)
+
+    def test_service_target_still_halves_on_pressure_and_recovers_after_clean_window(self):
+        policy = CountConcurrency(8, 972456, 49)
+        metrics = self.metrics(8, latency=.001)
+        metrics.update(completed_endpoints=8, service_latency_seconds=.04)
+        self.assertEqual(policy.target(metrics), 8)
+        metrics.update(completed_endpoints=9, pressure_events=1)
+        self.assertEqual(policy.target(metrics), 4)
+        metrics["completed_endpoints"] = 17
+        self.assertEqual(policy.target(metrics), 4)
+        metrics["completed_endpoints"] = 25
+        self.assertEqual(policy.target(metrics), 8)
+        metrics.update(completed_endpoints=26, pressure_events=2)
+        self.assertEqual(policy.target(metrics), 4)
+
+    def test_service_target_obeys_saved_fixed_backlog_and_resource_limits(self):
+        metrics = self.metrics(1000, latency=.001)
+        metrics.update(completed_endpoints=1000, service_latency_seconds=30)
+        self.assertEqual(CountConcurrency(3, 972456, 49).target(metrics), 3)
+        self.assertEqual(CountConcurrency(8, 3, 49).target(metrics), 3)
+        with patch.dict(os.environ, {"LIQUID_COUNT_WORKERS": "32"}):
+            self.assertEqual(CountConcurrency(8, 972456, 49).target(metrics), 32)
+        self.memory.return_value = 256 * MIB
+        self.assertEqual(CountConcurrency(8, 972456, 49).target(metrics), 2)
+        self.memory.return_value = 32 * 1024 * MIB
+        self.cpus.return_value = 1
+        self.assertEqual(CountConcurrency(8, 972456, 49).target(metrics), 8)
+
+    def test_invalid_service_sample_falls_back_to_legacy_network_sample(self):
+        for service in (None, 0, -1, "1", True, float("inf"), float("nan")):
+            with self.subTest(service=service):
+                policy = CountConcurrency(8, 972456, 49)
+                metrics = self.metrics(8, latency=.1)
+                metrics.update(completed_endpoints=8, service_latency_seconds=service)
+                self.assertEqual(policy.target(metrics), 7)
+
     def test_saved_low_worker_settings_remain_caps_in_auto_mode(self):
         for initial in (1, 2, 3, 7):
             with self.subTest(initial=initial):

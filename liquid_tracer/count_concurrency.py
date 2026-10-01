@@ -14,12 +14,15 @@ _MIB = 1024 * 1024
 
 
 class CountConcurrency:
-    """Bound network workers by resources, measured latency, and retry pressure.
+    """Bound lookup workers by resources, service time, and retry pressure.
 
     The caller supplies cumulative metrics from a fresh count-only API client.
-    Completed requests include retries, so they advance measurement windows but
-    do not reduce the address backlog. The API's shared limiter remains solely
-    responsible for pacing requests.
+    A worker also saves evidence and decodes a response after the network request
+    finishes. Size its overlap from that full service time, excluding admission
+    and retry waits: shared quota contention must not inflate the worker target.
+    Older API clients can still supply network-only request metrics. Neither
+    completed endpoints nor retries reduce the address backlog here. The API's
+    shared limiter remains solely responsible for pacing requests.
     """
 
     def __init__(self, initial_workers, total, rate, *, setting=_SETTING, label="Address count"):
@@ -76,6 +79,13 @@ class CountConcurrency:
         value = metrics.get(key, 0)
         return value if type(value) is int and value >= 0 else 0
 
+    @staticmethod
+    def _latency(metrics, key):
+        value = metrics.get(key)
+        if type(value) in (int, float) and math.isfinite(value) and value > 0:
+            return value
+        return None
+
     def target(self, metrics):
         """Return a bounded in-flight target, changing at most once per window."""
         now = time.monotonic()
@@ -83,7 +93,11 @@ class CountConcurrency:
             self._ceiling = self._resource_ceiling()
             self._sampled_at = now
         self._target = min(self._target, self._ceiling)
-        completed = self._counter(metrics, "completed_requests")
+        # A response can finish while its worker is still writing evidence.
+        # Wait for complete service samples before adjusting worker occupancy.
+        completion_key = ("completed_endpoints" if "completed_endpoints" in metrics
+                          else "completed_requests")
+        completed = self._counter(metrics, completion_key)
         pressure = self._counter(metrics, "pressure_events")
         if pressure > self._pressure_events:
             self._pressure_events = pressure
@@ -95,14 +109,21 @@ class CountConcurrency:
             # requests finished between callbacks. Repeated identical metrics
             # cannot trigger another increase.
             self._next_adjustment = completed + self._window
-            latency = metrics.get("latency_seconds")
+            service_latency = self._latency(metrics, "service_latency_seconds")
+            latency = service_latency or self._latency(metrics, "latency_seconds")
             if self.mode == "fixed" or self._rate == 0:
                 desired = min(self._initial, self._ceiling)
-            elif type(latency) in (int, float) and math.isfinite(latency) and latency > 0:
+            elif latency is not None:
                 # Little's law, with modest headroom for response variance.
                 # Clamp before ceil to avoid overflow for extreme rate inputs.
                 demand = self._rate * latency * 1.25
                 desired = max(1, math.ceil(min(self._ceiling, demand)))
+                if service_latency is not None:
+                    # Fast early responses should not collapse the initial
+                    # overlap before slower/archive-heavy work is observed.
+                    # Resource caps and retry pressure can still reduce below
+                    # this floor; recovery observes the clean-window hold.
+                    desired = max(desired, min(self._initial, self._ceiling))
             else:
                 desired = self._target
             if self._hold_growth:
