@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from liquid_tracer.api import Esplora
 from liquid_tracer.cli import main
 from liquid_tracer.common import TraceError, read_json, save_json
 from liquid_tracer.investigations import create_investigation, list_investigations, read_case, update_case
@@ -15,6 +16,7 @@ from liquid_tracer.services import set_service
 from liquid_tracer.shared_collection import (collect_prepared, dataset_path, load_shared_run,
                                               prepare_collection, read_summary)
 from tests.fixtures import A, B, C, D, fixture
+from tests.test_trace_concurrency import evidence_topology
 
 
 class SharedCollectionTests(unittest.TestCase):
@@ -93,6 +95,54 @@ class SharedCollectionTests(unittest.TestCase):
         self.assertEqual(fresh_state["seeds"], [D + ":0"])
         self.assertIsNone(fresh_state["parent_run"])
         self.assertEqual(original, {str(path.relative_to(archive)): path.read_bytes() for path in archive.rglob("*") if path.is_file()})
+
+    def test_failed_collection_is_saved_and_zero_hop_continuation_recovers_all_paths(self):
+        update_case(self.first, {"run_defaults": {**self.settings, "budget_limits_enabled": False}})
+        prepared = self.prepare(hops=15)
+        original_get = Esplora._get
+
+        def fail_outspends(api, endpoint):
+            if endpoint == "/tx/" + B + "/outspends":
+                raise TraceError("Network request failed: RemoteDisconnected")
+            return original_get(api, endpoint)
+
+        output = io.StringIO()
+        with patch.object(Esplora, "_get", fail_outspends), contextlib.redirect_stdout(output):
+            self.assertEqual(collect_prepared(self.first, prepared["request_id"]), 1)
+        failed = json.loads(output.getvalue())
+        self.assertEqual(failed["status"], "error")
+        self.assertEqual(failed["errors"], ["Network request failed: RemoteDisconnected"])
+        self.assertEqual(read_case(dataset_path(self.first))["latest_run"], failed["run_id"])
+        _, state, archive = load_shared_run(self.first, failed["run_id"])
+        original = {str(path.relative_to(archive)): path.read_bytes()
+                    for path in archive.rglob("*") if path.is_file()}
+        self.assertGreater(len(state["transactions"]), 0)
+        self.assertIn(A + ":0", state["links"])
+        self.assertGreater(state["stats"]["frontier_count"], 0)
+        self.assertFalse(any(item["status"] == "pending" for item in state["outputs"].values()))
+        summary = read_summary(self.root, case=self.first)
+        self.assertEqual(summary["latest_run"], failed["run_id"])
+        self.assertEqual(summary["latest"]["status"], "error")
+
+        recovery = prepare_collection(self.first, None, hops=0, resume=failed["run_id"])
+        self.assertEqual(recovery["policy"]["settings"]["hops"], 15)
+        result = self.collect(recovery)
+        _, recovered, _ = load_shared_run(self.first, result["run_id"])
+        self.assertEqual(recovered["limits"]["max_hops"], 15)
+        self.assertEqual(recovered["parent_run"], failed["run_id"])
+        self.assertEqual(recovered["status"], "bounded_complete")
+        self.assertEqual(recovered["errors"], [])
+        self.assertTrue(set(state["transactions"]).issubset(recovered["transactions"]))
+        self.assertTrue(set(state["outputs"]).issubset(recovered["outputs"]))
+        self.assertTrue(set(state["observations"]).issubset(recovered["observations"]))
+        self.assertEqual({key: recovered["links"][key] for key in state["links"]}, state["links"])
+        self.assertEqual(recovered["shared_collection"]["members"], state["shared_collection"]["members"])
+        self.assertEqual(original, {str(path.relative_to(archive)): path.read_bytes()
+                                    for path in archive.rglob("*") if path.is_file()})
+
+        complete = self.collect(self.prepare(hops=15))
+        _, uninterrupted, _ = load_shared_run(self.first, complete["run_id"])
+        self.assertEqual(evidence_topology(recovered), evidence_topology(uninterrupted))
 
     def test_policy_and_membership_are_frozen_before_credential_delay(self):
         set_service(self.first, "SYNTHETIC-victim-deposit", name="Policy stop", stop_tracing=True)

@@ -6,19 +6,53 @@ existing urllib path. This transport never replays requests: the API owns the
 request budget, pacing, retries and evidence archive.
 """
 
+import errno
+import socket
 import ssl
 import threading
+import urllib.error
 import urllib.parse
 import urllib.request
-from http.client import HTTPException, HTTPSConnection, RemoteDisconnected
+from http.client import HTTPException, HTTPSConnection, IncompleteRead, RemoteDisconnected
 
 from .common import TraceError
 
 MAX_BODY = 32 * 1024 * 1024
 
 
-class StaleExplorerConnection(TraceError):
+class TransientExplorerConnection(TraceError):
+    """A safe read/token request failed transiently; API admission owns retries."""
+
+
+class StaleExplorerConnection(TransientExplorerConnection):
     """A reused GET connection disconnected; retry only through API admission."""
+
+
+def network_failure(method, error, *, reused=False, token_request=False):
+    """Classify known transient transport failures without exposing their text.
+
+    urllib wraps socket/TLS failures in URLError. Retry only safe reads or an
+    explicitly identified client-credentials token request, and only specific
+    temporary failures. Certificate, protocol, URL and JSON validation errors
+    remain fatal. A new connection can disconnect just like a reused one.
+    """
+    while isinstance(error, urllib.error.URLError) and isinstance(error.reason, BaseException):
+        error = error.reason
+    transient = isinstance(error, (RemoteDisconnected, IncompleteRead, TimeoutError,
+                                   ConnectionError, ssl.SSLEOFError))
+    if isinstance(error, socket.gaierror):
+        transient = error.errno == socket.EAI_AGAIN
+    elif isinstance(error, ssl.SSLError):
+        transient = isinstance(error, ssl.SSLEOFError)
+    elif isinstance(error, OSError):
+        transient = transient or error.errno in {
+            errno.ECONNRESET, errno.ECONNABORTED, errno.ECONNREFUSED, errno.EPIPE,
+            errno.ETIMEDOUT, errno.ENETDOWN, errno.ENETUNREACH, errno.EHOSTUNREACH,
+        }
+    exception = TraceError
+    if (method == "GET" or (method == "POST" and token_request)) and transient:
+        exception = StaleExplorerConnection if reused and method == "GET" else TransientExplorerConnection
+    return exception("Network request failed: " + type(error).__name__)
 
 
 class ExplorerHTTP:
@@ -129,7 +163,10 @@ class ExplorerHTTP:
         with self._lock:
             self._check_open()
         if origin in self._proxy_origins:
-            result = self._fallback(method, url, headers, body, timeout)
+            try:
+                result = self._fallback(method, url, headers, body, timeout)
+            except (HTTPException, OSError, ValueError, TypeError) as error:
+                raise network_failure(method, error, token_request=url == self._token_url) from None
             if 300 <= result[0] < 400:
                 raise TraceError("Unexpected HTTP redirect; verify the configured API endpoint")
             if len(result[2]) > MAX_BODY:
@@ -158,8 +195,4 @@ class ExplorerHTTP:
             raise
         except (HTTPException, OSError, ValueError, TypeError) as error:
             self._discard(origin, connection)
-            exception = (StaleExplorerConnection if reused and method == "GET"
-                         and isinstance(error, (RemoteDisconnected, ConnectionResetError,
-                                                BrokenPipeError, ConnectionAbortedError)) else TraceError)
-            # Omit request headers, credentials, URL queries and exception text.
-            raise exception("Network request failed: " + type(error).__name__) from None
+            raise network_failure(method, error, reused=reused, token_request=url == self._token_url) from None

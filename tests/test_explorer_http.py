@@ -1,15 +1,17 @@
+import errno
+import socket
 import ssl
 import io
 import threading
 import unittest
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
-from http.client import RemoteDisconnected
+from http.client import IncompleteRead, RemoteDisconnected
 from unittest.mock import Mock, patch
 
 from liquid_tracer.api import ENTERPRISE, TOKEN_URL, http
 from liquid_tracer.common import TraceError
-from liquid_tracer.explorer_http import ExplorerHTTP, StaleExplorerConnection
+from liquid_tracer.explorer_http import ExplorerHTTP, StaleExplorerConnection, TransientExplorerConnection
 
 
 class Response:
@@ -113,27 +115,80 @@ class ExplorerHTTPTests(unittest.TestCase):
             transport('GET', ENTERPRISE + '/tx/three')
             self.assertEqual(len(self.connections), 2)
 
-    def test_failed_oauth_post_is_neither_marked_retryable_nor_replayed(self):
+    def test_failed_exact_oauth_post_is_marked_but_never_replayed_by_transport(self):
         with self.client() as transport:
             transport('POST', TOKEN_URL)
             connection = self.connections[0]
             connection.failure = RemoteDisconnected('never expose synthetic-secret')
             with self.assertRaises(TraceError) as caught:
                 transport('POST', TOKEN_URL)
+            self.assertIsInstance(caught.exception, TransientExplorerConnection)
             self.assertNotIsInstance(caught.exception, StaleExplorerConnection)
             self.assertEqual(str(caught.exception), 'Network request failed: RemoteDisconnected')
             self.assertEqual(len(connection.requests), 2)
             self.assertEqual(len(self.connections), 1)
             self.assertTrue(connection.closed)
 
-    def test_new_get_connection_failure_is_not_assumed_stale(self):
+    def test_new_get_connection_failure_is_retryable_without_transport_replay(self):
         connection = Connection('enterprise.blockstream.info', 443, 3, ssl.create_default_context())
         connection.failure = RemoteDisconnected('sensitive failure')
         with self.client() as transport, patch('liquid_tracer.explorer_http.HTTPSConnection', return_value=connection):
             with self.assertRaises(TraceError) as caught:
                 transport('GET', ENTERPRISE + '/tx/one')
+            self.assertIsInstance(caught.exception, TransientExplorerConnection)
             self.assertNotIsInstance(caught.exception, StaleExplorerConnection)
+            self.assertEqual(len(connection.requests), 1)
             self.assertTrue(connection.closed)
+
+    def test_transient_get_failures_are_classified_on_fresh_connections(self):
+        failures = [TimeoutError('private'), ConnectionResetError('private'),
+                    BrokenPipeError('private'), ConnectionAbortedError('private'),
+                    IncompleteRead(b'private', 99), ssl.SSLEOFError('private'),
+                    socket.gaierror(socket.EAI_AGAIN, 'private'),
+                    OSError(errno.ENETUNREACH, 'private')]
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                connection = Connection('enterprise.blockstream.info', 443, 3, ssl.create_default_context())
+                connection.failure = failure
+                with self.client() as transport, patch('liquid_tracer.explorer_http.HTTPSConnection', return_value=connection):
+                    with self.assertRaises(TransientExplorerConnection) as caught:
+                        transport('GET', ENTERPRISE + '/tx/one')
+                self.assertEqual(str(caught.exception), 'Network request failed: ' + type(failure).__name__)
+                self.assertEqual(len(connection.requests), 1)
+                self.assertTrue(connection.closed)
+
+    def test_certificate_protocol_and_permanent_dns_errors_are_not_retryable(self):
+        failures = [ssl.SSLCertVerificationError('private'), ssl.SSLError('private'),
+                    socket.gaierror(socket.EAI_NONAME, 'private'),
+                    PermissionError('private'), ValueError('private')]
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                connection = Connection('enterprise.blockstream.info', 443, 3, ssl.create_default_context())
+                connection.failure = failure
+                with self.client() as transport, patch('liquid_tracer.explorer_http.HTTPSConnection', return_value=connection):
+                    with self.assertRaises(TraceError) as caught:
+                        transport('GET', ENTERPRISE + '/tx/one')
+                self.assertNotIsInstance(caught.exception, TransientExplorerConnection)
+                self.assertEqual(len(connection.requests), 1)
+                self.assertNotIn('private', str(caught.exception))
+
+    def test_proxy_urllib_failures_keep_retry_classification_and_redaction(self):
+        for failure in (RemoteDisconnected('private'), urllib.error.URLError(TimeoutError('private')),
+                        urllib.error.URLError(ssl.SSLCertVerificationError('private'))):
+            opener = Mock()
+            opener.open.side_effect = failure
+            with self.subTest(failure=repr(type(failure))), \
+                 patch('liquid_tracer.explorer_http.urllib.request.getproxies', return_value={'https': 'http://proxy.example:3128'}), \
+                 patch('liquid_tracer.explorer_http.urllib.request.proxy_bypass', return_value=False), \
+                 patch('liquid_tracer.api.urllib.request.build_opener', return_value=opener):
+                with self.client() as transport, self.assertRaises(TraceError) as caught:
+                    transport('GET', ENTERPRISE + '/tx/one')
+                retryable = not (isinstance(failure, urllib.error.URLError)
+                                 and isinstance(failure.reason, ssl.SSLCertVerificationError))
+                self.assertEqual(isinstance(caught.exception, TransientExplorerConnection), retryable)
+                self.assertNotIn('private', str(caught.exception))
+                self.assertEqual(opener.open.call_count, 1)
+        self.factory.assert_not_called()
 
     def test_response_limits_include_error_bodies_and_redirects_are_not_followed(self):
         with self.client() as transport, patch('liquid_tracer.explorer_http.MAX_BODY', 16):

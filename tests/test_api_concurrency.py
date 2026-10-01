@@ -441,7 +441,7 @@ class ApiConcurrencyTests(unittest.TestCase):
             return 503, {}, b'{"retry":true}'
 
         api = self.client(transport)
-        with patch.object(api.budget, 'pause'):
+        with patch.object(api._cancelled, 'wait', return_value=False):
             results = api.prefetch(['/tx/one'] * 8)
             with self.assertRaisesRegex(TraceError, 'retries exhausted'):
                 api.get('/tx/one')
@@ -696,7 +696,7 @@ class ApiConcurrencyTests(unittest.TestCase):
             return status, {}, b'{}'
 
         api = self.client(transport)
-        with patch.object(api, '_cooldown'), patch.object(api.budget, 'pause'):
+        with patch.object(api, '_cooldown'), patch.object(api._cancelled, 'wait', return_value=False):
             first = api.prefetch(['/tx/first'])
             second = api.prefetch(['/tx/second'])
         self.assertIsInstance(first['/tx/first'], TraceError)

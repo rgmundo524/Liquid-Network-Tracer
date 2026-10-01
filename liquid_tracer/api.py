@@ -13,7 +13,7 @@ from http.client import HTTPException
 
 from .common import StopRun, TraceError, canonical, read_json
 from .explorer_quota import SharedExplorerQuota
-from .explorer_http import ExplorerHTTP, StaleExplorerConnection
+from .explorer_http import ExplorerHTTP, TransientExplorerConnection, network_failure
 
 TOKEN_URL = "https://login.blockstream.com/realms/blockstream-public/protocol/openid-connect/token"
 ENTERPRISE = "https://enterprise.blockstream.info/liquid/api"
@@ -73,8 +73,7 @@ def http(method, url, headers=None, body=None, timeout=20):
                     raise TraceError("API response exceeds 32 MiB")
                 return error.code, dict(error.headers), raw
     except (urllib.error.URLError, TimeoutError, OSError, HTTPException) as error:
-        # Never echo request headers, credentials, URLs with queries, or server bodies.
-        raise TraceError("Network request failed: " + type(error).__name__) from None
+        raise network_failure(method, error, token_request=url == TOKEN_URL) from None
 
 
 @dataclass
@@ -395,6 +394,20 @@ class Esplora:
                 delay = 0.
         return max(2 ** attempt, delay) if math.isfinite(delay) else float("inf")
 
+    def _pause_retry(self, seconds):
+        """Wait between retries without hiding attempts or delaying cancellation."""
+        started = time.monotonic()
+        try:
+            self.budget.check_request()
+            remaining = self.budget.remaining_seconds()
+            if remaining is not None and seconds >= remaining:
+                raise StopRun("time_limit")
+            if self._cancelled.wait(max(0., seconds)):
+                raise StopRun("interrupted")
+            self.budget.check_request()
+        finally:
+            self._add_seconds("retry_wait_seconds_total", started)
+
     def call(self, method, url, kind, endpoint, headers=None, body=None):
         started = time.monotonic()
         self._transport_slots.acquire()
@@ -455,10 +468,34 @@ class Esplora:
             raise TraceError("Set BLOCKSTREAM_CLIENT_ID and BLOCKSTREAM_CLIENT_SECRET locally")
         payload = urllib.parse.urlencode({"client_id": client, "client_secret": secret,
                        "grant_type": "client_credentials", "scope": "openid"}).encode()
-        status, _, raw = self.call("POST", TOKEN_URL, "oauth", "/token",
-                                  {"Content-Type": "application/x-www-form-urlencoded"}, payload)
-        if status != 200:
-            raise TraceError("Blockstream authentication failed (HTTP " + str(status) + ")")
+        # This exact client-credentials acquisition may be repeated safely.
+        # No other POST is replayed, and token bodies are never archived.
+        for attempt in range(4):
+            try:
+                status, response_headers, raw = self.call(
+                    "POST", TOKEN_URL, "oauth", "/token",
+                    {"Content-Type": "application/x-www-form-urlencoded"}, payload)
+            except TransientExplorerConnection as error:
+                if attempt == 3:
+                    raise type(error)("Blockstream token request network retries exhausted after 4 attempts: "
+                                      + str(error)) from None
+                self._pause_retry(2 ** attempt)
+                continue
+            if status == 200:
+                break
+            if status not in (429, 500, 502, 503, 504):
+                raise TraceError("Blockstream authentication failed (HTTP " + str(status) + ")")
+            if self._pacing_error is not None:
+                raise self._pacing_error
+            delay = self._retry_delay(response_headers, attempt)
+            if status == 429:
+                self._cooldown(delay)
+            if attempt == 3:
+                raise TraceError("Blockstream token request retries exhausted after 4 attempts (HTTP " + str(status) + ")")
+            if not math.isfinite(delay) or delay > 30:
+                raise StopRun("server_retry_later")
+            if status != 429:
+                self._pause_retry(delay)
         try:
             data = json.loads(raw)
             token = data["access_token"]
@@ -664,12 +701,15 @@ class Esplora:
                     token_generation = self._token_generation
             try:
                 status, response_headers, raw = self.call("GET", self.base + endpoint, "esplora", endpoint, headers)
-            except StaleExplorerConnection:
-                # A stale keep-alive GET consumes its original request budget
-                # and network-error evidence. Its replacement goes through the
-                # same admission gate and four-attempt ceiling as HTTP retries.
+            except TransientExplorerConnection as error:
+                # Fresh, reused and proxy GET failures all consume the original
+                # request budget and network-error evidence. Their replacements
+                # use the same admission gate and four-attempt ceiling as HTTP
+                # responses, with interruptible 1/2/4 second backoff.
                 if attempt == 3:
-                    raise
+                    raise type(error)("Explorer network retries exhausted after 4 attempts for "
+                                      + endpoint + ": " + str(error)) from None
+                self._pause_retry(2 ** attempt)
                 continue
             oid = self._evidence(self.store.observe, self.run_id, self.base, endpoint, raw, status)
             self._remember(oid)
@@ -697,11 +737,7 @@ class Esplora:
                 if not math.isfinite(delay) or delay > 30:
                     raise StopRun("server_retry_later")
                 if status != 429:
-                    started = time.monotonic()
-                    try:
-                        self.budget.pause(delay)
-                    finally:
-                        self._add_seconds("retry_wait_seconds_total", started)
+                    self._pause_retry(delay)
                 continue
             raise TraceError("Explorer HTTP " + str(status) + " for " + endpoint)
         raise TraceError("Explorer retries exhausted for " + endpoint)
