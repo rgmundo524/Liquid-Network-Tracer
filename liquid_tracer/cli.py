@@ -235,7 +235,7 @@ def parser():
         plot.add_argument("--include-unspendable", action="store_true",
                           help="Include paths to non-peg-out unspendable outputs in peg-out plots")
         plot.add_argument("--include-context", action="store_true",
-                          help="Show other input addresses and spendable sibling outputs around selected peg-out path transactions")
+                          help="Compatibility flag; new peg-out plots always display every input and output of selected transactions")
         if command == "plot":
             plot.add_argument("--open", dest="open_browser", action="store_true")
         else:

@@ -21,7 +21,7 @@ SEED_SCOPE = SCOPE.replace("from the chosen transaction", "from the selected see
 
 def validate_query(txid=None, min_hops=0, max_hops=10, *, seeds=None,
                    include_unspent=False, include_unspendable=False, include_context=False,
-                   hop_reference_name=""):
+                   hop_reference_name="", transaction_io=None):
     if seeds is not None:
         if txid is not None:
             raise TraceError("Choose either selected seed outputs or one transaction for a peg-out search")
@@ -44,6 +44,10 @@ def validate_query(txid=None, min_hops=0, max_hops=10, *, seeds=None,
     if type(include_context) is not bool:
         raise TraceError("Context addresses must be enabled or disabled")
     options["include_context"] = include_context
+    if transaction_io not in (None, "complete"):
+        raise TraceError("Peg-out transaction I/O must use complete transaction context")
+    if transaction_io is not None:
+        options["transaction_io"] = transaction_io
     name = normalize_reference_name(hop_reference_name)
     if name:
         options["hop_reference_name"] = name
@@ -254,7 +258,13 @@ def _endpoint_matches(state, endpoints, distances):
 
 def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=None,
                  group_context_inputs=False):
-    """Filter a copied graph to the union of all qualifying bounded paths."""
+    """Select qualifying transactions, then show their requested local context.
+
+    Complete I/O is explicitly versioned in the query so archived path-only
+    graphs can still be reviewed using their original display semantics.
+    Reachability, endpoint matches and tracked-output evidence never expand
+    when local context is displayed.
+    """
     from .export import build_graph
     from .context_groups import group_context_inputs as group_inputs
     from .layout import arrange
@@ -270,7 +280,10 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
     query = validate_query(query.get("txid"), query.get("min_hops", 0), query.get("max_hops", 10),
                            seeds=query.get("seeds"), include_unspent=query.get("include_unspent", False),
                            include_unspendable=query.get("include_unspendable", False),
-                           include_context=query.get("include_context", False), hop_reference_name=name)
+                           include_context=query.get("include_context", False), hop_reference_name=name,
+                           transaction_io=query.get("transaction_io"))
+    complete_io = query.get("transaction_io") == "complete"
+    include_context = complete_io or query.get("include_context", False)
     outpoints, endpoint_matches, depths, output_depths = _paths(state, query)
     matches = [{key: value for key, value in match.items() if key != "kind"}
                for match in endpoint_matches if match["kind"] == "pegout"]
@@ -302,8 +315,8 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
     edge_ids = {"out:" + key for key in outpoints | endpoints}
     edge_ids.update(f"in:{state['links'][key]['spending_txid']}:{state['links'][key]['vin']}" for key in outpoints)
     context_edge_ids = set()
-    if query.get("include_context"):
-        # Add local address context only after finding successful paths. Keeping
+    if include_context:
+        # Add local I/O context only after finding successful paths. Keeping
         # outputs, links and seeds pruned above preserves exact path evidence,
         # edge roles, branch provenance and endpoint status.
         for txid, record in reduced["transactions"].items():
@@ -311,20 +324,22 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
                 prevout = vin.get("prevout") or {}
                 if not isinstance(prevout, dict):
                     raise TraceError("Context inputs require valid saved output metadata")
-                if not vin.get("is_coinbase") and output_kind(prevout) == "spendable":
+                if complete_io or (not vin.get("is_coinbase") and output_kind(prevout) == "spendable"):
                     context_edge_ids.add(f"in:{txid}:{index}")
             context_edge_ids.update(f"out:{txid}:{index}"
                                     for index, output in enumerate(record["data"]["vout"])
-                                    if output_kind(output) == "spendable")
+                                    if complete_io or output_kind(output) == "spendable")
         context_edge_ids.difference_update(edge_ids)
         edge_ids.update(context_edge_ids)
-    graph = build_graph(reduced, merge_addresses=True, include_fees=False,
+    graph = build_graph(reduced, merge_addresses=True, include_fees=complete_io,
                         color_attribution_arrows=color_attribution_arrows, center_name=center_name,
                         edge_ids=edge_ids)
     node_ids = {edge[field] for edge in graph["edges"] for field in ("source", "target")}
     graph["nodes"] = [node for node in graph["nodes"] if node["id"] in node_ids]
-    graph["fee_items"] = {}
-    graph["layout"] = arrange({node["id"]: node for node in graph["nodes"]}, graph["edges"], reduced["transactions"], {})
+    if not complete_io:
+        graph["fee_items"] = {}
+    graph["layout"] = arrange({node["id"]: node for node in graph["nodes"]}, graph["edges"],
+                              reduced["transactions"], graph["fee_items"])
     graph["activity_frames"] = activity_frames(graph)
     scope = SEED_SCOPE if "seeds" in query else SCOPE
     extra_endpoints = query.get("include_unspent") or query.get("include_unspendable")
@@ -333,8 +348,13 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
                   "this is their status at observation, not a current balance. Unchecked or bounded outputs "
                   "are not treated as unspent.")
     if query.get("include_unspendable"):
-        scope += " Unspendable endpoints are proven by the saved output script; fees are excluded."
-    if query.get("include_context"):
+        scope += (" Unspendable endpoints are proven by the saved output script; fees are excluded"
+                  + (" from endpoint selection." if complete_io else "."))
+    if complete_io:
+        scope += (" Every input and output of each qualifying transaction is displayed, including fees. "
+                  "Context arrows do not establish a qualifying path or add endpoint matches. "
+                  "Unfollowed branch outputs are shown without inferring unspent status or expanding their transactions.")
+    elif include_context:
         scope += (" Context input and output arrows show other addresses on qualifying transactions; "
                   "they do not establish a qualifying path or extend the trace.")
     origin_notice = ("each seed transaction is hop 0, with only its selected outputs starting a path. "
@@ -349,7 +369,7 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
                         "transaction_count": len(selected), "scope": scope,
                         "source_run_status": state.get("status"), "source_stop_reason": state.get("stop_reason"),
                         "status": "pegouts_found" if matches else "no_pegout_found"}
-    if query.get("include_context"):
+    if include_context:
         graph["pegouts"]["context_edge_count"] = len(context_edge_ids)
     if extra_endpoints:
         counts = {kind: sum(match["kind"] == kind for match in endpoint_matches)
@@ -365,7 +385,7 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
     if query.get("include_unspendable"):
         summary += f", {counts['unspendable']} unspendable output(s)"
     path_notice = ("Every traced path edge belongs to a qualifying path; "
-                   if query.get("include_context") else "Every displayed edge belongs to a qualifying path; ")
+                   if include_context else "Every displayed edge belongs to a qualifying path; ")
     units = "group-relative hops" if name else "transaction hops"
     graph["notice"] = (summary + f" found within {query['min_hops']} to {query['max_hops']} "
                        + units + ", inclusive; " + origin_notice + scope +
@@ -373,7 +393,7 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
                        + path_notice +
                        "their union may also form routes outside the selected range. "
                        "UTXO reachability does not prove ownership or allocate confidential values.")
-    if query.get("include_context") and group_context_inputs:
+    if include_context and group_context_inputs:
         # Group after final filtering and arrangement so summary dimensions and
         # notices survive, while eligibility sees every displayed occurrence.
         graph = group_inputs(graph, enabled=True)

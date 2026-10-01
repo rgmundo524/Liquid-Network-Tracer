@@ -22,8 +22,9 @@ def _endpoint_summary(plot):
         labels.append(f"{counts.get('unspent', 0)} unspent UTXOs")
     if query.get("include_unspendable"):
         labels.append(f"{counts.get('unspendable', 0)} unspendable outputs")
-    if query.get("include_context"):
-        labels.append("context addresses included" +
+    if query.get("transaction_io") == "complete" or query.get("include_context"):
+        labels.append(("all transaction inputs and outputs included" if query.get("transaction_io") == "complete"
+                       else "context addresses included") +
                       (" (isolated inputs grouped)" if plot.get("layout_settings", {}).get("group_context_inputs") else ""))
     return ", ".join(labels)
 
@@ -133,10 +134,10 @@ def plot_screen(base, button, case):
                     yield Checkbox("Include unspent UTXOs", id="plot-include-unspent")
                     yield Checkbox("Include unspendable outputs", id="plot-include-unspendable")
                     yield Static("Peg-outs are always included. Unspent means recorded as unspent in this saved collection; "
-                                 "it is not a live balance check. Fee outputs are excluded.", markup=False)
-                    yield Checkbox("Include context addresses", id="plot-include-context")
-                    yield Static("Show other input addresses and spendable sibling outputs around the selected path transactions. "
-                                 "Context does not extend the trace or add matching endpoints. Grouping follows the saved "
+                                 "it is not a live balance check. Fee outputs are excluded from endpoint selection.", markup=False)
+                    yield Static("Every selected transaction displays all its inputs and outputs, including fees. "
+                                 "Other branch outputs stay visible without extending the trace or adding matching endpoints. "
+                                 "Grouping follows the saved "
                                  "Group isolated context inputs layout setting.", markup=False)
                 yield Static("Hop limits filter the saved data. They do not collect additional transactions. "
                              "A starting transaction is hop 0. Missing matches may reflect incomplete coverage.", markup=False)
@@ -187,7 +188,6 @@ def plot_screen(base, button, case):
                         self.query_one("#plot-max-hops", Input).value,
                         include_unspent=goal == "pegouts" and self.query_one("#plot-include-unspent", Checkbox).value,
                         include_unspendable=goal == "pegouts" and self.query_one("#plot-include-unspendable", Checkbox).value,
-                        include_context=goal == "pegouts" and self.query_one("#plot-include-context", Checkbox).value,
                         layout_mode=mode, board_record_id=self.query_one("#plot-board", Select).value if mode == "update" else None,
                         publish=event.button.id == "plot-go", name=self.query_one("#plot-name", Input).value,
                         max_items=int(self.query_one("#plot-max-items", Input).value) if event.button.id == "plot-go" else 750))

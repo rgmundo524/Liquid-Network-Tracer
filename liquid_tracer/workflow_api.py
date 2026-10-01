@@ -58,7 +58,8 @@ def public_plot(value):
             except (TraceError, TypeError):
                 pass
         context_count = value.get("context_edge_count")
-        if (result.get("query", {}).get("include_context")
+        if ((result.get("query", {}).get("include_context")
+                or result.get("query", {}).get("transaction_io") == "complete")
                 and type(context_count) is int and context_count >= 0):
             result["context_edge_count"] = context_count
         counts = value.get("endpoint_counts")

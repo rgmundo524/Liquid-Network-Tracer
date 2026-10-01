@@ -77,7 +77,8 @@ class PlotTests(unittest.TestCase):
     def test_pegouts_use_selected_archive_seeds_not_changed_case_seeds(self):
         result = preview_plot(self.case, "pegouts", min_hops=2, max_hops=2)
         graph, _ = reviewed_plot(self.case, result["preview_id"])
-        self.assertEqual(result["query"], {"seeds": sorted(self.state["seeds"]), "min_hops": 2, "max_hops": 2})
+        self.assertEqual(result["query"], {"seeds": sorted(self.state["seeds"]), "min_hops": 2,
+                                          "max_hops": 2, "transaction_io": "complete"})
         self.assertEqual((result["min_hops"], result["max_hops"]), (2, 2))
         self.assertEqual([match["outpoint"] for match in graph["pegouts"]["matches"]], [self.endpoint])
         metadata = read_case(self.case)
@@ -121,6 +122,42 @@ class PlotTests(unittest.TestCase):
         self.assertEqual(plot_files(directory), FILES)
         reviewed_plot(self.case, result["preview_id"])
         self.assertTrue(list_plots(self.case)[0]["reviewable"])
+
+    def test_markerless_pegout_snapshots_keep_original_io_and_exports_after_new_plots(self):
+        from liquid_tracer.plot_csv import build_plot_csv
+        from liquid_tracer.plots import _query
+
+        state = graph_state((("a:0", "b"),), seeds=("a:0",), raw_links=(("e:0", "b"), ("f:0", "b")))
+        add_pegout(state, tx("b"))
+        state["transactions"][tx("b")]["data"]["vout"].append(
+            {"scriptpubkey": "", "scriptpubkey_type": "fee", "asset": LBTC, "value": 1})
+        self.state, self.archive = saved_case(self.case, state)
+        update_case(self.case, {"run_defaults": {"group_context_inputs": True}})
+
+        def legacy_query(*args, **kwargs):
+            return _query(*args, **kwargs, transaction_io=None)
+
+        old = []
+        for include_context in (False, True):
+            with patch("liquid_tracer.plots._query", side_effect=legacy_query):
+                result = preview_plot(self.case, "pegouts", include_context=include_context)
+            graph, plan = reviewed_plot(self.case, result["preview_id"])
+            self.assertNotIn("transaction_io", result["query"])
+            self.assertFalse(graph["include_fees"])
+            self.assertEqual(graph["graph_options"]["group_context_inputs"], include_context)
+            old.append((result, graph, plan, self.bytes(Path(result["directory"])),
+                        build_plot_csv(self.case, result["preview_id"], "endpoints.csv")["data"]))
+        fresh = preview_plot(self.case, "pegouts", include_context=False)
+        new_graph, _ = reviewed_plot(self.case, fresh["preview_id"])
+        self.assertEqual(fresh["query"]["transaction_io"], "complete")
+        self.assertTrue(new_graph["include_fees"])
+        self.assertTrue(new_graph["graph_options"]["group_context_inputs"])
+        for result, graph, plan, snapshot, endpoints in old:
+            self.assertEqual(reviewed_plot(self.case, result["preview_id"]), (graph, plan))
+            self.assertEqual(self.bytes(Path(result["directory"])), snapshot)
+            self.assertEqual(build_plot_csv(self.case, result["preview_id"], "endpoints.csv")["data"], endpoints)
+            self.assertEqual(build_plot_csv(self.case, fresh["preview_id"], "endpoints.csv")["data"], endpoints)
+        self.assertTrue(all(item["reviewable"] for item in list_plots(self.case)))
 
     def test_new_pegout_exports_are_required_even_for_empty_results(self):
         result = preview_plot(self.case, "pegouts", max_hops=0)
@@ -173,21 +210,22 @@ class PlotTests(unittest.TestCase):
         graph, plan = reviewed_plot(self.case, result["preview_id"])
         directory = Path(result["directory"])
         addresses = [node for node in graph["nodes"] if node["kind"] == "address"]
-        self.assertEqual(len(addresses), 1)
-        address = addresses[0]
+        self.assertEqual(len({node["details"]["address"] for node in addresses}), len(addresses))
+        address, = [node for node in addresses if node["details"]["address"] == "SYNTHETIC-a-address"]
         self.assertEqual(address["id"], "liquid:address:SYNTHETIC-a-address")
         self.assertEqual({item["outpoint"] for item in address["details"]["occurrences"]},
-                         {tx("a") + ":0", tx("a") + ":1"})
+                         {tx("a") + ":0", tx("a") + ":1", tx("a") + ":2"})
         self.assertEqual({row["outpoint"] for row in graph["pegouts"]["matches"]}, endpoints)
         self.assertEqual(graph["namespace"]["address_mode"], "merged")
         self.assertEqual(sum(item["key"] == address["id"] for item in plan["shapes"]), 1)
-        self.assertEqual(len(plan["connectors"]), 6)
+        self.assertEqual(len(plan["connectors"]), 10)
         with (directory / "transactions.csv").open(newline="") as stream:
             rows = list(csv.DictReader(stream))
         self.assertEqual(len(rows), len(graph["edges"]))
         shared_rows = {(row["Transaction Hash"], row["Direction"], row["Number of I/O"])
                        for row in rows if row["Address Hash"] == "SYNTHETIC-a-address"}
         self.assertEqual(shared_rows, {(tx("a"), "OUT", "0"), (tx("a"), "OUT", "1"),
+                                       (tx("a"), "OUT", "2"), (tx("c"), "IN", "1"),
                                        (tx("c"), "IN", "0"), (tx("d"), "IN", "0")})
         svg = ET.fromstring((directory / "graph.svg").read_bytes())
         self.assertEqual(sum(item.get("data-node-id") == address["id"] for item in svg.iter()), 1)
@@ -218,12 +256,13 @@ class PlotTests(unittest.TestCase):
         default = preview_plot(self.case, "pegouts", min_hops=1, max_hops=1)
         original, original_plan = reviewed_plot(self.case, default["preview_id"])
         self.assertNotIn("include_context", default["query"])
-        self.assertNotIn("context_edge_count", default)
+        self.assertEqual(default["query"]["transaction_io"], "complete")
+        self.assertEqual(default["context_edge_count"], 5)
         result = preview_plot(self.case, "pegouts", min_hops=1, max_hops=1, include_context=True)
         graph, plan = reviewed_plot(self.case, result["preview_id"])
         self.assertEqual(result["query"], {**default["query"], "include_context": True})
-        self.assertEqual(result["context_edge_count"], 3)
-        self.assertEqual(graph["pegouts"]["context_edge_count"], 3)
+        self.assertEqual(result["context_edge_count"], 5)
+        self.assertEqual(graph["pegouts"]["context_edge_count"], 5)
         self.assertEqual(graph["pegouts"]["matches"], original["pegouts"]["matches"])
         self.assertEqual(graph["pegouts"]["outpoints"], original["pegouts"]["outpoints"])
         self.assertEqual([item["outpoint"] for item in graph["pegouts"]["matches"]], [selected])
@@ -234,15 +273,18 @@ class PlotTests(unittest.TestCase):
         context = {edge["id"]: edge["role"] for edge in graph["edges"] if edge["role"].startswith("context")}
         self.assertEqual(context, {"out:" + tx("a") + ":1": "context_output",
                                    "in:" + tx("c") + ":1": "context_input",
-                                   "out:" + tx("c") + ":0": "context_output"})
-        self.assertEqual({edge["id"] for edge in graph["edges"]} - set(context),
+                                   "out:" + tx("c") + ":0": "context_output",
+                                   "out:" + tx("c") + ":2": "context_output",
+                                   "out:" + tx("c") + ":3": "context_output"})
+        self.assertEqual({edge["id"] for edge in graph["edges"]},
                          {edge["id"] for edge in original["edges"]})
         directory = Path(result["directory"])
         with (directory / "transactions.csv").open(newline="") as stream:
             rows = list(csv.DictReader(stream))
         context_rows = {(row["Transaction Hash"], row["Direction"], row["Number of I/O"])
                         for row in rows if "CONTEXT" in row["Address Flags"]}
-        self.assertEqual(context_rows, {(tx("a"), "OUT", "1"), (tx("c"), "IN", "1"), (tx("c"), "OUT", "0")})
+        self.assertEqual(context_rows, {(tx("a"), "OUT", "1"), (tx("c"), "IN", "1"),
+                                       (tx("c"), "OUT", "0"), (tx("c"), "OUT", "2"), (tx("c"), "OUT", "3")})
         self.assertEqual(len(rows), len(graph["edges"]))
         svg = ET.fromstring((directory / "graph.svg").read_bytes())
         self.assertEqual({node.get("data-node-id") for node in svg.iter() if node.get("data-node-id")},
@@ -282,12 +324,13 @@ class PlotTests(unittest.TestCase):
         self.assertEqual(result["endpoint_counts"], {"pegout": 1, "unspent": 1, "unspendable": 1})
         self.assertEqual(result["match_count"], 1)
         self.assertEqual(result["query"], {"seeds": state["seeds"], "min_hops": 1, "max_hops": 1,
-                                          "include_unspent": True, "include_unspendable": True})
+                                          "include_unspent": True, "include_unspendable": True,
+                                          "transaction_io": "complete"})
         self.assertEqual(graph["graph_options"]["pegout_query"], result["query"])
         self.assertEqual([item["outpoint"] for item in graph["pegouts"]["matches"]], [pegout])
         self.assertEqual(plan["namespace"], default_plan["namespace"])
         expected = {"out:" + tx("a") + ":0", "in:" + tx("b") + ":0",
-                    *("out:" + tx("b") + ":" + str(index) for index in range(3))}
+                    *("out:" + tx("b") + ":" + str(index) for index in range(4))}
         self.assertEqual({edge["id"] for edge in graph["edges"]}, expected)
         directory = Path(result["directory"])
         self.assertEqual(read_json(directory / "plot.json"), graph["plot"])
@@ -404,13 +447,14 @@ class PlotTests(unittest.TestCase):
                 result = preview_plot(self.case, goal)
                 graph, _ = reviewed_plot(self.case, result["preview_id"])
                 settings = result["layout_settings"]
-                self.assertFalse(settings["include_fees"])
-                self.assertFalse(settings["group_context_inputs"])
+                self.assertEqual(settings["include_fees"], goal == "pegouts")
+                self.assertEqual(settings["group_context_inputs"], goal == "pegouts")
                 self.assertEqual(settings["hub_addresses"], [])
                 self.assertEqual(settings["center_name"], "Example")
                 self.assertTrue(settings["color_attribution_arrows"])
-                self.assertFalse(any(edge["role"].startswith("context") for edge in graph["edges"]))
-                self.assertFalse(graph["include_fees"])
+                if goal == "connections":
+                    self.assertFalse(any(edge["role"].startswith("context") for edge in graph["edges"]))
+                self.assertEqual(graph["include_fees"], goal == "pegouts")
                 self.assertFalse(any(node["kind"] == "context_group" for node in graph["nodes"]))
 
     def test_context_grouping_effective_settings_follow_goal_and_saved_query(self):
@@ -420,12 +464,14 @@ class PlotTests(unittest.TestCase):
                                                 "hub_addresses": ["H" * 34]}})
         preferences = _settings(read_case(self.case))
         for goal in ("full", "connections", "pegouts"):
-            for query in (None, {}, {"include_context": False}, {"include_context": True}):
+            for query in (None, {}, {"include_context": False}, {"include_context": True},
+                          {"transaction_io": "complete"}, {"transaction_io": "complete", "include_context": False}):
                 with self.subTest(goal=goal, query=query):
                     settings = _effective_settings(preferences, goal, query)
-                    expected_grouping = goal == "full" or (goal == "pegouts" and bool(query and query.get("include_context")))
+                    complete = goal == "pegouts" and bool(query and query.get("transaction_io") == "complete")
+                    expected_grouping = goal == "full" or complete or (goal == "pegouts" and bool(query and query.get("include_context")))
                     self.assertEqual(settings["group_context_inputs"], expected_grouping)
-                    self.assertEqual(settings["include_fees"], goal == "full")
+                    self.assertEqual(settings["include_fees"], goal == "full" or complete)
                     self.assertEqual(settings["hub_addresses"], ["H" * 34] if goal == "full" else [])
                     graph = {"plot": {"goal": goal, "query": query, "layout_settings": settings,
                                        "settings_sha256": digest(canonical(settings))},
@@ -453,7 +499,7 @@ class PlotTests(unittest.TestCase):
         self.assertEqual(summary["details"]["address_count"], 2)
         self.assertTrue(result["layout_settings"]["group_context_inputs"])
         self.assertTrue(graph["graph_options"]["group_context_inputs"])
-        self.assertFalse(result["layout_settings"]["include_fees"])
+        self.assertTrue(result["layout_settings"]["include_fees"])
         self.assertEqual(result["layout_settings"]["hub_addresses"], [])
         self.assertEqual(graph["pegouts"], old_graph["pegouts"])
         self.assertEqual(plan["namespace"], old_plan["namespace"])

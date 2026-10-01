@@ -828,13 +828,48 @@ td .case-title:hover {
   max-width: min(440px, calc(100vw - 40px));
 }
 .toast {
+  pointer-events: auto;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  line-height: 1.5;
+  position: relative;
   background: #173d44;
   color: #e5f5ee;
   box-shadow: 0 6px 30px #092b3c2a;
-  padding: 14px 18px;
+  padding: 14px 38px 14px 18px;
   border: 1px solid #396361;
   border-radius: 10px;
   font-size: 12px;
+}
+.toast::after {
+  content: "×";
+  position: absolute;
+  right: 14px;
+  top: 11px;
+  font-size: 19px;
+}
+.toast:focus-visible {
+  outline: 3px solid #5daab5;
+  outline-offset: 3px;
+}
+.notification-control {
+  border: 1px solid #ccdce1;
+  border-radius: 6px;
+  padding: 6px 9px;
+  background: transparent;
+  color: #46656f;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.notification-control[aria-pressed="true"] {
+  color: #176555;
+  border-color: #82b5a7;
+}
+.notification-control:disabled {
+  cursor: default;
+  opacity: .7;
 }
 .toast.error {
   background: #793f49;

@@ -6,6 +6,7 @@ import {test} from 'node:test';
 import vm from 'node:vm';
 import * as frameRecovery from '../src/scripts/frame-recovery.ts';
 import {collectionPerformancePanel} from '../src/scripts/collection-performance.ts';
+import {createTaskNotifications} from '../src/scripts/task-notifications.ts';
 
 // Execute the real application handlers with a small DOM and offline HTTP stub.
 // The attribution panels are unrelated to new-investigation and lookup behavior.
@@ -21,10 +22,12 @@ const txid = 'a'.repeat(64);
 const defaults = {hops: 1, hop_reference_name: '', max_transactions: 20, max_outpoints: 100, max_requests: 30,
   max_seconds: 60, max_new_items: 750, layout_attempts: 25, connector_style: 'straight'};
 
-async function harness(respond = () => undefined, {hash = '', storage = new Map(), importAction, importPending = () => false} = {}) {
+async function harness(respond = () => undefined, {hash = '', storage = new Map(), importAction, importPending = () => false, systemNotification} = {}) {
   frameRecovery.resetFrameRecovery();
   const calls = [], listeners = {}, windowListeners = {}, dialogListeners = {}, notifications = [], importActions = [];
   const editorResets = [], downloads = [], downloadBlobs = [], revokedDownloads = [];
+  const toastElements = [];
+  let focusCount = 0;
   const elements = new Map();
   let currentForm = null;
   const app = {innerHTML: '', addEventListener(name, callback) {listeners[name] = callback;}};
@@ -34,7 +37,7 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
     Error, Blob, URL: class extends URL {
       static createObjectURL(blob) {downloadBlobs.push(blob); return `blob:export-${downloadBlobs.length}`;}
       static revokeObjectURL(url) {revokedDownloads.push(url);}
-    }, console, ...frameRecovery, collectionPerformancePanel,
+    }, console, ...frameRecovery, collectionPerformancePanel, createTaskNotifications,
     resetNameColors(caseId) {editorResets.push({editor: 'colors', caseId});},
     resetAddressImport(caseId) {editorResets.push({editor: 'addresses', caseId});},
     resetChangeOutputs(caseId) {editorResets.push({editor: 'change-outputs', caseId});}, resetInputImport() {},
@@ -54,7 +57,7 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
         if (selector === '#app') return app;
         if (selector === '#action-dialog') return dialog;
         if (selector === '#new-case-form') return currentForm;
-        if (selector === '#notifications') return {append(node) {notifications.push(node.textContent);}};
+        if (selector === '#notifications') return {append(node) {notifications.push(node.textContent); toastElements.push(node);}};
         if (selector === '#job-tasks') return {set outerHTML(value) {
           app.innerHTML = app.innerHTML.replace(/<div id="job-tasks">[\s\S]*?<\/header>/, value + '</header>');
           const progress = elements.get('#job-progress'); if (progress) progress.innerHTML = value;
@@ -64,9 +67,11 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
       },
       addEventListener() {},
       body: {append() {}},
-      createElement(tag) {return {remove() {}, click() {if (tag === 'a') downloads.push({url: this.href, filename: this.download});}};},
+      createElement(tag) {return {tag, removed: false, attributes: {}, setAttribute(name, value) {this.attributes[name] = value;}, remove() {this.removed = true;}, click() {if (tag === 'a') downloads.push({url: this.href, filename: this.download}); this.onclick?.();}};},
     },
     window: {addEventListener(name, callback) {windowListeners[name] = callback;}, scrollY: 0, scrollTo() {},
+      Notification: systemNotification, focus() {focusCount++;},
+      localStorage: {getItem(key) {return storage.get(key) ?? null;}, setItem(key, value) {storage.set(key, value);}},
       sessionStorage: {getItem(key) {return storage.get(key) ?? null;}, setItem(key, value) {storage.set(key, value);}}},
     history: {replaceState() {}},
     location: {hash, pathname: '/', reload() {}},
@@ -88,6 +93,7 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
   await context.startup;
   return {
     ...context.appTest, app, dialog, calls, notifications, importActions, elements, storage, windowListeners, editorResets, downloads, downloadBlobs, revokedDownloads,
+    toastElements, get focusCount() {return focusCount;},
     async submitDialog(values = {}) {
       dialogListeners.submit({target: {values, reportValidity: () => true}, preventDefault() {}});
       await new Promise(setImmediate);
@@ -1620,9 +1626,10 @@ test('saving a filtered layout preserves full-trace options and reloads saved pr
   await view.dispatch('view-plots');
   await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
   const disabledFields = view.workspace().match(/<fieldset[^>]*\bdisabled[^>]*>[\s\S]*?<\/fieldset>/g) || [];
-  for (const key of ['include_fees', 'group_context_inputs', 'hub_addresses']) {
+  for (const key of ['include_fees', 'hub_addresses']) {
     assert.ok(disabledFields.some(fieldset => fieldset.includes(`name="${key}"`)), key);
   }
+  assert.doesNotMatch(contextGroupingFields(view), /disabled/);
   view.plotForm({layout_attempts: '61', connector_style: 'curved', center_name: 'Saved Treasury',
     color_attribution_arrows_present: '1', color_attribution_arrows: 'on'});
   await view.dispatch('plot-settings-save');
@@ -1753,66 +1760,54 @@ test('peg-out endpoints default off and optional booleans are submitted only for
   }
 });
 
-test('endpoint and context drafts survive tab and goal changes without leaking into another investigation', async () => {
+test('endpoint drafts survive tab and goal changes without leaking into another investigation', async () => {
   const view = await harness();
   view.state.activeCase = workflowCase();
   await view.dispatch('view-plots');
   await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
   view.workflowInput({id: 'workflow-include-unspent', checked: true});
   view.workflowInput({id: 'workflow-include-unspendable', checked: true});
-  view.workflowInput({id: 'workflow-include-context', checked: true});
   await view.dispatch('view-boards');
   await view.dispatch('view-plots');
   await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
   await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
-  for (const id of ['unspent', 'unspendable', 'context']) assert.match(view.workspace(), new RegExp(`id="workflow-include-${id}"[^>]*checked`));
+  for (const id of ['unspent', 'unspendable']) assert.match(view.workspace(), new RegExp(`id="workflow-include-${id}"[^>]*checked`));
   view.workflowInput({id: 'workflow-include-unspent', checked: false});
-  view.workflowInput({id: 'workflow-include-context', checked: false});
   await view.dispatch('view-plots');
   assert.doesNotMatch(view.workspace(), /id="workflow-include-unspent"[^>]*checked/);
-  assert.doesNotMatch(view.workspace(), /id="workflow-include-context"[^>]*checked/);
-  view.workflowInput({id: 'workflow-include-context', checked: true});
   view.state.activeCase = workflowCase({id: 'other'});
   await view.dispatch('view-plots');
   await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
-  for (const id of ['unspent', 'unspendable', 'context']) assert.doesNotMatch(view.workspace(), new RegExp(`id="workflow-include-${id}"[^>]*checked`));
+  for (const id of ['unspent', 'unspendable']) assert.doesNotMatch(view.workspace(), new RegExp(`id="workflow-include-${id}"[^>]*checked`));
   assert.equal(view.calls.length, 1);
 });
 
-test('context addresses default off, describe display only, and submit only for peg-out layouts', async () => {
+test('peg-out layouts always describe complete I/O without an optional context toggle', async () => {
   for (const goal of ['full', 'connections', 'pegouts']) {
-    for (const includeContext of [false, true]) {
-      const view = await harness(path => path.endsWith('/actions') ? {id: 'plotjob', status: 'running'} : undefined);
-      view.state.activeCase = workflowCase();
-      await view.dispatch('view-plots');
-      assert.doesNotMatch(view.workspace(), /id="workflow-include-context"/);
-      await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
-      const html = view.workspace();
-      assert.match(html, /<legend>Context display<\/legend>/);
-      assert.match(html, /Include context addresses/);
-      assert.match(html, /Show other input addresses and sibling output addresses of displayed transactions/);
-      assert.match(html, /Context adds no tracing or fetching and is excluded from endpoint match counts/);
-      assert.doesNotMatch(html, /id="workflow-include-context"[^>]*checked/);
-      view.workflowInput({id: 'workflow-include-context', checked: includeContext});
-      view.workflowInput({id: 'workflow-include-unspent', checked: true});
-      await view.dispatch('plot-goal', {dataset: {goal}});
-      if (goal !== 'pegouts') assert.doesNotMatch(view.workspace(), /id="workflow-include-context"/);
-      await view.dispatch('workflow-plot');
-      assert.deepEqual(view.calls.at(-1).body, {action: 'plot', layout_settings: layoutDefaults, layout_mode: 'fresh', goal, run_id: 'saved1',
-        min_hops: 0, max_hops: goal === 'full' ? 0 : 10,
-        ...(goal === 'pegouts' ? {include_unspent: true} : {}),
-        ...(goal === 'pegouts' && includeContext ? {include_context: true} : {})});
-      assert.equal(view.state.job.live, false);
-      assert.equal(view.calls.filter(call => call.body).length, 1, 'context display neither updates settings nor collects data');
-      assert.equal(view.workflowInput({id: 'workflow-include-context', checked: !includeContext}), true);
-      assert.equal(view.currentWorkflow(view.state.activeCase).includeContext, !includeContext, 'another layout can have different settings while this one runs');
-    }
+    const view = await harness(path => path.endsWith('/actions') ? {id: 'plotjob', status: 'running'} : undefined);
+    view.state.activeCase = workflowCase();
+    await view.dispatch('view-plots');
+    await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+    const html = view.workspace();
+    assert.match(html, /Every included transaction shows all its inputs and outputs, including fees/);
+    assert.match(html, /Outputs on excluded branches remain visible without continuing those branches/);
+    assert.match(html, /These extra objects do not add endpoint matches or change the peg-out total/);
+    assert.doesNotMatch(html, /id="workflow-include-context"|Include context addresses/);
+    assert.equal(view.workflowInput({id: 'workflow-include-context', checked: false}), false);
+    view.workflowInput({id: 'workflow-include-unspent', checked: true});
+    await view.dispatch('plot-goal', {dataset: {goal}});
+    await view.dispatch('workflow-plot');
+    assert.deepEqual(view.calls.at(-1).body, {action: 'plot', layout_settings: layoutDefaults, layout_mode: 'fresh', goal, run_id: 'saved1',
+      min_hops: 0, max_hops: goal === 'full' ? 0 : 10,
+      ...(goal === 'pegouts' ? {include_unspent: true} : {})});
+    assert.equal(view.state.job.live, false);
+    assert.equal(view.calls.filter(call => call.body).length, 1, 'display choices neither update settings nor collect data');
   }
 });
 
 const contextGroupingFields = view => view.workspace().match(/<fieldset class="layout-fields context-grouping-fields"[^>]*>[\s\S]*?<\/fieldset>/)?.[0];
 
-test('peg-out context grouping depends on context display and preserves edits across toggles and goals', async () => {
+test('peg-out context grouping is always available and preserves edits across goals', async () => {
   const view = await harness();
   view.state.activeCase = workflowCase();
   await view.dispatch('view-plots');
@@ -1820,26 +1815,20 @@ test('peg-out context grouping depends on context display and preserves edits ac
   view.plotForm({group_context_inputs_present: '1', group_context_inputs: 'on'});
   await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
   view.elements.delete('#plot-layout-form');
-  assert.match(contextGroupingFields(view), /disabled/);
-  assert.match(contextGroupingFields(view), /name="group_context_inputs"[^>]*checked/);
-  assert.match(view.workspace(), /Enable Include context addresses above/);
-
-  view.workflowInput({id: 'workflow-include-context', checked: true});
   assert.doesNotMatch(contextGroupingFields(view), /disabled/);
+  assert.match(contextGroupingFields(view), /name="group_context_inputs"[^>]*checked/);
   assert.match(contextGroupingFields(view), /Shared or named addresses and context outputs stay separate/);
-  // No input event is dispatched before the context toggle; it must snapshot the form itself.
   view.plotForm({layout_attempts: '47', connector_style: 'curved', center_name: 'Draft treasury',
     group_context_inputs_present: '1'});
-  view.workflowInput({id: 'workflow-include-context', checked: false});
+  await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
   view.elements.delete('#plot-layout-form');
   assert.match(contextGroupingFields(view), /disabled/);
   assert.doesNotMatch(contextGroupingFields(view), /name="group_context_inputs"[^>]*checked/);
   assert.match(view.workspace(), /name="layout_attempts"[^>]*value="47"/);
   assert.match(view.workspace(), /value="Draft treasury"/);
   assert.match(view.workspace(), /value="curved" selected/);
-  view.workflowInput({id: 'workflow-include-context', checked: true});
+  await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
   assert.doesNotMatch(contextGroupingFields(view), /disabled|name="group_context_inputs"[^>]*checked/);
-
   view.plotForm({group_context_inputs_present: '1', group_context_inputs: 'on'});
   await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
   view.elements.delete('#plot-layout-form');
@@ -1867,15 +1856,13 @@ test('peg-out generation captures grouped and separate context preferences for e
     view.state.activeCase = detail;
     await view.dispatch('view-plots');
     await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
-    view.workflowInput({id: 'workflow-include-context', checked: true});
     view.plotForm({group_context_inputs_present: '1', ...(grouped ? {group_context_inputs: 'on'} : {})});
     await view.dispatch('workflow-plot');
     const writes = view.calls.filter(call => call.body);
     assert.deepEqual(writes.map(call => call.path), ['/api/cases/case1/actions']);
     assert.deepEqual(writes[0].body, {action: 'plot', layout_mode: 'fresh', goal: 'pegouts', run_id: 'saved1', min_hops: 0,
-      max_hops: 10, include_context: true, layout_settings: {...layoutDefaults, group_context_inputs: grouped}});
-    assert.equal(view.workflowInput({id: 'workflow-include-context', checked: false}), true);
-    assert.equal(view.currentWorkflow(detail).includeContext, false, 'new drafts can change without changing running job input');
+      max_hops: 10, layout_settings: {...layoutDefaults, group_context_inputs: grouped}});
+    assert.equal(view.workflowInput({id: 'workflow-include-context', checked: false}), false);
   }
 });
 
@@ -1889,7 +1876,6 @@ test('saved context grouping labels use each plot snapshot across plot, download
       boards: [workflowBoard('pegouts', 'context-board', {preview_id: plot.preview_id})]});
     await view.dispatch('view-plots');
     await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
-    view.workflowInput({id: 'workflow-include-context', checked: true});
     for (const page of ['plots', 'history', 'boards']) {
       await view.dispatch('view-' + page);
       const html = view.workspace(), expected = grouped ? 'grouped' : 'separate';
@@ -1901,6 +1887,23 @@ test('saved context grouping labels use each plot snapshot across plot, download
         new RegExp(`Context addresses included · isolated inputs ${expected}`));
     }
     assert.equal(view.calls.length, 1, 'different draft settings do not rewrite or regenerate the saved plot');
+  }
+});
+
+test('complete I/O saved scope appears across plots, downloads and boards without changing endpoint counts', async () => {
+  const view = await harness();
+  const plot = workflowPlot('pegouts', 'complete', {query: {transaction_io: 'complete'},
+    layout_settings: {...layoutDefaults, group_context_inputs: true, include_fees: true},
+    match_count: 2, endpoint_count: 2, context_edge_count: 9});
+  view.state.activeCase = workflowCase({plots: [plot],
+    boards: [workflowBoard('pegouts', 'complete-board', {preview_id: plot.preview_id})]});
+  for (const page of ['plots', 'history', 'boards']) {
+    await view.dispatch('view-' + page);
+    const html = view.workspace();
+    assert.match(html, /Saved layout: All transaction inputs and outputs · isolated inputs grouped\. 9 context connections, excluded from endpoint counts\./);
+    assert.match(html, /Results: 2 peg-out requests\./);
+    const picker = html.match(/<select id="workflow-(?:plot-picker|board-plot-[^"\s]+)"[^>]*>[\s\S]*?<\/select>/)?.[0];
+    assert.match(picker, /All transaction inputs and outputs · isolated inputs grouped/);
   }
 });
 
@@ -1925,14 +1928,14 @@ test('saved context scope and separate connection counts appear across plots, do
   assert.deepEqual(view.calls.at(-1).body, {action: 'board-sync', record_id: 'context-board', preview_id: 'contextual', reorganize: false});
 });
 
-test('context toggles do not change the scope of a selected saved layout', async () => {
+test('complete I/O defaults do not rewrite the scope of a selected legacy layout', async () => {
   for (const savedContext of [false, true]) {
     const view = await harness();
     view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'saved', {
       ...(savedContext ? {query: {include_context: true}} : {}), match_count: 2})]});
     await view.dispatch('view-plots');
     await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
-    view.workflowInput({id: 'workflow-include-context', checked: !savedContext});
+    assert.doesNotMatch(view.workspace(), /id="workflow-include-context"/);
     for (const page of ['plots', 'history']) {
       await view.dispatch('view-' + page);
       const html = view.workspace();
@@ -1940,7 +1943,7 @@ test('context toggles do not change the scope of a selected saved layout', async
       assert.doesNotMatch(html, new RegExp(`Saved layout: ${savedContext ? 'Paths only' : 'Context addresses included · isolated inputs separate'}\\.`));
       assert.doesNotMatch(html, /undefined context connections|NaN context connections/);
     }
-    assert.equal(view.calls.length, 1, 'changing context display neither regenerates nor updates saved plots');
+    assert.equal(view.calls.length, 1, 'new display defaults neither regenerate nor update saved plots');
   }
 });
 
@@ -2738,19 +2741,18 @@ test('combined new board action captures settings and submits generation and pub
   assert.equal(view.calls.length, count, 'busy job prevents duplicate publication');
 });
 
-test('combined update binds the exact board and includes endpoint and context choices', async () => {
+test('combined update binds the exact board and includes endpoint choices', async () => {
   const view = await harness(path => path.endsWith('/actions') ? {id: 'combined', status: 'running'} : undefined);
   view.state.activeCase = workflowCase({boards: [workflowBoard('pegouts', 'cashouts')]});
   await view.dispatch('workflow-board-prepare', boardControl('cashouts'));
   workflowEdit(view, 'min-hops', '2'); workflowEdit(view, 'max-hops', '11');
   view.workflowInput({id: 'workflow-include-unspent', checked: true});
   view.workflowInput({id: 'workflow-include-unspendable', checked: true});
-  view.workflowInput({id: 'workflow-include-context', checked: true});
   assert.match(view.workspace(), /Generate & update board/);
   await view.dispatch('workflow-plot-sync');
   assert.deepEqual(view.calls.at(-1).body, {action: 'plot-sync', goal: 'pegouts', run_id: 'saved1',
     min_hops: 2, max_hops: 11, layout_mode: 'update', board_record_id: 'cashouts',
-    include_unspent: true, include_unspendable: true, include_context: true, layout_settings: layoutDefaults});
+    include_unspent: true, include_unspendable: true, layout_settings: layoutDefaults});
   assert.equal(view.state.job.live, true);
 });
 
@@ -2769,17 +2771,16 @@ test('switching update targets restores each board query and keeps unsaved board
   await view.dispatch('workflow-board-prepare', boardControl('first'));
   let draft = view.currentWorkflow(view.state.activeCase);
   assert.equal(draft.minHops, '1'); assert.equal(draft.maxHops, '7');
-  assert.equal(draft.includeUnspent, true); assert.equal(draft.includeContext, true);
+  assert.equal(draft.includeUnspent, true);
   assert.match(view.workspace(), /name="center_name"[^>]*value="First"/);
   workflowEdit(view, 'max-hops', '9');
-  view.workflowInput({id: 'workflow-include-context', checked: false});
   workflowEdit(view, 'layout-board', 'second');
   draft = view.currentWorkflow(view.state.activeCase);
   assert.equal(draft.minHops, '4'); assert.equal(draft.maxHops, '12');
   assert.equal(draft.includeUnspent, false); assert.equal(draft.includeUnspendable, true);
   assert.match(view.workspace(), /name="center_name"[^>]*value="Second"/);
   workflowEdit(view, 'layout-board', 'first');
-  assert.equal(draft.maxHops, '9'); assert.equal(draft.includeContext, false);
+  assert.equal(draft.maxHops, '9');
   assert.match(view.workspace(), /name="center_name"[^>]*value="First"/);
   workflowEdit(view, 'layout-mode', 'fresh');
   assert.equal(draft.goal, 'full'); assert.equal(draft.boardName, 'Fresh draft');
@@ -3668,3 +3669,97 @@ test('combined export skips closed cases and does nothing when no tabs are open'
   assert.deepEqual(view.calls.find(call => call.path === '/api/endpoint-exports').body.investigations,
     [{case_id: 'b2', run_id: 'b-new'}]);
 });
+
+for (const terminal of ['succeeded', 'failed', 'canceled']) {
+  test(`system notification for ${terminal} background task is once-only and opens the correct case`, async () => {
+    const sent = [];
+    let permissionRequests = 0;
+    class SystemNotification {
+      static permission = 'default';
+      static async requestPermission() {permissionRequests++; this.permission = 'granted'; return 'granted';}
+      constructor(title, options) {this.title = title; this.options = options; sent.push(this);}
+      close() {this.closed = true;}
+    }
+    const details = {id: 'background', name: 'Background investigation', run_defaults: defaults, runs: []};
+    const view = await harness(path => {
+      if (path === '/api/session') return {csrf: 'test', settings: defaults, cases: [details]};
+      if (path === '/api/jobs/background-job') return {id: 'background-job', status: terminal,
+        message: 'Private backend error details must not be copied to the system notification.', result: {}};
+      if (path === '/api/cases/background') return details;
+    }, {systemNotification: SystemNotification});
+    assert.equal(permissionRequests, 0);
+    assert.match(view.app.innerHTML, /Notifications off/);
+    await view.dispatch('toggle-system-notifications');
+    assert.equal(permissionRequests, 1);
+    assert.match(view.app.innerHTML, /Notifications on/);
+    // Toast is a native keyboard-accessible button, and clicking removes it.
+    const toast = view.toastElements.at(-1);
+    assert.equal(toast.tag, 'button');
+    assert.equal(toast.type, 'button');
+    assert.match(toast.attributes['aria-label'], /Dismiss notification/);
+    toast.click();
+    assert.equal(toast.removed, true);
+    view.state.jobs.set('background-job', {id: 'background-job', caseId: 'background', action: 'trace',
+      status: 'running', message: 'Collecting', started: Date.now(), live: true, cancellable: false});
+    await view.pollJob('background-job');
+    await view.pollJob('background-job');
+    assert.equal(sent.length, 1);
+    assert.match(sent[0].options.body, /Background investigation/);
+    assert.doesNotMatch(sent[0].options.body, /Private backend/);
+    sent[0].onclick();
+    await new Promise(setImmediate);
+    assert.equal(view.focusCount, 1);
+    assert.equal(sent[0].closed, true);
+    assert.equal(view.state.activeCase.id, 'background');
+  });
+}
+
+test('initial completed task history never sends system notifications', async () => {
+  const sent = [];
+  class SystemNotification {
+    static permission = 'granted';
+    constructor(title) {sent.push(title);}
+  }
+  const history = {id: 'old-job', status: 'succeeded', action: 'plot', case_id: 'past', message: 'Done'};
+  const view = await harness(path => {
+    if (path === '/api/session') return {csrf: 'test', settings: defaults, cases: [], active_jobs: [history]};
+    if (path === '/api/jobs') return {jobs: [history]};
+  }, {systemNotification: SystemNotification, storage: new Map([['liquid-tracer:system-notifications:v1', 'on']])});
+  await view.discoverJobs();
+  await view.pollJob('old-job');
+  assert.equal(sent.length, 0);
+  assert.equal(view.state.jobs.get('old-job').status, 'succeeded');
+  assert.equal(view.notifications.length, 0);
+});
+
+for (const deliveredBeforePost of [false, true]) {
+  test(`fast lookup discovered before POST response ${deliveredBeforePost ? 'retains delivered notification suppression' : 'still sends its completion notification'}`, async () => {
+    let resolvePost;
+    const posted = new Promise(resolve => {resolvePost = resolve;});
+    const sent = [];
+    class SystemNotification {
+      static permission = 'granted';
+      constructor(title) {sent.push(title);}
+    }
+    const task = activeTask('fast-lookup', null, {action: 'lookup', live: true});
+    const terminal = {...task, status: 'succeeded', result: {transactions: [{txid, outputs: []}]}};
+    const storage = new Map([['liquid-tracer:system-notifications:v1', 'on']]);
+    const view = await harness(path => {
+      if (path === '/api/lookup') return posted;
+      if (path === '/api/jobs') return {jobs: [deliveredBeforePost ? task : terminal]};
+      if (path === '/api/jobs/fast-lookup') return terminal;
+    }, {systemNotification: SystemNotification, storage});
+    view.navigate('new'); view.state.draft.txids = txid;
+    const starting = view.startJob('/api/lookup', {}, 'lookup', true);
+    await view.discoverJobs();
+    assert.equal(view.state.jobs.get(task.id).generation, undefined);
+    if (deliveredBeforePost) await view.pollJob(task.id);
+    assert.equal(sent.length, deliveredBeforePost ? 1 : 0);
+    resolvePost(task); await starting;
+    await view.pollJob(task.id);
+    await view.pollJob(task.id);
+    assert.equal(sent.length, 1);
+    assert.equal(view.state.draft.reports.length, 1);
+    assert.deepEqual(JSON.parse(storage.get('liquid-tracer:task-notifications:v1')), [task.id]);
+  });
+}

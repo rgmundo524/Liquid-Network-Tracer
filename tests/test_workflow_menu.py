@@ -91,6 +91,11 @@ class PlotCommandTests(unittest.TestCase):
         self.assertEqual(_endpoint_summary({"goal": "pegouts", "match_count": 1,
             "query": {"include_context": True}, "layout_settings": {"group_context_inputs": True}}),
             "1 peg-outs, context addresses included (isolated inputs grouped)")
+        self.assertEqual(_endpoint_summary({"goal": "pegouts", "match_count": 1,
+            "query": {"transaction_io": "complete"}}), "1 peg-outs, all transaction inputs and outputs included")
+        self.assertEqual(_endpoint_summary({"goal": "pegouts", "match_count": 1,
+            "query": {"transaction_io": "complete"}, "layout_settings": {"group_context_inputs": True}}),
+            "1 peg-outs, all transaction inputs and outputs included (isolated inputs grouped)")
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "Install the optional tui extra")
@@ -219,16 +224,15 @@ class WorkflowMenuTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(app.screen.query_one("#plot-endpoints").display)
             unspent = app.screen.query_one("#plot-include-unspent", Checkbox)
             unspendable = app.screen.query_one("#plot-include-unspendable", Checkbox)
-            context = app.screen.query_one("#plot-include-context", Checkbox)
+            self.assertEqual(len(app.screen.query("#plot-include-context")), 0)
             self.assertFalse(unspent.value)
             self.assertFalse(unspendable.value)
-            self.assertFalse(context.value)
             app.screen.query_one("#plot-goal", Select).value = "pegouts"
             await pilot.pause()
             self.assertTrue(app.screen.query_one("#plot-endpoints").display)
-            unspent.value = unspendable.value = context.value = True
+            unspent.value = unspendable.value = True
             await self.click(app, pilot, "#plot-preview")
-            self.assertEqual(app.result[0][-4:], ["--include-unspent", "--include-unspendable", "--include-context", "--open"])
+            self.assertEqual(app.result[0][-3:], ["--include-unspent", "--include-unspendable", "--open"])
             self.assertFalse(app.result[1])
 
     async def test_hidden_terminal_options_do_not_leak_into_other_goals(self):
@@ -240,7 +244,6 @@ class WorkflowMenuTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(110, 55)) as pilot:
             app.screen.query_one("#plot-goal", Select).value = "pegouts"
             app.screen.query_one("#plot-include-unspent", Checkbox).value = True
-            app.screen.query_one("#plot-include-context", Checkbox).value = True
             app.screen.query_one("#plot-goal", Select).value = "connections"
             await pilot.pause()
             self.assertFalse(app.screen.query_one("#plot-endpoints").display)

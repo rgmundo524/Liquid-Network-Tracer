@@ -58,7 +58,10 @@ class PegoutSearchTests(unittest.TestCase):
         self.assertNotIn(B + ":2", state["outputs"])
         graph, _ = reviewed_pegouts(self.case, result["preview_id"])
         self.assertEqual(graph["pegouts"]["matches"][0]["hops"], [2])
-        self.assertFalse(any(edge["outpoint"] in {B + ":1", B + ":2"} for edge in graph["edges"]))
+        self.assertTrue({B + ":1", B + ":2"} <= {edge["outpoint"] for edge in graph["edges"]})
+        self.assertEqual(graph["pegouts"]["query"]["transaction_io"], "complete")
+        self.assertTrue(all(edge["role"] == "context_output" for edge in graph["edges"]
+                            if edge["id"] in {"out:" + B + ":1", "out:" + B + ":2"}))
         self.assertEqual((self.case / "case.json").read_bytes(), before)
         self.assertFalse((self.case / "runs").exists())
         self.assertFalse((self.case / "miro").exists())
@@ -204,12 +207,43 @@ class PegoutSearchTests(unittest.TestCase):
         self.assertEqual(result["match_count"], 1)
         graph, plan = reviewed_pegouts(self.case, result["preview_id"])
         self.assertEqual(graph["pegouts"]["matches"][0]["outpoint"], D + ":0")
-        self.assertFalse(any(e["role"].startswith("context") for e in graph["edges"]))
-        self.assertFalse(any(e["outpoint"] == A + ":1" for e in graph["edges"]))
+        self.assertTrue(any(e["role"].startswith("context") for e in graph["edges"]))
+        self.assertTrue(any(e["outpoint"] == A + ":1" for e in graph["edges"]))
+        self.assertNotIn(A + ":1", graph["pegouts"]["outpoints"])
         self.assertNotIn("namespace", plan)
         self.assertEqual((self.case / "case.json").read_bytes(), before)
         self.assertFalse((self.case / "runs").exists())
         self.assertFalse((self.case / "miro").exists())
+
+    def test_regenerated_search_preview_preserves_archive_and_markerless_saved_preview(self):
+        from liquid_tracer.pegout_paths import pegout_graph
+        from liquid_tracer.plot_csv import build_plot_csv
+
+        def legacy_graph(state, query, **options):
+            return pegout_graph(state, {key: value for key, value in query.items()
+                                       if key != "transaction_io"}, **options)
+
+        with patch("liquid_tracer.pegouts.pegout_graph", side_effect=legacy_graph):
+            original = self.seed_search()
+        old_graph, old_plan = reviewed_pegouts(self.case, original["preview_id"])
+        self.assertNotIn("transaction_io", old_graph["pegouts"]["query"])
+        directory = self.case / "pegouts" / original["search_id"]
+        archive = {str(path.relative_to(directory)): path.read_bytes()
+                   for path in directory.rglob("*") if path.is_file()}
+        old_directory = Path(original["directory"])
+        snapshot = {path.name: path.read_bytes() for path in old_directory.iterdir() if path.is_file()}
+        old_csv = build_plot_csv(self.case, original["preview_id"], "endpoints.csv")["data"]
+        with patch.object(Esplora, "get", side_effect=AssertionError("Use saved evidence only")):
+            regenerated = preview_pegouts(self.case, original["search_id"])
+        new_graph, _ = reviewed_pegouts(self.case, regenerated["preview_id"])
+        self.assertEqual(new_graph["pegouts"]["query"]["transaction_io"], "complete")
+        self.assertTrue(new_graph["include_fees"])
+        self.assertEqual(old_graph["pegouts"]["matches"], new_graph["pegouts"]["matches"])
+        self.assertEqual(reviewed_pegouts(self.case, original["preview_id"]), (old_graph, old_plan))
+        self.assertEqual(build_plot_csv(self.case, regenerated["preview_id"], "endpoints.csv")["data"], old_csv)
+        self.assertEqual({path.name: path.read_bytes() for path in old_directory.iterdir() if path.is_file()}, snapshot)
+        self.assertEqual({str(path.relative_to(directory)): path.read_bytes()
+                          for path in directory.rglob("*") if path.is_file()}, archive)
 
     def test_direct_hop_zero_pegout_uses_one_request(self):
         result = search_pegouts(self.case, D, 0, 0, max_requests=1, max_outpoints=10)

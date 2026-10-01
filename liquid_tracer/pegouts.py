@@ -269,7 +269,8 @@ def _summary(state, query):
 
 def preview_pegouts(case, search_id, *, open_browser=False, progress=None):
     from .address_counts import apply_saved_counts
-    from .cli import attribution_arrow_coloring, centered_name_group, connector_appearance, layout_search_attempts, open_preview
+    from .cli import (attribution_arrow_coloring, centered_name_group, connector_appearance,
+                      context_input_grouping, layout_search_attempts, open_preview)
     from .elk_layout import optimize_graph
     from .layout_preview import export_layout
     from .mermaid import mermaid_source
@@ -283,7 +284,11 @@ def preview_pegouts(case, search_id, *, open_browser=False, progress=None):
         state["service_controls"] = {k: v for k, v in controls.items() if k != "history"}
         apply_saved_counts(case, state)
         _progress(progress, "pegout_paths")
-        graph = pegout_graph(state, query, color_attribution_arrows=attribution_arrow_coloring(metadata),
+        # Search archives describe collection. The new display policy belongs
+        # to this preview, so regenerating never rewrites its source archive.
+        plot_query = validate_query(**query, transaction_io="complete")
+        graph = pegout_graph(state, plot_query, color_attribution_arrows=attribution_arrow_coloring(metadata),
+                              group_context_inputs=context_input_grouping(metadata),
                               center_name=centered_name_group(metadata))
         if graph["nodes"]:
             graph = optimize_graph(graph, connector_style=connector_appearance(metadata), progress=progress,
@@ -340,11 +345,16 @@ def saved_pegout_snapshot(case, preview_id):
     state, query, _ = _read_search(case, preview_id[:16])
     metadata = read_case(case)
     report = graph.get("pegouts", {})
+    plot_query = report.get("query")
+    if not isinstance(plot_query, dict) or validate_query(**plot_query) != plot_query:
+        raise TraceError("Peg-out preview has an invalid saved display query")
+    search_query = {key: value for key, value in plot_query.items() if key != "transaction_io"}
     if (graph.get("namespace", {}).get("case_id") != metadata["case_id"]
             or graph.get("namespace", {}).get("source") != state.get("source")
             or graph.get("run_id") != state["run_id"] or plan.get("run_id") != state["run_id"]
             or graph.get("graph_options", {}).get("view") != "pegout_paths"
-            or report.get("query") != query or plan.get("schema_version") != 1):
+            or graph.get("graph_options", {}).get("pegout_query") != plot_query
+            or search_query != query or plan.get("schema_version") != 1):
         raise TraceError("Peg-out preview does not match this investigation or query")
     if report.get("archive_sha256") != digest((_search_path(case, state["run_id"]) / "SHA256SUMS").read_bytes()):
         raise TraceError("Peg-out preview source archive changed; restore the saved evidence")
@@ -355,14 +365,16 @@ def saved_pegout_snapshot(case, preview_id):
 
 
 def reviewed_pegouts(case, preview_id):
-    from .cli import attribution_arrow_coloring, centered_name_group
+    from .cli import attribution_arrow_coloring, centered_name_group, context_input_grouping
 
     graph, plan, _ = saved_pegout_snapshot(case, preview_id)
     metadata, controls = read_case(case), load_services(case)
     report = graph["pegouts"]
     if (report.get("service_sha256") != digest(canonical({k: v for k, v in controls.items() if k != "history"}))
             or graph["graph_options"].get("color_attribution_arrows", False) is not attribution_arrow_coloring(metadata)
-            or graph["graph_options"].get("center_name", "") != centered_name_group(metadata)):
+            or graph["graph_options"].get("center_name", "") != centered_name_group(metadata)
+            or (report["query"].get("transaction_io") == "complete"
+                and graph["graph_options"].get("group_context_inputs", False) is not context_input_grouping(metadata))):
         raise TraceError("Evidence, colors, layout settings or trace controls changed; regenerate the peg-out preview")
     return graph, plan
 

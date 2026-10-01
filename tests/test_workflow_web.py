@@ -463,6 +463,23 @@ class WorkflowWebTests(unittest.TestCase):
             with self.subTest(query=invalid):
                 self.assertNotIn("context_edge_count", public_plot({**plot, "query": invalid}))
 
+    def test_default_pegout_cli_and_http_results_always_include_complete_transaction_io(self):
+        case, route, _ = self.collected()
+        for supplied in ({}, {"include_context": False}):
+            with self.subTest(supplied=supplied):
+                # Same entry point used by both plot and plot-sync actions.
+                plot = preview_plot(case, "pegouts", **supplied)
+                listed = next(item for item in self.success(route)["plots"]
+                              if item["preview_id"] == plot["preview_id"])
+                self.assertEqual(listed["query"]["transaction_io"], "complete")
+                self.assertNotIn("include_context", listed["query"])
+                self.assertEqual(listed["context_edge_count"], plot["context_edge_count"])
+                self.assertTrue(listed["layout_settings"]["include_fees"])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(main(["plot", "--case", str(case), "--goal", "pegouts"]), 0)
+        self.assertEqual(json.loads(output.getvalue())["query"]["transaction_io"], "complete")
+
     def test_busy_plot_registry_does_not_hide_the_investigation_or_expose_paths(self):
         _, route, _ = self.collected()
         with patch("liquid_tracer.plots.list_plots", side_effect=TraceError("private/path")), \
