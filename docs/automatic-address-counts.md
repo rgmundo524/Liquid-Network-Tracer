@@ -65,6 +65,12 @@ on the same host can constrain auto clients, so restart older API jobs when
 enabling this mode. Positive numeric values select fixed pacing instead. A
 verified `LIQUID_BLOCKSTREAM_API_RPS` allowance takes precedence at 95% of its value.
 
+When one adaptive client is active, workers reuse a brief local denial while
+waiting for the next shared admission time. This avoids repeatedly committing
+the same waiting state to the coordinator. Every granted start still checks the
+shared database for other clients and cooldowns; a cached result cannot grant a
+request. Long waits periodically renew the client registration and flush feedback.
+
 Saved runs previously recorded the derived 49 RPS interval as well as the source
 of that rate. That specific implicit default is ignored for later count lookups
 under the new configuration. Explicit minimum intervals, verified allowances and
@@ -86,7 +92,10 @@ ordinary transaction collection keeps its existing worker setting.
 A separate ancillary-cache lock permits one count lookup per investigation.
 Completed requests are processed immediately, without waiting for a fixed batch.
 Cache writes and progress updates stay on the coordinating thread. Raw responses
-are archived individually. Every 32 successes, or on the next completed response
+are archived individually. Each received response and its request outcome commit
+together in one evidence transaction; the request-start record is still committed
+before sending the HTTP request. A response is delivered to the count pipeline
+only after its evidence transaction commits. Every 32 successes, or on the next completed response
 after one second, only new count observations are committed to
 `address-counts.sqlite3`. Records have case/source-bound checksums; concurrent
 readers see committed snapshots. Completion, errors and orderly interruption
@@ -158,6 +167,28 @@ worker counts and throttling responses. Compare `counts_per_second` and the
 measurement windows with the requested target; a target alone is not achieved
 throughput. A short or already-cached sample cannot establish available capacity.
 The probe never certifies a provider's maximum or overrides an explicit allowance.
+
+The result includes cumulative network, evidence-store, pacing and retry seconds,
+completed requests/endpoints, and `peak_in_flight` (actual simultaneous HTTP calls).
+`peak_workers` is the largest requested worker count, which can include workers
+waiting for pacing or local storage. `latency_seconds` and
+`service_latency_seconds` are recent weighted averages, not totals. Service time
+includes evidence and decoding but excludes admission and retry waits. The worker
+timing totals overlap and must not be added to calculate elapsed time.
+`quota_reserve_calls`, `quota_admitted` and `quota_denied` count coordinator checks,
+including inexpensive cached denials; `quota_reserve_seconds` measures time
+inside those checks and is already included in pacing time.
+`probe_outside_lookup_seconds` separates archive verification, state/cache
+preparation and cleanup from the measured lookup; this is local work, not an API
+rate-limit delay.
+
+A target higher than achieved throughput with zero rate-limit responses does not
+establish a provider limit. For example, a 110 RPS target with 38 completed counts
+per second leaves local storage, admission overhead and response latency to
+investigate. Raising the target or worker count alone may not improve it. A
+`time_limit` stop on a bounded probe is expected, and successful counts remain
+saved. Once recovery has already sealed a run, repeating `recover-collection` can
+report that no finished unsealed collection was found; use the saved run directly.
 
 Restart the UI in an existing shell with:
 
@@ -249,6 +280,29 @@ responses and preserved all 2,402 response observations. Counts and successful
 response fingerprints matched. The provider's 150 RPS capacity is synthetic;
 this test verifies feedback, persistence and scheduling rather than predicting
 Blockstream performance.
+
+To measure sensitivity to durable-storage latency, compare checkouts with:
+
+```sh
+python scripts/benchmark_address_counts.py --shared-quota --adaptive \
+  --provider-rps 150 --addresses 1200 --network-delay-ms 150 \
+  --evidence-commit-delay-ms 8 --quota-commit-delay-ms 2
+```
+
+Against revision `582a4b8`, one local comparison improved from 35.98 to 53.88
+counts/second, with wall time falling from 33.64 to 22.60 seconds. Evidence
+commits fell from 3,600 to 2,400 while retaining all 1,200 responses and 2,400
+request-attempt rows. Counts, response hashes and attempt fingerprints matched.
+The baseline reproduced a 110.25 RPS target without HTTP 429 responses, despite
+achieving only about 36 counts/second. This demonstrates how local storage can
+produce that pattern; it does not diagnose a particular machine.
+
+With no injected storage delay, 1,600 addresses and the same simulated network
+latency, throughput was essentially unchanged (133.38 versus 131.61 counts/second).
+Quota database commits still fell from 8,815 to 3,167, and time inside reservation
+calls fell from 6.55 to 3.23 seconds. This second comparison used no synthetic
+provider cap. Reservation-call counts include cached denials; the benchmark's
+actual commit counters distinguish them from database writes.
 
 ## Inline display and migration
 

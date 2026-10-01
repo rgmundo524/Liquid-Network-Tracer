@@ -50,6 +50,7 @@ class ExplorerProbeMeasurementTests(unittest.TestCase):
                                     transport="offline-transport")
         self.assertEqual(result["counts_per_second"], 160 / 12)
         self.assertEqual(result["probe_wall_seconds"], 14.)
+        self.assertEqual(result["probe_outside_lookup_seconds"], 2.)
         self.assertEqual(result["sample_windows"], 2)
         self.assertEqual(result["peak_window"], {"fetched": 100, "seconds": 5., "counts_per_second": 20.})
         self.assertEqual(result["latest_window"], result["peak_window"])
@@ -75,6 +76,16 @@ class ExplorerProbeMeasurementTests(unittest.TestCase):
                 result = probe_explorer("case")
             self.assertEqual(result["outcome"], outcome)
 
+    def test_cached_probe_attributes_all_time_to_preparation(self):
+        cached = report(fetched=0, remaining=0)
+        del cached["elapsed_seconds"]
+        with patch("liquid_tracer.explorer_probe.fetch_counts", return_value=cached), \
+                patch("liquid_tracer.explorer_probe.time.monotonic", side_effect=[10., 14.]):
+            result = probe_explorer("case")
+        self.assertEqual(result["probe_wall_seconds"], 4.)
+        self.assertEqual(result["probe_outside_lookup_seconds"], 4.)
+        self.assertEqual(result["counts_per_second"], 0.)
+
     def test_invalid_probe_budgets_fail_before_opening_a_case(self):
         invalid = [{"seconds": value} for value in (0, -1, True, "60", None, float("inf"), float("nan"))]
         invalid += [{"max_requests": value} for value in (0, -1, True, "10", 1.5, None)]
@@ -95,6 +106,29 @@ class ExplorerProbeMeasurementTests(unittest.TestCase):
         with patch("liquid_tracer.explorer_probe.fetch_counts", side_effect=fetch):
             result = probe_explorer("case", progress=progress)
         self.assertEqual(result["fetched"], 160)
+
+    def test_probe_keeps_api_diagnostics_separate_from_lookup_and_total_wall_time(self):
+        clock = [0.]
+        metrics = {"completed_requests": 2300, "completed_endpoints": 2300,
+                   "peak_in_flight": 12, "latency_seconds": .1, "service_latency_seconds": .17,
+                   "network_seconds_total": 230, "evidence_seconds_total": 95,
+                   "pacing_wait_seconds_total": 440, "retry_wait_seconds_total": 0,
+                   "quota_reserve_calls": 3400, "quota_reserve_seconds": .5,
+                   "quota_admitted": 2301, "quota_denied": 1099}
+
+        def fetch(case, run_id, **options):
+            clock[0] = 125.8
+            return report(elapsed_seconds=60.6, **metrics)
+
+        with patch("liquid_tracer.explorer_probe.time", SimpleNamespace(monotonic=lambda: clock[0])), \
+                patch("liquid_tracer.explorer_probe.fetch_counts", side_effect=fetch):
+            result = probe_explorer("case")
+        for key, value in metrics.items():
+            self.assertEqual(result[key], value)
+        self.assertEqual(result["elapsed_seconds"], 60.6)
+        self.assertEqual(result["probe_wall_seconds"], 125.8)
+        self.assertAlmostEqual(result["probe_outside_lookup_seconds"], 65.2)
+        self.assertIn("Worker timing totals overlap and must not be added together", result["notice"])
 
 
 class ExplorerProbeIntegrationTests(unittest.TestCase):

@@ -10,7 +10,7 @@ import time
 
 from .address_counts import fetch_counts
 from .common import TraceError
-from .performance import public_api_rate
+from .performance import public_api_diagnostics
 
 
 WINDOW_SECONDS = 5.
@@ -26,11 +26,7 @@ class _Windows:
         self.latest_metrics = {}
 
     def observe(self, event):
-        self.latest_metrics.update(public_api_rate(event))
-        for key in ("rate_limit_responses", "retry_responses"):
-            number = event.get(key)
-            if type(number) is int and 0 <= number <= 2**53 - 1:
-                self.latest_metrics[key] = number
+        self.latest_metrics.update(public_api_diagnostics(event))
         fetched = event.get("fetched")
         if event.get("phase") != "address_counts" or type(fetched) is not int or fetched < 0:
             return
@@ -82,13 +78,11 @@ def probe_explorer(case, run_id="latest", *, seconds=60, max_requests=10000,
     report = fetch_counts(case, run_id, max_requests=max_requests, max_seconds=seconds,
                           refresh=False, progress=observe, transport=transport)
     wall_seconds = max(0., time.monotonic() - started)
-    elapsed = report.get("elapsed_seconds", wall_seconds)
+    # No lookup timer exists when every requested count was already cached.
+    # In that case all command time belongs to preparation/verification.
+    elapsed = report.get("elapsed_seconds", 0.)
     metrics = windows.latest_metrics
-    metrics.update(public_api_rate(report))
-    for key in ("rate_limit_responses", "retry_responses"):
-        number = report.get(key)
-        if type(number) is int and 0 <= number <= 2**53 - 1:
-            metrics[key] = number
+    metrics.update(public_api_diagnostics(report))
     rate_limits = metrics.get("rate_limit_responses")
     feedback = ("unavailable" if rate_limits is None else
                 "observed" if rate_limits else "not_observed")
@@ -110,10 +104,13 @@ def probe_explorer(case, run_id="latest", *, seconds=60, max_requests=10000,
     return {**report, **metrics, "schema_version": 1, "kind": "explorer_probe",
             "probe_seconds": seconds, "probe_max_requests": max_requests,
             "probe_wall_seconds": wall_seconds,
+            "probe_outside_lookup_seconds": max(0., wall_seconds - elapsed),
             "counts_per_second": report["fetched"] / max(.001, elapsed),
             "sample_windows": windows.count, "peak_window": windows.peak,
             "latest_window": windows.latest, "rate_limit_feedback": feedback,
             "outcome": outcome,
             "notice": explanation + " Successfully fetched counts are saved for subsequent work. "
                 "Observed throughput and the learned pacing target do not establish a provider or account maximum. "
-                "Other processes sharing this API, local storage and available workers can affect this result."}
+                "Other processes sharing this API, local storage and available workers can affect this result. "
+                "Worker timing totals overlap and must not be added together. Outside-lookup time includes "
+                "archive verification, state/cache preparation and cleanup, rather than API request time."}

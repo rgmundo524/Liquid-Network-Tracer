@@ -15,7 +15,7 @@ import threading
 import urllib.parse
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .common import TraceError
@@ -133,6 +133,8 @@ class SharedExplorerQuota(_Feedback):
         self._setup_feedback(adaptive)
         self._idle_seconds = idle_seconds
         self._clock = clock or time.time
+        self._monotonic = clock or time.monotonic
+        self._denied_hint = None
         self._client_id = uuid.uuid4().hex
         self._closed = False
         if directory is None:
@@ -233,14 +235,50 @@ class SharedExplorerQuota(_Feedback):
         db.execute("""UPDATE clients SET interval = ? WHERE id IN
             (SELECT id FROM adaptive_clients)""", (1. / state.target_rps,))
 
+    def _clear_denied_hint(self):
+        with self._feedback_lock:
+            self._denied_hint = None
+
     def reserve(self):
-        """Admit now, or return a delay for a cancellable caller-owned wait."""
+        """Admit atomically, or reuse a recent local *denial* without writes.
+
+        Parallel workers often ask about the same next start. Writing a renewed
+        lease/controller for every waiter creates a disk-write stampede. A
+        recent denial can only keep a caller waiting: each possible admission
+        still goes through the shared database and rechecks peers and cooldowns.
+        """
         if self._closed:
             raise TraceError("Shared explorer pacing is closed")
+        with self._feedback_lock:
+            hint = self._denied_hint
+            now = self._monotonic()
+            if hint is not None and now < hint[1]:
+                return replace(hint[2], wait_seconds=hint[0] - now)
+            self._denied_hint = None
+        admission, deadline, checked_at = self._reserve_uncached()
+        if deadline is None:
+            return admission
+        now = self._monotonic()
+        # The database commit happened after calculating this deadline. Do not
+        # add commit latency to the caller's sleep. A positive delay is required
+        # even when the deadline elapsed: this result did not grant permission.
+        admission = replace(admission, wait_seconds=max(1e-6, deadline - now))
+        if self.adaptive and admission.active_clients == 1 and deadline > now:
+            # Multiple known clients retain immediate rechecks so a peer's
+            # closing/revised fixed interval is reflected without a stale hint.
+            # Long server cooldowns must still renew leases and flush feedback.
+            refresh_at = min(deadline, checked_at + min(1., self._idle_seconds / 2))
+            if refresh_at > now:
+                with self._feedback_lock:
+                    self._denied_hint = (deadline, refresh_at, admission)
+        return admission
+
+    def _reserve_uncached(self):
         pending = self._take_successes()
         try:
             with self._transaction() as db:
                 now = self._clock()
+                checked_at = self._monotonic()
                 db.execute("DELETE FROM clients WHERE expires_at <= ?", (now,))
                 state = None
                 if self.adaptive:
@@ -263,13 +301,14 @@ class SharedExplorerQuota(_Feedback):
                 deadline = max(last_start + interval, cooldown)
                 if deadline > now:
                     reason = "server_cooldown" if cooldown >= last_start + interval else "shared_rate_limit"
-                    return Admission(False, deadline - now, active, 1. / interval, reason, **metadata)
+                    return (Admission(False, deadline - now, active, 1. / interval, reason, **metadata),
+                            checked_at + (deadline - now), checked_at)
                 db.execute("UPDATE pacing SET last_start = ? WHERE id = 1", (now,))
-                return Admission(True, active_clients=active, effective_rps=1. / interval, **metadata)
+                return Admission(True, active_clients=active, effective_rps=1. / interval, **metadata), None, None
         except _Busy:
             self._restore_successes(pending)
-            return Admission(False, LOCK_RETRY_SECONDS, reason="shared_rate_limit",
-                             mode="adaptive" if self.adaptive else "fixed")
+            return (Admission(False, LOCK_RETRY_SECONDS, reason="shared_rate_limit",
+                              mode="adaptive" if self.adaptive else "fixed"), None, None)
         except BaseException:
             self._restore_successes(pending)
             raise
@@ -284,6 +323,7 @@ class SharedExplorerQuota(_Feedback):
             return self.cooldown(seconds)
         if self._closed:
             raise TraceError("Shared explorer pacing is closed")
+        self._clear_denied_hint()
         seconds = max(1., seconds) if math.isfinite(seconds) else 60.
         try:
             with self._transaction() as db:
@@ -305,6 +345,7 @@ class SharedExplorerQuota(_Feedback):
         """
         if self._closed:
             raise TraceError("Shared explorer pacing is closed")
+        self._clear_denied_hint()
         seconds = max(0., seconds) if math.isfinite(seconds) else 60.
         try:
             with self._transaction() as db:

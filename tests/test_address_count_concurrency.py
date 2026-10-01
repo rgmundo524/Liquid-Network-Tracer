@@ -121,6 +121,12 @@ class AddressCountConcurrencyTests(unittest.TestCase):
         self.assertEqual(events[-1]["fetched"], 6)
         self.assertEqual(report["rate_limit_responses"], 0)
         self.assertEqual(report["retry_responses"], 0)
+        self.assertEqual(report["completed_requests"], 6)
+        self.assertEqual(report["completed_endpoints"], 6)
+        self.assertEqual(report["peak_in_flight"], 3)
+        for key in ("network_seconds_total", "evidence_seconds_total", "pacing_wait_seconds_total",
+                    "latency_seconds", "service_latency_seconds"):
+            self.assertGreater(report[key], 0)
 
     def test_explicit_single_worker_remains_serial(self):
         self.state["fetch_options"]["workers"] = 1
@@ -372,7 +378,11 @@ class AddressCountConcurrencyTests(unittest.TestCase):
                 "requests_this_lookup": 4, "stop_reason": None}
         report = {**base, "api_rate_mode": "adaptive", "api_target_rps": 256,
                   "shared_api_effective_rps": 128, "rate_limit_responses": 1,
-                  "retry_responses": 2, "observed_rps": 110}
+                  "retry_responses": 2, "observed_rps": 110,
+                  "network_seconds_total": 3, "evidence_seconds_total": 4,
+                  "pacing_wait_seconds_total": 5, "retry_wait_seconds_total": 2,
+                  "completed_requests": 4, "completed_endpoints": 3,
+                  "peak_in_flight": 2, "latency_seconds": .1, "service_latency_seconds": .2}
         self.assertEqual(public_count_report({**report, "message": "PRIVATE"}), report)
         for invalid in (True, -1, "PRIVATE", [], {}, float("nan"), 10 ** 400):
             with self.subTest(invalid=invalid):

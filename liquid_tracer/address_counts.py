@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from .address_activity import validate_address
 from .address_count_cache import CountCacheJournal, read_snapshot
 from .common import StopRun, TraceError, canonical, digest, read_json, save_json
-from .performance import public_api_rate
+from .performance import public_api_diagnostics
 
 COUNT_GAP = 20
 COUNT_HEIGHT = 28
@@ -336,11 +336,7 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
                         "checkpoint_count": checkpoint_count, "checkpoint_seconds": checkpoint_seconds,
                         "observed_rps": fetched / max(.001, time.monotonic() - started)}
                     feedback = api.request_metrics()
-                    concurrency_report.update(public_api_rate(feedback))
-                    for key in ("rate_limit_responses", "retry_responses"):
-                        number = feedback.get(key)
-                        if type(number) is int and 0 <= number <= 2**53-1:
-                            concurrency_report[key] = number
+                    concurrency_report.update(public_api_diagnostics(feedback))
                     if failure is not None:
                         raise failure
             known = sum(address in counts for address in wanted)
@@ -473,5 +469,5 @@ def public_count_report(report):
         number = report.get(key)
         if type(number) in (int, float) and math.isfinite(number) and 0 <= number <= 2**53-1:
             value[key] = number
-    value.update(public_api_rate(report))
+    value.update(public_api_diagnostics(report))
     return value

@@ -42,6 +42,22 @@ class Store:
             self.db.execute("INSERT INTO attempts VALUES (NULL,?,?,?,?,?)",
                             (run_id, kind, endpoint, now(), str(status)))
 
+    def record_response(self, run_id, kind, source, endpoint, body, status=200):
+        """Commit a received outcome and its exact response bytes together.
+
+        A request's started attempt is already durable before transport begins.
+        After receiving a response, neither its outcome nor its observation can
+        be acknowledged independently of the other. The returned ID is visible
+        to other SQLite readers only after this transaction commits.
+        """
+        timestamp, epoch, checksum = now(), time.time(), digest(body)
+        with self._lock, self.db:
+            self.db.execute("INSERT INTO attempts VALUES (NULL,?,?,?,?,?)",
+                            (run_id, kind, endpoint, timestamp, str(status)))
+            cur = self.db.execute("INSERT INTO observations VALUES (NULL,?,?,?,?,?,?,?,?)",
+                (run_id, source, endpoint, timestamp, epoch, status, checksum, body))
+        return cur.lastrowid
+
     def cached(self, source, endpoint, run_id, ttl):
         with self._lock:
             row = self.db.execute("SELECT * FROM observations WHERE source=? AND endpoint=? "
