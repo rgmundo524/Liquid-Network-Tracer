@@ -71,6 +71,20 @@ the same waiting state to the coordinator. Every granted start still checks the
 shared database for other clients and cooldowns; a cached result cannot grant a
 request. Long waits periodically renew the client registration and flush feedback.
 
+The coordinator reuses one SQLite connection and uses WAL with FULL synchronous
+commits on supported SQLite versions. This reduces repeated file opens and disk
+synchronizations while preserving committed admissions and cooldowns. Every
+granted request still checks shared state in an atomic transaction. The quota
+cache belongs on a local filesystem. Evidence-store journal settings are unchanged.
+
+SQLite's [WAL-reset fix](https://www.sqlite.org/wal.html#walreset) is required to
+enable this mode: version 3.51.3 or later, or the 3.44.6/3.50.7 maintenance branches
+and their later patch releases. Older runtimes retain DELETE/FULL. If an older
+runtime encounters a WAL cache held open by another instance, it reports the
+required runtime update or instance restart instead of waiting indefinitely.
+Diagnostics report the actual journal mode and SQLite version; all instances
+sharing a WAL cache should use a patched runtime.
+
 Saved runs previously recorded the derived 49 RPS interval as well as the source
 of that rate. That specific implicit default is ignored for later count lookups
 under the new configuration. Explicit minimum intervals, verified allowances and
@@ -168,6 +182,20 @@ measurement windows with the requested target; a target alone is not achieved
 throughput. A short or already-cached sample cannot establish available capacity.
 The probe never certifies a provider's maximum or overrides an explicit allowance.
 
+A final request's socket timeout may be shortened to fit the remaining probe
+budget. A known transport timeout after that local deadline is recorded as
+`local_time_limit`, counted in `local_deadline_timeouts`, and ends the probe
+without lowering the learned API target. Early timeouts, normal twenty-second
+timeouts, disconnects, HTTP 429 and retryable server errors still provide pressure
+feedback. This distinction also applies to other bounded collection requests.
+Previously saved backoff is retained because its cause cannot be inferred safely.
+Use a longer sample to let that target recover gradually:
+
+```sh
+env LIQUID_BLOCKSTREAM_ENTERPRISE_RPS=auto liquid-live explorer-probe \
+  --case cases/.shared-collection --seconds 180 --max-requests 30000
+```
+
 The result includes cumulative network, evidence-store, pacing and retry seconds,
 completed requests/endpoints, and `peak_in_flight` (actual simultaneous HTTP calls).
 `peak_workers` is the largest requested worker count, which can include workers
@@ -178,6 +206,9 @@ timing totals overlap and must not be added to calculate elapsed time.
 `quota_reserve_calls`, `quota_admitted` and `quota_denied` count coordinator checks,
 including inexpensive cached denials; `quota_reserve_seconds` measures time
 inside those checks and is already included in pacing time.
+`quota_sqlite_version`, `quota_journal_mode`, `quota_journal_mode_requested`,
+`quota_synchronous` and `quota_connection_mode` identify the coordinator storage
+configuration without exposing paths or credentials.
 `probe_outside_lookup_seconds` separates archive verification, state/cache
 preparation and cleanup from the measured lookup; this is local work, not an API
 rate-limit delay.
@@ -303,6 +334,30 @@ Quota database commits still fell from 8,815 to 3,167, and time inside reservati
 calls fell from 6.55 to 3.23 seconds. This second comparison used no synthetic
 provider cap. Reservation-call counts include cached denials; the benchmark's
 actual commit counters distinguish them from database writes.
+
+On Linux with a C compiler, the optional sync helper measures actual `fsync` and
+`fdatasync` calls rather than assigning the same cost to every COMMIT. It can add
+latency per synchronization while still executing the real disk operation:
+
+```sh
+python scripts/benchmark_address_counts.py --shared-quota --adaptive \
+  --addresses 1200 --network-delay-ms 40 --evidence-commit-delay-ms 4 \
+  --measure-sync --quota-sync-delay-ms 2
+```
+
+The helper is compiled and loaded only into the temporary offline benchmark
+process. It separates evidence file syncs from coordinator file/directory syncs,
+preserves real synchronization calls, and rejects runs with failed syncs.
+Ordinary collection never loads it.
+
+Against `69b8166`, a local comparison using the above delays improved from 66.26
+to 83.85 counts/second (18.32 to 14.54 seconds). Coordinator sync calls fell from
+5,352 to 1,544 and time inside admission checks from 12.26 to 4.33 seconds. All
+1,200 response hashes, counts and 2,400 request-attempt rows matched; evidence
+sync counts were unchanged. Without injected storage delays, throughput was
+essentially unchanged (117.52 versus 117.21 counts/second), while coordinator
+syncs fell from 9,600 to 2,416. These synthetic results isolate coordinator I/O;
+the probe on the investigator's machine measures the actual effect.
 
 ## Inline display and migration
 

@@ -14,7 +14,7 @@ from http.client import HTTPException
 
 from .common import StopRun, TraceError, canonical, read_json
 from .explorer_quota import LocalExplorerQuota, SharedExplorerQuota
-from .explorer_http import ExplorerHTTP, TransientExplorerConnection, network_failure
+from .explorer_http import ExplorerHTTP, ExplorerRequestTimeout, TransientExplorerConnection, network_failure
 
 TOKEN_URL = "https://login.blockstream.com/realms/blockstream-public/protocol/openid-connect/token"
 ENTERPRISE = "https://enterprise.blockstream.info/liquid/api"
@@ -211,6 +211,7 @@ class Esplora:
                         "cache_hits": 0, "coalesced_hits": 0,
                         "quota_reserve_calls": 0, "quota_reserve_seconds": 0.,
                         "quota_admitted": 0, "quota_denied": 0,
+                        "local_deadline_timeouts": 0,
                         "rate_limit_responses": 0, "retry_responses": 0,
                         "peak_in_flight": 0}
         self._in_flight = 0
@@ -342,7 +343,15 @@ class Esplora:
             metrics.update(self._totals)
             if self._shared_metrics is not None:
                 metrics.update(self._shared_metrics)
-            return metrics
+        # Storage metadata is a cheap coordinator snapshot. Never call a
+        # coordinator method while holding the metrics lock: admission takes
+        # those locks in the opposite order.
+        storage_metrics = getattr(self._shared_quota, "storage_metrics", None)
+        if callable(storage_metrics):
+            storage = storage_metrics()
+            if isinstance(storage, dict):
+                metrics.update(storage)
+        return metrics
 
     @contextmanager
     def _exclude_service(self):
@@ -534,16 +543,25 @@ class Esplora:
         admission = getattr(self._admission_local, "admission", None)
         started = time.monotonic()
         result = None
+        local_deadline_timeout = False
         with self._metrics_lock:
             self._in_flight += 1
             self._totals["peak_in_flight"] = max(self._totals["peak_in_flight"], self._in_flight)
         try:
             try:
                 result = self.transport(method, url, headers, body, timeout)
+            except BaseException as error:
+                local_deadline_timeout = self._is_local_deadline_timeout(error, timeout)
+                raise
             finally:
                 self._measure_request(started, kind, result[0] if result is not None else None,
-                                      failed=result is None)
+                                      failed=result is None and not local_deadline_timeout)
         except (TraceError, OSError, urllib.error.URLError) as error:
+            if local_deadline_timeout:
+                with self._metrics_lock:
+                    self._totals["local_deadline_timeouts"] += 1
+                self._evidence(self.store.attempt, self.run_id, kind, endpoint, "local_time_limit")
+                raise StopRun("time_limit") from None
             self._evidence(self.store.attempt, self.run_id, kind, endpoint, "network_error")
             if isinstance(error, (TransientExplorerConnection, OSError, urllib.error.URLError)):
                 self._rate_feedback(admission, failed=True)
@@ -570,6 +588,21 @@ class Esplora:
             return (*result, oid)
         self._evidence(self.store.attempt, self.run_id, kind, endpoint, result[0])
         return result
+
+    def _is_local_deadline_timeout(self, error, timeout):
+        """Do not learn provider pressure from our shortened final socket wait.
+
+        A bounded run can give its last request milliseconds of the normal
+        twenty-second timeout. Only a known transport timeout after that local
+        deadline qualifies. Resets, disconnects and actual HTTP errors retain
+        their ordinary pressure behavior even if the budget has also expired.
+        """
+        while isinstance(error, urllib.error.URLError) and isinstance(error.reason, BaseException):
+            error = error.reason
+        if timeout >= 20 or not isinstance(error, (ExplorerRequestTimeout, TimeoutError)):
+            return False
+        remaining = self.budget.remaining_seconds()
+        return remaining is not None and remaining <= 0
 
     def _rate_feedback(self, admission, *, status=None, failed=False, headers=None):
         """React to an individual admission, preserving response archival.

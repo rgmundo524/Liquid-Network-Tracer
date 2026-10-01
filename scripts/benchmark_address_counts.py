@@ -16,6 +16,12 @@ injected transports use the in-memory coordinator or local fixed pacing.
 Use --evidence-commit-delay-ms and --quota-commit-delay-ms to model slow durable
 storage. These delay actual SQLite COMMIT statements, so combining writes into
 one transaction reduces the simulated storage cost without dropping evidence.
+
+On Linux with a C compiler, --measure-sync counts/times real fsync/fdatasync
+calls using a temporary LD_PRELOAD helper. --quota-sync-delay-ms additionally
+delays each quota sync while still performing it. This distinguishes DELETE
+journal and WAL costs, unlike a fixed delay per COMMIT. Unsupported platforms
+can omit these optional flags; the ordinary benchmark needs no compiler.
 """
 
 import argparse
@@ -26,12 +32,55 @@ import importlib
 import json
 import os
 from pathlib import Path
+import shlex
+import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 from unittest.mock import patch
+
+
+def measured_sync_run(args, parser):
+    """Run one isolated offline child with Linux-only syscall instrumentation."""
+    if sys.platform != "linux" or not Path("/proc/self/fd").is_dir():
+        parser.error("Optional sync measurement needs Linux /proc; omit --measure-sync and sync-delay options")
+    compiler = shlex.split(os.environ.get("CC", "cc"))
+    if not compiler or not shutil.which(compiler[0]):
+        parser.error("Optional sync measurement needs a C compiler; install cc or omit sync measurement options")
+    source = Path(__file__).with_name("benchmark_sqlite_sync.c")
+    with tempfile.TemporaryDirectory(prefix="liquid-sync-benchmark-") as directory:
+        helper = Path(directory) / "sqlite-sync.so"
+        report = Path(directory) / "sync-report.json"
+        built = subprocess.run(compiler + ["-shared", "-fPIC", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+                                          "-o", str(helper), str(source), "-ldl", "-pthread"],
+                               capture_output=True, text=True)
+        if built.returncode:
+            parser.error("Optional sync helper could not compile: " + built.stderr.strip())
+        environment = dict(os.environ)
+        previous_preload = environment.get("LD_PRELOAD", "")
+        environment.update(LIQUID_BENCH_SYNC_ACTIVE="1", LIQUID_BENCH_SYNC_REPORT=str(report),
+                           LIQUID_BENCH_QUOTA_SYNC_DELAY_MS=str(args.quota_sync_delay_ms),
+                           LIQUID_BENCH_EVIDENCE_SYNC_DELAY_MS=str(args.evidence_sync_delay_ms),
+                           LD_PRELOAD=str(helper) + (":" + previous_preload if previous_preload else ""))
+        child = subprocess.run([sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]],
+                               env=environment, capture_output=True, text=True)
+        if child.stderr:
+            sys.stderr.write(child.stderr)
+        if child.returncode:
+            raise SystemExit(child.returncode)
+        result = json.loads(child.stdout)
+        if not report.exists():
+            raise RuntimeError("The sync helper did not report; no measured result is available")
+        syncs = json.loads(report.read_text())
+        if args.shared_quota and not sum(syncs["by_kind"]["quota"][key] for key in ("fsync", "fdatasync")):
+            raise RuntimeError("The shared quota's sync calls were not intercepted")
+        if any(value["errors"] for value in syncs["by_kind"].values()):
+            raise RuntimeError("A measured fsync/fdatasync failed")
+        result["sqlite_sync_syscalls"] = syncs
+        print(json.dumps(result, indent=2))
 
 
 def main():
@@ -53,15 +102,25 @@ def main():
                         help="Additional latency per actual evidence COMMIT")
     parser.add_argument("--quota-commit-delay-ms", type=float, default=0,
                         help="Additional latency per actual shared-quota COMMIT")
+    parser.add_argument("--measure-sync", action="store_true",
+                        help="Count/time actual fsync/fdatasync calls; optional Linux mode requiring a C compiler")
+    parser.add_argument("--evidence-sync-delay-ms", type=float, default=0,
+                        help="Linux helper: additional latency per evidence file sync")
+    parser.add_argument("--quota-sync-delay-ms", type=float, default=0,
+                        help="Linux helper: additional latency per quota file/directory sync")
     args = parser.parse_args()
     if not 1 <= args.addresses <= 100000 or not 0 <= args.cached_addresses <= 1000000:
         parser.error("Choose 1–100000 fetched addresses and 0–1000000 cached addresses")
     if not 0 < args.requests_per_second <= 100000 or any(
             not 0 <= value <= 1000 for value in (args.network_delay_ms, args.evidence_delay_ms,
-                                               args.evidence_commit_delay_ms, args.quota_commit_delay_ms)):
+                                               args.evidence_commit_delay_ms, args.quota_commit_delay_ms,
+                                               args.evidence_sync_delay_ms, args.quota_sync_delay_ms)):
         parser.error("Rate/delay outside synthetic benchmark bounds")
     if not 0 <= args.provider_rps <= 100000:
         parser.error("Choose a synthetic provider allowance of 0–100000 requests per second")
+    if ((args.measure_sync or args.evidence_sync_delay_ms or args.quota_sync_delay_ms)
+            and os.environ.get("LIQUID_BENCH_SYNC_ACTIVE") != "1"):
+        return measured_sync_run(args, parser)
     sys.path.insert(0, str(args.repo.resolve()))
     counts_module = importlib.import_module("liquid_tracer.address_counts")
     from liquid_tracer.api import ENTERPRISE, Esplora
@@ -77,6 +136,7 @@ def main():
     admitted, successful_responses, rate_samples = deque(), [], []
     writes, json_bytes, save_seconds = 0, 0, 0.
     quota_reservations, quota_admitted, quota_reserve_seconds = 0, 0, 0.
+    quota_clients = []
     commits = {kind: {"count": 0, "seconds": 0., "injected_wait_seconds": 0.}
                for kind in ("evidence", "quota")}
     lock = threading.Lock()
@@ -189,6 +249,7 @@ def main():
             client._shared_quota = BenchmarkSharedQuota(
                 client.base, client.min_interval, directory=Path(directory) / "quota",
                 adaptive=client.api_rate_mode == "adaptive")
+            quota_clients.append(client._shared_quota)
 
     def submit(client, *values, **options):
         nonlocal peak_retained
@@ -278,6 +339,9 @@ def main():
             "configured_requests_per_second": None if args.adaptive else args.requests_per_second,
             "adaptive": args.adaptive, "synthetic_provider_rps": args.provider_rps or None,
             "quota_coordinator": "shared_sqlite" if args.shared_quota else "local",
+            "sqlite_runtime_version": sqlite3.sqlite_version,
+            "quota_storage": next((quota.storage_metrics() for quota in quota_clients
+                                    if hasattr(quota, "storage_metrics")), None),
             "quota_reservations": quota_reservations, "quota_admitted": quota_admitted,
             "quota_denied_reservations": quota_reservations - quota_admitted,
             "quota_reserve_seconds": round(quota_reserve_seconds, 6),
@@ -288,6 +352,8 @@ def main():
             "network_delay_ms": args.network_delay_ms, "evidence_delay_ms": args.evidence_delay_ms,
             "evidence_commit_delay_ms": args.evidence_commit_delay_ms,
             "quota_commit_delay_ms": args.quota_commit_delay_ms,
+            "evidence_sync_delay_ms": args.evidence_sync_delay_ms,
+            "quota_sync_delay_ms": args.quota_sync_delay_ms,
             "sqlite_commits": {kind: {key: round(value, 6) if isinstance(value, float) else value
                                       for key, value in metrics.items()} for kind, metrics in commits.items()},
             "lookup_report": report, "peak_active_transport_requests": peak_active,

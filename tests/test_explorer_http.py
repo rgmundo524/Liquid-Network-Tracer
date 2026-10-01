@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 from liquid_tracer.api import ENTERPRISE, TOKEN_URL, http
 from liquid_tracer.common import TraceError
-from liquid_tracer.explorer_http import ExplorerHTTP, StaleExplorerConnection, TransientExplorerConnection
+from liquid_tracer.explorer_http import ExplorerHTTP, ExplorerRequestTimeout, StaleExplorerConnection, TransientExplorerConnection
 
 
 class Response:
@@ -154,6 +154,7 @@ class ExplorerHTTPTests(unittest.TestCase):
                     with self.assertRaises(TransientExplorerConnection) as caught:
                         transport('GET', ENTERPRISE + '/tx/one')
                 self.assertEqual(str(caught.exception), 'Network request failed: ' + type(failure).__name__)
+                self.assertEqual(isinstance(caught.exception, ExplorerRequestTimeout), isinstance(failure, TimeoutError))
                 self.assertEqual(len(connection.requests), 1)
                 self.assertTrue(connection.closed)
 
@@ -186,6 +187,8 @@ class ExplorerHTTPTests(unittest.TestCase):
                 retryable = not (isinstance(failure, urllib.error.URLError)
                                  and isinstance(failure.reason, ssl.SSLCertVerificationError))
                 self.assertEqual(isinstance(caught.exception, TransientExplorerConnection), retryable)
+                self.assertEqual(isinstance(caught.exception, ExplorerRequestTimeout),
+                                 isinstance(failure, urllib.error.URLError) and isinstance(failure.reason, TimeoutError))
                 self.assertNotIn('private', str(caught.exception))
                 self.assertEqual(opener.open.call_count, 1)
         self.factory.assert_not_called()

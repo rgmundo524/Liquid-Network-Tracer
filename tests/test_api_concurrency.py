@@ -692,6 +692,7 @@ class ApiConcurrencyTests(unittest.TestCase):
                                                 'evidence_seconds_total': 20.,
                                                 'quota_reserve_calls': 0, 'quota_reserve_seconds': 0.,
                                                 'quota_admitted': 0, 'quota_denied': 0,
+                                                'local_deadline_timeouts': 0,
                                                 'cache_hits': 0, 'coalesced_hits': 0,
                                                 'rate_limit_responses': 0, 'retry_responses': 0,
                                                 'peak_in_flight': 1})
