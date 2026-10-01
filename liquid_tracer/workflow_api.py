@@ -162,7 +162,8 @@ def workflow_action(server, case, metadata, body):
     from .cli import board_id, resolve_latest, run_path, verify_export
     from .investigation_boards import GOALS, list_boards
     from .plots import reviewed_plot
-    from .web import RequestError, validate_settings
+    from .web import RequestError
+    from .investigations import effective_run_settings
 
     action = body["action"]
     live = False
@@ -243,7 +244,7 @@ def workflow_action(server, case, metadata, body):
         if action == "plot-sync":
             if mode == "fresh":
                 arguments.extend(["--name", name])
-            settings = validate_settings(metadata.get("run_defaults", {}))
+            settings = effective_run_settings(metadata.get("run_defaults", {}))
             arguments.extend(["--max-items", str(settings["max_new_items"])])
     elif action == "board-create-sync":
         if set(body) != {"action", "name", "preview_id"}:
@@ -254,7 +255,7 @@ def workflow_action(server, case, metadata, body):
             raise RequestError("Create and sync requires a fresh layout.")
         if not graph.get("nodes"):
             raise RequestError("This plot has no matching activity to send to Miro.")
-        settings = validate_settings(metadata.get("run_defaults", {}))
+        settings = effective_run_settings(metadata.get("run_defaults", {}))
         arguments = ["investigation-board-create-sync", "--case", str(case),
                      "--preview", body["preview_id"], "--name", name,
                      "--max-items", str(settings["max_new_items"])]
@@ -296,7 +297,7 @@ def workflow_action(server, case, metadata, body):
             raise RequestError("Generate an update layout for this existing board, or create a new board from the fresh layout.")
         if not graph.get("nodes") and mode != "update":
             raise RequestError("This plot has no matching activity to send to Miro.")
-        settings = validate_settings(metadata.get("run_defaults", {}))
+        settings = effective_run_settings(metadata.get("run_defaults", {}))
         arguments = ["investigation-board-sync", "--case", str(case), "--record", record["id"],
                      "--preview", body["preview_id"], "--max-items", str(settings["max_new_items"])]
         if body["reorganize"]:

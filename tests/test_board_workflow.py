@@ -42,7 +42,7 @@ class BoardWorkflowTests(unittest.TestCase):
         remote = BoardRemote()
         with patch("liquid_tracer.plots.reviewed_plot", return_value=self.fresh()):
             with self.assertRaisesRegex(TraceError, "max-items"):
-                create_and_sync(self.case, "review-a", max_items=0, token="test", transport=remote, interval=0)
+                create_and_sync(self.case, "review-a", max_items=1, token="test", transport=remote, interval=0)
         self.assertFalse(remote.creations)
         self.assertFalse(self.registry.exists())
 

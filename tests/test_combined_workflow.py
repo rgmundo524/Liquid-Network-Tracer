@@ -37,8 +37,8 @@ class CombinedWorkflowTests(unittest.TestCase):
         self.assertEqual(list_boards(self.case), [])
 
     def test_fresh_budget_rejects_before_elk_or_saving_a_preview(self):
-        with self.assertRaisesRegex(TraceError, "above max-items=0"):
-            self.combined(max_items=0)
+        with self.assertRaisesRegex(TraceError, "above max-items=1"):
+            self.combined(max_items=1)
         self.layout.assert_not_called()
         self.assertEqual(self.transport.creations, [])
         self.assertEqual(list_plots(self.case), [])
@@ -53,8 +53,8 @@ class CombinedWorkflowTests(unittest.TestCase):
         self.layout.assert_not_called()
         set_service(self.case, "SYNTHETIC-b-address", name="Boundary", stop_tracing=False, hop_limit=2)
         remote.calls.clear()
-        with self.assertRaisesRegex(TraceError, "above max-items=0"):
-            self.combined(layout_mode="update", board_record_id=initial["record_id"], max_items=0)
+        with self.assertRaisesRegex(TraceError, "above max-items=1"):
+            self.combined(layout_mode="update", board_record_id=initial["record_id"], max_items=1)
         self.layout.assert_not_called()
         self.assertEqual(remote.calls, [])
         self.assertEqual(len(list_plots(self.case)), 2)

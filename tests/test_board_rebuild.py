@@ -98,6 +98,27 @@ class BoardRebuildTests(unittest.TestCase):
         self.rebuild()
         self.assertTrue(self.refresh.call_args.kwargs["color_attribution_arrows"])
 
+    def test_unlimited_default_rebuild_preflights_large_plan_and_positive_budget_rejects_before_create(self):
+        from liquid_tracer.miro import make_plan, sync
+        from tests.test_unlimited_miro_items import large_graph
+
+        value = large_graph(read_case(self.case)["case_id"])
+        value["run_id"] = self.run
+        value["namespace"] = self.plan["namespace"]
+        self.refresh.return_value = make_plan(value)
+        def checked(*args, **kwargs):
+            if kwargs.get("dry_run"):
+                return sync(*args, **kwargs)
+            return {"created": len(args[0]["shapes"])}
+        self.sync.side_effect = checked
+        with self.assertRaisesRegex(TraceError, "above max-items=750"):
+            self.rebuild(max_new_items=750)
+        self.remote.assert_not_called()
+        result = self.rebuild()
+        self.assertTrue(result["created"])
+        self.assertGreater(len(self.sync.call_args.args[0]["shapes"]), 750)
+        self.assertEqual(self.sync.call_args.kwargs["max_items"], 0)
+
     def test_missing_token_invalid_options_and_stale_source_never_create(self):
         with patch.dict(os.environ, {}, clear=True), self.assertRaisesRegex(TraceError, "MIRO_ACCESS_TOKEN"):
             self.rebuild()

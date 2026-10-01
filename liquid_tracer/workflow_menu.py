@@ -4,13 +4,28 @@ import webbrowser
 from pathlib import Path
 
 from .common import TraceError
-from .investigations import read_case
+from .investigations import effective_run_settings, read_case
 
 
 GOALS = [("Full investigation", "full"), ("Starter connections", "connections"),
          ("Paths to peg-outs", "pegouts")]
 GOAL_NAMES = dict((value, label) for label, value in GOALS)
 ERRORS = (TraceError, ValueError, OSError, KeyError, TypeError)
+
+
+def _new_item_budget(settings, value):
+    if not effective_run_settings(settings)["budget_limits_enabled"]:
+        return 0
+    budget = int(value)
+    if budget < 0:
+        raise TraceError("Use a nonnegative whole-number item budget; 0 means unlimited")
+    return budget
+
+
+def _item_budget_summary(settings):
+    if not settings["budget_limits_enabled"]:
+        return "New Miro items: unlimited. Enable optional budgets in Investigation settings to set a cap."
+    return "Optional budgets are enabled. Use 0 for unlimited new Miro items."
 
 
 def _endpoint_summary(plot):
@@ -44,7 +59,7 @@ def _compatible_plot(plot, board):
 
 def plot_arguments(case, goal, run, minimum="0", maximum="10", *, include_unspent=False, include_unspendable=False,
                    include_context=False, layout_mode="fresh", board_record_id=None,
-                   publish=False, name=None, max_items=750):
+                   publish=False, name=None, max_items=0):
     """Validate terminal fields; plotting always uses an explicit saved run."""
     if goal not in GOAL_NAMES:
         raise TraceError("Choose a plotting goal")
@@ -96,6 +111,7 @@ def plot_screen(base, button, case):
     class PlotScreen(base):
         def compose(self):
             metadata = read_case(case)
+            self.settings = effective_run_settings(metadata.get("run_defaults", {}))
             runs = [path.parent.name for path in sorted((Path(case) / "runs").glob("*/trace.json"), reverse=True)]
             selected = metadata.get("latest_run")
             self.boards = [board for board in list_boards(case) if board.get("can_sync")]
@@ -119,9 +135,10 @@ def plot_screen(base, button, case):
                 with Vertical(id="plot-name-field"):
                     yield Label("New board name")
                     yield Input(value=metadata.get("name", "Investigation")[:60], id="plot-name")
-                yield Label("Maximum new Miro items")
-                yield Input(value=str(metadata.get("run_defaults", {}).get("max_new_items", 750)),
-                            id="plot-max-items", type="integer")
+                yield Label("Maximum new Miro items (0 = unlimited)")
+                yield Input(value=str(self.settings["max_new_items"]), id="plot-max-items", type="integer",
+                            disabled=not self.settings["budget_limits_enabled"])
+                yield Static(_item_budget_summary(self.settings), markup=False)
                 yield Static("Full investigation: all displayed activity. Starter connections: all verified saved paths between "
                              "starting transactions. Paths to peg-outs: verified paths ending in matching requests.", markup=False)
                 with Vertical(id="plot-range"):
@@ -193,7 +210,9 @@ def plot_screen(base, button, case):
                         include_unspendable=goal == "pegouts" and self.query_one("#plot-include-unspendable", Checkbox).value,
                         layout_mode=mode, board_record_id=self.query_one("#plot-board", Select).value if mode == "update" else None,
                         publish=event.button.id == "plot-go", name=self.query_one("#plot-name", Input).value,
-                        max_items=int(self.query_one("#plot-max-items", Input).value) if event.button.id == "plot-go" else 750))
+                        max_items=_new_item_budget(read_case(case).get("run_defaults", {}),
+                                                  self.query_one("#plot-max-items", Input).value)
+                        if event.button.id == "plot-go" else 0))
                 except ERRORS as error:
                     self.query_one("#workflow-error", Static).update(str(error))
 
@@ -211,7 +230,7 @@ def boards_screen(base, button, case):
         def compose(self):
             self.boards = {row["id"]: row for row in list_boards(case)}
             self.plots = {row["preview_id"]: row for row in list_plots(case)}
-            self.settings = read_case(case).get("run_defaults", {})
+            self.settings = effective_run_settings(read_case(case).get("run_defaults", {}))
             yield Header()
             with VerticalScroll(classes="form-panel"):
                 yield Label("Saved boards and recovery", classes="title")
@@ -228,8 +247,10 @@ def boards_screen(base, button, case):
                 yield Select([], id="workflow-preview", prompt="Choose a board first")
                 yield Static("", id="workflow-preview-status", markup=False)
                 yield button("Review saved plot", id="workflow-review", disabled=True)
-                yield Label("Maximum new Miro items for this sync")
-                yield Input(value=str(self.settings.get("max_new_items", 750)), id="workflow-max-items", type="integer")
+                yield Label("Maximum new Miro items for this sync (0 = unlimited)")
+                yield Input(value=str(self.settings["max_new_items"]), id="workflow-max-items", type="integer",
+                            disabled=not self.settings["budget_limits_enabled"])
+                yield Static(_item_budget_summary(self.settings), markup=False)
                 with Horizontal(classes="buttons"):
                     yield button("Update board", id="workflow-sync", disabled=True)
                     yield button("Sync and reorganize", id="workflow-reorganize", disabled=True)
@@ -342,9 +363,8 @@ def boards_screen(base, button, case):
                     name = self.query_one("#workflow-name", Input).value.strip()
                     if not name:
                         raise TraceError("Provide a board name")
-                    budget = int(self.query_one("#workflow-max-items", Input).value)
-                    if budget < 0:
-                        raise TraceError("Use a nonnegative whole-number item budget")
+                    budget = _new_item_budget(read_case(case).get("run_defaults", {}),
+                                              self.query_one("#workflow-max-items", Input).value)
                     self.dismiss((["investigation-board-create-sync", "--case", str(case), "--preview", preview,
                                    "--name", name, "--max-items", str(budget)], True))
                 elif action in ("workflow-create", "workflow-link"):
@@ -363,9 +383,8 @@ def boards_screen(base, button, case):
                         raise TraceError("This saved plot has no matching activity to publish")
                     if not row.get("can_sync"):
                         raise TraceError(row.get("notice") or "This board is not available for managed sync")
-                    budget = int(self.query_one("#workflow-max-items", Input).value)
-                    if budget < 0:
-                        raise TraceError("Use a nonnegative whole-number item budget")
+                    budget = _new_item_budget(read_case(case).get("run_defaults", {}),
+                                              self.query_one("#workflow-max-items", Input).value)
                     arguments = ["investigation-board-sync", "--case", str(case), "--record", row["id"],
                                  "--preview", plot["preview_id"], "--max-items", str(budget)]
                     if action == "workflow-reorganize":

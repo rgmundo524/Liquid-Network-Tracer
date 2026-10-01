@@ -27,8 +27,9 @@ connections, without either attribution filter or an additional plotting hop cap
 | Full trace | Stops that path | Applied |
 | Starter connections | Ignored | Ignored |
 
-Collection still obeys the run's overall hop ceiling, confirmation policy, and
-transaction, output, API-request, and time budgets. Peg-out tracing still obeys
+Collection still obeys the run's overall hop ceiling and confirmation policy.
+Transaction, output, API-request, and total-time budgets are optional and
+disabled by default. Peg-out tracing still obeys
 its selected global hop range. Ignoring an address's local cap does not remove
 these limits or change the selected seeds. To stop collection or a peg-out path
 at an address, use `stop_tracing=true`; `hop_limit=0` alone does not stop them.
@@ -64,7 +65,7 @@ Older collection runs may lack transactions because an attribution `hop_limit`
 previously stopped their branches. Updating the application does not fill those
 gaps automatically. **Continue collection with 0 additional hops** to revisit
 eligible branches within the saved global ceiling, or add hops to increase that
-ceiling. Current `stop_tracing` rules and resource budgets still apply. For
+ceiling. Current `stop_tracing` rules and any enabled resource budgets still apply. For
 example, a branch previously capped at hop 3 can now be collected toward the
 saved overall ceiling of 10, unless an explicit address stop intervenes.
 
@@ -101,10 +102,10 @@ and observation time in local graph details. They are not ownership evidence.
 Normal traces, chart generation and ordinary live Miro sync now fetch missing
 counts automatically. **Fetch address transaction counts** remains an optional
 separate lookup/refresh. The lookup uses: one statistics endpoint per uncached Liquid
-address, with the normal request/time bounds. It does not enumerate history, trace
+address, with request/time caps only when explicitly enabled. It does not enumerate history, trace
 more funds, run ELK, or contact Miro. Each response is saved so another invocation
 fetches only remaining missing counts. Existing verified address-review statistics
-are reused. API authentication/retries can also consume the request budget.
+are reused. API authentication/retries also consume an enabled request budget.
 
 New local previews and normal **Sync to Miro** obtain missing counts automatically.
 In Miro, `TX: 1,234` is the final text row inside the address circle, below

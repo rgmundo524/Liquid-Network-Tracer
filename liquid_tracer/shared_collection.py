@@ -10,7 +10,7 @@ import re
 import uuid
 
 from .common import TraceError, canonical, digest, now, parse_outpoint, read_json, save_json
-from .investigations import list_investigations, read_case, validate_settings
+from .investigations import effective_run_settings, list_investigations, read_case, validate_settings
 
 DIRECTORY = ".shared-collection"
 IDENTITY = re.compile(r"[0-9a-f]{32}\Z")
@@ -162,7 +162,7 @@ def prepare_collection(case, members=None, *, hops, resume=None, hop_reference_n
         focused = read_case(case)
         source, private = _source(case, focused)
         controls = {key: value for key, value in load_services(case).items() if key != "history"}
-        values = validate_settings(settings if settings is not None else focused.get("run_defaults", {}))
+        values = effective_run_settings(settings if settings is not None else focused.get("run_defaults", {}))
         labels = apply_service_labels(private.get("labels", []) if private else [], controls)
     reference = normalize_reference_name(values["hop_reference_name"] if hop_reference_name is None else hop_reference_name)
     if reference and not reference_addresses({"labels": labels, "hop_reference_name": reference}):

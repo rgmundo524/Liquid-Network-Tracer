@@ -71,7 +71,12 @@ address. The code does not recursively reacquire the trace lock when a trace
 immediately exports or syncs its graph.
 
 Automatic statistics are a separate reported API phase, using the investigation's
-saved request/time settings (or the selected run's settings for legacy cases).
+optional request/time settings when **Use optional run budgets** is on.
+The default has no request-count or total-time cap, including for older cases
+with saved finite numeric values. Explicit count CLI limits also default to
+`0` (unlimited); a positive value sets a cap for that invocation. Per-request
+timeouts, bounded retries, API pacing, and concurrency resource checks remain
+active.
 They do not consume hops, expand UTXOs, or change tracing conclusions. The result
 contains an `address_counts` report with fetched/known/total/remaining/failed,
 requests used, and a stop reason. Budget exhaustion or an API failure is visible

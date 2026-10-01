@@ -30,6 +30,7 @@ type RenderingMetadata = {
 type Settings = {
   hops: number;
   hop_reference_name: string;
+  budget_limits_enabled: boolean;
   max_transactions: number;
   max_outpoints: number;
   max_requests: number;
@@ -273,6 +274,7 @@ type ActiveJob = {
 const defaults: Settings = {
   hops: 1,
   hop_reference_name: "",
+  budget_limits_enabled: false,
   max_transactions: 20,
   max_outpoints: 100,
   max_requests: 30,
@@ -333,7 +335,7 @@ let dialogAction = "";
 let sharedDialog: {caseId: string; mode: "collect" | "continue"; runId?: string} | null = null;
 let dialogMergeApproval = "";
 let dialogPreviewId = "";
-let dialogRebuild: { caseId: string; sourceBoard: string; runId: string } | null = null;
+let dialogRebuild: { caseId: string; sourceBoard: string; runId: string; budgetLimitsEnabled: boolean } | null = null;
 let submitting = false;
 let pageGeneration = 0;
 let viewRevision = 0;
@@ -683,17 +685,16 @@ function connectorOptions(style: ConnectorStyle): string {
 }
 
 function numericField(settings: Settings, key: keyof Settings, label: string, hint: string): string {
-  return `<label class="field"><span>${label}</span><input name="${key}" type="number" min="${key === "max_seconds" ? "0.01" : ["hops", "max_new_items"].includes(key) ? "0" : "1"}"${key === "layout_attempts" ? ' max="1000"' : ""} step="${key === "max_seconds" ? "any" : "1"}" required value="${esc(settings[key])}"/><small>${hint}</small></label>`;
+  return `<label class="field"><span>${label}</span><input name="${key}" type="number" min="${key === "layout_attempts" ? "1" : "0"}"${key === "layout_attempts" ? ' max="1000"' : ""} step="${key === "max_seconds" ? "any" : "1"}" required value="${esc(settings[key])}"/><small>${hint}</small></label>`;
 }
 
 function budgetFields(settings: Settings): string {
-  return `<div class="budget-grid">${([
-    ["hops", "Additional hops", "Default for each run; 0 retries the current frontier."],
-    ["max_transactions", "Transactions", "Maximum new transactions per run."],
-    ["max_outpoints", "Output lookups", "Maximum per run."],
-    ["max_requests", "API attempts", "Includes retries."],
-    ["max_seconds", "Time limit (seconds)", "Trace request budget."],
-  ] as [keyof Settings, string, string][]).map(([key, label, hint]) => numericField(settings, key, label, hint)).join("")}</div>`;
+  return `${numericField(settings, "hops", "Additional hops", "Default for each run; 0 retries the current frontier.")}<input type="hidden" name="budget_limits_enabled_present" value="1"/><label class="check-line"><input id="budget-limits-enabled" name="budget_limits_enabled" type="checkbox"${settings.budget_limits_enabled ? " checked" : ""}/><span><strong>Use optional run budgets</strong><small>Limit transaction collection and new Miro items. Hop limits and explicit stop rules apply whether budgets are on or off.</small></span></label>${settings.budget_limits_enabled ? `<div class="budget-grid">${([
+    ["max_transactions", "Transactions", "Maximum new transactions per run. 0 = unlimited."],
+    ["max_outpoints", "Output lookups", "Maximum per run. 0 = unlimited."],
+    ["max_requests", "API attempts", "Includes retries. 0 = unlimited."],
+    ["max_seconds", "Time limit (seconds)", "Trace request budget. 0 = unlimited."],
+  ] as [keyof Settings, string, string][]).map(([key, label, hint]) => numericField(settings, key, label, hint)).join("")}</div>` : traceSummary(settings)}`;
 }
 
 function graphFields(settings: Settings, suggest = false, goal: PlotGoal = "full"): string {
@@ -712,7 +713,10 @@ function graphFields(settings: Settings, suggest = false, goal: PlotGoal = "full
 }
 
 function traceSummary(settings: Settings): string {
-  return `<p class="settings-summary">Up to <strong>${esc(settings.max_transactions)}</strong> new transactions · <strong>${esc(settings.max_outpoints)}</strong> output lookups · <strong>${esc(settings.max_requests)}</strong> API attempts · <strong>${esc(settings.max_seconds)}s</strong></p>`;
+  if (!settings.budget_limits_enabled)
+    return '<p class="settings-summary">No transaction, output lookup, API request, time, or new Miro item cap. Hop limits and explicit stop rules still apply.</p>';
+  const limit = (value: number, suffix = "") => value > 0 ? `${esc(value)}${suffix}` : "Unlimited";
+  return `<p class="settings-summary">New transactions: <strong>${limit(settings.max_transactions)}</strong> · Output lookups: <strong>${limit(settings.max_outpoints)}</strong> · API attempts: <strong>${limit(settings.max_requests)}</strong> · Time: <strong>${limit(settings.max_seconds, "s")}</strong> · New Miro items: <strong>${limit(settings.max_new_items)}</strong>. Hop limits and explicit stop rules still apply.</p>`;
 }
 
 function hopBasis(name?: string): string {
@@ -725,7 +729,7 @@ function hopBasisExplanation(name?: string): string {
 }
 
 function hopReferenceFields(settings: Settings, shared = false): string {
-  return `<label class="field"><span>Count hops from named group</span><input name="hop_reference_name" maxlength="120" value="${esc(settings.hop_reference_name)}" placeholder="Blank: count from starting transactions" autocomplete="off" list="hop-reference-name-options"/><datalist id="hop-reference-name-options"></datalist><small>Optional attribution name, ignoring capitalization. Keeps the same starting outputs. Outputs to this group reset to hop 0; transfers outside it add a hop, separately for each branch. At the hop limit, the next spending transaction is checked for a return to the group. This may use more requests; explicit tracing stops and run budgets still apply. Collection ignores attribution CSV hop_limit values.</small><small>${shared ? "Captured for this shared collection; private collection preferences remain unchanged." : "Saved for this investigation when collection starts."} Changing the group recalculates saved paths and resumes eligible branches. Previous run snapshots stay unchanged. Center named group is a separate layout setting.</small></label>`;
+  return `<label class="field"><span>Count hops from named group</span><input name="hop_reference_name" maxlength="120" value="${esc(settings.hop_reference_name)}" placeholder="Blank: count from starting transactions" autocomplete="off" list="hop-reference-name-options"/><datalist id="hop-reference-name-options"></datalist><small>Optional attribution name, ignoring capitalization. Keeps the same starting outputs. Outputs to this group reset to hop 0; transfers outside it add a hop, separately for each branch. At the hop limit, the next spending transaction is checked for a return to the group. This may use more requests; explicit tracing stops and any enabled run budgets still apply. Collection ignores attribution CSV hop_limit values.</small><small>${shared ? "Captured for this shared collection; private collection preferences remain unchanged." : "Saved for this investigation when collection starts."} Changing the group recalculates saved paths and resumes eligible branches. Previous run snapshots stay unchanged. Center named group is a separate layout setting.</small></label>`;
 }
 
 let hopReferenceNameTimer: ReturnType<typeof setTimeout> | undefined;
@@ -774,9 +778,10 @@ function normalizedHubs(addresses: string[] | undefined): string[] {
 function readSettings(form: HTMLFormElement, previous: Settings = defaults): Settings {
   const data = new FormData(form);
   const number = (key: keyof Settings): number => data.has(key) ? Number(data.get(key)) : Number(previous[key]);
-  const flag = (key: "include_fees" | "color_attribution_arrows" | "group_context_inputs"): boolean =>
-    data.has(`${key}_present`) || data.has(key) ? data.has(key) : previous[key];
+  const flag = (key: "include_fees" | "color_attribution_arrows" | "group_context_inputs" | "budget_limits_enabled"): boolean =>
+    data.has(`${key}_present`) || data.has(key) ? data.has(key) : Boolean(previous[key]);
   return {
+    budget_limits_enabled: flag("budget_limits_enabled"),
     hops: number("hops"), max_transactions: number("max_transactions"), max_outpoints: number("max_outpoints"),
     hop_reference_name: data.has("hop_reference_name") ? String(data.get("hop_reference_name") || "").trim() : (previous.hop_reference_name || ""),
     max_requests: number("max_requests"), max_seconds: number("max_seconds"), max_new_items: number("max_new_items"),
@@ -1009,7 +1014,7 @@ function newCase(): string {
     )
     .join(
       "",
-    )}${draft.reports.length ? `<p class="selection-count" id="selection-count">${draft.selected.size} starting output${draft.selected.size === 1 ? "" : "s"} selected</p>` : ""}</div><details class="direct-seeds"${draft.seeds ? " open" : ""}><summary>Enter exact output references directly</summary><label class="field"><span>Starting outputs</span><textarea name="seeds" class="mono" rows="2" spellcheck="false" placeholder="TRANSACTION_HASH:0, TRANSACTION_HASH:1">${esc(draft.seeds)}</textarea><small>Optional. These numeric outpoints are combined with checked outputs above.</small></label></details></div></section><div class="form-actions"><p>Creates the investigation locally. Start a trace when you are ready.</p><button class="btn primary" type="submit"${disabled(isBusy())}>${icon("plus")}Create investigation</button></div></div><aside class="form-stack"><div class="side-note"><strong>Follow specific outputs</strong>Each selected UTXO becomes a starting point. Shared descendants appear once in the cumulative graph.<ul><li>Choose relevant outputs after lookup.</li><li>Fees and unspendable outputs cannot be selected.</li><li>Hidden amounts and assets appear as ??.</li></ul></div><div class="side-note"><strong>One case, several runs</strong>Each run has its own budget. Continue unfinished branches in a later run, including after closing this interface.</div></aside></div></form>`;
+    )}${draft.reports.length ? `<p class="selection-count" id="selection-count">${draft.selected.size} starting output${draft.selected.size === 1 ? "" : "s"} selected</p>` : ""}</div><details class="direct-seeds"${draft.seeds ? " open" : ""}><summary>Enter exact output references directly</summary><label class="field"><span>Starting outputs</span><textarea name="seeds" class="mono" rows="2" spellcheck="false" placeholder="TRANSACTION_HASH:0, TRANSACTION_HASH:1">${esc(draft.seeds)}</textarea><small>Optional. These numeric outpoints are combined with checked outputs above.</small></label></details></div></section><div class="form-actions"><p>Creates the investigation locally. Start a trace when you are ready.</p><button class="btn primary" type="submit"${disabled(isBusy())}>${icon("plus")}Create investigation</button></div></div><aside class="form-stack"><div class="side-note"><strong>Follow specific outputs</strong>Each selected UTXO becomes a starting point. Shared descendants appear once in the cumulative graph.<ul><li>Choose relevant outputs after lookup.</li><li>Fees and unspendable outputs cannot be selected.</li><li>Hidden amounts and assets appear as ??.</li></ul></div><div class="side-note"><strong>One case, several runs</strong>Each run preserves a saved snapshot. Continue to more hops or resume unfinished branches later, including after closing this interface.</div></aside></div></form>`;
 }
 
 function boardUrl(board: string): string {
@@ -1059,10 +1064,10 @@ function openRebuildDialog(detail: Case): void {
   const resume = progress && progress.status !== "complete";
   if (!detail.miro_board || !currentRun() || ["pending", "unavailable"].includes(progress?.status || "")) return;
   dialogRebuild = {caseId: detail.id, sourceBoard: resume ? progress.previous_board_id : detail.miro_board,
-    runId: resume ? progress.run_id : currentRun()!.id};
+    runId: resume ? progress.run_id : currentRun()!.id, budgetLimitsEnabled: Boolean(detail.run_defaults.budget_limits_enabled)};
   const settings = {...defaults, ...detail.run_defaults};
   const name = resume && progress.name ? progress.name : `${detail.fixture ? "SYNTHETIC DATA · " : ""}${detail.name}`.slice(0, 50) + " · Rebuilt";
-  dialog.innerHTML = `<form id="action-form"><header class="dialog-head"><div><h2 id="dialog-title">${resume ? "Resume board rebuild" : "Rebuild on a new private board"}</h2><p>${resume ? "Continue the saved rebuild. An acknowledged replacement board is reused." : "Recreate this saved graph using current labels, grouping and layout settings, then link the new board to this investigation."}</p></div></header><div class="dialog-body"><div class="dialog-board"><span>Previous board preserved</span><a class="board-link" href="${esc(boardUrl(dialogRebuild.sourceBoard))}" target="_blank" rel="noopener noreferrer">Open previous board ${icon("external")}</a><span>Selected snapshot</span><strong class="mono">${esc(dialogRebuild.runId)}</strong></div><p>The previous board and its comments and manual edits stay there. They are not copied to the rebuilt graph. Create frames separately when the graph is finished.</p><label class="field"><span>New board name</span><input name="board_name" required maxlength="60" value="${esc(name)}"${resume ? " readonly" : ""}/></label><label class="field"><span>New item budget for this rebuild</span><input name="max_new_items" type="number" min="0" max="9007199254740991" step="1" required value="${settings.max_new_items}"/><small>Include all graph objects and connections. Large graphs may need more than the usual sync budget. The layout and full budget are checked before a board is created. This does not change investigation defaults.</small></label><p>Credentials are retrieved through the launching terminal. Complete any Proton Pass prompt there.</p></div><footer class="dialog-footer"><button type="button" class="btn" data-action="close-dialog">Cancel</button><button type="submit" class="btn primary">${resume ? "Resume board rebuild" : "Create board and rebuild"}</button></footer></form>`;
+  dialog.innerHTML = `<form id="action-form"><header class="dialog-head"><div><h2 id="dialog-title">${resume ? "Resume board rebuild" : "Rebuild on a new private board"}</h2><p>${resume ? "Continue the saved rebuild. An acknowledged replacement board is reused." : "Recreate this saved graph using current labels, grouping and layout settings, then link the new board to this investigation."}</p></div></header><div class="dialog-body"><div class="dialog-board"><span>Previous board preserved</span><a class="board-link" href="${esc(boardUrl(dialogRebuild.sourceBoard))}" target="_blank" rel="noopener noreferrer">Open previous board ${icon("external")}</a><span>Selected snapshot</span><strong class="mono">${esc(dialogRebuild.runId)}</strong></div><p>The previous board and its comments and manual edits stay there. They are not copied to the rebuilt graph. Create frames separately when the graph is finished.</p><label class="field"><span>New board name</span><input name="board_name" required maxlength="60" value="${esc(name)}"${resume ? " readonly" : ""}/></label>${settings.budget_limits_enabled ? `<label class="field"><span>New item budget for this rebuild</span><input name="max_new_items" type="number" min="0" max="9007199254740991" step="1" required value="${settings.max_new_items}"/><small>Include all graph objects and connections. 0 = unlimited. The layout and any enabled budget are checked before a board is created. This does not change investigation defaults.</small></label>` : '<p class="small muted">No new Miro item cap. Optional run budgets are off in investigation settings.</p>'}<p>Credentials are retrieved through the launching terminal. Complete any Proton Pass prompt there.</p></div><footer class="dialog-footer"><button type="button" class="btn" data-action="close-dialog">Cancel</button><button type="submit" class="btn primary">${resume ? "Resume board rebuild" : "Create board and rebuild"}</button></footer></form>`;
   dialog.showModal();
 }
 
@@ -1162,7 +1167,7 @@ function pegoutsGraph(detail: Case): string {
   ${pegoutDraft.custom ? `<label class="field"><span>Starting transaction ID</span><input id="pegouts-txid" class="mono" maxlength="64" value="${esc(pegoutDraft.txid)}" autocomplete="off"${disabled(busy)}/></label><p class="small muted">This custom search considers all outputs of the entered transaction, which is hop 0.</p>` : ""}
   <div class="form-grid"><label class="field"><span>Minimum hops</span><input id="pegouts-min" type="number" min="0" max="2147483647" step="1" value="${esc(pegoutDraft.minHops)}"${disabled(busy)}/></label>
   <label class="field"><span>Maximum hops</span><input id="pegouts-max" type="number" min="0" max="2147483647" step="1" value="${esc(pegoutDraft.maxHops)}"${disabled(busy)}/></label></div>
-  <p class="small muted">${detail.fixture ? "Uses saved synthetic data." : "Uses your Blockstream API credits. Credentials are retrieved through the launching terminal."} Each search or continuation allows ${settings.max_transactions} new transactions, ${settings.max_outpoints} output lookups, ${settings.max_requests} API attempts and ${settings.max_seconds} seconds. Change these in investigation settings. Saved stop rules apply. Attribution CSV hop_limit values do not restrict new searches; the search hop range and resource budgets still apply.</p>
+  <p class="small muted">${detail.fixture ? "Uses saved synthetic data." : "Uses your Blockstream API credits. Credentials are retrieved through the launching terminal."} Saved stop rules apply. Attribution CSV hop_limit values do not restrict new searches; the search hop range and any enabled run budgets still apply. Change optional budgets in investigation settings.</p>${traceSummary(settings)}
   ${button("Trace and plot peg-outs", "pegouts-start", "graph", "primary", busy || (!pegoutDraft.custom && !seeds.length))}
   ${search ? `<hr/><label class="field"><span>Saved peg-out search</span><select id="pegouts-history"${disabled(busy)}>${(detail.pegout_searches || []).map(item => `<option value="${esc(item.id)}"${item.id === search.id ? " selected" : ""}>${esc(pegoutSearchScope(item))} · hops ${item.min_hops}–${item.max_hops} · ${esc(human(item.status))} · ${esc(short(item.id, 8))}</option>`).join("")}</select></label>
   <p>Saved scope: ${esc(pegoutSearchScope(search))}.</p>${search.txid ? `<p class="mono">${esc(search.txid)}</p>` : ""}<p>Hop range ${search.min_hops}–${search.max_hops}. ${esc(human(search.status))}${search.stop_reason ? `: ${esc(human(search.stop_reason))}` : ""}.</p>
@@ -1602,7 +1607,7 @@ function sharedCollectionPanel(detail: Case): string {
 }
 
 function collectDataPanel(detail: Case, saved: boolean, settings: Settings): string {
-  return `<section class="panel" id="collection-panel"><div class="panel-head"><div><h2>Collect transaction data</h2><p>Collect once, then reuse the saved evidence for every plotting goal.</p></div></div><div class="panel-body"><p>Follow your ${detail.seed_count ?? detail.seeds?.length ?? 0} selected starting outputs and save a new run. Continuing extends the latest run’s hop limit. Choose a named group in the collection form to count distance from that group. The collection hop ceiling, resource budgets and explicit tracing stops apply. Attribution CSV hop_limit values are ignored, including zero. Continue an older run to collect branches previously held by those limits; 0 additional hops fills eligible gaps within its existing ceiling.</p><p class="artifact-note">Collection does not generate plots or update Miro. A paused run can be continued here. Plots &amp; Miro uses saved transaction data and current investigation rules. Updating an existing board also reads its current arrangement.</p><p class="small muted">${esc(hopBasis(settings.hop_reference_name))}. ${esc(hopBasisExplanation(settings.hop_reference_name))}</p>${traceSummary(settings)}<div class="task-actions">${button(saved ? "Continue collecting data" : "Collect transaction data", "trace-dialog", "play", "primary", actionBusy("trace"))}</div><hr/><h3>Address activity</h3><p class="small muted">Missing transaction counts are fetched during collection. Retry any unresolved counts here.</p>${button("Fetch address transaction counts", "address-counts", "refresh", "small", !saved || actionBusy("address-counts"))}</div></section>${sharedCollectionPanel(detail)}`;
+  return `<section class="panel" id="collection-panel"><div class="panel-head"><div><h2>Collect transaction data</h2><p>Collect once, then reuse the saved evidence for every plotting goal.</p></div></div><div class="panel-body"><p>Follow your ${detail.seed_count ?? detail.seeds?.length ?? 0} selected starting outputs and save a new run. Continuing extends the latest run’s hop limit. Choose a named group in the collection form to count distance from that group. The collection hop ceiling, explicit tracing stops and any enabled run budgets apply. Attribution CSV hop_limit values are ignored, including zero. Continue an older run to collect branches previously held by those limits; 0 additional hops fills eligible gaps within its existing ceiling.</p><p class="artifact-note">Collection does not generate plots or update Miro. A paused run can be continued here. Plots &amp; Miro uses saved transaction data and current investigation rules. Updating an existing board also reads its current arrangement.</p><p class="small muted">${esc(hopBasis(settings.hop_reference_name))}. ${esc(hopBasisExplanation(settings.hop_reference_name))}</p>${traceSummary(settings)}<div class="task-actions">${button(saved ? "Continue collecting data" : "Collect transaction data", "trace-dialog", "play", "primary", actionBusy("trace"))}</div><hr/><h3>Address activity</h3><p class="small muted">Missing transaction counts are fetched during collection. Retry any unresolved counts here.</p>${button("Fetch address transaction counts", "address-counts", "refresh", "small", !saved || actionBusy("address-counts"))}</div></section>${sharedCollectionPanel(detail)}`;
 }
 
 function plotLayoutsPanel(detail: Case, saved: boolean): string {
@@ -2108,14 +2113,14 @@ function settingsPage(): string {
   const isCase = state.page === "case-settings", detail = state.activeCase;
   const draft = settingsDrafts.get(settingsKey());
   const settings = draft?.settings || {...defaults, ...(isCase ? detail?.run_defaults : state.settings)};
-  return `<div class="page-heading"><div><div class="eyebrow">${isCase ? esc(detail?.name) : "Workspace"}</div><h1 id="page-title" tabindex="-1">${isCase ? "Investigation settings" : "Workspace defaults"}</h1><p>${isCase ? "Data, collection limits, attribution colors, and Miro sync limits for this investigation. Plot appearance is saved in Plots &amp; Miro." : "Collection limits, plot layout preferences, and Miro sync limits copied into new investigations. Existing investigations keep their own settings."}</p></div>${button(isCase ? "Back to investigation" : "Back to investigations", isCase ? "back-case" : "dashboard", "", "ghost")}</div>
+  return `<div class="page-heading"><div><div class="eyebrow">${isCase ? esc(detail?.name) : "Workspace"}</div><h1 id="page-title" tabindex="-1">${isCase ? "Investigation settings" : "Workspace defaults"}</h1><p>${isCase ? "Data, hop defaults, optional run budgets, and attribution colors for this investigation. Plot appearance is saved in Plots &amp; Miro." : "Hop defaults, optional run budgets, and plot layout preferences copied into new investigations. Existing investigations keep their own settings."}</p></div>${button(isCase ? "Back to investigation" : "Back to investigations", isCase ? "back-case" : "dashboard", "", "ghost")}</div>
     <nav class="settings-navigation" aria-label="Settings sections">${isCase ? '<a href="#settings-data">Investigation data</a>' : ""}<a href="#settings-trace">Tracing</a>${!isCase ? '<a href="#settings-layout">Plot layouts</a>' : ""}<a href="#settings-miro">Miro</a>${isCase ? '<a href="#settings-colors">Colors</a>' : ""}</nav>
     ${isCase && detail ? `<div class="settings-layout">${investigationDataPanel(detail)}</div>` : ""}
     <form id="settings-form" class="settings-layout">
     ${isCase ? `<section class="panel"><div class="panel-body"><label class="field"><span>Investigation name</span><input name="name" maxlength="120" required value="${esc(draft?.name ?? detail?.name)}" autocomplete="off"/></label></div></section>` : ""}
-    <section class="panel" id="settings-trace"><div class="panel-head"><div><h2>Tracing</h2><p>Saved defaults for each bounded run.</p></div></div><div class="panel-body">${budgetFields(settings)}</div></section>
+    <section class="panel" id="settings-trace"><div class="panel-head"><div><h2>Tracing</h2><p>Hop defaults and optional collection budgets.</p></div></div><div class="panel-body">${budgetFields(settings)}</div></section>
     ${!isCase ? `<section class="panel" id="settings-layout"><div class="panel-head"><div><h2>Plot layout defaults</h2><p>Starting values for new investigations. Adjust each investigation separately in Plots &amp; Miro.</p></div></div><div class="panel-body">${graphFields(settings)}</div></section>` : ""}
-    <section class="panel" id="settings-miro"><div class="panel-head"><h2>Miro</h2></div><div class="panel-body">${isCase ? `${button("Manage investigation boards", "view-boards", "board", "", isBusy())}<p class="small muted">Create, update and link boards in Plots &amp; Miro.</p>` : ""}${numericField(settings, "max_new_items", "New Miro items", "Maximum new objects and connections per sync.")}<p class="small muted">Live actions use your existing SecretSpec and Proton Pass configuration.</p></div></section>
+    <section class="panel" id="settings-miro"><div class="panel-head"><h2>Miro</h2></div><div class="panel-body">${isCase ? `${button("Manage investigation boards", "view-boards", "board", "", isBusy())}<p class="small muted">Create, update and link boards in Plots &amp; Miro.</p>` : ""}${settings.budget_limits_enabled ? numericField(settings, "max_new_items", "New Miro items", "Maximum new objects and connections per sync. 0 = unlimited.") : '<p class="small muted">No new Miro item cap. Enable optional run budgets under Tracing to set one.</p>'}<p class="small muted">Live actions use your existing SecretSpec and Proton Pass configuration.</p></div></section>
     <div class="form-actions settings-save"><p>${isCase ? "Save once to update this investigation." : "Applies to investigations created after saving."}</p><button type="submit" class="btn primary"${disabled(isBusy())}>${icon("check")}Save settings</button></div></form>
     ${isCase && detail ? `<section class="panel" id="settings-colors"><div class="panel-head"><div><h2>Colors</h2><p>Graph roles and attribution names. Color edits save separately.</p></div>${button("Edit colors", "name-colors-open", "", "", isBusy())}</div></section>${nameColorsPanel(detail.id, isBusy())}` : ""}`;
 }
@@ -2703,7 +2708,7 @@ function openActionDialog(action: string): void {
   const live = action !== "trace" || !detail.fixture;
   const defaultBoardName =
     `${detail.fixture ? "SYNTHETIC DATA · " : ""}${detail.name}`.slice(0, 60);
-  dialog.innerHTML = `<form id="action-form"><header class="dialog-head"><div><h2 id="dialog-title">${titles[action]}</h2><p>${descriptions[action]}</p></div><button type="button" class="dialog-close" data-action="close-dialog" aria-label="Close dialog">${icon("close")}</button></header><div class="dialog-body">${action === "trace" ? `${numericField(settings, "hops", "Hops for this run", "First run or changed named group: maximum hops under the new basis. Same hop basis: additional hops beyond the latest run’s limit; 0 retries eligible paths. This value does not change saved defaults.")}${hopReferenceFields(settings)}${traceSummary(settings)}<p class="small muted">Other collection limits come from Investigation settings.</p><button type="button" class="btn small" data-action="edit-case-settings">Edit investigation settings</button>` : action === "miro-create" ? `<label class="field"><span>Board name</span><input name="board_name" required maxlength="60" value="${esc(defaultBoardName)}"/></label>` : action === "miro-recover" ? `<div class="dialog-board"><span>Linked board</span><a class="board-link" href="${esc(boardUrl(detail.miro_board!))}" target="_blank" rel="noopener noreferrer">Open linked board ${icon("external")}</a><span>${detail.miro_recovery?.pending_count} unconfirmed items</span></div><label class="check-line"><input type="checkbox" name="confirm_empty" required/><span><strong>I inspected this Miro board after the failed sync and it is empty.</strong><small>If any objects are present, cancel and reconcile the pending items individually.</small></span></label>` : `<div class="dialog-board"><span>Linked board</span><strong>${esc(detail.miro_board)}</strong><span style="margin-top:10px">Selected snapshot</span><strong class="mono">${esc(currentRun()?.id || detail.latest_run)}</strong><span style="margin-top:10px">New item budget</span><strong>${settings.max_new_items} items</strong>${compact ? `<span style="margin-top:10px">Saved preview</span><strong class="mono">${esc(compact.preview_id)}</strong><span>${esc(human(compact.connector_style || "straight"))} connectors · ${compact.include_fees ? "Fee flows included" : "Fee flows hidden"}</span>` : ""}</div>`}${live ? `<div class="alert ${["miro-organize", "miro-compact"].includes(action) ? "warning" : ""}">${icon(["miro-organize", "miro-compact"].includes(action) ? "info" : "lock")}<div><strong>${action === "trace" ? "Uses your Blockstream API credits" : action === "miro-recover" ? "Reads Miro and updates local recovery state" : "Changes your Miro workspace"}</strong><p>SecretSpec retrieves credentials through the launching terminal. Complete any Proton Pass prompt there.</p></div></div>` : '<div class="alert">' + icon("shield") + "<div><strong>Offline synthetic data</strong><p>This run uses the investigation’s saved fixture and needs no API credentials.</p></div></div>"}</div><footer class="dialog-footer"><button type="button" class="btn" data-action="close-dialog">Cancel</button><button type="submit" class="btn primary">${icon(action === "trace" ? "play" : action === "miro-create" ? "plus" : "refresh")}${action === "trace" ? "Collect transaction data" : action === "miro-create" ? "Create private board" : action === "miro-organize" ? "Sync and reorganize" : action === "miro-compact" ? "Apply compact layout" : action === "miro-frames" ? "Create / update frames" : action === "miro-recover" ? "Verify empty board and recover" : "Sync to Miro"}</button></footer></form>`;
+  dialog.innerHTML = `<form id="action-form"><header class="dialog-head"><div><h2 id="dialog-title">${titles[action]}</h2><p>${descriptions[action]}</p></div><button type="button" class="dialog-close" data-action="close-dialog" aria-label="Close dialog">${icon("close")}</button></header><div class="dialog-body">${action === "trace" ? `${numericField(settings, "hops", "Hops for this run", "First run or changed named group: maximum hops under the new basis. Same hop basis: additional hops beyond the latest run’s limit; 0 retries eligible paths. This value does not change saved defaults.")}${hopReferenceFields(settings)}${traceSummary(settings)}<p class="small muted">Optional run budgets can be enabled in Investigation settings.</p><button type="button" class="btn small" data-action="edit-case-settings">Edit investigation settings</button>` : action === "miro-create" ? `<label class="field"><span>Board name</span><input name="board_name" required maxlength="60" value="${esc(defaultBoardName)}"/></label>` : action === "miro-recover" ? `<div class="dialog-board"><span>Linked board</span><a class="board-link" href="${esc(boardUrl(detail.miro_board!))}" target="_blank" rel="noopener noreferrer">Open linked board ${icon("external")}</a><span>${detail.miro_recovery?.pending_count} unconfirmed items</span></div><label class="check-line"><input type="checkbox" name="confirm_empty" required/><span><strong>I inspected this Miro board after the failed sync and it is empty.</strong><small>If any objects are present, cancel and reconcile the pending items individually.</small></span></label>` : `<div class="dialog-board"><span>Linked board</span><strong>${esc(detail.miro_board)}</strong><span style="margin-top:10px">Selected snapshot</span><strong class="mono">${esc(currentRun()?.id || detail.latest_run)}</strong><span style="margin-top:10px">New item budget</span><strong>${settings.budget_limits_enabled && settings.max_new_items > 0 ? `${esc(settings.max_new_items)} items` : "No new Miro item cap"}</strong>${compact ? `<span style="margin-top:10px">Saved preview</span><strong class="mono">${esc(compact.preview_id)}</strong><span>${esc(human(compact.connector_style || "straight"))} connectors · ${compact.include_fees ? "Fee flows included" : "Fee flows hidden"}</span>` : ""}</div>`}${live ? `<div class="alert ${["miro-organize", "miro-compact"].includes(action) ? "warning" : ""}">${icon(["miro-organize", "miro-compact"].includes(action) ? "info" : "lock")}<div><strong>${action === "trace" ? "Uses your Blockstream API credits" : action === "miro-recover" ? "Reads Miro and updates local recovery state" : "Changes your Miro workspace"}</strong><p>SecretSpec retrieves credentials through the launching terminal. Complete any Proton Pass prompt there.</p></div></div>` : '<div class="alert">' + icon("shield") + "<div><strong>Offline synthetic data</strong><p>This run uses the investigation’s saved fixture and needs no API credentials.</p></div></div>"}</div><footer class="dialog-footer"><button type="button" class="btn" data-action="close-dialog">Cancel</button><button type="submit" class="btn primary">${icon(action === "trace" ? "play" : action === "miro-create" ? "plus" : "refresh")}${action === "trace" ? "Collect transaction data" : action === "miro-create" ? "Create private board" : action === "miro-organize" ? "Sync and reorganize" : action === "miro-compact" ? "Apply compact layout" : action === "miro-frames" ? "Create / update frames" : action === "miro-recover" ? "Verify empty board and recover" : "Sync to Miro"}</button></footer></form>`;
   dialog.showModal();
   if (action === "trace") void suggestHopReferenceNames().catch(() => {});
 }
@@ -2961,6 +2966,10 @@ app.addEventListener("click", (event) => {
 
 app.addEventListener("change", (event) => {
   const element = event.target as HTMLInputElement | HTMLSelectElement;
+  if (element.name === "budget_limits_enabled" && element.closest("#settings-form")) {
+    render();
+    return;
+  }
   if (element.closest("#plot-layout-form")) {
     if (!draftBusy()) {savePlotLayoutDraft(); viewRevision++;}
     return;
@@ -3121,7 +3130,7 @@ app.addEventListener("submit", (event) => {
       const savedKey = settingsKey();
       saveSettingsDraft();
       const submittedDraft = JSON.stringify(settingsDrafts.get(savedKey));
-      const previous = {...defaults, ...(state.page === "case-settings" ? state.activeCase?.run_defaults : state.settings)};
+      const previous = settingsDrafts.get(savedKey)?.settings || {...defaults, ...(state.page === "case-settings" ? state.activeCase?.run_defaults : state.settings)};
       const settings = {...readSettings(form, previous), ...(state.page === "case-settings" ? selectLayoutSettings(previous) : {})};
       const data = new FormData(form);
       try {
@@ -3208,7 +3217,7 @@ dialog.addEventListener("submit", (event) => {
     body.run_id = dialogRebuild.runId;
     body.source_board = dialogRebuild.sourceBoard;
     body.name = String(data.get("board_name") || "");
-    body.max_new_items = Number(data.get("max_new_items"));
+    body.max_new_items = dialogRebuild.budgetLimitsEnabled ? Number(data.get("max_new_items")) : 0;
   }
   if (action === "trace") {
     const data = new FormData(form);

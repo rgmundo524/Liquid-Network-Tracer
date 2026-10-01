@@ -80,16 +80,18 @@ def http(method, url, headers=None, body=None, timeout=20):
 @dataclass
 class Limits:
     max_hops: int = 3
-    max_transactions: int = 250
-    max_outpoints: int = 2000
-    max_requests: int = 600
-    max_seconds: float = 300
+    max_transactions: int = 0
+    max_outpoints: int = 0
+    max_requests: int = 0
+    max_seconds: float = 0
 
     def validate(self):
-        if self.max_hops < 0 or min(self.max_transactions, self.max_outpoints, self.max_requests) < 1:
-            raise TraceError("Limits must be positive; max_hops may be zero")
-        if not math.isfinite(self.max_seconds) or self.max_seconds <= 0:
-            raise TraceError("max_seconds must be positive")
+        if any(type(value) is not int or value < 0 for value in
+               (self.max_hops, self.max_transactions, self.max_outpoints, self.max_requests)):
+            raise TraceError("Hop and collection limits must be non-negative whole numbers; zero resource limits are unlimited")
+        if (type(self.max_seconds) not in (int, float) or not math.isfinite(self.max_seconds)
+                or self.max_seconds < 0):
+            raise TraceError("max_seconds must be finite and non-negative; zero is unlimited")
 
 
 class Budget:
@@ -100,8 +102,15 @@ class Budget:
         self._lock = threading.RLock()
 
     def check(self):
-        if time.monotonic() - self.started >= self.limits.max_seconds:
+        if self.limits.max_seconds and time.monotonic() - self.started >= self.limits.max_seconds:
             raise StopRun("time_limit")
+
+    def remaining_seconds(self, current=None):
+        """None means no run deadline; individual HTTP requests stay bounded."""
+        if not self.limits.max_seconds:
+            return None
+        current = time.monotonic() if current is None else current
+        return max(0., self.limits.max_seconds - (current - self.started))
 
     def request(self):
         with self._lock:
@@ -111,15 +120,18 @@ class Budget:
     def check_request(self):
         with self._lock:
             self.check()
-            if self.requests >= self.limits.max_requests:
+            if self.limits.max_requests and self.requests >= self.limits.max_requests:
                 raise StopRun("request_limit")
 
     def timeout(self):
         self.check()
-        return max(.01, min(20., self.limits.max_seconds - (time.monotonic() - self.started)))
+        remaining = self.remaining_seconds()
+        return 20. if remaining is None else max(.01, min(20., remaining))
 
     def pause(self, seconds):
-        if seconds > self.limits.max_seconds - (time.monotonic() - self.started):
+        self.check()
+        remaining = self.remaining_seconds()
+        if remaining is not None and seconds > remaining:
             raise StopRun("time_limit")
         time.sleep(max(0., seconds))
 
@@ -342,8 +354,8 @@ class Esplora:
                     delay = max(self.last_call + self.min_interval, self._cooldown_until) - current
                 if delay <= 0:
                     break
-                remaining = self.budget.limits.max_seconds - (current - self.budget.started)
-                if delay >= remaining:
+                remaining = self.budget.remaining_seconds(current)
+                if remaining is not None and delay >= remaining:
                     raise StopRun("time_limit")
                 self._gate.wait(min(delay, .25))
             self.budget.request()

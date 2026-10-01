@@ -98,6 +98,12 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
       dialogListeners.submit({target: {values, reportValidity: () => true}, preventDefault() {}});
       await new Promise(setImmediate);
     },
+    changeBudgetSettings(values) {
+      const form = {id: 'settings-form', values, reportValidity: () => true};
+      elements.set('#settings-form', form);
+      listeners.change({target: {id: 'budget-limits-enabled', name: 'budget_limits_enabled',
+        closest: selector => selector === '#settings-form' ? form : null}});
+    },
     async submitSettings(values) {
       const form = {id: 'settings-form', values, reportValidity: () => true};
       listeners.submit({target: form, preventDefault() {}});
@@ -520,7 +526,7 @@ test('opening feedback saves current investigation settings and address notes be
   const view = await harness(path => path === '/api/cases/othercase' ? request.promise : undefined);
   view.state.activeCase = {id: 'current', name: 'Current case', run_defaults: defaults, runs: []};
   view.navigate('case-settings');
-  view.elements.set('#settings-form', {values: {...defaults, name: 'Unsaved case name', max_transactions: 37}});
+  view.elements.set('#settings-form', {values: {...defaults, name: 'Unsaved case name', max_transactions: 37, budget_limits_enabled: 'on'}});
   view.elements.set('#service-form', {values: {service_name: 'Unsaved attribution', service_notes: 'Keep my notes',
     service_enabled: 'on', service_confidence: 'confirmed', service_source: 'My analysis', service_hop_limit: '5'}});
   const opening = view.dispatch('open-case', {dataset: {id: 'othercase'}});
@@ -824,7 +830,7 @@ test('workspace saves layout defaults for future investigations while existing c
     include_fees_present: '1', group_context_inputs_present: '1', color_attribution_arrows_present: '1',
     center_name: '', hub_addresses: ''});
   const workspace = view.calls.find(call => call.path === '/api/settings').body.settings;
-  assert.deepEqual(workspace, {...inherited, hops: 4, layout_attempts: 35, connector_style: 'elbowed',
+  assert.deepEqual(workspace, {...inherited, budget_limits_enabled: false, hops: 4, layout_attempts: 35, connector_style: 'elbowed',
     include_fees: false, group_context_inputs: false, color_attribution_arrows: false, center_name: '', hub_addresses: []});
   assert.deepEqual(JSON.parse(JSON.stringify(view.state.draft.settings)), workspace);
   const restarted = await harness(respond);
@@ -969,7 +975,7 @@ test('frame result counts distinguish frame updates from detached graph children
 
 test('fresh board action stays available during old-board recovery and pins reviewed snapshot/source', async () => {
   const detail = {id: 'case1', name: 'Fresh graph', miro_board: 'OLD=', latest_run: 'saved1',
-    run_defaults: defaults, runs: [{id: 'saved1'}, {id: 'saved2'}],
+    run_defaults: {...defaults, budget_limits_enabled: true}, runs: [{id: 'saved1'}, {id: 'saved2'}],
     miro_recovery: {pending_count: 1}};
   const view = await harness(path => path.endsWith('/actions') ? {id: 'rebuild1', status: 'running'} : undefined);
   view.state.activeCase = detail;
@@ -991,7 +997,7 @@ test('fresh board action stays available during old-board recovery and pins revi
 test('resume rebuild forwards original source and saved run after replacement became linked', async () => {
   const view = await harness(path => path.endsWith('/actions') ? {id: 'resume1', status: 'running'} : undefined);
   view.state.activeCase = {id: 'case1', name: 'Fresh graph', miro_board: 'NEW=', latest_run: 'later',
-    run_defaults: defaults, runs: [{id: 'original'}, {id: 'later'}],
+    run_defaults: {...defaults, budget_limits_enabled: true}, runs: [{id: 'original'}, {id: 'later'}],
     miro_rebuild: {status: 'syncing', previous_board_id: 'OLD=', board_id: 'NEW=', run_id: 'original', name: 'Saved copy'}};
   view.state.caseView = 'boards';
   assert.match(view.workspace(), /Resume board rebuild/);
@@ -1936,7 +1942,7 @@ test('collection and new peg-out controls explain attribution limits without cha
   const view = await harness();
   view.state.activeCase = workflowCase();
   await view.dispatch('view-collect');
-  assert.match(view.workspace(), /The collection hop ceiling, resource budgets and explicit tracing stops apply/);
+  assert.match(view.workspace(), /The collection hop ceiling, explicit tracing stops and any enabled run budgets apply/);
   assert.match(view.workspace(), /Attribution CSV hop_limit values are ignored, including zero/);
   assert.match(view.workspace(), /0 additional hops fills eligible gaps within its existing ceiling/);
   await view.dispatch('view-plots');
@@ -4000,3 +4006,97 @@ test('incompatible shared collection explains and disables fresh collection as w
   }
   assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 0);
 });
+
+const budgetKeys = ['max_transactions', 'max_outpoints', 'max_requests', 'max_seconds', 'max_new_items'];
+const noCaps = /No transaction, output lookup, API request, time, or new Miro item cap/;
+
+test('fresh defaults and legacy investigations have no automatic budgets despite stored finite values', async () => {
+  const view = await harness();
+  assert.equal(view.state.settings.budget_limits_enabled, false);
+  assert.equal(view.state.draft.settings.budget_limits_enabled, false);
+  view.state.page = 'settings';
+  for (const key of budgetKeys) assert.doesNotMatch(view.settingsPage(), new RegExp(`name="${key}"`));
+  assert.doesNotMatch(view.settingsPage(), /name="budget_limits_enabled"[^>]*checked/);
+  view.state.settings.budget_limits_enabled = true;
+  view.state.activeCase = workflowCase(); view.state.page = 'case-settings';
+  assert.match(view.settingsPage(), /Use optional run budgets/);
+  assert.match(view.settingsPage(), noCaps);
+  for (const key of budgetKeys) assert.doesNotMatch(view.settingsPage(), new RegExp(`name="${key}"`));
+  assert.match(view.settingsPage(), /name="hops"/);
+  assert.equal(view.state.activeCase.run_defaults.max_transactions, 20);
+});
+
+for (const caseSettings of [false, true]) {
+  test(`${caseSettings ? 'investigation' : 'workspace'} budgets toggle without losing numeric preferences or unrelated settings`, async () => {
+    const detail = workflowCase({run_defaults: {...defaults, ...layoutDefaults, budget_limits_enabled: false, center_name: 'Treasury'}});
+    const view = await harness(path => path === '/api/cases/case1' ? detail : undefined);
+    view.state.activeCase = detail;
+    view.navigate(caseSettings ? 'case-settings' : 'settings');
+    const base = {name: 'Preserved name', hops: '8', budget_limits_enabled_present: '1'};
+    view.changeBudgetSettings({...base, budget_limits_enabled: 'on'});
+    for (const key of budgetKeys) assert.match(view.settingsPage(), new RegExp(`name="${key}"[^>]*min="0"`));
+    const edited = {max_transactions: '37', max_outpoints: '81', max_requests: '92', max_seconds: '0.5', max_new_items: '1200'};
+    view.changeBudgetSettings({...base, ...edited});
+    for (const key of budgetKeys) assert.doesNotMatch(view.settingsPage(), new RegExp(`name="${key}"`));
+    view.changeBudgetSettings({...base, budget_limits_enabled: 'on'});
+    for (const key of budgetKeys) assert.match(view.settingsPage(), new RegExp(`name="${key}"[^>]*value="${edited[key]}"`));
+    view.changeBudgetSettings(base);
+    await view.submitSettings(base);
+    const request = view.calls.find(call => call.path === (caseSettings ? '/api/cases/case1/settings' : '/api/settings'));
+    assert.equal(request.body.settings.budget_limits_enabled, false);
+    assert.equal(request.body.settings.hops, 8);
+    for (const key of budgetKeys) assert.equal(request.body.settings[key], Number(edited[key]));
+    if (caseSettings) {
+      assert.equal(request.body.name, 'Preserved name');
+      assert.equal(request.body.settings.center_name, 'Treasury');
+    }
+  });
+}
+
+test('enabled budgets permit per-cap zero and summarize unlimited values accurately', async () => {
+  const limits = {...defaults, ...Object.fromEntries(budgetKeys.map(key => [key, 0])), budget_limits_enabled: true};
+  const detail = workflowCase({run_defaults: limits, miro_board: 'board'});
+  const view = await harness(path => path === '/api/cases/case1' ? detail : undefined);
+  view.state.activeCase = detail; view.state.page = 'case-settings';
+  for (const key of budgetKeys) assert.match(view.settingsPage(), new RegExp(`name="${key}"[^>]*min="0"[^>]*value="0"`));
+  assert.equal((view.settingsPage().match(/0 = unlimited/g) || []).length, 5);
+  await view.submitSettings({name: detail.name, budget_limits_enabled_present: '1', budget_limits_enabled: 'on',
+    ...Object.fromEntries(budgetKeys.map(key => [key, '0']))});
+  const saved = view.calls.find(call => call.path.endsWith('/settings')).body.settings;
+  assert.equal(saved.budget_limits_enabled, true);
+  for (const key of budgetKeys) assert.equal(saved[key], 0);
+  view.state.page = 'case'; view.state.caseView = 'collect';
+  assert.equal((view.workspace().match(/<strong>Unlimited<\/strong>/g) || []).length, 5);
+  assert.doesNotMatch(view.workspace(), /Up to <strong>0/);
+  await view.dispatch('miro-sync-dialog');
+  assert.match(view.dialog.innerHTML, /No new Miro item cap/);
+});
+
+test('private and shared collection dialogs describe unlimited legacy budgets while retaining hop and stop boundaries', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({shared_collection: sharedCollection()}); view.state.page = 'case';
+  assert.match(view.workspace(), noCaps);
+  assert.match(view.pegoutsGraph(view.state.activeCase), noCaps);
+  for (const action of ['trace-dialog', 'shared-collect-dialog', 'shared-continue-dialog']) {
+    await view.dispatch(action);
+    assert.match(view.dialog.innerHTML, noCaps);
+    assert.match(view.dialog.innerHTML, /Hop limits and explicit stop rules still apply/);
+    assert.match(view.dialog.innerHTML, /name="hops"/);
+    for (const key of budgetKeys) assert.doesNotMatch(view.dialog.innerHTML, new RegExp(`name="${key}"`));
+    view.dialog.close();
+  }
+});
+
+for (const flag of [undefined, false]) {
+  test(`board rebuild with ${flag === undefined ? 'legacy missing' : 'disabled'} budgets hides override and submits unlimited`, async () => {
+    const view = await harness(path => path.endsWith('/actions') ? {id: 'unlimited-rebuild', status: 'running'} : undefined);
+    view.state.activeCase = workflowCase({miro_board: 'existing', run_defaults: {...defaults,
+      ...(flag === undefined ? {} : {budget_limits_enabled: flag})}});
+    view.state.page = 'case'; view.state.caseView = 'boards';
+    await view.dispatch('miro-rebuild-dialog');
+    assert.match(view.dialog.innerHTML, /No new Miro item cap/);
+    assert.doesNotMatch(view.dialog.innerHTML, /name="max_new_items"/);
+    await view.submitDialog({board_name: 'Unlimited rebuild', max_new_items: '750'});
+    assert.equal(view.calls.find(call => call.path.endsWith('/actions')).body.max_new_items, 0);
+  });
+}

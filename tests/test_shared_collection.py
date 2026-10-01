@@ -24,7 +24,7 @@ class SharedCollectionTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.fixture = self.root / "fixture.json"
         save_json(self.fixture, fixture())
-        self.settings = {"hops": 1, "max_transactions": 100, "max_outpoints": 500,
+        self.settings = {"hops": 1, "budget_limits_enabled": True, "max_transactions": 100, "max_outpoints": 500,
                          "max_requests": 500, "max_seconds": 30}
         self.first = create_investigation(self.root, "First", seeds=[A + ":0"],
                                          fixture=self.fixture, run_defaults=self.settings)
@@ -105,6 +105,15 @@ class SharedCollectionTests(unittest.TestCase):
         self.assertTrue(any(label.get("stop") for label in state["labels"]))
         self.assertEqual(state["limits"]["max_transactions"], 100)
         self.assertEqual(state["shared_collection"]["settings"]["hops"], 3)
+
+    def test_address_counts_use_the_frozen_shared_policy_not_dataset_defaults(self):
+        prepared = self.prepare(hops=0)
+        dataset = dataset_path(self.first)
+        self.assertFalse(read_case(dataset)["run_defaults"]["budget_limits_enabled"])
+        with patch("liquid_tracer.address_counts._collect_counts", return_value={}) as counts:
+            self.collect(prepared)
+        self.assertEqual(counts.call_args.kwargs["max_requests"], 500)
+        self.assertEqual(counts.call_args.kwargs["max_seconds"], 30)
 
     def test_other_members_stop_rules_are_not_merged(self):
         set_service(self.second, "SYNTHETIC-victim-deposit", name="Other stop", stop_tracing=True)

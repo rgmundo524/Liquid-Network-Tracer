@@ -216,7 +216,7 @@ class WorkflowWebTests(unittest.TestCase):
         with patch.object(self.server, "start_job", return_value={"id": "create-sync"}) as start:
             self.success(route + "/actions", body, 202)
             self.assertEqual(start.call_args.args[0], ["investigation-board-create-sync", "--case", str(case),
-                "--preview", plot["preview_id"], "--name", "New assessment", "--max-items", "750"])
+                "--preview", plot["preview_id"], "--name", "New assessment", "--max-items", "0"])
             self.assertTrue(start.call_args.kwargs["live"])
             start.reset_mock()
             self.assertEqual(self.request(route + "/actions", {**body, "board": "EXISTING="})[0], 400)
@@ -233,7 +233,7 @@ class WorkflowWebTests(unittest.TestCase):
         with patch.object(self.server, "start_job", return_value={"id": "combined"}) as start:
             self.success(route + "/actions", body, 202)
             start.assert_called_once_with(["plot-sync", "--case", str(case), "--goal", "full", "--run", run,
-                "--min-hops", "0", "--max-hops", "10", "--name", "New investigation chart", "--max-items", "750"],
+                "--min-hops", "0", "--max-hops", "10", "--name", "New investigation chart", "--max-items", "0"],
                 action="plot-sync", live=True, case=case)
             update = {key: value for key, value in body.items() if key != "name"}
             update.update(layout_mode="update", board_record_id=board["id"])
@@ -241,7 +241,7 @@ class WorkflowWebTests(unittest.TestCase):
             self.success(route + "/actions", update, 202)
             start.assert_called_once_with(["plot-sync", "--case", str(case), "--goal", "full", "--run", run,
                 "--min-hops", "0", "--max-hops", "10", "--layout-mode", "update", "--board-record-id", board["id"],
-                "--max-items", "750"], action="plot-sync", live=True, case=case)
+                "--max-items", "0"], action="plot-sync", live=True, case=case)
             start.reset_mock()
             for invalid in ({**body, "name": ""}, {key: value for key, value in body.items() if key != "name"},
                     {**body, "board_record_id": board["id"]}, {**body, "max_items": 100000},

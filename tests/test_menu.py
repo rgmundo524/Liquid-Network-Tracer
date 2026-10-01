@@ -18,7 +18,7 @@ from liquid_tracer.common import TraceError, read_json, save_json
 from liquid_tracer.investigations import (DEFAULTS, create_investigation, list_investigations,
                                          load_settings, read_case, save_settings, update_case)
 from liquid_tracer.menu import (SECRET_ACCESS_REASON, _OfflineCalculation, _command, _lookup_reports, _seed_values,
-                                _trace_arguments, create_app, run_menu)
+                                _trace_arguments, _trace_budget_summary, create_app, run_menu)
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -141,6 +141,26 @@ finally:
         with patch("liquid_tracer.menu._latest", return_value=(Path("saved-run"), {"source": "fixture://saved"})), \
                 self.assertRaisesRegex(TraceError, "fixture path is not configured"):
             _trace_arguments(Path("saved-case"), metadata, DEFAULTS)
+
+    def test_saved_finite_trace_preferences_are_unlimited_until_budgets_are_enabled(self):
+        settings = {key: value for key, value in DEFAULTS.items() if key != "budget_limits_enabled"}
+        settings.update(max_transactions=2, max_outpoints=3, max_requests=4, max_seconds=5)
+        original = copy.deepcopy(settings)
+        metadata = {"seeds": ["a" * 64 + ":0"]}
+        for flag, expected in ((None, (0, 0, 0, 0)), (False, (0, 0, 0, 0)), (True, (2, 3, 4, 5))):
+            configured = dict(settings)
+            if flag is not None:
+                configured["budget_limits_enabled"] = flag
+            with self.subTest(flag=flag):
+                arguments, live = _trace_arguments(Path("saved-case"), metadata, configured)
+                self.assertTrue(live)
+                self.assertEqual(arguments[arguments.index("--hops") + 1], str(settings["hops"]))
+                for key, value in zip(("max-transactions", "max-outpoints", "max-requests", "max-seconds"), expected):
+                    self.assertEqual(arguments[arguments.index("--" + key) + 1], str(value))
+        self.assertEqual(settings, original)
+        self.assertEqual(_trace_budget_summary(settings), "Run budgets: unlimited. Optional budgets are off.")
+        self.assertIn("unlimited transactions", _trace_budget_summary(dict(settings,
+                      budget_limits_enabled=True, max_transactions=0)))
 
     def test_nonterminal_menu_does_not_load_the_ui_or_credentials(self):
         with patch("sys.stdin.isatty", return_value=False), patch("liquid_tracer.menu.create_app") as make_app, \
@@ -955,6 +975,7 @@ finally:
                 self.assertEqual(app.screen.query_one("#layout_attempts", Input).value, "25")
                 app.screen.query_one("#layout_attempts", Input).value = "75"
                 app.screen.query_one("#max_requests", Input).value = "12"
+                self.assertFalse(app.screen.query_one("#budget-limits-enabled", Checkbox).value)
                 self.assertFalse(app.screen.query_one("#include-fees", Checkbox).value)
                 app.screen.query_one("#include-fees", Checkbox).value = True
                 self.assertFalse(app.screen.query_one("#color-attribution-arrows", Checkbox).value)
@@ -970,6 +991,7 @@ finally:
                 await self.click(app, pilot, "#submit")
                 self.assertEqual(load_settings(self.root)["connector_style"], "curved")
                 self.assertEqual(load_settings(self.root)["hops"], 3)
+                self.assertIs(load_settings(self.root)["budget_limits_enabled"], False)
                 self.assertEqual(load_settings(self.root)["layout_attempts"], 75)
                 self.assertIs(load_settings(self.root)["include_fees"], True)
                 self.assertIs(load_settings(self.root)["color_attribution_arrows"], True)
@@ -1001,6 +1023,10 @@ finally:
                 self.assertEqual(app.screen.read_limits()["center_name"], "Treasury Group")
                 await self.click(app, pilot, "#cancel")
                 await self.click(app, pilot, "#case-settings")
+                self.assertFalse(app.screen.query_one("#budget-limits-enabled", Checkbox).value)
+                app.screen.query_one("#budget-limits-enabled", Checkbox).value = True
+                app.screen.query_one("#max_transactions", Input).value = "0"
+                app.screen.query_one("#max_seconds", Input).value = "0"
                 self.assertTrue(app.screen.query_one("#include-fees", Checkbox).value)
                 self.assertTrue(app.screen.query_one("#color-attribution-arrows", Checkbox).value)
                 app.screen.query_one("#color-attribution-arrows", Checkbox).value = False
@@ -1022,6 +1048,9 @@ finally:
                 self.assertEqual(saved["name"], "Renamed investigation")
                 self.assertEqual(saved["miro_board"], "UPDATED=")
                 self.assertEqual(saved["run_defaults"]["max_requests"], 8)
+                self.assertIs(saved["run_defaults"]["budget_limits_enabled"], True)
+                self.assertEqual(saved["run_defaults"]["max_transactions"], 0)
+                self.assertEqual(saved["run_defaults"]["max_seconds"], 0)
                 self.assertEqual(saved["run_defaults"]["layout_attempts"], 100)
                 self.assertEqual(load_settings(self.root)["layout_attempts"], 75)
                 self.assertEqual(saved["run_defaults"]["connector_style"], "elbowed")
@@ -1082,6 +1111,30 @@ finally:
                 process.assert_not_called()
                 self.assertEqual((case / "case.json").read_bytes(), original)
 
+    async def test_address_count_refresh_applies_only_enabled_budgets(self):
+        from liquid_tracer.cli import main
+        fixture = PROJECT / "tests/data/synthetic-api.json"
+        case = create_investigation(self.root, "Address count budgets", fixture=str(fixture),
+                                    run_defaults={"max_requests": 4, "max_seconds": 5})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["trace", "--case", str(case), "--fixture", str(fixture),
+                                   "--seeds-file", str(PROJECT / "tests/data/synthetic-seeds.txt"), "--hops", "0"]), 0)
+        app = create_app(self.root)
+        async with app.run_test(size=(110, 55)) as pilot:
+            app.created(case)
+            await pilot.pause()
+            with patch.object(app.screen, "perform") as perform:
+                for enabled, limits in ((False, (0, 0)), (True, (4, 5))):
+                    update_case(case, {"run_defaults": dict(read_case(case)["run_defaults"],
+                                                          budget_limits_enabled=enabled)})
+                    await self.click(app, pilot, "#address-counts")
+                    arguments, live = perform.call_args.args[0]
+                    self.assertFalse(live)
+                    self.assertEqual(arguments[arguments.index("--max-requests") + 1], str(limits[0]))
+                    self.assertEqual(arguments[arguments.index("--max-seconds") + 1], str(limits[1]))
+        self.assertEqual(read_case(case)["run_defaults"]["max_requests"], 4)
+        self.assertEqual(read_case(case)["run_defaults"]["max_seconds"], 5)
+
     async def test_organize_requires_a_saved_board_and_completed_run(self):
         from textual.widgets import Button
         case = create_investigation(self.root, "No run yet", board="DEMO=")
@@ -1141,7 +1194,7 @@ finally:
                     str(PROJECT / "secretspec.toml"), "run", "--provider", "protonpass", "--profile", "development",
                     "--reason", SECRET_ACCESS_REASON, "--",
                     sys.executable, "-m", "liquid_tracer", "miro-sync", "--case", str(case), "--run", "latest",
-                    "--board", "DEMO=", "--max-new-items", "750", "--reorganize"])
+                    "--board", "DEMO=", "--max-new-items", "0", "--reorganize"])
                 for field in ("capture_output", "stdout", "stderr"):
                     self.assertNotIn(field, process.call_args.kwargs)
                 self.assertIn("Miro graph synced and reorganized", str(app.screen.query_one("#action-status", Static).render()))

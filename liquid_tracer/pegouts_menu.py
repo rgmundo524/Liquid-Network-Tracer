@@ -2,7 +2,7 @@
 import re
 
 from .common import TraceError
-from .investigations import read_case
+from .investigations import effective_run_settings, read_case
 
 
 def pegout_screen(base, button, case):
@@ -22,7 +22,9 @@ def pegout_screen(base, button, case):
 
     class PegoutScreen(base):
         def compose(self):
-            self.seeds = read_case(case).get("seeds", [])
+            metadata = read_case(case)
+            self.seeds = metadata.get("seeds", [])
+            settings = effective_run_settings(metadata.get("run_defaults", {}))
             self.searches = {row["search_id"]: row for row in list_pegout_searches(case)}
             rows = [(f"{scope(row)} · hops {row['min_hops']}–{row['max_hops']} · {row['status']} · {identity}", identity)
                     for identity, row in self.searches.items()]
@@ -31,8 +33,11 @@ def pegout_screen(base, button, case):
                 yield Label("Trace to peg-outs", classes="title")
                 yield Static("Search forward from the investigation's selected seed UTXOs and plot only paths reaching peg-out requests. "
                              "Each starting transaction is hop 0; unselected sibling outputs at the start are excluded. "
-                             "Both hop bounds are included. Uses the investigation's request, "
-                             "time, transaction and output budgets. Saved service stop and hop-limit rules apply.", markup=False)
+                             "Both hop bounds are included. Saved service stop and hop-limit rules apply.", markup=False)
+                yield Static("Collection budgets: " + ", ".join(
+                    f"{label}: {settings[key] or 'unlimited'}" for key, label in (
+                        ("max_requests", "requests"), ("max_seconds", "seconds"),
+                        ("max_transactions", "transactions"), ("max_outpoints", "outputs"))) + ".", markup=False)
                 yield Static(f"Investigation seeds: {scope({'seeds': self.seeds})}." if self.seeds else
                              "This investigation has no selected seed UTXOs. Enable ‘Use a different starting transaction’ "
                              "to run a custom search.", markup=False)
@@ -59,6 +64,7 @@ def pegout_screen(base, button, case):
                 yield Checkbox("I reviewed the selected snapshot and authorize publication to this separate board", id="pegout-confirm")
                 yield Static("One immutable snapshot per board. The full-trace board stays unchanged. "
                              "Repeated publication reuses acknowledged items.", markup=False)
+                yield Static(f"New Miro item budget: {settings['max_new_items'] or 'unlimited'}.", markup=False)
                 yield button("Publish reviewed snapshot", id="pegout-publish", disabled=not rows)
                 yield Static("", id="pegout-error", markup=False)
             with Horizontal(classes="buttons form-actions"):
@@ -98,6 +104,7 @@ def pegout_screen(base, button, case):
                 return
             try:
                 metadata = read_case(case)
+                settings = effective_run_settings(metadata.get("run_defaults", {}))
                 live = False
                 if action == "pegout-search":
                     custom = self.query_one("#pegout-custom", Checkbox).value
@@ -137,7 +144,7 @@ def pegout_screen(base, button, case):
                         if metadata.get("miro_board") and target == board_id(metadata["miro_board"]):
                             raise TraceError("Choose a separate Miro board; the full-trace board is protected")
                         arguments = ["pegouts-publish", "--case", str(case), "--preview", preview,
-                                     "--board", target, "--max-items", str(metadata.get("run_defaults", {}).get("max_new_items", 750))]
+                                     "--board", target, "--max-items", str(settings["max_new_items"])]
                         live = True
                 self.dismiss((arguments, live))
             except (TraceError, ValueError, OSError, KeyError, TypeError) as error:

@@ -77,7 +77,7 @@ When a button is highlighted, use **↑ ↓ ← →** to move between buttons an
 
 1. Choose **New investigation** and give it a name. The program creates a unique subdirectory under `cases/`.
 2. Paste one or more bare Liquid transaction hashes, separated by commas, into **Transaction hashes** and choose **Load outputs**. New investigations use Live Liquid. Review the outputs grouped by transaction, use Enter to toggle the relevant rows across transactions, then choose **Use selected outputs**. This fills the starting-output field; it replaces any existing entries. Alternatively enter known outputs directly as `HASH:NUMBER`, separated by whitespace or commas. Optionally provide an existing Miro board URL or ID; you can add it later.
-3. Choose **Collect transaction data** and review its hop and request limits. Collection retrieves credentials through SecretSpec when the configured API requires them. Later collections use **additional hops** from the previous saved ceiling.
+3. Choose **Collect transaction data** and choose its hop allowance. Collection retrieves credentials through SecretSpec when the configured API requires them. Later collections use **additional hops** from the previous saved ceiling.
 4. Choose **Choose plotting goal** under **Plot saved data**. Select a saved run and a goal: full investigation, starter connections, or paths to peg-outs. These plots use saved evidence only and make no API requests.
 5. Choose **View / create / sync boards**. Create or link a named board for a goal, select its saved plot, and sync it. Each investigation can have several boards, and each board can be refreshed from later plots.
 6. Next time, launch `liquid-trace`, choose **Continue investigation**, and select the saved case. Collect more data if needed, or plot and sync what is already saved.
@@ -122,19 +122,21 @@ An update layout is bound to the board it inspected. Sync checks that snapshot a
 
 Current stop-tracing rules are reapplied when generating **Full trace** and **Paths to peg-outs** plots. **Full trace** also applies attribution CSV `hop_limit` values as display caps. New **Paths to peg-outs** plots ignore those attribution caps while retaining their selected minimum/maximum hop range. New **Starter connections** plots show all verified saved paths between selected starting transactions, ignoring attribution hop limits, stop rules, and plotting hop cutoffs. Their labels and actual transaction status remain visible; older saved layouts retain their original scope. For Full trace and peg-out boards, tightening applicable rules can remove excluded branches from the board update; loosening rules can restore branches already present in the selected collected evidence. Plotting never fetches the missing transactions of an uncollected branch. Use **Collect data** to extend that evidence first. Combined actions use the existing terminal credential flow. Preview-only fresh plotting stays offline; preview-only updates read Miro without writing.
 
-**Investigation settings** collects this case's tracing limits, Miro sync budget, and colors. Its **Investigation data** section contains CSV imports, address review, change outputs, and input CSV exports. **Workspace defaults** sets collection, plot layout, and Miro sync defaults copied into future investigations; existing cases keep their saved settings. Both scopes persist across restarts. Changing the hop allowance in a run dialog applies only to that run. Imports use **Preview → Apply**; changing a file or import option requires a fresh preview. Imported data and color edits save through their own controls; **Save settings** saves the investigation preferences.
+**Investigation settings** collects this case's tracing preferences, optional resource budgets, and colors. Its **Investigation data** section contains CSV imports, address review, change outputs, and input CSV exports. **Workspace defaults** sets collection, plot layout, and Miro sync defaults copied into future investigations; existing cases keep their saved settings. Both scopes persist across restarts. Changing the hop allowance in a run dialog applies only to that run. Imports use **Preview → Apply**; changing a file or import option requires a fresh preview. Imported data and color edits save through their own controls; **Save settings** saves the investigation preferences.
 
 **Plots & Miro** edits this investigation's layout attempts, connector appearance, attribution arrow coloring, named-group centering, separate branch hubs, isolated context grouping, and fee-flow visibility. The same controls in **Workspace defaults** set the starting values for new investigations. **Save layout settings** persists these preferences as defaults for the investigation, including before its first collection. **Generate** captures the current form settings for that layout without changing shared defaults, so simultaneous jobs can use different settings. Unsaved edits survive tab navigation in the current browser session. Separate branch hubs and optional fee-flow visibility apply to **Full trace** only; **Paths to peg-outs** always shows fees with the rest of each included transaction. Isolated context grouping applies to both **Full trace** and **Paths to peg-outs**. Other filtered layouts preserve the grouping preference without applying it. Existing saved layouts and Miro boards keep their appearance until you generate and sync a new layout.
 
 The task tabs are **Collect data**, **Plots & Miro**, and **History & downloads**. The selected saved snapshot stays selected across tabs. **Collected data** shows **Hops collected**, the deepest recorded transaction hop in that snapshot, separately from its collection hop limit. Starting transactions are hop 0; this maximum does not imply every branch reached that depth. Collection is the separate fetching phase. Plotting uses saved evidence; updating a board also reads its current arrangement. Combined generation and publication actions require Miro credentials. Linking and listing boards are local actions.
 
 Data collection ignores attribution CSV `hop_limit` values and follows every eligible
-selected-seed branch within the run's overall hop ceiling and resource budgets.
+selected-seed branch within the run's overall hop ceiling.
 Explicit `stop_tracing=true` still prevents expansion through that address, so
 adjudicated branches can be excluded from further collection. An independent
 selected path that does not pass through the stop can still continue. Use
 `hop_limit` to limit Full trace display without withholding
 data needed by Paths to peg-outs.
+
+Collection has no transaction-count, output-count, request-count, or total-time cap by default. Miro publication likewise has no application item-count cap. This applies to existing investigations as well as new ones: previously saved numeric budgets are retained but stay inactive until **Use optional run budgets** is selected in Investigation settings. The same control in Workspace defaults applies to future cases. When enabled, each positive value sets a cap; **0 means unlimited** for that budget. Private and shared collection, continuation, address counts, and Miro publication use this setting. API pacing, per-request timeouts, retries, cancellation, and layout CPU/memory coordination remain active.
 
 Continue an older investigation to fill branches previously paused by an
 attribution hop limit. **0 additional hops** can fill gaps inside its existing
@@ -483,7 +485,7 @@ The generated `puppeteer-config.json` also disables Puppeteer's [default 180-sec
 
 On a Mermaid renderer failure, a bounded diagnostic tail is saved locally as `mermaid-renderer.log` with owner-only permissions when possible. It can contain graph labels and is intentionally excluded from browser downloads. The displayed error uses fixed diagnostic categories and points to the saved source; a generic exit 1 no longer claims the installation is broken. Retry the selected saved run after updating, without another Blockstream trace.
 
-The local SVG exporter also has no fixed object, connection, coordinate-range, or route-point ceiling. It still validates finite geometry and retains every displayed connection. Very large SVGs may be slow to open in a browser; **Create CSV export** remains available for analysis. A saved continuation is cumulative: reducing the next run's hop count will not shrink the existing graph. You can retry either preview from a saved run without fetching Blockstream data again. Trace hop/request/time budgets and Miro's per-sync publication budget still use the investigator's settings.
+The local SVG exporter also has no fixed object, connection, coordinate-range, or route-point ceiling. It still validates finite geometry and retains every displayed connection. Very large SVGs may be slow to open in a browser; **Create CSV export** remains available for analysis. A saved continuation is cumulative: reducing the next run's hop count will not shrink the existing graph. You can retry either preview from a saved run without fetching Blockstream data again. Collection still follows its selected hop ceiling and explicit stop rules. Optional collection and Miro publication budgets apply only when enabled.
 
 To export CSV tables directly:
 
@@ -534,7 +536,9 @@ The default base is `https://enterprise.blockstream.info/liquid/api`. The client
 
 The menu supplies the selected investigation path automatically. When scripting, supply its case directory with `--case`. The examples below use `cases/theft-liquid`; replace that with the directory printed by the menu, or use it to start a case directly. An existing `LIQUID_CASE_DIR` setting remains a fallback when `--case` is omitted.
 
-For a first live trial, select **one exact Liquid outpoint** and use small budgets:
+CLI collection defaults to no transaction, output, request, or elapsed-time cap; the four resource limits default to `0` (unlimited). A positive CLI flag explicitly caps that invocation, independently of the saved UI budget toggle. The hop ceiling and stop rules still apply.
+
+For a deliberately capped first live trial, select **one exact Liquid outpoint** and supply finite budgets:
 
 ```bash
 liquid-live trace \
@@ -564,7 +568,7 @@ Replace `--seed ...` with `--seeds-file case-seeds.txt`, or repeat `--seed 'TXID
 | `--max-transactions 20` | At most 20 newly added transactions this run, including seed funding transactions. |
 | `--max-outpoints 100` | At most 100 output examinations this run, including terminal outputs. |
 | `--max-requests 30` | At most 30 HTTP attempts, including token requests and retries. This is **not a count of Blockstream credits**. |
-| `--max-seconds 60` | Stops traversal and bounds HTTP timeouts. Checkpoint/export filesystem work can finish afterward. |
+| `--max-seconds 60` | Stops traversal after 60 seconds and bounds HTTP timeouts. At `0`, there is no run deadline; individual requests still time out. Checkpoint/export filesystem work can finish afterward. |
 
 Transaction tracing starts with **eight independent explorer requests** and adapts concurrency to measured response latency, retry pressure, available memory and CPU limits, up to 64 workers. A bounded frontier pipeline starts eligible spend and child-transaction lookups as their dependencies finish, while applying results in the existing traversal order. Transaction inspection retains its eight-worker maximum. A shared limiter spaces request starts across all workers, including OAuth and retries. Concurrent branches requesting the same endpoint share one response and evidence record. One `/tx/:txid/outspends` response serves all outputs of its transaction within a run. The [documented Esplora API](https://github.com/Blockstream/esplora/blob/master/API.md) has no arbitrary transaction-hash batch lookup, so this uses concurrent individual GETs.
 
@@ -576,7 +580,7 @@ The 49 RPS target is an investigator-selected setting. Blockstream's [paid API d
 
 `LIQUID_TRACE_WORKERS = "auto"` in `devenv.nix` enables adaptive tracing. In auto mode, `--api-workers 1` disables overlapping trace requests and values 2 through 7 cap automatic growth; the default of 8 allows growth up to 64. An explicit `LIQUID_TRACE_WORKERS` value from 1 to 64 overrides that starting preference and caps concurrency, still subject to resources and retry pressure. These settings change overlap, not the shared API rate ceiling. `--min-interval` can impose a longer gap, but cannot raise that ceiling. Run evidence records fetching settings and measured worker use in `trace.json`. Fixtures retain their configured worker count and bypass network pacing.
 
-HTTP 429 responses pause all workers. Transient failures retry within the same request/time budget; retries and token refreshes are intentional additional attempts. A requested cooldown above 30 seconds stops the run for later continuation. Successful in-flight responses are recorded before returning a failure or interruption. Near a traversal budget, fetching becomes serial to preserve the remaining work allowance. Completed transaction bodies can be reused from the evidence cache; spend status is refreshed for each new run so continuation can discover newly spent outputs. Duplicate suppression applies within a lookup or run, not across these deliberate refreshes.
+HTTP 429 responses pause all workers. Transient failures retry within bounded attempts and any explicitly enabled request/time budget; retries and token refreshes are intentional additional attempts. A requested cooldown above 30 seconds stops the run for later continuation. Successful in-flight responses are recorded before returning a failure or interruption. Near an enabled traversal budget, fetching becomes serial to preserve the remaining work allowance. Completed transaction bodies can be reused from the evidence cache; spend status is refreshed for each new run so continuation can discover newly spent outputs. Duplicate suppression applies within a lookup or run, not across these deliberate refreshes.
 
 Direct explorer HTTPS requests reuse connections within each worker. Configured proxies retain the existing proxy-aware transport. This reduces connection setup overhead without changing TLS verification, response-size limits, authentication origins, or retry budgets.
 
@@ -601,7 +605,7 @@ liquid-live trace \
   --max-seconds 60
 ```
 
-This creates a **new** run, preserves the parent, increases the first trial's absolute hop ceiling from 1 to 2, and reconsiders its unfinished branches. Request, time, transaction and output budgets reset for each run. The snapshot and graph are cumulative.
+This creates a **new** run, preserves the parent, increases the first trial's absolute hop ceiling from 1 to 2, and reconsiders its unfinished branches. Any explicit request, time, transaction and output budgets reset for each run; omitted CLI caps remain unlimited. The snapshot and graph are cumulative.
 
 `latest` resolves the run ID recorded in that case's `case.json`; it does not guess from file timestamps. The pointer advances only after a run's exports are saved, including runs that paused at a limit or recorded an error. Existing cases without the pointer need an explicit `--resume RUN_ID`. For a reproducible selection of a particular snapshot, use its explicit ID instead of `latest`.
 
@@ -715,7 +719,7 @@ Use the **same case directory and board** for later runs. Sync creates native [s
 - Excluding fees removes only generated fee connectors and diamonds identified from the saved trace. Edited fee labels, captions, or managed styles stop removal before board writes. Extra comments and unmapped connectors attached to fee diamonds are outside those checks; retain fees when these annotations need to remain attached. Enabling fees again recreates their representations. Other mapped objects are retained; an unexpectedly missing object or changed connector endpoint stops sync for inspection. Interrupted fee removals retain recovery state.
 - A board mapping is bound to one case, API source, and address mode. After a run has been synced, extend that run (or a later descendant). Older snapshots, sibling branches and independent roots cannot overwrite newer graph classifications. You may skip intermediate unpublished runs.
 - Finish an interrupted sync before switching to another run. Resolving a pending creation alone does not finish that sync.
-- The default cap is **750 new shapes and connectors per graph sync**, not total board size. The separate frame action applies its own new-frame cap. Use `--max-new-items` to change either action's limit. Existing-object checks can still take time on a large graph.
+- Graph sync, frame creation, board updates, rebuilds, and standalone publications have no application item-count cap by default. Enable resource budgets to use the saved Miro item cap in the interfaces, or pass a positive `--max-new-items` / `--max-items` for a CLI action. `0` means unlimited. A finite cap counts new objects for that action, not total board size. Existing-object checks can still take time on a large graph; Miro service limits and request pacing still apply.
 
 ### Export the whole graph or an activity group
 

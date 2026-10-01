@@ -1333,14 +1333,14 @@ def _require_no_run_notes(plan):
         raise TraceError("This saved Miro plan contains retired run summaries; use normal sync or generate a fresh preview before publishing")
 
 
-def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, interval=.02, dry_run=False,
+def sync(plan, board_id, state_path, max_items=0, token=None, transport=http, interval=.02, dry_run=False,
          reorganize=False, progress=None, workers=4):
-    """Sync graph objects, leaving export frames for the separate frame action."""
+    """Sync graph objects; zero disables the optional new-item budget."""
     return _sync(plan, board_id, state_path, max_items, token, transport, interval, dry_run,
                  reorganize, progress, workers)
 
 
-def sync_frames(plan, board_id, state_path, max_items=750, token=None, transport=http, interval=.02,
+def sync_frames(plan, board_id, state_path, max_items=0, token=None, transport=http, interval=.02,
                 dry_run=False, progress=None, workers=4):
     """Create or refresh export frames around the completed graph's live geometry.
 
@@ -1406,7 +1406,7 @@ def _check_frame_operation(plan, state, frames_only):
             raise TraceError("Finish the interrupted graph updates before creating or updating frames")
 
 
-def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http, interval=.02, dry_run=False,
+def _sync(plan, board_id, state_path, max_items=0, token=None, transport=http, interval=.02, dry_run=False,
           reorganize=False, progress=None, workers=4, *, frames_only=False):
     """Add bounded runs to one board; preserve manually edited fields and geometry.
 
@@ -1436,8 +1436,8 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
     if (not isinstance(board_id, str) or not board_id or len(board_id) > 200
             or any(c in board_id for c in "/?#") or any(c.isspace() for c in board_id)):
         raise TraceError("Provide the Miro board ID, not its full URL")
-    if not isinstance(max_items, int) or max_items < 0:
-        raise TraceError("max-items must be a nonnegative integer (it limits new items)")
+    if type(max_items) is not int or max_items < 0:
+        raise TraceError("max-items must be a nonnegative integer (0 means unlimited new items)")
     if (isinstance(interval, bool) or not isinstance(interval, (int, float))
             or not math.isfinite(interval) or interval < 0):
         raise TraceError("Miro interval must be finite and nonnegative")
@@ -1490,7 +1490,7 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
             report["mapped_" + endpoint] = len(collection) - report["new_" + endpoint]
         report["new_items"] = report["new_shapes"] + report["new_connectors"] + report["new_frames"]
         report["existing_items"] = len(current["items"])
-        if report["new_items"] > max_items:
+        if max_items and report["new_items"] > max_items:
             raise TraceError(f"Sync needs {report['new_items']} new items, above max-items={max_items}; reduce the trace or explicitly raise the limit")
         return report
 
@@ -1893,7 +1893,7 @@ def _record_pending(pending, item_id, response=None):
     return record
 
 
-def publish(plan, board_id, state_path, max_items=750, token=None, transport=http, interval=.4):
+def publish(plan, board_id, state_path, max_items=0, token=None, transport=http, interval=.4):
     """Append this run as a snapshot. Acknowledged items are never posted twice.
 
     Ambiguous POST outcomes are deliberately not automatically retried: the
@@ -1904,8 +1904,10 @@ def publish(plan, board_id, state_path, max_items=750, token=None, transport=htt
         raise TraceError("Board update layouts require registered board sync")
     _require_inline_counts(plan)
     _require_no_run_notes(plan)
+    if type(max_items) is not int or max_items < 0:
+        raise TraceError("max-items must be a nonnegative integer (0 means unlimited items)")
     count = len(plan["shapes"]) + len(plan["connectors"]) + len(plan.get("frames", []))
-    if count > max_items:
+    if max_items and count > max_items:
         raise TraceError(f"Plan has {count} items, above max-items={max_items}; select a smaller trace or explicitly raise the limit")
     token = token or os.getenv("MIRO_ACCESS_TOKEN")
     if not token:
