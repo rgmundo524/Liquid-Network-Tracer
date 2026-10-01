@@ -66,13 +66,27 @@ class CollectionPerformanceTests(unittest.TestCase):
     def test_storage_diagnostics_accept_only_known_modes_and_numeric_version(self):
         value = {"quota_journal_mode": "wal", "quota_journal_mode_requested": "wal",
                  "quota_synchronous": "full", "quota_connection_mode": "persistent",
-                 "quota_sqlite_version": "3.51.3"}
+                 "quota_sqlite_version": "3.51.3", "evidence_journal_mode": "wal",
+                 "evidence_journal_mode_requested": "wal", "evidence_synchronous": "full",
+                 "evidence_sqlite_version": "3.51.3"}
         self.assertEqual(public_api_diagnostics(value), value)
         self.assertEqual(public_performance({"schema_version": 1, **value}), {"schema_version": 1, **value})
         for invalid in (True, None, "PRIVATE", [], {}, "3.51.3 PRIVATE", "3.5", "1" * 1000):
             with self.subTest(invalid=invalid):
                 self.assertEqual(public_api_diagnostics({key: invalid for key in
-                    {*API_STORAGE_ENUMS, "quota_sqlite_version"}}), {})
+                    {*API_STORAGE_ENUMS, "quota_sqlite_version", "evidence_sqlite_version"}}), {})
+
+    def test_current_http_occupancy_and_active_client_count_are_bounded_gauges(self):
+        for clients in (1, 65535):
+            for actual in (0, 64):
+                value = {"shared_api_active_clients": clients,
+                         "shared_api_peak_active_clients": clients, "in_flight": actual}
+                self.assertEqual(public_api_diagnostics(value), value)
+        for invalid in (True, 0, 65536, 1.5, "PRIVATE", None):
+            self.assertNotIn("shared_api_active_clients", public_api_diagnostics({"shared_api_active_clients": invalid}))
+            self.assertNotIn("shared_api_peak_active_clients", public_api_diagnostics({"shared_api_peak_active_clients": invalid}))
+        for invalid in (True, -1, 65, 1.5, "PRIVATE", None):
+            self.assertNotIn("in_flight", public_api_diagnostics({"in_flight": invalid}))
 
 
 if __name__ == "__main__":

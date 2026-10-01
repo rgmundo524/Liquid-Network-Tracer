@@ -127,6 +127,16 @@ class AddressCountConcurrencyTests(unittest.TestCase):
         for key in ("network_seconds_total", "evidence_seconds_total", "pacing_wait_seconds_total",
                     "latency_seconds", "service_latency_seconds"):
             self.assertGreater(report[key], 0)
+        for key in ("evidence_write_lock_wait_seconds_total", "evidence_read_lock_wait_seconds_total",
+                    "evidence_write_seconds_total", "evidence_read_seconds_total",
+                    "evidence_commit_seconds_total", "evidence_commits", "evidence_write_operations",
+                    "evidence_read_operations", "in_flight"):
+            self.assertGreaterEqual(report[key], 0)
+            self.assertEqual(report[key], events[-1][key])
+            self.assertEqual(public_count_report(report)[key], report[key])
+        self.assertGreaterEqual(report["evidence_commits"], report["fetched"])
+        self.assertIn(report["evidence_journal_mode"], ("wal", "delete"))
+        self.assertEqual(report["evidence_synchronous"], "full")
 
     def test_explicit_single_worker_remains_serial(self):
         self.state["fetch_options"]["workers"] = 1
@@ -390,6 +400,30 @@ class AddressCountConcurrencyTests(unittest.TestCase):
                     "api_target_rps": invalid, "rate_limit_responses": invalid,
                     "retry_responses": invalid})
                 self.assertEqual(result, base)
+
+    def test_count_report_preserves_observed_active_client_peak_after_peer_exits(self):
+        from liquid_tracer.api import Esplora
+        original = Esplora.request_metrics
+        active = [1]
+        events = []
+
+        def metrics(api):
+            return {**original(api), "shared_api_active_clients": active[0]}
+
+        def progress(event):
+            events.append(event)
+            if event.get("fetched") == 1:
+                active[0] = 3
+            elif event.get("fetched", 0) >= 2:
+                active[0] = 1
+
+        self.state["fetch_options"]["workers"] = 1
+        with patch.object(Esplora, "request_metrics", metrics):
+            report = self.collect(self.wanted(3), CountTransport(), progress=progress)
+        self.assertEqual(report["shared_api_active_clients"], 1)
+        self.assertEqual(report["shared_api_peak_active_clients"], 3)
+        self.assertEqual(public_count_report(report)["shared_api_peak_active_clients"], 3)
+        self.assertEqual(events[-1]["shared_api_peak_active_clients"], 3)
 
 
 if __name__ == "__main__":

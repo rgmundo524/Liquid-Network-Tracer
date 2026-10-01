@@ -241,7 +241,7 @@ class ApiAndMiroTests(unittest.TestCase):
             data, _ = api.get("/tx/" + A)
         self.assertEqual(data["txid"], A)
         self.assertEqual(api.budget.requests, 4)
-        archive = (self.root / "case" / "evidence.sqlite").read_bytes()
+        archive = b''.join(path.read_bytes() for path in (self.root / "case").glob('evidence.sqlite*') if path.is_file())
         self.assertNotIn(b"private-secret", archive)
         self.assertNotIn(b"private-token", archive)
 

@@ -14,18 +14,30 @@ WORKERS = {"worker_peak", "worker_limit", "peak_in_flight"}
 API_SECONDS = {
     "network_seconds_total", "pacing_wait_seconds_total", "retry_wait_seconds_total",
     "evidence_seconds_total", "latency_seconds", "service_latency_seconds", "quota_reserve_seconds",
+    "evidence_write_lock_wait_seconds_total", "evidence_read_lock_wait_seconds_total",
+    "evidence_write_seconds_total", "evidence_read_seconds_total", "evidence_commit_seconds_total",
 }
+API_CUMULATIVE_SECONDS = API_SECONDS - {"latency_seconds", "service_latency_seconds"}
 API_COUNTS = {
     "completed_requests", "completed_endpoints", "cache_hits", "coalesced_hits",
     "rate_limit_responses", "retry_responses", "pressure_events",
     "quota_reserve_calls", "quota_admitted", "quota_denied",
     "local_deadline_timeouts",
+    "evidence_commits", "evidence_write_operations", "evidence_read_operations",
 }
 API_STORAGE_ENUMS = {
     "quota_journal_mode": {"pending", "wal", "delete"},
     "quota_journal_mode_requested": {"wal", "delete"},
     "quota_synchronous": {"full"},
     "quota_connection_mode": {"persistent"},
+    "evidence_journal_mode": {"wal", "delete"},
+    "evidence_journal_mode_requested": {"wal", "delete"},
+    "evidence_synchronous": {"full"},
+}
+API_DIAGNOSTIC_FIELDS = API_SECONDS | API_COUNTS | set(API_STORAGE_ENUMS) | {
+    "api_rate_mode", "api_target_rps", "shared_api_effective_rps", "shared_api_active_clients",
+    "shared_api_peak_active_clients",
+    "peak_in_flight", "in_flight", "quota_sqlite_version", "evidence_sqlite_version",
 }
 
 
@@ -60,16 +72,22 @@ def public_api_diagnostics(value):
         number = value.get(key)
         if type(number) is int and 0 <= number <= 2 ** 53 - 1:
             clean[key] = number
-    peak = value.get("peak_in_flight")
-    if type(peak) is int and 0 <= peak <= 64:
-        clean["peak_in_flight"] = peak
+    for key in ("peak_in_flight", "in_flight"):
+        workers = value.get(key)
+        if type(workers) is int and 0 <= workers <= 64:
+            clean[key] = workers
+    for key in ("shared_api_active_clients", "shared_api_peak_active_clients"):
+        clients = value.get(key)
+        if type(clients) is int and 1 <= clients <= 65535:
+            clean[key] = clients
     for key, allowed in API_STORAGE_ENUMS.items():
         option = value.get(key)
         if isinstance(option, str) and option in allowed:
             clean[key] = option
-    version = value.get("quota_sqlite_version")
-    if isinstance(version, str) and re.fullmatch(r"[0-9]{1,6}(?:\.[0-9]{1,6}){2}", version):
-        clean["quota_sqlite_version"] = version
+    for key in ("quota_sqlite_version", "evidence_sqlite_version"):
+        version = value.get(key)
+        if isinstance(version, str) and re.fullmatch(r"[0-9]{1,6}(?:\.[0-9]{1,6}){2}", version):
+            clean[key] = version
     return clean
 
 

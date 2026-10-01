@@ -77,6 +77,8 @@ def measured_sync_run(args, parser):
         syncs = json.loads(report.read_text())
         if args.shared_quota and not sum(syncs["by_kind"]["quota"][key] for key in ("fsync", "fdatasync")):
             raise RuntimeError("The shared quota's sync calls were not intercepted")
+        if not sum(syncs["by_kind"]["evidence"][key] for key in ("fsync", "fdatasync")):
+            raise RuntimeError("The evidence store's sync calls were not intercepted")
         if any(value["errors"] for value in syncs["by_kind"].values()):
             raise RuntimeError("A measured fsync/fdatasync failed")
         result["sqlite_sync_syscalls"] = syncs
@@ -137,6 +139,7 @@ def main():
     writes, json_bytes, save_seconds = 0, 0, 0.
     quota_reservations, quota_admitted, quota_reserve_seconds = 0, 0, 0.
     quota_clients = []
+    evidence_storage = []
     commits = {kind: {"count": 0, "seconds": 0., "injected_wait_seconds": 0.}
                for kind in ("evidence", "quota")}
     lock = threading.Lock()
@@ -178,6 +181,23 @@ def main():
     original_submit = Esplora.submit
     original_init = Esplora.__init__
     original_connect = sqlite3.connect
+    original_store_close = Store.close
+
+    def close_store(store):
+        # Observe lazy journal selection after the workload, before closing can
+        # checkpoint/remove its WAL. These PRAGMA reads never select a mode.
+        with store._lock:
+            try:
+                journal_mode = str(store.db.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+                synchronous = int(store.db.execute("PRAGMA synchronous").fetchone()[0])
+            except sqlite3.ProgrammingError:
+                pass  # A second close should retain the Store's normal behavior.
+            else:
+                details = store.storage_metrics() if hasattr(store, "storage_metrics") else {}
+                evidence_storage.append({**details, "observed_journal_mode": journal_mode,
+                                         "observed_synchronous": synchronous,
+                                         "sqlite_version": sqlite3.sqlite_version})
+        return original_store_close(store)
 
     class MeasuredConnection(sqlite3.Connection):
         benchmark_kind = None
@@ -267,9 +287,12 @@ def main():
 
     def delayed(original):
         def wrapped(store, *values, **options):
+            if not args.evidence_delay_ms:
+                # Preserve production lock-wait telemetry when this legacy
+                # method-delay model is disabled (including sync benchmarks).
+                return original(store, *values, **options)
             with store._lock:
-                if args.evidence_delay_ms:
-                    time.sleep(args.evidence_delay_ms / 1000)
+                time.sleep(args.evidence_delay_ms / 1000)
                 return original(store, *values, **options)
         return wrapped
 
@@ -297,6 +320,7 @@ def main():
              patch.object(Esplora, "bearer", return_value="synthetic-not-a-credential"), \
              patch.object(sqlite3, "connect", connect), \
              patch.object(Store, "attempt", delayed(Store.attempt)), \
+             patch.object(Store, "close", close_store), \
              (patch.object(Store, "record_response", delayed(Store.record_response))
               if hasattr(Store, "record_response") else nullcontext()), \
              patch.object(Store, "observe", delayed(Store.observe)):
@@ -327,6 +351,9 @@ def main():
                                     for address, status in requests for label in ("started", str(status)))
         if Counter(attempts) != expected_attempts:
             raise AssertionError("An HTTP attempt start or outcome was lost, duplicated, or changed")
+        if not evidence_storage or any(details["observed_synchronous"] not in (2, 3)
+                                       for details in evidence_storage):
+            raise AssertionError("Evidence durability below SQLite FULL was observed")
         rolling = deque()
         peak_successful_rps = 0
         for timestamp in sorted(successful_responses):
@@ -342,6 +369,7 @@ def main():
             "sqlite_runtime_version": sqlite3.sqlite_version,
             "quota_storage": next((quota.storage_metrics() for quota in quota_clients
                                     if hasattr(quota, "storage_metrics")), None),
+            "evidence_storage_before_close": evidence_storage,
             "quota_reservations": quota_reservations, "quota_admitted": quota_admitted,
             "quota_denied_reservations": quota_reservations - quota_admitted,
             "quota_reserve_seconds": round(quota_reserve_seconds, 6),

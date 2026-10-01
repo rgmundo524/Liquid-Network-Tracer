@@ -251,6 +251,7 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
                     pending = {}
                     checkpoint_count = 0
                     checkpoint_seconds = 0.0
+                    peak_active_clients = 0
                     failure = None
                     journal = CountCacheJournal(case, state['case_id'], source)
 
@@ -268,13 +269,19 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
                         return scaling.target(api.request_metrics())
 
                     def metrics():
+                        nonlocal peak_active_clients
                         feedback = api.request_metrics()
-                        return {"worker_count": workers(), "worker_limit": scaling.ceiling,
+                        diagnostics = public_api_diagnostics(feedback)
+                        peak_active_clients = max(peak_active_clients,
+                                                  diagnostics.get("shared_api_active_clients", 0))
+                        if peak_active_clients:
+                            diagnostics["shared_api_peak_active_clients"] = peak_active_clients
+                        return {"worker_count": scaling.target(feedback), "worker_limit": scaling.ceiling,
                                 "fetched": fetched,
                                 "observed_rps": fetched / max(.001, time.monotonic() - started),
+                                **diagnostics,
                                 **{key: value for key, value in feedback.items()
-                                   if key.startswith("shared_api_") or key in (
-                                       "api_rate_mode", "api_target_rps", "rate_limit_responses", "retry_responses")}}
+                                   if key in ("shared_api_wait_seconds", "shared_api_wait_reason")}}
 
                     def idle_progress():
                         _progress(progress, "address_counts", len(wanted)-len(todo)+examined,
@@ -337,6 +344,10 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
                         "observed_rps": fetched / max(.001, time.monotonic() - started)}
                     feedback = api.request_metrics()
                     concurrency_report.update(public_api_diagnostics(feedback))
+                    peak_active_clients = max(peak_active_clients,
+                        concurrency_report.get("shared_api_active_clients", 0))
+                    if peak_active_clients:
+                        concurrency_report["shared_api_peak_active_clients"] = peak_active_clients
                     if failure is not None:
                         raise failure
             known = sum(address in counts for address in wanted)
