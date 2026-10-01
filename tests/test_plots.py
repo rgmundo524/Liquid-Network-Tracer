@@ -78,7 +78,7 @@ class PlotTests(unittest.TestCase):
         result = preview_plot(self.case, "pegouts", min_hops=2, max_hops=2)
         graph, _ = reviewed_plot(self.case, result["preview_id"])
         self.assertEqual(result["query"], {"seeds": sorted(self.state["seeds"]), "min_hops": 2,
-                                          "max_hops": 2, "transaction_io": "complete"})
+                                          "max_hops": 2, "transaction_io": "complete", "attribution_hop_limits": "ignore"})
         self.assertEqual((result["min_hops"], result["max_hops"]), (2, 2))
         self.assertEqual([match["outpoint"] for match in graph["pegouts"]["matches"]], [self.endpoint])
         metadata = read_case(self.case)
@@ -135,7 +135,7 @@ class PlotTests(unittest.TestCase):
         update_case(self.case, {"run_defaults": {"group_context_inputs": True}})
 
         def legacy_query(*args, **kwargs):
-            return _query(*args, **kwargs, transaction_io=None)
+            return _query(*args, **kwargs, transaction_io=None, attribution_hop_limits=None)
 
         old = []
         for include_context in (False, True):
@@ -325,7 +325,7 @@ class PlotTests(unittest.TestCase):
         self.assertEqual(result["match_count"], 1)
         self.assertEqual(result["query"], {"seeds": state["seeds"], "min_hops": 1, "max_hops": 1,
                                           "include_unspent": True, "include_unspendable": True,
-                                          "transaction_io": "complete"})
+                                          "transaction_io": "complete", "attribution_hop_limits": "ignore"})
         self.assertEqual(graph["graph_options"]["pegout_query"], result["query"])
         self.assertEqual([item["outpoint"] for item in graph["pegouts"]["matches"]], [pegout])
         self.assertEqual(plan["namespace"], default_plan["namespace"])

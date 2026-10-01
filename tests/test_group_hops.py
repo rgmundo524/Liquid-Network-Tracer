@@ -7,6 +7,7 @@ from pathlib import Path
 
 from liquid_tracer.api import Esplora, Limits
 from liquid_tracer.group_hops import reference_addresses, normalize_reference_name
+from liquid_tracer.plot_scope import project_full_scope
 from liquid_tracer.store import Store
 from liquid_tracer.trace import new_state, trace
 from tests.fixtures import CONFIRMED, output
@@ -123,12 +124,15 @@ class NamedGroupHopTests(unittest.TestCase):
         self.assertEqual(state["outputs"][self.key("E")]["trace_scope_depth"], 2)
         self.assertNotIn(self.ids["G"], state["transactions"])
 
-    def test_stop_and_attribution_allowance_never_reset_with_group_hops(self):
+    def test_group_collection_ignores_attribution_cap_but_preserves_stop(self):
         labels = copy.deepcopy(self.labels)
         labels[0]["hop_limit"] = 2
         state, _ = self.run_trace(hops=9, labels=labels)
-        self.assertEqual(set(state["transactions"]), {self.ids[n] for n in "ABCD"})
-        self.assertEqual(state["outputs"][self.key("C")]["trace_control"]["reason"], "attribution_hop_limit")
+        self.assertEqual(set(state["transactions"]), set(self.ids.values()))
+        projected = project_full_scope(state)
+        self.assertEqual(set(projected["transactions"]), {self.ids[n] for n in "ABCD"})
+        self.assertEqual(projected["outputs"][self.key("C")]["trace_control"]["reason"], "attribution_hop_limit")
+        self.assertNotIn('trace_control', state["outputs"][self.key("C")])
         labels[0]["stop"] = True
         state, transport = self.run_trace(hops=9, labels=labels)
         self.assertEqual(set(state["transactions"]), {self.ids["A"]})
@@ -182,9 +186,9 @@ class NamedGroupHopTests(unittest.TestCase):
             state, _ = self.run_trace(hops=2, labels=labels, workers=workers,
                                       seeds=[self.key("A"), self.key("U")])
             self.assertIn(self.ids["F"], state["transactions"])
-            self.assertNotIn(self.ids["E"], state["transactions"])
-            self.assertEqual(state["outputs"][self.key("C", 1)]["trace_control"]["reason"],
-                             "attribution_hop_limit")
+            self.assertIn(self.ids["E"], state["transactions"])
+            projected = project_full_scope(state)
+            self.assertNotIn(self.ids["E"], projected["transactions"])
 
     def test_boundary_parent_cannot_launder_longer_path_budget_through_group_return(self):
         # Put V first in the hop-1 queue, so its over-limit arrival at C's
@@ -207,12 +211,34 @@ class NamedGroupHopTests(unittest.TestCase):
             state, _ = self.run_trace(hops=1, labels=labels, workers=workers,
                                       seeds=[self.key("A"), self.key("U")])
             self.assertIn(self.ids["E"], state["transactions"])
-            self.assertNotIn(self.ids["G"], state["transactions"])
+            self.assertIn(self.ids["G"], state["transactions"])
             self.assertEqual(state["outputs"][self.key("E")]["trace_scope_depth"], 0)
-            self.assertEqual(state["outputs"][self.key("E")]["trace_control"]["reason"],
-                             "attribution_hop_limit")
+            self.assertNotIn(self.ids["G"], project_full_scope(state)["transactions"])
             resumed, _ = self.run_trace(hops=1, parent=state, labels=labels, workers=workers)
+            self.assertIn(self.ids["G"], resumed["transactions"])
+            self.assertNotIn(self.ids["G"], project_full_scope(resumed)["transactions"])
+
+    def test_legacy_named_cap_releases_without_resetting_global_group_distance(self):
+        labels = copy.deepcopy(self.labels)
+        labels[0]["hop_limit"] = 0
+        parent, _ = self.run_trace(hops=0, labels=labels)
+        # Model a prior cap-zero run, before any first spender was fetched.
+        parent["transactions"] = {self.ids["A"]: parent["transactions"][self.ids["A"]]}
+        parent["outputs"] = {self.key("A"): parent["outputs"][self.key("A")]}
+        parent["links"] = {}
+        item = parent["outputs"][self.key("A")]
+        item.update(status="attribution_hop_limit",
+                    trace_control={"reason": "attribution_hop_limit", "previous_status": "pending"})
+        parent.pop("collection_policy")
+        original = copy.deepcopy(parent)
+        for workers in (1, 8):
+            resumed, calls = self.run_trace(hops=1, parent=parent, labels=labels, workers=workers)
+            self.assertEqual(parent, original)
+            self.assertIn(self.ids["F"], resumed["transactions"])
+            self.assertIn(self.ids["E"], resumed["transactions"])
             self.assertNotIn(self.ids["G"], resumed["transactions"])
+            self.assertNotIn("/tx/" + self.ids["E"] + "/outspends", calls.calls)
+            self.assertEqual(resumed["outputs"][self.key("E")]["trace_scope_depth"], 2)
 
     def test_boundary_inspection_keeps_terminal_observation_status(self):
         self.data["/tx/" + self.ids["C"]]["vout"].append({"scriptpubkey": "", "scriptpubkey_type": "fee"})

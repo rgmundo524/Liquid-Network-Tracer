@@ -139,8 +139,10 @@ def plot_screen(base, button, case):
                                  "Other branch outputs stay visible without extending the trace or adding matching endpoints. "
                                  "Grouping follows the saved "
                                  "Group isolated context inputs layout setting.", markup=False)
-                yield Static("Hop limits filter the saved data. They do not collect additional transactions. "
+                yield Static("The selected hop range filters saved data; it does not collect additional transactions. "
                              "A starting transaction is hop 0. Missing matches may reflect incomplete coverage.", markup=False)
+                yield Static("All goals respect explicit stop-tracing rules. Full trace and Starter connections also "
+                             "respect attribution hop_limit values; Paths to peg-outs ignores those local caps, including 0.", markup=False)
                 yield Static("", id="workflow-error", markup=False)
             with Horizontal(classes="buttons form-actions"):
                 yield button("Back", id="workflow-back")

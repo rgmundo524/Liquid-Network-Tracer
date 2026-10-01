@@ -202,7 +202,7 @@ def _source(case, run_id):
 
 
 def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_unspendable=False,
-           include_context=False, transaction_io="complete"):
+           include_context=False, transaction_io="complete", attribution_hop_limits="ignore"):
     from .connections import validate_hops
     from .pegout_paths import validate_query
     if not isinstance(goal, str) or goal not in GOALS:
@@ -219,7 +219,7 @@ def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_un
         return validate_query(seeds=state["seeds"], min_hops=min_hops, max_hops=max_hops,
                               include_unspent=include_unspent, include_unspendable=include_unspendable,
                               include_context=include_context, hop_reference_name=reference_name(state),
-                              transaction_io=transaction_io)
+                              transaction_io=transaction_io, attribution_hop_limits=attribution_hop_limits)
     reference = {"hop_reference_name": reference_name(state)} if reference_name(state) else {}
     if goal == "connections":
         return {"max_hops": validate_hops(max_hops), **reference}
@@ -518,7 +518,8 @@ def _review_source(case, graph, source_cache=None, inputs=None):
                       include_unspent=query.get("include_unspent", False),
                       include_unspendable=query.get("include_unspendable", False),
                       include_context=query.get("include_context", False),
-                      transaction_io=query.get("transaction_io"))
+                      transaction_io=query.get("transaction_io"),
+                      attribution_hop_limits=query.get("attribution_hop_limits"))
     settings = _snapshot_settings(graph)
     if settings is not None:
         from .export import PRESENTATION_VERSION

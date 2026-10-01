@@ -7,6 +7,17 @@ from .hop_limits import HopScope
 from .group_hops import reference_name, refresh_reference_hops
 
 
+def project_collected_full_scope(state):
+    """Apply display caps to newly broadened collections, retaining old views.
+
+    The collection policy identifies evidence gathered without attribution hop
+    limits. Historical archives without it retain their original raw graph
+    semantics on legacy preview and publication routes.
+    """
+    from .trace import COLLECTION_POLICY
+    return project_full_scope(state) if state.get("collection_policy") == COLLECTION_POLICY else state
+
+
 def project_full_scope(state):
     """Keep every saved path still reachable under the current trace controls.
 
@@ -17,15 +28,19 @@ def project_full_scope(state):
     This is a display copy, not a replacement collection checkpoint.
     """
     result = deepcopy(state)
-    scope = HopScope(result)
+    scope = HopScope(result, respect_attribution_hops=True)
     unspent = _unspent_endpoints(result)
     named = bool(reference_name(result))
+    from .trace import COLLECTION_POLICY
+    bounded = named or result.get("collection_policy") == COLLECTION_POLICY
     maximum = result.get("limits", {}).get("max_hops", float("inf"))
     reachable = {key for key in scope.reachable
-                 if not named or scope.depth(result["outputs"][key]) <= maximum}
+                 if not bounded or any(depth <= maximum for depth, _ in
+                                       [*scope.paths.get(key, ()), *scope.pending.get(key, ())])}
     links = {
         key: link for key, link in result["links"].items()
-        if key in reachable and any(remaining > 0 and (not named or depth <= maximum)
+        if key in reachable and any(remaining > 0 and (not bounded or
+                                    (depth <= maximum if named else depth < maximum))
                                     for depth, remaining in scope.paths.get(key, ()))
     }
     selected = {key.rpartition(":")[0] for key in result["seeds"]}

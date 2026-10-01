@@ -156,18 +156,18 @@ class PegoutSearchTests(unittest.TestCase):
         with self.assertRaisesRegex(TraceError, "does not match"):
             search_pegouts(self.case, resume=first["search_id"])
 
-    def test_saved_seed_frontier_honors_active_controls_and_resumes_after_expansion(self):
+    def test_saved_seed_frontier_ignores_attribution_hop_caps_but_honors_stops(self):
         # Any active stop rule changes frontier initialization, even off-path.
         set_service(self.case, "SYNTHETIC-other-service", name="Other", stop_tracing=True)
         self.assertEqual(self.seed_search()["match_count"], 1)
         set_service(self.case, "SYNTHETIC-branch-A", name="Service", hop_limit=0, stop_tracing=False)
         first = self.seed_search()
-        self.assertEqual(first["match_count"], 0)
-        self.assertEqual(set(self.state(first)["transactions"]), {B})
-        set_service(self.case, "SYNTHETIC-branch-A", name="Service", hop_limit=2, stop_tracing=False)
-        resumed = search_pegouts(self.case, resume=first["search_id"], max_transactions=20,
-                                max_requests=100, max_outpoints=100)
-        self.assertEqual(resumed["match_count"], 1)
+        self.assertEqual(first["match_count"], 1)
+        self.assertEqual(set(self.state(first)["transactions"]), {B, C, D})
+        set_service(self.case, "SYNTHETIC-branch-A", name="Service", hop_limit=0, stop_tracing=True)
+        stopped = self.seed_search()
+        self.assertEqual(stopped["match_count"], 0)
+        self.assertEqual(set(self.state(stopped)["transactions"]), {B})
 
     def test_missing_saved_seeds_fail_before_fetch_and_custom_origin_still_works(self):
         self.save_seeds([])
@@ -221,7 +221,7 @@ class PegoutSearchTests(unittest.TestCase):
 
         def legacy_graph(state, query, **options):
             return pegout_graph(state, {key: value for key, value in query.items()
-                                       if key != "transaction_io"}, **options)
+                                       if key not in {"transaction_io", "attribution_hop_limits"}}, **options)
 
         with patch("liquid_tracer.pegouts.pegout_graph", side_effect=legacy_graph):
             original = self.seed_search()
@@ -457,15 +457,29 @@ class PegoutSearchTests(unittest.TestCase):
         self.assertEqual(graph["pegouts"], previous["pegouts"])
         self.assertEqual(snapshot, {p.name: p.read_bytes() for p in archive.iterdir() if p.is_file()})
 
-    def test_larger_attribution_hop_budget_resumes_old_search_frontier(self):
+    def test_new_policy_resumes_old_capped_search_without_changing_attribution_limit(self):
+        from liquid_tracer.hop_limits import HopScope
+        from liquid_tracer.trace import trace
+
+        def legacy_scope(state, **kwargs):
+            return HopScope(state, respect_attribution_hops=True)
+
+        def legacy_trace(*args, **kwargs):
+            with patch("liquid_tracer.hop_limits.HopScope", side_effect=legacy_scope):
+                trace(*args, **kwargs)
+            args[1].pop("collection_policy", None)
+
         set_service(self.case, "SYNTHETIC-branch-A", name="Service", hop_limit=0, stop_tracing=False)
-        first = self.search()
+        with patch("liquid_tracer.pegouts.trace", side_effect=legacy_trace):
+            first = self.search()
         self.assertEqual(first["match_count"], 0)
         self.assertNotIn(D, self.state(first)["transactions"])
-        set_service(self.case, "SYNTHETIC-branch-A", name="Service", hop_limit=2, stop_tracing=False)
+        directory = self.case / "pegouts" / first["search_id"]
+        old_bytes = {p.relative_to(directory): p.read_bytes() for p in directory.rglob("*") if p.is_file()}
         second = search_pegouts(self.case, resume=first["search_id"], max_transactions=20,
                                 max_requests=100, max_outpoints=100)
         self.assertEqual(second["match_count"], 1)
+        self.assertEqual(old_bytes, {p.relative_to(directory): p.read_bytes() for p in directory.rglob("*") if p.is_file()})
 
     def test_unconfirmed_origin_pegout_is_excluded(self):
         data = read_json(self.fixture)

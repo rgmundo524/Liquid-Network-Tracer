@@ -168,6 +168,7 @@ def pegout_csv_rows(graph, state, *, observations=None):
                                include_unspendable=raw_query.get("include_unspendable", False),
                                include_context=raw_query.get("include_context", False),
                                transaction_io=raw_query.get("transaction_io"),
+                               attribution_hop_limits=raw_query.get("attribution_hop_limits"),
                                hop_reference_name=name)
         if canonical(query) != canonical(raw_query) or reference_name(graph) != name:
             raise TraceError("Endpoint CSV hop reference or query disagrees with the saved graph")

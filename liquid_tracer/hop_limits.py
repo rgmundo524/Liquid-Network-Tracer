@@ -28,10 +28,17 @@ def has_hop_limits(labels):
     return any(label.get("hop_limit") is not None for label in labels)
 
 
-def output_budget(labels, key, output):
+def output_budget(labels, key, output, *, respect_attribution_hops=True):
+    """Return a path allowance, always preserving an explicit stop boundary.
+
+    Collection and new peg-out queries ignore attribution display limits. Full
+    plots and legacy saved queries retain them through the default behavior.
+    """
     matches = match_labels(labels, key, output)
     if any(label.get("stop") is True for label in matches):
         return 0
+    if not respect_attribution_hops:
+        return math.inf
     limits = [hop_limit_value(label["hop_limit"]) for label in matches
               if label.get("hop_limit") is not None]
     return min((n for n in limits if n is not None), default=math.inf)
@@ -46,8 +53,9 @@ class HopScope:
     """
     active = True
 
-    def __init__(self, state):
+    def __init__(self, state, *, respect_attribution_hops=True):
         self.state = state
+        self.respect_attribution_hops = respect_attribution_hops
         from .group_hops import reference_name, reference_addresses, restore_scope_outputs
         self.reference_name = reference_name(state)
         self.reference_addresses = reference_addresses(state)
@@ -75,7 +83,7 @@ class HopScope:
     @staticmethod
     def _restore(item):
         control = item.pop("trace_control", None)
-        if control and item["status"] in {"suspected_service_stop", "held_behind_service", "attribution_hop_limit",
+        if control and item["status"] in {"suspected_service_stop", "analyst_stop", "held_behind_service", "attribution_hop_limit",
                                           "named_group_hop_limit"}:
             item["status"] = control["previous_status"]
 
@@ -102,6 +110,8 @@ class HopScope:
         matches = self._matches(key, output)
         if any(label.get("stop") is True for label in matches):
             return 0
+        if not self.respect_attribution_hops:
+            return math.inf
         limits = [hop_limit_value(m.get("hop_limit")) for m in matches]
         return min((n for n in limits if n is not None), default=math.inf)
 
@@ -182,7 +192,11 @@ class HopScope:
                 self._hold(item, "named_group_hop_limit")
             elif not viable and output_kind(output) == "spendable":
                 stopped = any(m.get("stop") is True for m in item["labels"])
-                self._hold(item, "suspected_service_stop" if stopped else "attribution_hop_limit",
+                reason = "suspected_service_stop" if stopped else "attribution_hop_limit"
+                if (stopped and not self.respect_attribution_hops
+                        and not any(m.get("kind") == "address" and m.get("stop") is True for m in item["labels"])):
+                    reason = "analyst_stop"
+                self._hold(item, reason,
                            output.get("scriptpubkey_address") if stopped else None)
             elif remaining > 0:
                 admitted.add(key)

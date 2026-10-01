@@ -1,7 +1,7 @@
 # Trace to peg-outs
 
 This guide describes the older standalone search and its recovery commands.
-For the shared **Collect data → Plot Layouts → Miro boards** workflow, use
+For the shared **Collect data → Plots & Miro** workflow, use
 [the investigation workflow guide](investigation-workflow.md). Its peg-out plots
 read saved collection data, and its boards can be updated with later plots.
 
@@ -16,7 +16,9 @@ first full run.
    the search, choose **Resume search** to continue its saved frontier.
 
 Each starting transaction is **hop 0**. Only its selected seed outputs start
-the search; unselected sibling outputs are excluded, including at hop 0.
+the search; unselected sibling outputs are not followed, including at hop 0.
+If a transaction belongs to a qualifying path, its sibling outputs are still
+shown as context.
 One forward UTXO spend adds one hop, and both bounds are inclusive. A range of
 0–0 finds requests among the selected seed outputs themselves.
 A range of 2–4 includes any verified path of two, three, or four spends ending in
@@ -33,25 +35,38 @@ this mode explicitly; the search will not substitute all outputs automatically.
 The search fetches transactions using the investigation's API source, confirmed
 transaction cache, request throttling, and bounded parallel fetching. Each
 search or continuation uses the saved transaction, output, API attempt, and time
-budgets. CLI flags can override those budgets for one invocation. Stop rules,
-attribution hop limits, and the investigation's confirmation policy apply.
-Address reuse and other inputs do not create traversal links.
+budgets. CLI flags can override those budgets for one invocation. Active
+`stop_tracing` rules and the investigation's confirmation policy apply.
+Attribution `hop_limit` values, including `0`, are ignored. The selected global
+hop range and resource budgets still bound the search. Address reuse and other
+inputs do not create traversal links.
 
-Only paths reaching matching requests appear in the plot, with one circle per
-full address per network. Each UTXO keeps its own input and output connectors;
+The plot selects transactions on paths reaching matching requests, then shows
+all inputs and outputs of each selected transaction, including fees. Outputs
+at the head of excluded branches remain visible as context without continuing
+those branches or adding endpoint matches. There is no optional context-display
+toggle for newly generated plots. Each full address has one circle per network.
+Each UTXO keeps its own input and output connectors;
 unknown addresses stay separate by outpoint, and each peg-out request keeps its
 own diamond even when destinations repeat. Sharing a circle does not establish
 a spend between unrelated outputs. All fetched evidence is retained in the search archive.
-Every displayed connector belongs to a qualifying path; combining those paths
-visually can also form longer or shorter routes outside the chosen range. The
-JSON report records the qualifying hop counts for each request.
+Traced connectors belong to qualifying paths; additional context connectors
+show the remaining inputs and outputs of those transactions. Combining paths
+visually can form longer or shorter routes outside the chosen range, while
+context connections do not establish further traced paths. The JSON report
+records the qualifying hop counts for each request.
 
 ## Limits and recovery
 
 A paused search can contain useful matches while additional requests remain
 undiscovered. A completed bounded search is limited to its selected hop range,
 confirmation policy, stop rules, and observed spends. Zero results are not proof
-that no peg-out exists.
+that no peg-out exists. Old saved reports and plots keep their recorded rules
+and results. Start a new search to use the current tracing policy. For the main
+saved-data plotting workflow, fill gaps left by older attribution-capped runs
+with **Continue collection**, using 0 additional hops within the existing ceiling
+or additional hops for a larger ceiling, then regenerate the peg-out plot.
+Explicit address stops and resource budgets still apply.
 
 Select a saved search to resume with the same saved seed selection or custom
 transaction and range. Saved searches show their starting scope. Later changes

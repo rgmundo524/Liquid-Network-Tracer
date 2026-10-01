@@ -125,7 +125,11 @@ class PlotScopeCSVIntegrationTests(unittest.TestCase):
                     patch("liquid_tracer.elk_layout.optimize_graph", side_effect=lambda graph, **kwargs: graph):
                 upload(0, "#123456")
                 first = preview_plot(case, "full")
-                graph, _ = reviewed_plot(case, first["preview_id"])
+                graph, plan = reviewed_plot(case, first["preview_id"])
+                self.assertEqual(first["input_snapshot_version"], 1)
+                first_graph, first_plan = deepcopy(graph), deepcopy(plan)
+                first_files = {path.name: path.read_bytes() for path in Path(first["directory"]).iterdir()
+                               if path.is_file()}
                 self.assertEqual({node["id"] for node in graph["nodes"] if node["kind"] == "transaction"},
                                  {"tx:" + tx(name) for name in "ab"})
                 address = next(node for node in graph["nodes"]
@@ -133,8 +137,7 @@ class PlotScopeCSVIntegrationTests(unittest.TestCase):
                 self.assertEqual(address["color"], "#123456")
                 self.assertEqual(graph["change_outputs"]["designations"][0]["outpoint"], tx("b") + ":0")
                 upload(2, "#654321")
-                with self.assertRaises(TraceError):
-                    reviewed_plot(case, first["preview_id"])
+                self.assertEqual(reviewed_plot(case, first["preview_id"]), (first_graph, first_plan))
                 second = preview_plot(case, "full")
                 graph, _ = reviewed_plot(case, second["preview_id"])
                 self.assertEqual({node["id"] for node in graph["nodes"] if node["kind"] == "transaction"},
@@ -142,5 +145,7 @@ class PlotScopeCSVIntegrationTests(unittest.TestCase):
                 address = next(node for node in graph["nodes"]
                                if node["id"] == "liquid:address:SYNTHETIC-b-address")
                 self.assertEqual(address["color"], "#654321")
+                self.assertEqual(first_files, {path.name: path.read_bytes()
+                                               for path in Path(first["directory"]).iterdir() if path.is_file()})
             self.assertEqual(read_json(archive / "trace.json"), state)
             self.assertEqual(before, {path.name: path.read_bytes() for path in archive.iterdir() if path.is_file()})

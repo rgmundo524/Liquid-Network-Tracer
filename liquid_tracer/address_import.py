@@ -28,11 +28,12 @@ NOTICE = ("Importing records your assessment, not independent verification of ow
           "Addresses use the same text validation as Address review; network/checksums are not checked offline. "
           "Use the public address form shown by the trace, not a confidential-address alias. "
           "Active address stops apply to the first run and continuations, including seed outputs. "
+          "Attribution hop limits apply to Full trace and Starter connections; collection and peg-out tracing ignore them. "
           "No blockchain requests or Miro changes are made. Existing evidence is retained.")
 TEMPLATE = ("Address,Name,confidence,stop_tracing,hop_limit,source,notes\n"
             "REPLACE_WITH_LIQUID_ADDRESS_1,Example Exchange,suspected,true,,Investigator research,Explain the evidence\n"
             "REPLACE_WITH_LIQUID_ADDRESS_2,Client wallet,confirmed,false,,Client records,Continue tracing\n"
-            "REPLACE_WITH_LIQUID_ADDRESS_3,Service deposit,suspected,false,1,Investigator research,Follow one consolidation hop\n")
+            "REPLACE_WITH_LIQUID_ADDRESS_3,Service deposit,suspected,false,1,Investigator research,Show one consolidation hop in Full trace\n")
 
 
 def read_import(path):

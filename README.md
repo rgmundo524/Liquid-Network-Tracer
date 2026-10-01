@@ -120,13 +120,26 @@ The browser and terminal interfaces share the same `cases/`, defaults, run histo
 
 An update layout is bound to the board it inspected. Sync checks that snapshot again before writing; if the board changed meanwhile, regenerate the update from its latest state. If a job stops during publication, use the board's saved-layout resume control instead of generating another layout. Acknowledged changes are tracked so the same sync can resume. Unrelated manually created board items remain outside the managed graph. Removing an obsolete generated object can still be blocked by manual content edits or an unrelated attached connector that needs preservation.
 
-Current stop-tracing and attribution hop limits are reapplied when generating a plot, including **Full trace**. Tightening rules can remove excluded branches from the board update; loosening rules can restore branches already present in the selected collected evidence. Plotting never fetches the missing transactions of an uncollected branch. Use **Collect data** to extend that evidence first. Combined actions use the existing terminal credential flow. Preview-only fresh plotting stays offline; preview-only updates read Miro without writing.
+Current stop-tracing rules are reapplied when generating plots. **Full trace** and **Starter connections** also apply attribution CSV `hop_limit` values as display caps. New **Paths to peg-outs** plots ignore those attribution caps while retaining their selected minimum/maximum hop range. Tightening rules can remove excluded branches from the board update; loosening rules can restore branches already present in the selected collected evidence. Plotting never fetches the missing transactions of an uncollected branch. Use **Collect data** to extend that evidence first. Combined actions use the existing terminal credential flow. Preview-only fresh plotting stays offline; preview-only updates read Miro without writing.
 
 **Investigation settings** collects this case's tracing limits, Miro sync budget, and colors. Its **Investigation data** section contains CSV imports, address review, change outputs, and input CSV exports. **Workspace defaults** sets collection, plot layout, and Miro sync defaults copied into future investigations; existing cases keep their saved settings. Both scopes persist across restarts. Changing the hop allowance in a run dialog applies only to that run. Imports use **Preview → Apply**; changing a file or import option requires a fresh preview. Imported data and color edits save through their own controls; **Save settings** saves the investigation preferences.
 
 **Plots & Miro** edits this investigation's layout attempts, connector appearance, attribution arrow coloring, named-group centering, separate branch hubs, isolated context grouping, and fee-flow visibility. The same controls in **Workspace defaults** set the starting values for new investigations. **Save layout settings** persists these preferences as defaults for the investigation, including before its first collection. **Generate** captures the current form settings for that layout without changing shared defaults, so simultaneous jobs can use different settings. Unsaved edits survive tab navigation in the current browser session. Separate branch hubs and optional fee-flow visibility apply to **Full trace** only; **Paths to peg-outs** always shows fees with the rest of each included transaction. Isolated context grouping applies to both **Full trace** and **Paths to peg-outs**. Other filtered layouts preserve the grouping preference without applying it. Existing saved layouts and Miro boards keep their appearance until you generate and sync a new layout.
 
 The task tabs are **Collect data**, **Plots & Miro**, and **History & downloads**. The selected saved snapshot stays selected across tabs. **Collected data** shows **Hops collected**, the deepest recorded transaction hop in that snapshot, separately from its collection hop limit. Starting transactions are hop 0; this maximum does not imply every branch reached that depth. Collection is the separate fetching phase. Plotting uses saved evidence; updating a board also reads its current arrangement. Combined generation and publication actions require Miro credentials. Linking and listing boards are local actions.
+
+Data collection ignores attribution CSV `hop_limit` values and follows every eligible
+selected-seed branch within the run's overall hop ceiling and resource budgets.
+Explicit `stop_tracing=true` still prevents expansion through that address, so
+adjudicated branches can be excluded from further collection. An independent
+selected path that does not pass through the stop can still continue. Use
+`hop_limit` to limit Full trace or Starter connections display without withholding
+data needed by Paths to peg-outs.
+
+Continue an older investigation to fill branches previously paused by an
+attribution hop limit. **0 additional hops** can fill gaps inside its existing
+ceiling; increase the allowance to collect farther. Then generate a new plot.
+Existing collection snapshots and saved plot exports remain unchanged.
 
 **Seed transactions** appears below Collected data on every investigation tab, including before collection starts. Each row shows the full transaction ID and its selected zero-based vout indexes. Live transaction IDs link to Blockstream Explorer. Selecting a saved snapshot shows its recorded starting outputs, including older CLI-created investigations. If that snapshot has no recorded seed field, the panel shows the investigation's configured seeds and labels them accordingly. Viewing seeds does not fetch transactions or change tracing settings.
 
@@ -164,8 +177,9 @@ Use **Miro boards** to initialize and maintain a separate board for this goal.
 
 Select **Include unspent UTXOs** and/or **Include unspendable outputs** to also
 plot paths to those endpoints. Peg-outs remain included. The same inclusive hop
-range, selected seeds, and current attribution stop/hop limits apply to every
-endpoint type. Unspent requires a saved observation that the exact UTXO was
+range, selected seeds, and explicit stop-tracing rules apply to every
+endpoint type. Attribution CSV `hop_limit` values are ignored by new peg-out
+layouts, including a value of zero. Unspent requires a saved observation that the exact UTXO was
 unspent; unchecked outputs and branches paused at a hop limit do not qualify.
 It describes the selected collection run, not the current live balance. A saved
 spending transaction overrides an older unspent observation. Unspendable outputs
@@ -334,7 +348,7 @@ are in `examples/address-attributions-template.csv` and `.json`.
 Only Address is required. Address-only lists default to suspected confidence and
 stop_tracing=true. Explicitly set false to keep tracing through a named address.
 Names, sources and notes are free text; notes supports multiple lines. Optional
-enabled and observed_at fields remain available. Limits: 5,000 rows / 512 KiB.
+enabled and observed_at fields remain available. The optional `hop_limit` column controls Full trace and Starter connections display; collection and new peg-out plots ignore it. Use `stop_tracing=true` to stop collection. Limits: 5,000 rows / 512 KiB.
 Import the exact public address spelling from the trace/explorer; address text is
 validated offline but network/checksum and confidential aliases are not resolved.
 

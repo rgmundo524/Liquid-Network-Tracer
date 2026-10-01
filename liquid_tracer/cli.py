@@ -152,7 +152,7 @@ def parser():
     service.add_argument("--notes", "--rationale", dest="notes", default=None, help="Notes supporting the attribution")
     service.add_argument("--confidence", choices=("suspected", "confirmed"), default=None)
     service.add_argument("--source", default=None)
-    service.add_argument("--hop-limit", default=UNSET, help="Additional hops after this address; blank clears the cap")
+    service.add_argument("--hop-limit", default=UNSET, help="Additional hops shown after this address in full/connection plots; ignored by collection and peg-out paths; blank clears the cap")
     service.add_argument("--stop-tracing", choices=("true", "false"), default=None)
     service.add_argument("--disable", action="store_true", help="Disable this designation so future continuation can resume its branches")
     run = commands.add_parser("trace", help="Start or extend a bounded run")
@@ -572,6 +572,10 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
             or state.get("case_id") != namespace["case_id"]
             or state.get("source") != namespace["source"]):
         raise TraceError("Saved trace does not match the Miro plan's run, case, or API source")
+    from .plot_scope import project_collected_full_scope
+    # Verify the original plan against the original attribution snapshot. A
+    # broader new collection can have a deliberately narrower archived graph.
+    archived_display = project_collected_full_scope(state)
     if service_settings is not None:
         state["labels"] = apply_service_labels(state["labels"], service_settings)
         state["service_controls"] = {key: value for key, value in service_settings.items() if key != "history"}
@@ -580,7 +584,8 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
         if (count_case / "case.json").is_file():
             apply_saved_counts(count_case, state)
         merged = namespace["address_mode"] == "merged"
-        full_graph = build_graph(state, merged, include_fees=True)
+        full_graph = build_graph(archived_display if archived_display is not state else state,
+                                 merged, include_fees=True)
         full_plan = make_plan(full_graph)
         fee_outpoints = {f"{txid}:{index}" for txid, record in state["transactions"].items()
                          for index, output in enumerate(record["data"]["vout"])
@@ -607,7 +612,7 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
             raise TraceError("Presentation refresh would change saved graph topology beyond fee flows; use an explicit verified --plan or regenerate an export for review")
     # Layout is a derivative of verified evidence, never a rewrite of the archive.
     from .elk_layout import optimize_graph
-    graph = build_graph(state, merge_addresses=True, include_fees=include_fees,
+    graph = build_graph(project_collected_full_scope(state), merge_addresses=True, include_fees=include_fees,
                         group_context_inputs=group_context_inputs, hub_addresses=hub_addresses,
                         color_attribution_arrows=color_attribution_arrows, center_name=center_name)
     if fetch_address_counts:
@@ -1022,7 +1027,7 @@ def open_preview(path):
         return False
 
 
-def saved_graph(case, run_id="latest", include_fees=None, *, group_context_inputs=None):
+def saved_graph(case, run_id="latest", include_fees=None, *, group_context_inputs=None, full_accounting=False):
     """Build current presentation from a verified snapshot, without case writes."""
     case = Path(case)
     metadata = read_case(case)
@@ -1039,7 +1044,9 @@ def saved_graph(case, run_id="latest", include_fees=None, *, group_context_input
     state["service_controls"] = {key: value for key, value in service_settings.items() if key != "history"}
     apply_saved_counts(case, state)
     fees = include_fee_flows(metadata, include_fees)
-    graph = build_graph(state, merge_addresses=True, include_fees=fees,
+    from .plot_scope import project_collected_full_scope
+    graph = build_graph(state if full_accounting else project_collected_full_scope(state),
+                        merge_addresses=True, include_fees=fees,
                         group_context_inputs=context_input_grouping(metadata, group_context_inputs),
                         color_attribution_arrows=attribution_arrow_coloring(metadata),
                         hub_addresses=branch_hubs(metadata), center_name=centered_name_group(metadata))
@@ -1132,7 +1139,7 @@ def csv_run(case, run_id="latest", out=None, include_fees=None):
 
     case = Path(case)
     # Grouping is a drawing choice; tabular I/O keeps its original endpoints.
-    run_id, archive, graph = saved_graph(case, run_id, include_fees, group_context_inputs=False)
+    run_id, archive, graph = saved_graph(case, run_id, include_fees, group_context_inputs=False, full_accounting=True)
     destination = Path(out) if out is not None else case / "exports" / (run_id + "-csv-" + uuid.uuid4().hex[:8])
     if destination.resolve().is_relative_to((case / "runs").resolve()):
         raise TraceError("Save CSV exports outside runs/ to preserve archived evidence")

@@ -86,6 +86,8 @@ def _plan(case, state, target, metadata):
     if (trace.get("case_id") != metadata["case_id"] or trace.get("run_id") != selected
             or trace.get("source") != namespace["source"]):
         raise TraceError("Address conversion archive does not match the mapped graph")
+    from .plot_scope import project_collected_full_scope
+    trace = project_collected_full_scope(trace)
     old, new = (build_graph(trace, merge_addresses=merged, include_fees=True) for merged in (False, True))
     old_nodes = {n["id"]: n for n in old["nodes"]}
     old_edges = {e["id"]: e for e in old["edges"]}
