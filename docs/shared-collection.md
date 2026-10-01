@@ -51,6 +51,14 @@ the previous ceiling. Changing the hop origin uses the entered maximum for
 that origin. To add other seed outputs, start a fresh shared collection with the
 desired investigations open.
 
+After a gracefully saved error or interruption, choose **Continue shared data**
+and set **Additional hops** to **0** to finish the existing hop ceiling. Keep
+the same hop origin and policy settings. For example, a run stopped at hop 12
+of 15 resumes toward 15; entering 15 additional hops would instead target 30.
+The continuation reuses saved confirmed transactions and resumes unfinished
+outputs, while refreshing spending observations. The failed run remains an
+unchanged historical snapshot.
+
 If another collection completes before a prepared continuation starts, the
 stale continuation is rejected. Select the new latest snapshot before retrying.
 Historical shared snapshots remain available for plotting.

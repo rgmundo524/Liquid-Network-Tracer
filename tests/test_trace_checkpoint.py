@@ -34,7 +34,7 @@ class TraceCheckpointTests(unittest.TestCase):
     def test_skipped_saves_do_not_build_statistics_or_serialize(self):
         build_and_save = Mock()
         self.assertTrue(self.checkpoint.save(build_and_save, force=True, completed=False))
-        for _ in range(255):
+        for _ in range(self.checkpoint.max_operations - 1):
             self.assertFalse(self.checkpoint.save(build_and_save))
         self.assertEqual(build_and_save.call_count, 1)
         self.assertTrue(self.checkpoint.save(build_and_save))
@@ -56,7 +56,55 @@ class TraceCheckpointTests(unittest.TestCase):
         callback = Mock()
         self.assertFalse(self.checkpoint.save(callback))
         self.clock.advance(2)
+        self.assertFalse(self.checkpoint.save(callback))
+        self.assertEqual(self.checkpoint.next_interval_seconds, 90)
+        self.clock.advance(88)
         self.assertTrue(self.checkpoint.save(callback))
+
+    def test_recovery_time_ceiling_takes_priority_over_overhead_target(self):
+        self.checkpoint.save(lambda: self.clock.advance(100), force=True, completed=False)
+        self.assertEqual(self.checkpoint.next_interval_seconds, 120)
+        self.clock.advance(119)
+        self.assertFalse(self.checkpoint.save(lambda: None))
+        self.clock.advance(1)
+        self.assertTrue(self.checkpoint.save(lambda: None))
+
+    def test_operation_ceiling_takes_priority_over_costly_write_delay(self):
+        checkpoint = TraceCheckpoint(max_operations=3, clock=self.clock)
+        checkpoint.save(lambda: self.clock.advance(100), force=True, completed=False)
+        callback = Mock()
+        self.assertFalse(checkpoint.save(callback))
+        self.assertFalse(checkpoint.save(callback))
+        self.assertTrue(checkpoint.save(callback))
+        callback.assert_called_once_with()
+
+    def test_cost_increases_apply_immediately_and_decreases_are_smoothed(self):
+        self.checkpoint.save(lambda: self.clock.advance(10), force=True, completed=False)
+        self.checkpoint.save(lambda: None, force=True, completed=False)
+        self.assertEqual(self.checkpoint.next_interval_seconds, 67.5)
+        self.checkpoint.save(lambda: self.clock.advance(12), force=True, completed=False)
+        self.assertEqual(self.checkpoint.next_interval_seconds, 108)
+
+    def test_growing_snapshot_cost_does_not_dominate_collection(self):
+        def simulate(checkpoint):
+            # A deterministic growing graph, with response/processing work
+            # between snapshots. No wall-clock sleeps or timing assertions.
+            def write():
+                checkpoint.clock.advance(completed * .00015)
+
+            for completed in range(1, 82692):
+                checkpoint.clock.advance(.02)
+                checkpoint.save(write)
+            checkpoint.save(write, force=True, completed=False)
+            return checkpoint.writes, checkpoint.write_seconds / checkpoint.clock()
+
+        old = TraceCheckpoint(max_operations=256, max_interval_seconds=2, clock=Clock())
+        adaptive = TraceCheckpoint(clock=Clock())
+        old_count, old_fraction = simulate(old)
+        new_count, new_fraction = simulate(adaptive)
+        self.assertLess(new_count, old_count / 5)
+        self.assertGreater(old_fraction, .7)
+        self.assertLess(new_fraction, .15)
 
     def test_clean_final_save_includes_changes_outside_output_processing(self):
         state, snapshots = {"status": "running"}, []
@@ -102,6 +150,12 @@ class TraceCheckpointTests(unittest.TestCase):
         for maximum in (0, -1, 1.5, True):
             with self.subTest(maximum=maximum), self.assertRaises(ValueError):
                 TraceCheckpoint(max_operations=maximum)
+        for maximum in (0, 1, float("nan"), float("inf")):
+            with self.subTest(maximum_interval=maximum), self.assertRaises(ValueError):
+                TraceCheckpoint(max_interval_seconds=maximum)
+        for target in (0, -1, 1, float("nan"), float("inf")):
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                TraceCheckpoint(target_overhead=target)
 
 
 class TraceCheckpointRecoveryTests(unittest.TestCase):
@@ -114,7 +168,7 @@ class TraceCheckpointRecoveryTests(unittest.TestCase):
         self.store = Store(self.root / "evidence")
         self.addCleanup(self.store.close)
 
-    def run_trace(self, *, parent=None, fail=None, max_outpoints=2000):
+    def run_trace(self, *, parent=None, fail=None, max_outpoints=2000, checkpoint_clock=None):
         limits = Limits(max_hops=3, max_outpoints=max_outpoints)
         with Esplora(self.store, "pending", limits, fixture=self.fixture_path,
                      min_interval=0, workers=1) as api:
@@ -125,6 +179,8 @@ class TraceCheckpointRecoveryTests(unittest.TestCase):
             snapshots = []
 
             def get(endpoint):
+                if checkpoint_clock:
+                    checkpoint_clock.advance(2)
                 if fail and endpoint == "/tx/" + B + "/outspends":
                     raise fail
                 return actual_get(endpoint)
@@ -132,9 +188,13 @@ class TraceCheckpointRecoveryTests(unittest.TestCase):
             def write(destination, value):
                 save_json(destination, value)
                 snapshots.append(read_json(destination))
+                if checkpoint_clock:
+                    checkpoint_clock.advance(.5)
 
             module = importlib.import_module("liquid_tracer.trace")
-            with patch.object(api, "get", get), patch.object(module, "save_json", write):
+            with patch.object(api, "get", get), patch.object(module, "save_json", write), \
+                 patch.object(module, "TraceCheckpoint", side_effect=lambda: TraceCheckpoint(
+                     clock=checkpoint_clock) if checkpoint_clock else TraceCheckpoint()):
                 result = trace(api, state, limits, path)
             saved = read_json(path)
             self.assertEqual(evidence_topology(saved), evidence_topology(result))
@@ -155,6 +215,16 @@ class TraceCheckpointRecoveryTests(unittest.TestCase):
         self.assertEqual(len(snapshots), 2)
         self.assertEqual(result["stats"]["outpoints_examined_this_run"], 0)
         self.assertEqual(snapshots[-1]["status"], "bounded_complete")
+
+    def test_periodic_adaptive_snapshot_resumes_complete_evidence_topology(self):
+        complete, snapshots = self.run_trace(checkpoint_clock=Clock())
+        self.assertGreater(len(snapshots), 2)
+        partial = snapshots[1]
+        self.assertEqual(partial["status"], "running")
+        self.assertIsNone(partial["finished_at"])
+        self.assertLess(len(partial["transactions"]), len(complete["transactions"]))
+        resumed, _ = self.run_trace(parent=partial)
+        self.assertEqual(evidence_topology(resumed), evidence_topology(complete))
 
     def test_error_interruption_and_limit_force_resumable_checkpoint(self):
         complete, _ = self.run_trace()

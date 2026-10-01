@@ -130,7 +130,8 @@ class ExplorerPipelineTests(unittest.TestCase):
         transport = Mock(side_effect=[StaleExplorerConnection('Network request failed: RemoteDisconnected'),
                                       (200, {}, b'{}')])
         client = self.client(transport, limits=Limits(max_requests=2))
-        self.assertEqual(client.get('/tx/one')[0], {})
+        with patch.object(client._cancelled, 'wait', return_value=False):
+            self.assertEqual(client.get('/tx/one')[0], {})
         self.assertEqual(client.budget.requests, 2)
         self.assertEqual(transport.call_count, 2)
         statuses = self.store.db.execute('SELECT status FROM attempts ORDER BY id').fetchall()
@@ -148,7 +149,7 @@ class ExplorerPipelineTests(unittest.TestCase):
         self.assertEqual(transport.call_count, 1)
         transport.reset_mock()
         bounded = self.client(transport, run_id='bounded', limits=Limits(max_requests=20))
-        with self.assertRaises(StaleExplorerConnection):
+        with patch.object(bounded._cancelled, 'wait', return_value=False), self.assertRaises(StaleExplorerConnection):
             bounded.get('/tx/two')
         self.assertEqual(transport.call_count, 4)
         self.assertEqual(bounded.budget.requests, 4)
@@ -177,7 +178,7 @@ class ExplorerPipelineTests(unittest.TestCase):
 
         client.transport = transport
         with patch('liquid_tracer.api.time.monotonic', side_effect=lambda: clock[0]), \
-             patch.object(client.budget, 'pause', side_effect=pause), \
+             patch.object(client._cancelled, 'wait', side_effect=pause), \
              patch.object(self.store, 'attempt', side_effect=attempt), \
              patch.object(self.store, 'observe', side_effect=observe):
             client.get('/tx/one')
