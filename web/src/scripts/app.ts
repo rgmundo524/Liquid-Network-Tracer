@@ -73,6 +73,7 @@ type EndpointExport = {
 };
 type Artifact = RenderingMetadata & {
   max_hops?: number | null; connection_count?: number; connection_status?: string; connection_scope?: "all_saved";
+  transaction_io?: "complete"; context_edge_count?: number;
   downloads: Download[];
   preview_url?: string;
   include_fees: boolean;
@@ -175,6 +176,7 @@ type Result = RenderingMetadata & {
   performance?: CollectionPerformance;
   address_counts?: CountReport;
   max_hops?: number | null; connection_count?: number; connection_status?: string; connection_scope?: "all_saved";
+  transaction_io?: "complete"; context_edge_count?: number;
   connector_style?: ConnectorStyle;
   layout_metrics?: LayoutMetrics;
   preview_id?: string;
@@ -700,16 +702,14 @@ function budgetFields(settings: Settings): string {
 function graphFields(settings: Settings, suggest = false, goal: PlotGoal = "full"): string {
   const check = (key: "include_fees" | "color_attribution_arrows" | "group_context_inputs", label: string, hint: string): string =>
     `<input type="hidden" name="${key}_present" value="1"/><label class="check-line"><input name="${key}" type="checkbox"${settings[key] ? " checked" : ""}/><span><strong>${label}</strong><small>${hint}</small></span></label>`;
-  const canGroupContext = goal === "full" || goal === "pegouts";
   return `<div class="field-row"><label class="field"><span>Connector appearance</span><select name="connector_style">${connectorOptions(settings.connector_style)}</select></label>${numericField(settings, "layout_attempts", "Layout attempts", "More attempts compare more arrangements and take longer.")}</div>
     ${check("color_attribution_arrows", "Color arrows by attribution", "Use each named address's assigned color for its arrows.")}
     ${centerNameFields(settings, suggest)}
-    <fieldset class="layout-fields context-grouping-fields"${disabled(!canGroupContext)}><legend>Context input grouping</legend>
+    <fieldset class="layout-fields context-grouping-fields"><legend>Context input grouping</legend>
     ${check("group_context_inputs", "Group isolated context inputs", "Combine isolated external input addresses used by one transaction. Shared or named addresses and context outputs stay separate. Changing this grouping replaces generated context objects; preserve any Miro comments on them first.")}</fieldset>
-    ${goal === "connections" ? '<p class="small muted">Context input grouping applies to Full trace and Paths to peg-outs.</p>' : ""}
     <fieldset class="layout-fields full-trace-fields"${disabled(goal !== "full")}><legend>Full trace options</legend>
     ${check("include_fees", "Include transaction fee flows", "Show fees above the graph.")}
-    ${hubAddressFields(settings)}</fieldset>${goal === "pegouts" ? '<p class="small muted">Peg-out layouts always show every transaction input and output, including fees. Separate branch hubs apply to Full trace.</p>' : goal === "connections" ? '<p class="small muted">Fee flows and separate branch hubs apply to Full trace.</p>' : ""}`;
+    ${hubAddressFields(settings)}</fieldset>${goal !== "full" ? `<p class="small muted">${goal === "pegouts" ? "Peg-out" : "Starter connection"} layouts always show every transaction input and output, including fees. Separate branch hubs apply to Full trace.</p>` : ""}`;
 }
 
 function traceSummary(settings: Settings): string {
@@ -1120,10 +1120,10 @@ function connectionsGraph(artifact: Artifact | undefined, saved: boolean): strin
   const source = artifact?.downloads.find(item => item.name === "graph.mmd");
   const evidence = artifact?.downloads.find(item => item.name === "connections.json");
   const transactions = artifact?.downloads.find(item => item.name === "transactions.csv");
-  return `<section class="panel" id="connections-panel"><div class="panel-head"><div><h2>Starter connections</h2><p>Only directed paths that reach another starting transaction.</p></div></div>
+  return `<section class="panel" id="connections-panel"><div class="panel-head"><div><h2>Starter connections</h2><p>Transactions on directed paths that reach another starting transaction.</p></div></div>
   <div class="panel-body"><p>Shows all verified connections in the selected saved run, ignoring attribution hop limits, stop-tracing rules, and plotting hop cutoffs. Labels remain visible. No additional transactions are fetched, so collection limits may leave connections undiscovered.</p>
   ${button("Plot starter connections", "connections", "graph", "", !saved || isBusy())}
-  ${artifact ? `<p>${count === 0 ? "No connection found in the saved searched data. Nothing is plotted." : `${count} ordered starter pair(s) connected${artifact.connection_scope === "all_saved" ? " · All saved connections" : ` within ${artifact.max_hops} hops`}.`}</p>` : ""}
+  ${artifact ? `<p>${count === 0 ? "No connection found in the saved searched data. Nothing is plotted." : `${count} ordered starter pair(s) connected${artifact.connection_scope === "all_saved" ? " · All saved connections" : ` within ${artifact.max_hops} hops`}.`}</p><p class="small muted">Saved layout: ${artifact.transaction_io === "complete" ? `All transaction inputs and outputs, including fees. Isolated context inputs ${artifact.group_context_inputs ? "grouped" : "separate"}.${artifact.context_edge_count === undefined ? "" : ` ${artifact.context_edge_count} context connections, excluded from starter-pair counts.`}` : "Paths only."}</p>` : ""}
   ${downloadLink(svg, "SVG", "small")}${downloadLink(source, "Mermaid source", "small")}${downloadLink(evidence, "Connection report", "small")}${downloadLink(transactions, "Transaction CSV", "small")}
   ${preview ? `<a class="btn small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">Open full view</a>` : ""}${detailPagesLink(artifact?.downloads)}
   ${artifact?.preview_id && count ? `<details><summary>Publish this reviewed snapshot to Miro</summary><p>Use a separate board. The full trace board is protected. One immutable snapshot per board; repeating this publication reuses acknowledged items.</p>
@@ -1497,6 +1497,7 @@ function plotEndpointScope(plot: Plot): string {
 }
 
 function plotEndpointLabel(plot: Plot | undefined): string {
+  if (plot?.goal === "connections") return ` · ${plotContextScope(plot)}`;
   if (plot?.goal !== "pegouts") return "";
   const count = plot.endpoint_count ?? plot.match_count;
   return ` · ${plotEndpointScope(plot)}${count === undefined ? "" : ` · ${count} endpoints`} · ${plotContextScope(plot)}`;
@@ -1510,8 +1511,14 @@ function plotContextScope(plot: Plot): string {
 }
 
 function plotEndpointSummary(plot: Plot | undefined): string {
-  if (plot?.goal === "connections" && plot.query?.connection_scope === "all_saved")
-    return '<p class="small muted">All verified saved connections. Attribution hop limits, stop-tracing rules, and plotting hop cutoffs are ignored; labels remain visible.</p>';
+  if (plot?.goal === "connections") {
+    const scope = plot.query?.connection_scope === "all_saved"
+      ? '<p class="small muted">All verified saved connections. Attribution hop limits, stop-tracing rules, and plotting hop cutoffs are ignored; labels remain visible.</p>' : "";
+    const complete = plot.query?.transaction_io === "complete";
+    const contextCount = complete && plot.context_edge_count !== undefined
+      ? ` ${plot.context_edge_count} context connections, excluded from starter-pair counts.` : "";
+    return `${scope}<p class="small muted">Saved layout: ${plotContextScope(plot)}.${contextCount}</p>${complete ? '<p class="small muted">Every included transaction retains all inputs and outputs, including fees, in the graph and transaction CSV. Context objects do not extend the selected connecting paths.</p>' : ""}`;
+  }
   if (plot?.goal !== "pegouts") return "";
   const counts = plot.endpoint_counts;
   const matches = counts ? `${counts.pegout} peg-out requests · ${counts.unspent} unspent UTXOs · ${counts.unspendable} unspendable outputs`
@@ -1582,6 +1589,7 @@ function plotBoardSummary(plot: Plot | undefined): string {
 }
 
 function plotEndpointFields(draft: typeof workflowDraft): string {
+  if (draft.goal === "connections") return '<p class="artifact-note">Every included transaction shows all its inputs and outputs, including fees. Outputs on excluded branches remain visible without continuing those branches. The transaction CSV includes this complete accounting; extra context does not add starter-pair matches.</p>';
   if (draft.goal !== "pegouts") return "";
   return `<fieldset class="layout-fields"${disabled(draftBusy())}><legend>Additional endpoints</legend>
     <label class="check-line"><input id="workflow-include-unspent" type="checkbox"${draft.includeUnspent ? " checked" : ""}/><span>Include unspent UTXOs</span></label>
@@ -1594,7 +1602,7 @@ function plotEndpointFields(draft: typeof workflowDraft): string {
 function savedLayoutSummary(plot: Plot): string {
   const settings = plot.layout_settings;
   if (!settings) return "";
-  const contextGrouping = plot.goal === "full" || plot.goal === "pegouts" && (plot.query?.transaction_io === "complete" || plot.query?.include_context);
+  const contextGrouping = plot.goal === "full" || plot.query?.transaction_io === "complete" || plot.goal === "pegouts" && plot.query?.include_context;
   return `<details class="tool-details"><summary>Saved layout settings</summary><p>${esc(human(settings.connector_style))} connectors · ${esc(settings.layout_attempts)} layout attempts · Attribution arrow colors ${settings.color_attribution_arrows ? "on" : "off"}.</p><p>Centered group: ${esc(settings.center_name || "None")}.${contextGrouping ? ` Isolated context inputs ${settings.group_context_inputs ? "grouped" : "separate"}.` : ""}${plot.goal === "full" ? ` Fee flows ${settings.include_fees ? "shown" : "hidden"}; ${esc(settings.hub_addresses.length)} separate branch hubs.` : ""}</p></details>`;
 }
 
@@ -2538,6 +2546,7 @@ async function pollJob(identity: string): Promise<void> {
               compaction: result.compaction,
               preview_id: result.preview_id,
               max_hops: result.max_hops, connection_count: result.connection_count, connection_status: result.connection_status, connection_scope: result.connection_scope,
+              transaction_io: result.transaction_io, context_edge_count: result.context_edge_count,
               layout_algorithm: result.layout_algorithm,
               layout_attempts: result.layout_attempts,
               renderer: result.renderer,

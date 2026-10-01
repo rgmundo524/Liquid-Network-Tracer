@@ -1,8 +1,9 @@
 # Starter connections: all verified saved paths between starting transactions
 
-**Starter connections** builds a separate connection-only graph from the selected
-saved run. New plots search every verified saved connection between starting
-transactions. They ignore attribution `stop_tracing` and `hop_limit` values and
+**Starter connections** selects transactions on verified saved paths between
+starting transactions, then displays every input and output of each selected
+transaction. New plots search every verified saved connection in the selected
+run. They ignore attribution `stop_tracing` and `hop_limit` values and
 have no additional plotting hop cutoff. Attribution labels, colors, and recorded
 confirmation status remain visible.
 
@@ -27,9 +28,13 @@ two separate hops. Direct starter-to-starter spends also qualify.
 Every verified saved route is considered, not only the shortest route. A longer
 saved route remains eligible even when an intermediate address has a stop rule
 or an attribution hop cap. The chart contains the union of those transactions
-and exact connecting UTXOs. Dead-end branches, unrelated co-inputs, extra
-outputs, fees, and isolated starters are omitted. If C has no saved connection
-to another starter, C is not plotted. With no connected starter pair, the graph
+with their complete inputs and outputs, including fees, peg-outs, unspendable
+outputs, and context addresses. Other inputs and outputs provide local context;
+they do not establish a qualifying connection or add further transactions. A
+side branch therefore appears as its first output without expanding its later
+transactions. Unchecked outputs are not labeled unspent merely because that
+branch is not followed. If C has no saved connection to another starter, C is
+not plotted. With no connected starter pair, the graph
 and publication plan are empty and publication makes no Miro requests.
 
 The search is directed. `A -> X <- B` does not qualify unless X is itself another
@@ -57,10 +62,11 @@ existing ceiling, or add hops for a larger ceiling. Generate a new connection
 plot from the resulting saved run.
 
 Older saved Starter connections queries retain their original stop rules,
-attribution caps, and hop bounds. Their reports and publication scope do not
-change when the application is updated. Generate a new layout to use all
-verified saved connections. Saved preview selectors distinguish **all saved
-connections** from older bounded snapshots.
+attribution caps, hop bounds, and input/output selection. Their reports and
+publication scope do not change when the application is updated. Generate a new
+layout to display complete transaction inputs and outputs on all verified saved
+connections. Saved preview selectors distinguish **all saved connections** from
+older bounded snapshots.
 
 ## Browser and terminal
 
@@ -75,11 +81,14 @@ Starter connections hop chooser. The older **Starter connections** dialog uses
 the latest saved run. Its **Publish starter connections to Miro** dialog lets
 you select a reviewed snapshot and supply a separate Miro board.
 
-Connection-only charts use one address circle per **connecting UTXO**, including
-when several UTXOs use the same address. This prevents address merging from
+Starter connection charts use one address circle per **UTXO**, including when
+several UTXOs use the same address. This prevents address merging from
 visually inventing cross-spends between unrelated outputs. The ordinary graph's
 merged-address setting is unchanged. Configured role/name colors, starter
 transaction styling, and applicable border-only highlights are retained.
+**Group isolated context inputs** can combine eligible external input addresses
+into a summary while preserving each input's connector and CSV row. Transaction
+fee outputs are always included in newly generated connection plots.
 
 ## Publishing older standalone previews
 
@@ -120,6 +129,7 @@ cumulative sync.
 
 Connections establish UTXO reachability, not ownership, common control, the asset
 or amount of a confidential output, or allocation of stolen value. Transaction
-CSV downloads contain the input/output arrows in this connection view, using
-the [transaction CSV schema](transaction-csv.md). Historical snapshots remain
+CSV downloads contain every input and output of each selected transaction, using
+the [transaction CSV schema](transaction-csv.md). Context grouping does not
+collapse the individual CSV rows. Historical snapshots remain
 available with their original scope and files.

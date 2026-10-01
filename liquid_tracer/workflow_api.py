@@ -51,16 +51,22 @@ def public_plot(value):
             and value.get("max_hops") is None):
         result["connection_scope"] = "all_saved"
         query = value.get("query")
-        if (isinstance(query, dict) and set(query) <= {"connection_scope", "hop_reference_name"}
+        if (isinstance(query, dict) and set(query) <= {"connection_scope", "hop_reference_name", "transaction_io"}
                 and query.get("connection_scope") == "all_saved"):
             from .group_hops import normalize_reference_name
             try:
                 name = normalize_reference_name(query.get("hop_reference_name", ""))
                 normalized = {"connection_scope": "all_saved", **({"hop_reference_name": name} if name else {})}
+                if query.get("transaction_io") == "complete":
+                    normalized["transaction_io"] = "complete"
                 if query == normalized:
                     result["query"] = normalized
             except TraceError:
                 pass
+        context_count = value.get("context_edge_count")
+        if (result.get("query", {}).get("transaction_io") == "complete"
+                and type(context_count) is int and context_count >= 0):
+            result["context_edge_count"] = context_count
     if value.get("goal") == "pegouts":
         from .pegout_paths import validate_query
         from .pegout_csv import validate_pegout_lbtc_summary

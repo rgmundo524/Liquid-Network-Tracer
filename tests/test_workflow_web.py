@@ -68,7 +68,7 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertIn(b"html", self.success(plot["artifact"]["preview_url"]).lower())
             if plot["goal"] == "connections":
                 self.assertEqual(plot["connection_scope"], "all_saved")
-                self.assertEqual(plot["query"], {"connection_scope": "all_saved"})
+                self.assertEqual(plot["query"], {"connection_scope": "all_saved", "transaction_io": "complete"})
                 self.assertIsNone(plot["max_hops"])
         self.assertNotIn(str(case), json.dumps(detail))
         self.assertNotIn("state_file", json.dumps(detail))
@@ -495,6 +495,29 @@ class WorkflowWebTests(unittest.TestCase):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             self.assertEqual(main(["plot", "--case", str(case), "--goal", "pegouts"]), 0)
+        self.assertEqual(json.loads(output.getvalue())["query"]["transaction_io"], "complete")
+
+    def test_default_starter_cli_http_listing_and_csv_keep_complete_transaction_io(self):
+        from tests.test_connections_complete_workflow import complete_state, input_output_keys
+
+        case, route, _ = self.collected()
+        state, _ = saved_case(case, complete_state())
+        update_case(case, {"run_defaults": {"group_context_inputs": True, "include_fees": False}})
+        plot = preview_plot(case, "connections")
+        listed = next(item for item in self.success(route)["plots"] if item["preview_id"] == plot["preview_id"])
+        self.assertEqual(listed["query"], {"connection_scope": "all_saved", "transaction_io": "complete"})
+        self.assertEqual(listed["context_edge_count"], plot["context_edge_count"])
+        self.assertGreater(listed["context_edge_count"], 0)
+        self.assertTrue(listed["layout_settings"]["include_fees"])
+        self.assertTrue(listed["layout_settings"]["group_context_inputs"])
+        downloads = {item["name"]: item["url"] for item in listed["artifact"]["downloads"]}
+        rows = list(csv.DictReader(io.StringIO(self.success(downloads["transactions.csv"]).decode())))
+        self.assertEqual({(row["Transaction Hash"], row["Direction"], row["Number of I/O"]) for row in rows},
+                         input_output_keys(state, {name * 64 for name in "acb"}))
+        self.assertNotIn("endpoints.csv", downloads)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(main(["plot", "--case", str(case), "--goal", "connections"]), 0)
         self.assertEqual(json.loads(output.getvalue())["query"]["transaction_io"], "complete")
 
     def test_busy_plot_registry_does_not_hide_the_investigation_or_expose_paths(self):

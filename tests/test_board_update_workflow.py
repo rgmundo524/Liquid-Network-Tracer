@@ -10,8 +10,8 @@ from liquid_tracer import input_import
 from liquid_tracer.common import TraceError, read_json
 from liquid_tracer.elk_layout import optimize_graph
 from liquid_tracer.investigation_boards import create_and_sync, list_boards, sync_board
-from liquid_tracer.investigations import create_investigation
-from liquid_tracer.plots import preview_plot, reviewed_plot
+from liquid_tracer.investigations import create_investigation, update_case
+from liquid_tracer.plots import _query, preview_plot, reviewed_plot
 from tests.test_attribution_convergence import graph_state, tx
 from tests.test_board_workflow import BoardRemote
 from tests.test_connections import saved_case
@@ -128,6 +128,48 @@ class BoardUpdateWorkflowTests(unittest.TestCase):
         self.assertGreater(report["deleted"], 0)
         self.assertEqual(self.mapping(), {})
         self.assertEqual(self.remote.items, {note["id"]: note})
+
+    def test_markerless_starter_board_update_adds_complete_io_preserving_ids_and_manual_positions(self):
+        from tests.test_connections_complete_workflow import complete_state, csv_rows, input_output_keys
+
+        self.state, self.archive = saved_case(self.case, complete_state())
+        before_archive = {path.name: path.read_bytes() for path in self.archive.iterdir() if path.is_file()}
+
+        def legacy_query(*args, **kwargs):
+            return _query(*args, **{**kwargs, "transaction_io": None})
+
+        with patch("liquid_tracer.plots._query", side_effect=legacy_query):
+            self.publish("connections")
+        self.item("tx:" + tx("c"))["position"].update(x=3000, y=-1500)
+        note = self.note()
+        old_mapping = deepcopy(self.mapping())
+        old_positions = {key: deepcopy(self.remote.items[record["id"]]["position"])
+                         for key, record in old_mapping.items() if record["endpoint"] == "shapes"}
+        update_case(self.case, {"run_defaults": {"group_context_inputs": True}})
+        before = deepcopy(self.remote.items)
+        with patch("liquid_tracer.elk_layout.optimize_graph", wraps=optimize_graph) as elk:
+            preview = self.prepare("connections")
+        self.assertEqual(self.remote.items, before)
+        graph, _ = reviewed_plot(self.case, preview["preview_id"])
+        self.assertEqual(graph["address_mode"], "outpoint_occurrences")
+        self.assertEqual(preview["query"]["transaction_io"], "complete")
+        new_nodes = {node["id"] for node in graph["nodes"]} - old_mapping.keys()
+        self.assertTrue(new_nodes)
+        elk.assert_called_once()
+        self.assertEqual({node["id"] for node in elk.call_args.args[0]["nodes"]}, new_nodes)
+        self.assertEqual({(row["Transaction Hash"], row["Direction"], row["Number of I/O"])
+                          for row in csv_rows(preview)}, input_output_keys(self.state, {tx(name) for name in "acb"}))
+        result = self.sync(preview)
+        self.assertGreater(result["created"], 0)
+        self.assertEqual(result["deleted"], 0)
+        for key, original in old_mapping.items():
+            self.assertEqual(self.mapping()[key]["id"], original["id"])
+        for key, original in old_positions.items():
+            self.assertEqual(self.item(key)["position"], original)
+        self.assertEqual(self.remote.items[note["id"]], note)
+        self.assertEqual(len(self.transport.creations), 1)
+        self.assertEqual(before_archive,
+                         {path.name: path.read_bytes() for path in self.archive.iterdir() if path.is_file()})
 
     def test_board_drift_after_update_review_prevents_all_writes(self):
         self.upload(0)

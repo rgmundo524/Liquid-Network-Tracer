@@ -148,7 +148,7 @@ destination. The available goals are shown together:
 | Goal | What it plots |
 | --- | --- |
 | Full investigation / Full trace | Saved activity reachable under the current stop/hop rules, using the current display settings. |
-| Starter connections | All verified saved paths between selected starting transactions, without attribution stops, attribution hop caps, or a plotting hop cutoff. Existing labels and confirmation status are preserved. |
+| Starter connections | Transactions on all verified saved paths between selected starting transactions, without attribution stops, attribution hop caps, or a plotting hop cutoff. Every selected transaction displays all its inputs and outputs. Existing labels and confirmation status are preserved. |
 | Paths to peg-outs | Transactions on verified paths from selected seed UTXOs to qualifying endpoints within the global hop range, respecting explicit stop rules and ignoring attribution hop caps. Every selected transaction displays all its inputs and outputs. |
 
 Choose **New board** and enter a name for a fresh arrangement, or choose
@@ -179,14 +179,18 @@ New plots ignore both `stop_tracing` and attribution `hop_limit` values and have
 no maximum-hop field. They preserve attribution names, colors, and confirmation
 status, including verified unconfirmed links already saved. A connection must
 start through a selected seed output and follow an exact, verified UTXO spend;
-shared addresses or matching names do not create connections. Other inputs and
-unrelated side branches are not added just to join starters. No blockchain
+shared addresses or matching names do not create connections. Every selected
+transaction displays all its inputs and outputs, including context inputs, fees,
+and the heads of unrelated side branches. These additional objects do not create
+qualifying connections or expand those branches further. The transaction CSV
+contains the same complete input/output accounting. No blockchain
 requests are made. Missing links still require collection, which continues to
 respect its explicit stops, global hop ceiling, and any enabled resource budgets.
 
-Older saved Starter connections plots keep their recorded stop/hop rules and
-bounds. Generate a new layout to use all saved connections; syncing an old
-layout does not silently change its scope.
+Older saved Starter connections plots keep their recorded stop/hop rules,
+bounds, and input/output selection. Generate a new layout to use complete
+transactions on all saved connections; syncing an old layout does not silently
+change its scope.
 
 **Paths to peg-outs** uses one circle per full address per network. Repeated
 UTXOs retain their separate connectors and transaction CSV rows. Unknown
@@ -275,7 +279,8 @@ contain them; the peg-out interface presents only the two downloads above.
 Set layout attempts, connector appearance, attribution arrow coloring, and
 named-group centering here. **Full trace** also supports **Separate branch hubs**,
 **Group isolated context inputs**, and **Include transaction fee flows**.
-**Group isolated context inputs** is also available for **Paths to peg-outs**.
+**Group isolated context inputs** is also available for **Paths to peg-outs**
+and **Starter connections**.
 It combines at least two eligible external input addresses used only by one
 transaction into a context summary.
 Traced, shared, attributed, and otherwise protected addresses remain separate,
@@ -284,9 +289,9 @@ the full member addresses stay available in local details. Endpoint matches,
 hop limits, and trace evidence are unchanged.
 
 Grouping is saved as an investigation layout preference and captured with each
-generated layout. Choosing Starter connections preserves the preference without
-applying it. Separate branch hubs and the optional fee-flow toggle remain
-Full trace-only; new peg-out layouts always display their transaction fees.
+generated layout. Separate branch hubs and the optional fee-flow toggle remain
+Full trace-only; new peg-out and Starter connections layouts always display
+their transaction fees.
 **Generate & update board** applies grouping changes. Replaced
 context objects join the newly arranged additions.
 

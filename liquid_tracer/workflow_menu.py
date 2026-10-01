@@ -29,6 +29,9 @@ def _item_budget_summary(settings):
 
 
 def _endpoint_summary(plot):
+    if plot.get("goal") == "connections" and plot.get("query", {}).get("transaction_io") == "complete":
+        return ("all transaction inputs and outputs included" +
+                (" (isolated inputs grouped)" if plot.get("layout_settings", {}).get("group_context_inputs") else ""))
     if plot.get("goal") != "pegouts":
         return ""
     query, counts = plot.get("query", {}), plot.get("endpoint_counts", {})
@@ -140,7 +143,8 @@ def plot_screen(base, button, case):
                             disabled=not self.settings["budget_limits_enabled"])
                 yield Static(_item_budget_summary(self.settings), markup=False)
                 yield Static("Full investigation: all displayed activity. Starter connections: all verified saved paths between "
-                             "starting transactions. Paths to peg-outs: verified paths ending in matching requests.", markup=False)
+                             "starting transactions. Paths to peg-outs: verified paths ending in matching requests. "
+                             "Both focused plots include every input and output of their selected transactions, including fees.", markup=False)
                 with Vertical(id="plot-range"):
                     with Vertical(id="plot-minimum"):
                         yield Label("Minimum transaction hops, inclusive")

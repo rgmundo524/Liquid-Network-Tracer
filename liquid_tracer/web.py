@@ -656,6 +656,9 @@ class LocalServer(ThreadingHTTPServer):
                         report = info["connections"]
                         if report.get("connection_scope") == "all_saved":
                             product["connection_scope"] = "all_saved"
+                        if report.get("transaction_io") == "complete":
+                            product["transaction_io"] = "complete"
+                            product["context_edge_count"] = report["context_edge_count"]
                         product.update(preview_id=directory.name, max_hops=report["max_hops"],
                                        connection_count=report["connection_count"], connection_status=report["status"])
                         layout = info.get("layout")
@@ -1103,6 +1106,9 @@ class LocalServer(ThreadingHTTPServer):
                 report = graph["connections"]
                 if report.get("connection_scope") == "all_saved":
                     value["connection_scope"] = "all_saved"
+                if report.get("transaction_io") == "complete":
+                    value["transaction_io"] = "complete"
+                    value["context_edge_count"] = report["context_edge_count"]
                 value.update(preview_id=directory.name, max_hops=report["max_hops"],
                              connection_count=report["connection_count"], connection_status=report["status"])
             if action == "compact":
