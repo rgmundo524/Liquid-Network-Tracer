@@ -1,6 +1,6 @@
 import unittest
 
-from liquid_tracer.performance import (API_COUNTS, API_SECONDS, API_STORAGE_ENUMS, public_api_diagnostics,
+from liquid_tracer.performance import (API_COUNTS, API_MAXIMA, API_SECONDS, API_STORAGE_ENUMS, public_api_diagnostics,
                                        public_performance)
 
 
@@ -57,11 +57,27 @@ class CollectionPerformanceTests(unittest.TestCase):
     def test_api_diagnostics_drop_malformed_measurements_and_unknown_fields(self):
         for invalid in (True, None, "PRIVATE", [], {}, -1, float("nan"), float("inf"), 10 ** 400):
             with self.subTest(invalid=invalid):
-                value = {key: invalid for key in API_SECONDS | API_COUNTS | {"peak_in_flight"}}
+                value = {key: invalid for key in API_SECONDS | API_COUNTS | API_MAXIMA | {"peak_in_flight"}}
                 self.assertEqual(public_api_diagnostics(value), {})
         for invalid in (None, [], "PRIVATE"):
             self.assertEqual(public_api_diagnostics(invalid), {})
         self.assertEqual(public_api_diagnostics({"peak_in_flight": 65, "completed_requests": 3.5}), {})
+
+    def test_group_commit_metrics_distinguish_logical_work_from_physical_commits(self):
+        value = {"evidence_write_operations": 100, "evidence_write_batches": 26,
+                 "evidence_commits": 25, "evidence_queue_wait_seconds_total": 7.5,
+                 "evidence_batch_size_max": 12, "evidence_queue_depth_peak": 32}
+        self.assertEqual(public_api_diagnostics({**value, "queued_bodies": "PRIVATE"}), value)
+        self.assertEqual(public_performance({"schema_version": 1, **value}),
+                         {"schema_version": 1, **value})
+        for invalid in (1.5, True, -1, 2 ** 53, "PRIVATE"):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(public_api_diagnostics({key: invalid for key in API_MAXIMA}), {})
+        self.assertEqual(public_api_diagnostics({key: 0 for key in API_MAXIMA}),
+                         {key: 0 for key in API_MAXIMA})
+        maxima = {"evidence_batch_size_max": 64, "evidence_queue_depth_peak": 128}
+        self.assertEqual(public_api_diagnostics(maxima), maxima)
+        self.assertEqual(public_api_diagnostics({key: value + 1 for key, value in maxima.items()}), {})
 
     def test_storage_diagnostics_accept_only_known_modes_and_numeric_version(self):
         value = {"quota_journal_mode": "wal", "quota_journal_mode_requested": "wal",

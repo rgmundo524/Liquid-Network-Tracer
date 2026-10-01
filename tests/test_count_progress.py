@@ -134,6 +134,9 @@ class CountProgressTests(unittest.TestCase):
                        "evidence_write_lock_wait_seconds_total": 2,
                        "evidence_read_lock_wait_seconds_total": .5,
                        "evidence_commit_seconds_total": 1, "evidence_commits": 50,
+                       "evidence_write_operations": 150, "evidence_write_batches": 50,
+                       "evidence_queue_wait_seconds_total": 5,
+                       "evidence_batch_size_max": 12, "evidence_queue_depth_peak": 32,
                        "in_flight": 3, "shared_api_active_clients": 2,
                        "evidence_journal_mode": "wal", "evidence_synchronous": "full"}
         value = public_progress(self.event(**diagnostics, body="PRIVATE"))

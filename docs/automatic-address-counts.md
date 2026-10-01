@@ -127,6 +127,18 @@ also retains DELETE/FULL. Both request-start and response commits remain durable
 before the pipeline proceeds. Keep the case on a local filesystem and preserve
 its SQLite sidecars while a worker is active; completed run archives are unchanged.
 
+Concurrent evidence writers share durable commits when work is already waiting.
+A bounded FIFO queue holds at most 128 waiting operations, and each transaction
+handles up to 64 ready operations. There is no timer to accumulate a batch.
+Callers keep waiting until their transaction commits with FULL synchronization;
+the request-start record still commits before HTTP dispatch, and a response's
+outcome and exact bytes remain atomic. Ordinary record-constraint failures are
+isolated within the transaction so valid neighboring responses can still commit.
+A whole-transaction failure is reported to every affected caller without a
+success acknowledgment or an automatic retry of an uncertain commit. Closing
+the Store drains accepted writes before closing SQLite. These bounds control
+pending memory, not the number of responses a collection can save.
+
 The count pipeline also releases completed response bodies and futures instead
 of retaining one for every requested address. Pending requests remain bounded by
 the worker target; the count table itself still grows with the investigation.
@@ -222,6 +234,14 @@ The matching `evidence_*` storage fields identify the evidence database's mode
 and runtime. Evidence diagnostics separate read/write lock waiting, time holding
 the lock, and commit time. Commit time is included in write time; these values
 are not additional elapsed time to add to the other totals.
+`evidence_write_operations` counts logical writes; `evidence_commits` counts
+successful durable transactions. Grouping can therefore reduce commits while
+retaining every write. `evidence_write_batches` counts attempted batches,
+`evidence_batch_size_max` reports the largest batch, and
+`evidence_queue_depth_peak` reports the highest waiting queue depth.
+`evidence_queue_wait_seconds_total` accumulates caller waiting time, including
+queue admission backpressure. Batch/queue maxima remain gauges in probe windows;
+operation, commit and batch counts are cumulative counters with window deltas.
 
 `window_series` retains the latest 120 complete five-second measurement windows.
 Each includes start/end times, completed counts, throughput, worker and actual
@@ -399,6 +419,16 @@ Without injected storage delays, throughput was essentially unchanged
 (118.39 versus 118.28 counts/second), while evidence file syncs still fell
 from 7,209 to 2,430. This isolates a storage improvement; it does not establish
 the cause of any particular slowdown on a live machine.
+
+Ready-only group commits were also compared against `cc7f000` with 1,200
+addresses, 100 ms network latency, and 4 ms per evidence and quota file sync.
+Lookup throughput was 83.37 versus 84.21 counts/second, with evidence commits
+falling from 2,400 to 2,389. Counts, exact response bytes and request-attempt
+fingerprints matched, with WAL/FULL retained. This approximately 1% difference
+does not establish a meaningful speedup: the existing dispatch sequence left
+few writes waiting together. Grouping benefits depend on actual write overlap;
+the batch-size and commit counters expose that in a live run. Separate forced
+concurrency tests verify that waiting responses really share durable commits.
 
 ## Inline display and migration
 
