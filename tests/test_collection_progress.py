@@ -10,8 +10,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from liquid_tracer.api import Esplora, Limits
-from liquid_tracer.cli import main as cli_main
-from liquid_tracer.common import save_json
+from liquid_tracer.cli import main as cli_main, verify_export
+from liquid_tracer.common import read_json, save_json
 from liquid_tracer.progress import COLLECTION_PHASES, ProgressReporter, public_progress
 from liquid_tracer.store import Store
 from liquid_tracer.trace import new_state, trace
@@ -164,6 +164,14 @@ class CollectionProgressTests(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertEqual(result["status"], "bounded_complete")
         self.assertTrue((Path(result["directory"]) / "SHA256SUMS").exists())
+        saved = read_json(Path(result["directory"]) / "trace.json")
+        self.assertEqual(result["performance"], {
+            key: saved["performance"][key] for key in result["performance"]})
+        self.assertEqual(result["performance"]["schema_version"], 1)
+        self.assertGreater(result["performance"]["address_counts_seconds"], 0)
+        self.assertGreaterEqual(result["performance"]["checkpoint_count"], 2)
+        self.assertEqual(result["performance"]["request_count"], saved["stats"]["requests_this_run"])
+        verify_export(Path(result["directory"]))
         phases = [e["phase"] for e in events]
         self.assertEqual(phases[:3], ["collecting", "collecting", "collection_complete"])
         self.assertEqual(phases[-4:], ["address_counts", "address_counts_ready", "exporting_collection", "exporting_collection"])
@@ -185,6 +193,8 @@ class CollectionProgressTests(unittest.TestCase):
         self.assertEqual(events[-1]["phase"], "collection_error")
         self.assertEqual(events[-1]["completed"], 0)
         self.assertTrue((Path(result["directory"]) / "SHA256SUMS").exists())
+        self.assertEqual(result["performance"]["address_counts_seconds"], 0)
+        verify_export(Path(result["directory"]))
 
 
 class CollectionProgressBoundaryTests(unittest.TestCase):

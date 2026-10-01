@@ -89,8 +89,8 @@ def _public_elk_workers(event, attempt_total):
     return value
 
 
-def _public_count_workers(event):
-    """Expose count-only scheduling telemetry without provider-controlled text."""
+def _public_api_workers(event):
+    """Expose API scheduling telemetry without provider-controlled text."""
     value = {}
     for field in ("worker_count", "worker_limit"):
         number = event.get(field)
@@ -136,7 +136,7 @@ def public_progress(event):
     value = {"phase": event["phase"], "completed": done, "total": total,
              "message": MESSAGES[event["phase"]]}
     if value["phase"].startswith("address_counts"):
-        value.update(_public_count_workers(event))
+        value.update(_public_api_workers(event))
         if "worker_count" in value:
             noun = "request" if value["worker_count"] == 1 else "requests"
             value["message"] += f"; up to {value['worker_count']} concurrent {noun}"
@@ -153,6 +153,12 @@ def public_progress(event):
         if name:
             value["hop_reference_name"] = name
             value["message"] += f" from {name}; named-group outputs reset to hop 0"
+        value.update(_public_api_workers(event))
+        if "worker_count" in value:
+            noun = "request" if value["worker_count"] == 1 else "requests"
+            value["message"] += f"; up to {value['worker_count']} concurrent {noun}"
+        if "observed_rps" in value:
+            value["message"] += f"; {value['observed_rps']:.1f} requests/s"
     if value["phase"].startswith("address_counts") or value["phase"] in COLLECTION_PHASES:
         value.update(_public_shared_api(event))
         if value.get("shared_api_active_clients", 1) > 1:
@@ -236,11 +242,11 @@ def public_progress(event):
     return value
 
 
-def report_progress(progress, phase, completed=0, total=0, *, hop_reference_name=""):
+def report_progress(progress, phase, completed=0, total=0, *, hop_reference_name="", **telemetry):
     """Advisory observers cannot change collection or its saved evidence."""
     if progress is None:
         return
-    value = public_progress({"phase": phase, "completed": completed, "total": total,
+    value = public_progress({**telemetry, "phase": phase, "completed": completed, "total": total,
                              "hop_reference_name": hop_reference_name})
     if value is not None:
         try:

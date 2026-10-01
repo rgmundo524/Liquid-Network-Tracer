@@ -304,6 +304,22 @@ select.input {
   width: 15px;
   height: 15px;
 }
+.collection-performance {
+  padding: 16px 24px;
+  border-top: 1px solid #e8efec;
+}
+.performance-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 12px 20px;
+  margin: 0;
+}
+.performance-metrics dt { color: #719085; font-size: 11px; }
+.performance-metrics dd { margin: 5px 0 0; font-size: 13px; font-weight: 600; }
+.performance-details { margin-top: 12px; }
+.performance-details summary { cursor: pointer; color: #426358; font-size: 12px; }
+.performance-details p { margin: 14px 0 10px; }
+.performance-details .performance-metrics + .performance-metrics { margin-top: 16px; }
 .run-list td,
 .run-list th {
   padding: 13px 20px;

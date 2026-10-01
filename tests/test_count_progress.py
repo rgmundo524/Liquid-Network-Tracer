@@ -67,13 +67,20 @@ class CountProgressTests(unittest.TestCase):
         self.assertEqual(public_progress(base), {**base, "message": MESSAGES["address_counts"]})
 
     def test_count_fields_do_not_escape_into_other_phases(self):
-        for phase in ("collecting", "preflight", "pegout_search", "optimizing"):
+        for phase in ("preflight", "pegout_search", "optimizing"):
             with self.subTest(phase=phase):
                 value = public_progress(self.event(phase=phase))
                 for field in ("worker_count", "worker_limit", "observed_rps"):
                     self.assertNotIn(field, value)
                 self.assertNotIn("counts/s", value["message"])
                 self.assertNotIn("concurrent", value["message"])
+
+    def test_collection_uses_request_units_for_shared_fetch_metrics(self):
+        value = public_progress(self.event(phase="collecting"))
+        self.assertEqual(value["worker_count"], 16)
+        self.assertEqual(value["worker_limit"], 64)
+        self.assertIn("12.3 requests/s", value["message"])
+        self.assertNotIn("counts/s", value["message"])
 
     def test_reporter_emits_sanitized_counts_to_terminal_and_ipc(self):
         with tempfile.TemporaryDirectory() as folder:

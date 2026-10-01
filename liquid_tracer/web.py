@@ -30,6 +30,7 @@ from .investigations import (create_investigation, default_root, load_settings,
                              validate_blockchain, validate_settings)
 from .menu import _command, _environment, _lookup_reports, _project, _seed_values, _trace_arguments
 from .progress import public_progress
+from .performance import public_performance
 from .layout_search import MAX_LAYOUT_ATTEMPTS, normalize_layout_attempts
 from .layout_search_reporting import public_search_counts
 
@@ -465,6 +466,9 @@ class LocalServer(ThreadingHTTPServer):
                            "stop_reason": state.get("stop_reason"), "created_at": state.get("started_at"),
                            "transaction_count": stats.get("transactions_cumulative", len(state.get("transactions", {}))),
                            "frontier_count": stats.get("frontier_count", 0)}
+                    performance = public_performance(state.get("performance"))
+                    if performance:
+                        run["performance"] = performance
                     limits = state.get("limits", {})
                     if isinstance(limits, dict) and type(limits.get("max_hops")) is int:
                         run["max_hops"] = limits["max_hops"]
@@ -1001,6 +1005,9 @@ class LocalServer(ThreadingHTTPServer):
         if isinstance(result.get("stats"), dict):
             value["stats"] = {key: item for key, item in result["stats"].items()
                               if isinstance(item, (int, float)) and not isinstance(item, bool)}
+        performance = public_performance(result.get("performance"))
+        if performance:
+            value["performance"] = performance
         if result.get("connector_style") in ("straight", "curved", "elbowed"):
             value["connector_style"] = result["connector_style"]
         options = result.get("graph_options", {})

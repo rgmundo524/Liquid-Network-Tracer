@@ -1,6 +1,8 @@
 import copy
 import heapq
+import math
 import platform
+import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
@@ -10,6 +12,8 @@ from .common import (HEX64, StopRun, TraceError, digest, match_labels, now,
                      output_kind, parse_outpoint, save_json)
 from .services import ServiceScope, is_service_stop
 from .progress import report_progress
+from .trace_checkpoint import TraceCheckpoint
+from .trace_fetch import FrontierFetcher, TraceConcurrency
 
 TERMINAL = {"spent", "fee", "pegout", "provably_unspendable"}
 
@@ -28,7 +32,8 @@ def new_state(seeds, source, limits, labels, parent=None, case_id=None):
     state.update({"run_id": uuid.uuid4().hex[:16], "parent_run": parent["run_id"] if parent else None,
                   "ancestor_runs": parent.get("ancestor_runs", []) + [parent["run_id"]] if parent else [],
                   "started_at": now(), "finished_at": None, "limits": asdict(limits),
-                  "labels": labels, "status": "running", "errors": [], "stats": {}})
+                  "labels": labels, "status": "running", "errors": [], "stats": {},
+                  "performance": {}})
     state.setdefault("root_run_id", state["run_id"])
     files = sorted(Path(__file__).parent.glob("*.py"))
     state["software"] = {"version": __version__, "python": platform.python_version(),
@@ -59,6 +64,52 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
     traversed backward, clustered, or used as address-history expansion seeds.
     """
     limits.validate()
+    started = time.monotonic()
+    fetch_wait_seconds = 0.
+    checkpoint_writer = TraceCheckpoint()
+    # Timings describe this collection only, never the resumed parent run.
+    state["performance"] = {}
+    workers = getattr(api, "workers", 1)
+    worker_ceiling = getattr(api, "worker_ceiling", workers)
+    adaptive = worker_ceiling > workers
+    policy = (TraceConcurrency(workers, limits.max_outpoints,
+                               getattr(api, "effective_rps", 0.) if not getattr(api, "fixture", None) else 0.)
+              if adaptive else None)
+    target_workers = policy.target({}) if policy is not None else workers
+    last_progress_at = started
+
+    def metrics():
+        callback = getattr(api, "request_metrics", None)
+        return callback() if callable(callback) else {}
+
+    def concurrency():
+        nonlocal target_workers
+        target_workers = min(worker_ceiling, policy.target(metrics())) if policy is not None else workers
+        return target_workers
+
+    def performance():
+        elapsed = max(0., time.monotonic() - started)
+        result = {"schema_version": 1, "tracing_seconds": elapsed, "fetch_wait_seconds": fetch_wait_seconds,
+                  "checkpoint_seconds": checkpoint_writer.write_seconds,
+                  "checkpoint_count": checkpoint_writer.writes,
+                  "processing_seconds": max(0., elapsed - fetch_wait_seconds - checkpoint_writer.write_seconds),
+                  "request_count": api.budget.requests,
+                  "worker_peak": policy.peak if policy is not None else workers,
+                  "worker_limit": policy.ceiling if policy is not None else workers}
+        result.update(metrics())
+        # Optional API snapshots can include descriptive shared-wait reasons;
+        # only numeric measurements belong to the saved performance table.
+        state["performance"] = {key: value for key, value in result.items()
+                                if type(value) in (int, float) and value >= 0 and math.isfinite(value)}
+
+    def get(endpoint):
+        nonlocal fetch_wait_seconds
+        waiting = time.monotonic()
+        try:
+            return api.get(endpoint)
+        finally:
+            fetch_wait_seconds += max(0., time.monotonic() - waiting)
+
     queue = []
     count = 0
     new_transactions = 0
@@ -113,7 +164,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
             txid, index = parse_outpoint(seed)
             add(txid, index, 0, "analyst_seed")
 
-    def save():
+    def write_state():
         refresh_reference_hops(state, scope)
         state["observations"] = sorted(set(state["observations"]) | api.used)
         state["stats"] = {"requests_this_run": api.budget.requests,
@@ -134,7 +185,11 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
             state["stats"]["active_frontier_count"] = sum(
                 item["status"] not in TERMINAL and not item.get("trace_control")
                 for item in state["outputs"].values())
+        performance()
         save_json(checkpoint, state)
+
+    def save(*, force=False):
+        checkpoint_writer.save(write_state, force=force, completed=not force)
 
     def get_tx(txid, depth):
         nonlocal new_transactions
@@ -144,7 +199,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
             return cached["data"]
         if cached is None and new_transactions >= limits.max_transactions:
             raise StopRun("transaction_limit")
-        data, oid = api.get("/tx/" + txid)
+        data, oid = get("/tx/" + txid)
         validate_transaction(data, txid)
         state["transactions"][txid] = {"data": data, "depth": min(depth, cached["depth"]) if cached else depth,
                                        "observation_id": oid}
@@ -155,90 +210,107 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
     prepared = set()
 
     def prepare_frontier():
-        """Overlap only work already required by a bounded frontier window.
+        """Prefetch a bounded same-hop window, advancing each ready dependency.
 
-        Traversal and checkpoints stay on this thread. Near a transaction or
-        request cap, use the ordinary serial path so speculative work cannot
-        consume the slots needed by the current output's spending transaction.
+        Only selected eligible outputs supply child endpoints. Near a budget
+        boundary the ordinary serial path retains the next output's slots.
+        Traversal remains ordered and starts only after this window drains.
         """
-        workers = getattr(api, "workers", 1)
-        if workers <= 1 or not callable(getattr(api, "prefetch", None)) or not queue:
+        nonlocal fetch_wait_seconds
+        if (worker_ceiling <= 1 or not callable(getattr(api, "submit", None)) or not queue
+                or queue[0][1] in prepared):
             return
-        if queue[0][1] in prepared:
+        target = concurrency()
+        if target <= 1:
             return
         depth = queue[0][0]
-        window = []
-        seen = set()
-        for candidate_depth, key in heapq.nsmallest(min(workers, limits.max_outpoints - count), queue):
+        window, seen, funding_seen = [], set(), set()
+        # Count distinct funding endpoints, not merely eight adjacent outputs
+        # from one large transaction. The output cap bounds speculative scope.
+        unique_limit = min(worker_ceiling, max(workers, target * 2))
+        scan_limit = min(256, limits.max_outpoints - count)
+        for candidate_depth, key in heapq.nsmallest(scan_limit, queue):
             item = state["outputs"][key]
             if (candidate_depth != depth or candidate_depth != scope.depth(item)
                     or item["status"] != "pending" or key in seen or scope.blocked(key)):
                 continue
+            if item["txid"] not in funding_seen and len(funding_seen) >= unique_limit:
+                break
             seen.add(key)
+            funding_seen.add(item["txid"])
             window.append(item)
         if not window:
             return
         funding_ids = list(dict.fromkeys(item["txid"] for item in window))
         missing = [txid for txid in funding_ids if txid not in state["transactions"]]
-        # At most one previously unseen spending transaction per output. This
-        # bound also covers converging branches, without fetching any sibling
-        # outputs that the investigator did not select for this frontier.
         possible_children = len(window) if within_hops(depth) else 0
         if len(missing) + possible_children > limits.max_transactions - new_transactions:
             return
-        fetch_ids = [txid for txid in funding_ids
-                     if not state["transactions"].get(txid, {}).get("data", {}).get("status", {}).get("confirmed")]
+        fetch_ids = {txid for txid in funding_ids
+                     if not state["transactions"].get(txid, {}).get("data", {}).get("status", {}).get("confirmed")}
         nominal_requests = len(fetch_ids) + (len(funding_ids) + possible_children if possible_children else 0)
         if api.auth == "blockstream" and not api.token:
             nominal_requests += 1
         if nominal_requests > limits.max_requests - api.budget.requests:
             return
         prepared.update(seen)
-        fetched = api.prefetch(["/tx/" + txid for txid in fetch_ids])
-        funding = {}
-        for txid in funding_ids:
-            result = fetched.get("/tx/" + txid)
+        fetching = FrontierFetcher(api, concurrency, report_activity)
+        by_funding = {}
+        for item in window:
+            by_funding.setdefault(item["txid"], []).append(item)
+
+        def eligible(item, transaction):
+            if (scope.blocked(item["outpoint"]) or not within_hops(scope.depth(item))
+                    or item["vout"] >= len(transaction["vout"])):
+                return False
+            output = transaction["vout"][item["vout"]]
+            return (output_kind(output) == "spendable" and scope.permits(item, output)
+                    and not any(label.get("stop") for label in match_labels(labels, item["outpoint"], output))
+                    and (include_unconfirmed or transaction["status"]["confirmed"]))
+
+        def spending_ready(txid, transaction, result):
             if isinstance(result, Exception):
-                continue  # The normal get() surfaces this saved failure in order.
-            transaction = result[0] if result is not None else state["transactions"][txid]["data"]
+                return
+            rows = result[0]
+            if not isinstance(rows, list) or len(rows) != len(transaction["vout"]):
+                return
+            for item in by_funding[txid]:
+                if not eligible(item, transaction):
+                    continue
+                spend = rows[item["vout"]]
+                if (not isinstance(spend, dict) or spend.get("spent") is not True
+                        or (not include_unconfirmed and
+                            (not isinstance(spend.get("status"), dict) or not spend["status"].get("confirmed")))):
+                    continue
+                child_id, vin = spend.get("txid"), spend.get("vin")
+                if (not isinstance(child_id, str) or not HEX64.fullmatch(child_id)
+                        or type(vin) is not int or vin < 0 or child_id == txid):
+                    continue
+                if not state["transactions"].get(child_id, {}).get("data", {}).get("status", {}).get("confirmed"):
+                    fetching.add("/tx/" + child_id)
+
+        def funding_ready(txid, result):
+            if isinstance(result, Exception):
+                return
+            transaction = result[0]
             try:
                 validate_transaction(transaction, txid)
             except TraceError:
-                continue
-            funding[txid] = transaction
-        eligible = []
-        for item in window:
-            transaction = funding.get(item["txid"])
-            if transaction is None or item["vout"] >= len(transaction["vout"]):
-                continue
-            output = transaction["vout"][item["vout"]]
-            if (output_kind(output) != "spendable" or not within_hops(depth)
-                    or not scope.permits(item, output)
-                    or any(label.get("stop") for label in match_labels(labels, item["outpoint"], output))
-                    or (not include_unconfirmed and not transaction["status"]["confirmed"])):
-                continue
-            eligible.append(item)
-        spends = api.prefetch(list(dict.fromkeys("/tx/" + item["txid"] + "/outspends" for item in eligible)))
-        children = []
-        for item in eligible:
-            result = spends.get("/tx/" + item["txid"] + "/outspends")
-            if result is None or isinstance(result, Exception):
-                continue
-            rows = result[0]
-            if not isinstance(rows, list) or len(rows) != len(funding[item["txid"]]["vout"]):
-                continue
-            spend = rows[item["vout"]]
-            if (not isinstance(spend, dict) or spend.get("spent") is not True
-                    or (not include_unconfirmed and
-                        (not isinstance(spend.get("status"), dict) or not spend["status"].get("confirmed")))):
-                continue
-            child_id, vin = spend.get("txid"), spend.get("vin")
-            if (not isinstance(child_id, str) or not HEX64.fullmatch(child_id)
-                    or type(vin) is not int or vin < 0 or child_id == item["txid"]):
-                continue
-            if not state["transactions"].get(child_id, {}).get("data", {}).get("status", {}).get("confirmed"):
-                children.append("/tx/" + child_id)
-        api.prefetch(list(dict.fromkeys(children)))
+                return  # Ordered get_tx() surfaces the saved failure later.
+            if any(eligible(item, transaction) for item in by_funding[txid]):
+                fetching.add("/tx/" + txid + "/outspends",
+                             lambda rows: spending_ready(txid, transaction, rows))
+
+        for txid in funding_ids:
+            if txid in fetch_ids:
+                fetching.add("/tx/" + txid, lambda result, txid=txid: funding_ready(txid, result))
+            else:
+                funding_ready(txid, (state["transactions"][txid]["data"], None))
+        waiting = time.monotonic()
+        try:
+            fetching.run()
+        finally:
+            fetch_wait_seconds += max(0., time.monotonic() - waiting)
 
     current = None
     stop_reason = None
@@ -249,17 +321,33 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
     had_frontier = bool(queue)
     current_hop = min(limits.max_hops, queue[0][0]) if queue else 0
 
+    def telemetry():
+        feedback = metrics()
+        elapsed = max(.001, time.monotonic() - started)
+        return {"worker_count": target_workers,
+                "worker_limit": policy.ceiling if policy is not None else workers,
+                "observed_rps": api.budget.requests / elapsed,
+                **{key: value for key, value in feedback.items() if key.startswith("shared_api_")}}
+
+    def report_activity():
+        nonlocal last_progress_at
+        timestamp = time.monotonic()
+        if timestamp - last_progress_at >= 1:
+            last_progress_at = timestamp
+            report_progress(progress, "collecting", current_hop, limits.max_hops,
+                            **hop_progress, **telemetry())
+
     def report_hop(depth):
         nonlocal current_hop
         depth = min(limits.max_hops, depth)
         if depth != current_hop:
             current_hop = depth
-            report_progress(progress, "collecting", current_hop, limits.max_hops, **hop_progress)
+            report_progress(progress, "collecting", current_hop, limits.max_hops, **hop_progress, **telemetry())
 
     if had_frontier:
-        report_progress(progress, "collecting", current_hop, limits.max_hops, **hop_progress)
+        report_progress(progress, "collecting", current_hop, limits.max_hops, **hop_progress, **telemetry())
     try:
-        save()
+        save(force=True)
         while queue:
             api.budget.check()
             if count >= limits.max_outpoints:
@@ -303,7 +391,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
             elif not within_hops(depth):
                 current["status"] = "hop_limit"
             else:
-                spends, oid = api.get("/tx/" + current["txid"] + "/outspends")
+                spends, oid = get("/tx/" + current["txid"] + "/outspends")
                 if not isinstance(spends, list) or len(spends) != len(tx["vout"]):
                     raise TraceError("Outspends length does not match funding transaction")
                 spend = spends[current["vout"]]
@@ -339,6 +427,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
                             add(child_id, index, child_depth, "candidate_descendant", parent=key)
             current = None
             save()
+            report_activity()
         state["status"] = "bounded_complete"
     except StopRun as error:
         stop_reason = str(error)
@@ -355,6 +444,17 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
         stop_reason = "interrupted"
         state["status"] = "paused"
     finally:
+        # No response may update the evidence store after the final snapshot.
+        drain = getattr(api, "drain_pending", None)
+        if callable(drain):
+            try:
+                drain(cancel=bool(stop_reason))
+            except KeyboardInterrupt:
+                # The API drains before surfacing repeated interrupts. Still
+                # preserve the final recoverable frontier after that signal.
+                if stop_reason is None:
+                    stop_reason = "interrupted"
+                    state["status"] = "paused"
         if named_hops or was_named:
             refresh_seed_depths(state)
         if stop_reason:
@@ -363,11 +463,12 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
                     item["status"] = stop_reason
         state["stop_reason"] = stop_reason
         state["finished_at"] = now()
-        save()
+        save(force=True)
+        performance()
         phase = {"bounded_complete": "collection_complete", "paused": "collection_paused",
                  "error": "collection_error"}.get(state["status"], "collection_error")
         if not had_frontier and state["status"] == "bounded_complete":
             report_progress(progress, "collection_empty", 0, 0, **hop_progress)
         else:
-            report_progress(progress, phase, current_hop, limits.max_hops, **hop_progress)
+            report_progress(progress, phase, current_hop, limits.max_hops, **hop_progress, **telemetry())
     return state

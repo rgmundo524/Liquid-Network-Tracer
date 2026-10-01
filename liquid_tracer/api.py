@@ -9,9 +9,11 @@ import urllib.request
 from dataclasses import dataclass
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from email.utils import parsedate_to_datetime
+from http.client import HTTPException
 
 from .common import StopRun, TraceError, canonical, read_json
 from .explorer_quota import SharedExplorerQuota
+from .explorer_http import ExplorerHTTP, StaleExplorerConnection
 
 TOKEN_URL = "https://login.blockstream.com/realms/blockstream-public/protocol/openid-connect/token"
 ENTERPRISE = "https://enterprise.blockstream.info/liquid/api"
@@ -58,14 +60,19 @@ def http(method, url, headers=None, body=None, timeout=20):
     request = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
     opener = urllib.request.build_opener(NoRedirect())
     try:
-        with opener.open(request, timeout=timeout) as response:
-            raw = response.read(MAX_BODY + 1)
-            if len(raw) > MAX_BODY:
-                raise TraceError("API response exceeds 32 MiB")
-            return response.status, dict(response.headers), raw
-    except urllib.error.HTTPError as error:
-        return error.code, dict(error.headers), error.read(MAX_BODY)
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                raw = response.read(MAX_BODY + 1)
+                if len(raw) > MAX_BODY:
+                    raise TraceError("API response exceeds 32 MiB")
+                return response.status, dict(response.headers), raw
+        except urllib.error.HTTPError as error:
+            with error:
+                raw = error.read(MAX_BODY + 1)
+                if len(raw) > MAX_BODY:
+                    raise TraceError("API response exceeds 32 MiB")
+                return error.code, dict(error.headers), raw
+    except (urllib.error.URLError, TimeoutError, OSError, HTTPException) as error:
         # Never echo request headers, credentials, URLs with queries, or server bodies.
         raise TraceError("Network request failed: " + type(error).__name__) from None
 
@@ -155,6 +162,12 @@ class Esplora:
         self._latency_seconds = None
         self._completed_requests = 0
         self._pressure_events = 0
+        self._totals = {"network_seconds_total": 0., "pacing_wait_seconds_total": 0.,
+                        "retry_wait_seconds_total": 0., "evidence_seconds_total": 0.,
+                        "cache_hits": 0, "coalesced_hits": 0,
+                        "rate_limit_responses": 0, "retry_responses": 0,
+                        "peak_in_flight": 0}
+        self._in_flight = 0
         self._pool = None
         self._closed = False
         self.fixture = read_json(fixture) if fixture else None
@@ -185,6 +198,9 @@ class Esplora:
         # embedding application supplies its own coordinator.
         self._shared_quota = shared_quota if self.fixture is None else None
         self._automatic_quota = self.fixture is None and transport is http
+        self._owned_transport = ExplorerHTTP(self.base, TOKEN_URL, http) if self._automatic_quota else None
+        if self._owned_transport is not None:
+            self.transport = self._owned_transport
         self._shared_metrics = None
         self._pacing_error = None
 
@@ -200,6 +216,8 @@ class Esplora:
             self._closed = True
             pool = self._pool
             results = list(self._results.values())
+            for future in results:
+                future.cancel()
         self._cancelled.set()
         with self._gate:
             self._gate.notify_all()
@@ -208,6 +226,8 @@ class Esplora:
         interrupted = self._drain(results)
         if pool is not None:
             pool.shutdown(wait=True, cancel_futures=True)
+        if self._owned_transport is not None:
+            self._owned_transport.close()
         if self._shared_quota is not None:
             self._shared_quota.close()
         if interrupted:
@@ -236,25 +256,62 @@ class Esplora:
         """Snapshot transport feedback and current shared admission status.
 
         Shared wait seconds is the latest estimated delay, not cumulative
-        threaded waiting time. Network latency excludes all admission waits.
+        threaded waiting time. Network latency and completed_requests retain
+        their Esplora-only semantics for adaptive concurrency. Cumulative
+        timings include OAuth and are overlapping worker seconds, never
+        additive phase wall time. Retry waits exclude 429 admission cooldowns,
+        which count as pacing waits. cache_hits counts accepted SQLite cached
+        responses; coalesced_hits counts reuse of an in-run endpoint Future.
+        retry_responses counts HTTP 429/500/502/503/504, whether retried or not.
         """
         with self._metrics_lock:
             metrics = {"latency_seconds": self._latency_seconds,
                        "completed_requests": self._completed_requests,
                        "pressure_events": self._pressure_events}
+            metrics.update(self._totals)
             if self._shared_metrics is not None:
                 metrics.update(self._shared_metrics)
             return metrics
 
-    def _measure_request(self, started, pressure):
+    def _measure_request(self, started, kind, status=None, failed=False):
         elapsed = max(0., time.monotonic() - started)
         with self._metrics_lock:
-            self._latency_seconds = (elapsed if self._latency_seconds is None else
-                                     .2 * elapsed + .8 * self._latency_seconds)
-            self._completed_requests += 1
-            self._pressure_events += int(pressure)
+            self._in_flight -= 1
+            self._totals["network_seconds_total"] += elapsed
+            self._totals["rate_limit_responses"] += int(status == 429)
+            pressure = status in (429, 500, 502, 503, 504)
+            self._totals["retry_responses"] += int(pressure)
+            if kind == "esplora":
+                self._latency_seconds = (elapsed if self._latency_seconds is None else
+                                         .2 * elapsed + .8 * self._latency_seconds)
+                self._completed_requests += 1
+                self._pressure_events += int(pressure or failed)
+
+    def _add_seconds(self, metric, started):
+        elapsed = max(0., time.monotonic() - started)
+        with self._metrics_lock:
+            self._totals[metric] += elapsed
+
+    def _evidence(self, method, *args):
+        started = time.monotonic()
+        try:
+            return method(*args)
+        finally:
+            self._add_seconds("evidence_seconds_total", started)
 
     def _admit(self, kind=None, endpoint=None):
+        started = time.monotonic()
+        with self._gate:
+            try:
+                self._reserve_request()
+            finally:
+                self._add_seconds("pacing_wait_seconds_total", started)
+            if kind is not None:
+                self._evidence(self.store.attempt, self.run_id, kind, endpoint, "started")
+            self.last_call = time.monotonic()
+            return self.budget.timeout()
+
+    def _reserve_request(self):
         # Reserve starts under one shared gate. Increasing workers never
         # multiplies the configured request rate or the run's hard budget.
         with self._gate:
@@ -290,11 +347,6 @@ class Esplora:
                     raise StopRun("time_limit")
                 self._gate.wait(min(delay, .25))
             self.budget.request()
-            if kind is not None:
-                self.store.attempt(self.run_id, kind, endpoint, "started")
-            timeout = self.budget.timeout()
-            self.last_call = time.monotonic()
-            return timeout
 
     def _cooldown(self, seconds):
         with self._gate:
@@ -327,21 +379,30 @@ class Esplora:
         return max(2 ** attempt, delay) if math.isfinite(delay) else float("inf")
 
     def call(self, method, url, kind, endpoint, headers=None, body=None):
-        with self._transport_slots:
+        started = time.monotonic()
+        self._transport_slots.acquire()
+        self._add_seconds("pacing_wait_seconds_total", started)
+        try:
             return self._call(method, url, kind, endpoint, headers, body)
+        finally:
+            self._transport_slots.release()
 
     def _call(self, method, url, kind, endpoint, headers=None, body=None):
         timeout = self._admit(kind, endpoint)
         started = time.monotonic()
+        result = None
+        with self._metrics_lock:
+            self._in_flight += 1
+            self._totals["peak_in_flight"] = max(self._totals["peak_in_flight"], self._in_flight)
         try:
-            result = self.transport(method, url, headers, body, timeout)
+            try:
+                result = self.transport(method, url, headers, body, timeout)
+            finally:
+                self._measure_request(started, kind, result[0] if result is not None else None,
+                                      failed=result is None)
         except (TraceError, OSError, urllib.error.URLError):
-            if kind == "esplora":
-                self._measure_request(started, True)
-            self.store.attempt(self.run_id, kind, endpoint, "network_error")
+            self._evidence(self.store.attempt, self.run_id, kind, endpoint, "network_error")
             raise
-        if kind == "esplora":
-            self._measure_request(started, result[0] in (429, 500, 502, 503, 504))
         if result[0] == 429:
             # Close the shared gate as soon as the response arrives. The caller
             # still archives the response before propagating a long cooldown.
@@ -355,7 +416,7 @@ class Esplora:
                 with self._gate:
                     self._pacing_error = error
                     self._gate.notify_all()
-        self.store.attempt(self.run_id, kind, endpoint, result[0])
+        self._evidence(self.store.attempt, self.run_id, kind, endpoint, result[0])
         return result
 
     def bearer(self):
@@ -394,8 +455,7 @@ class Esplora:
             raise TraceError("Malformed authentication response") from None
         return self.token
 
-    def get(self, endpoint):
-        """Fetch an endpoint once per run, coalescing success and failure alike."""
+    def _future(self, endpoint):
         with self._results_lock:
             if self._closed:
                 raise TraceError("Explorer client is closed")
@@ -404,12 +464,55 @@ class Esplora:
             owner = future is None
             if owner:
                 future = self._results[endpoint] = Future()
+            else:
+                with self._metrics_lock:
+                    self._totals["coalesced_hits"] += 1
+            return future, owner
+
+    def _resolve(self, endpoint, future):
+        if not future.set_running_or_notify_cancel():
+            return
+        try:
+            future.set_result(self._get(endpoint))
+        except BaseException as error:
+            future.set_exception(error)
+
+    def get(self, endpoint):
+        """Fetch an endpoint once per run, coalescing success and failure alike."""
+        future, owner = self._future(endpoint)
         if owner:
-            try:
-                future.set_result(self._get(endpoint))
-            except BaseException as error:
-                future.set_exception(error)
+            self._resolve(endpoint, future)
         return future.result()
+
+    def submit(self, endpoint):
+        """Schedule one endpoint and return its coalesced result Future.
+
+        The coordinating caller bounds its rolling window. Workers resolve
+        endpoints directly, never waiting on another task in their own pool.
+        Call drain_pending before committing a final run snapshot.
+        """
+        with self._results_lock:
+            future, owner = self._future(endpoint)
+            if owner:
+                try:
+                    if self._pool is None:
+                        self._pool = ThreadPoolExecutor(max_workers=self.worker_ceiling,
+                                                        thread_name_prefix="esplora")
+                    self._pool.submit(self._resolve, endpoint, future)
+                except BaseException as error:
+                    future.set_exception(error)
+                    raise
+            return future
+
+    def drain_pending(self, cancel=False):
+        """Drain existing endpoint work; optionally cancel queued work only."""
+        with self._results_lock:
+            futures = list(self._results.values())
+            if cancel:
+                for future in futures:
+                    future.cancel()
+        if self._drain(futures):
+            raise KeyboardInterrupt()
 
     def prefetch(self, endpoints, *, on_result=None, concurrency=None, on_idle=None):
         """Return ordered unique endpoints mapped to results or TraceError.
@@ -424,12 +527,6 @@ class Esplora:
         endpoints = list(dict.fromkeys(endpoints))
         if not endpoints:
             return {}
-        with self._results_lock:
-            if self._closed:
-                raise TraceError("Explorer client is closed")
-            if self._pool is None:
-                self._pool = ThreadPoolExecutor(max_workers=self.worker_ceiling, thread_name_prefix="esplora")
-            pool = self._pool
         pending, results = {}, {}
         remaining = iter(endpoints)
         stop = None
@@ -444,7 +541,16 @@ class Esplora:
                 endpoint = next(remaining, None)
                 if endpoint is None:
                     break
-                pending[pool.submit(self.get, endpoint)] = endpoint
+                try:
+                    future = self.submit(endpoint)
+                except StopRun as error:
+                    # Match a worker-discovered hard limit: return this error
+                    # with the endpoint cohort rather than aborting prefetch.
+                    future = Future()
+                    future.set_exception(error)
+                    pending[future] = endpoint
+                    break
+                pending[future] = endpoint
 
         def deliver(endpoint):
             nonlocal stop, callback_stopped
@@ -520,13 +626,15 @@ class Esplora:
             # Unconfirmed transactions need fresh confirmation status in a new run.
             if not ttl or (isinstance(data, dict) and isinstance(data.get("status"), dict) and data["status"].get("confirmed")) or self.fixture is not None:
                 self._remember(oid)
+                with self._metrics_lock:
+                    self._totals["cache_hits"] += 1
                 return data, oid
         if self.fixture is not None:
             self._admit()
             if endpoint not in self.fixture:
                 raise TraceError("Synthetic fixture has no response for " + endpoint)
             raw = canonical(self.fixture[endpoint])
-            oid = self.store.observe(self.run_id, self.base, endpoint, raw)
+            oid = self._evidence(self.store.observe, self.run_id, self.base, endpoint, raw)
             self._remember(oid)
             return json.loads(raw), oid
         auth_retried = False
@@ -537,8 +645,16 @@ class Esplora:
                 with self._token_lock:
                     headers["Authorization"] = "Bearer " + self.bearer()
                     token_generation = self._token_generation
-            status, response_headers, raw = self.call("GET", self.base + endpoint, "esplora", endpoint, headers)
-            oid = self.store.observe(self.run_id, self.base, endpoint, raw, status)
+            try:
+                status, response_headers, raw = self.call("GET", self.base + endpoint, "esplora", endpoint, headers)
+            except StaleExplorerConnection:
+                # A stale keep-alive GET consumes its original request budget
+                # and network-error evidence. Its replacement goes through the
+                # same admission gate and four-attempt ceiling as HTTP retries.
+                if attempt == 3:
+                    raise
+                continue
+            oid = self._evidence(self.store.observe, self.run_id, self.base, endpoint, raw, status)
             self._remember(oid)
             if status == 200:
                 try:
@@ -564,7 +680,11 @@ class Esplora:
                 if not math.isfinite(delay) or delay > 30:
                     raise StopRun("server_retry_later")
                 if status != 429:
-                    self.budget.pause(delay)
+                    started = time.monotonic()
+                    try:
+                        self.budget.pause(delay)
+                    finally:
+                        self._add_seconds("retry_wait_seconds_total", started)
                 continue
             raise TraceError("Explorer HTTP " + str(status) + " for " + endpoint)
         raise TraceError("Explorer retries exhausted for " + endpoint)

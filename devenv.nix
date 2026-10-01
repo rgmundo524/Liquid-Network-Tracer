@@ -25,6 +25,9 @@
     # Chosen paid-endpoint rate, shared across local workers and instances.
     # This is an actual target, not an advertised Blockstream quota.
     LIQUID_BLOCKSTREAM_ENTERPRISE_RPS = "49";
+    # Trace fetches adapt to latency and available resources, up to 64 workers.
+    # Set 1 for serial fetching or 1..64 as an explicit concurrency ceiling.
+    LIQUID_TRACE_WORKERS = "auto";
     # A verified allowance in LIQUID_BLOCKSTREAM_API_RPS overrides this target
     # and applies 5% headroom to that allowance instead.
     LIQUID_SECRETSPEC_BIN = "${pkgs.secretspec}/bin/secretspec";
