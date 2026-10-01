@@ -41,6 +41,8 @@ NODE_CSV_FIELDS = ("id", "kind", "label", "url", "color", "details", "role",
 def legend_lines(graph=None):
     from .role_colors import validate_role_colors
     colors = validate_role_colors((graph or {}).get("service_controls", {}).get("role_colors", {}))
+    all_saved_connections = ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
+                             and (graph or {}).get("connections", {}).get("connection_scope") == "all_saved")
     def name(key):
         return colors.get(key, PALETTE[key][0])
     arrows = ("Arrows: assigned name colors identify links directly entering or leaving that Liquid address; "
@@ -48,7 +50,7 @@ def legend_lines(graph=None):
               "Colors do not extend through downstream addresses or establish ownership."
               if (graph or {}).get("graph_options", {}).get("color_attribution_arrows") else
               f"Arrows: thicker {name('traced_edge').lower()} = traced UTXO links; thinner {name('context_edge').lower()} = context only.")
-    return [
+    lines = [
         f"Squares: {name('starting_transaction').lower()} = provided starting transactions; {name('transaction').lower()} = subsequent hops. Starting role takes priority.",
         f"{name('event')} diamonds: events. Transaction inputs enter on the left; outputs leave on the right.",
         f"Circles: {name('seed').lower()} = selected seed outputs; {name('candidate').lower()} = reachable candidate outputs.",
@@ -58,11 +60,15 @@ def legend_lines(graph=None):
         arrows,
         "Optional context rectangles summarize isolated input addresses; each input remains a separate arrow. Full members stay in local exports; a summary does not imply common ownership.",
         "Captions: vin/vout number · amount asset. ?? = not publicly available. L-BTC amounts use whole-token units (100,000,000 base units = 1 L-BTC); other assets use base units.",
-        "STOP TRACING: an explicit address boundary, independent of confidence. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards.",
+        ("Collection stop: retained attribution only; does not limit this saved-data view. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards."
+         if all_saved_connections else "STOP TRACING: an explicit address boundary, independent of confidence. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards."),
         "Thick red border: INPUT MERGE = distinct starting lineages meet in a transaction; shared-address receipts from distinct branches also highlight the receiving address and all participating senders. Neither proves ownership or value allocation.",
         "TX count inside circles: confirmed + mempool transactions at last lookup; ?? = unavailable. Not the number of visible arrows.",
         "Unspent refers to tracked outputs at their last check, not all funds or inactivity at that address. Arrows do not allocate stolen value.",
     ]
+    if all_saved_connections:
+        lines.append("Starter connections use all verified saved paths, including unconfirmed spends, without stop rules, attribution hop limits or a plot hop cutoff. No additional data is fetched.")
+    return lines
 
 
 def edge_color(edge):
@@ -154,7 +160,8 @@ def _reference_fields(item, enabled):
 
 
 def build_graph(state, merge_addresses=True, include_fees=False, *, group_context_inputs=False, hub_addresses=None,
-                color_attribution_arrows=None, center_name=None, edge_ids=None, respect_attribution_hops=True):
+                color_attribution_arrows=None, center_name=None, edge_ids=None,
+                respect_attribution_hops=True, respect_stops=True, resolve_saved_inputs=False):
     """Build display nodes, optionally limited to exact input/output edges.
 
     Apply a path's edge selection before shared-address aggregation so excluded
@@ -164,6 +171,10 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
     from .investigations import validate_settings
     if type(respect_attribution_hops) is not bool:
         raise TraceError("Attribution hop limits must be respected or explicitly ignored for graph lineage")
+    if type(respect_stops) is not bool:
+        raise TraceError("Stop-tracing rules must be respected or explicitly ignored for graph lineage")
+    if type(resolve_saved_inputs) is not bool:
+        raise TraceError("Saved input resolution must be enabled or disabled")
     if edge_ids is not None:
         edge_ids = frozenset(edge_ids)
     if center_name is None:
@@ -264,6 +275,9 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
             key = f"{vin.get('txid', txid)}:{vin.get('vout', index)}"
             network = "bitcoin" if vin.get("is_pegin") else "liquid"
             prevout = vin.get("prevout") or {}
+            if resolve_saved_inputs:
+                from .saved_inputs import saved_input_output
+                prevout = saved_input_output(state["transactions"], vin)
             if vin.get("is_coinbase"):
                 input_node = add_node("coinbase:" + txid + ":" + str(index), "event", "COINBASE", column - 1, vin)
             else:
@@ -308,7 +322,7 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
         if limits and not any(m.get("stop") is True for m in records):
             parts.append(("Hop limit: " if respect_attribution_hops else "Display hop limit: ") + str(min(limits)))
         if any(m.get("stop") is True for m in records):
-            parts.append("STOP TRACING")
+            parts.append("STOP TRACING" if respect_stops else "Collection stop (not applied here)")
         node["attribution_reference"] = attribution_reference(node["id"])
         parts.append(node["attribution_reference"])
         node["label"] = "\n".join(parts)
@@ -349,6 +363,8 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
                        "shared addresses do not establish value allocation or common ownership."
                        if merge_addresses else "Legacy view: separate outpoint occurrences."),
             "nodes": list(nodes.values()), "edges": edges}
+    if resolve_saved_inputs:
+        graph["graph_options"]["resolve_saved_inputs"] = True
     if reference_name:
         graph["hop_reference_name"] = reference_name
         graph["run"]["hop_reference_name"] = reference_name
@@ -362,7 +378,8 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
         node["starting_transaction_index"] = entry["index"]
         node["label"] = node["label"].replace("TX\n", f"Starting TX {entry['index']}\n", 1)
     from .convergence import annotate_branch_interactions
-    annotate_branch_interactions(graph, state, respect_attribution_hops=respect_attribution_hops)
+    annotate_branch_interactions(graph, state, respect_attribution_hops=respect_attribution_hops,
+                                 respect_stops=respect_stops)
     from .address_counts import annotate
     annotate(graph, state)
     from .change_layout import annotate_changes

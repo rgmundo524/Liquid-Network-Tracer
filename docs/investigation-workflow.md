@@ -28,7 +28,7 @@ Check the collection status. A request, transaction, output, or time budget can
 stop collection before the hop ceiling is reached. Active `stop_tracing` rules
 and the confirmation policy still apply. Collection ignores attribution
 `hop_limit` values, including `0`; these caps remain available for Full trace
-and Starter connections layouts. For a chart covering up to 10 hops, collect
+layouts. For a chart covering up to 10 hops, collect
 enough data to cover that depth before plotting. Choosing 10 in a plotting form
 does not fetch missing transactions.
 
@@ -87,9 +87,10 @@ The tracer cannot discover a return behind an outside output beyond that
 boundary. A maximum of 0 can follow internal group transfers. Transaction,
 output, request, and time budgets still bound the work. Stop-tracing rules still
 apply. Attribution hop caps do not restrict collection or peg-out tracing.
-For Full trace and Starter connections layouts, local attribution allowances
-still decrease on every spend, including internal transfers; a named-group
-reset does not replenish those local allowances.
+For Full trace layouts, local attribution allowances still decrease on every
+spend, including internal transfers; a named-group reset does not replenish
+those local allowances. Starter connections ignores both attribution stops
+and caps and searches all verified connections already saved.
 
 The chosen name is saved with each run and shown in collection history. For the
 same hop origin, continuation adds the entered hops to the previous ceiling.
@@ -99,8 +100,9 @@ can reuse already collected transactions. Earlier saved runs remain unchanged.
 The original distance from the seeds stays in the evidence alongside the
 group-relative measurement.
 
-Full, starter-connection, and peg-out layouts use the selected collection run's
-hop origin. Updated attribution can change which saved outputs reset to 0 when
+Full and peg-out layouts use the selected collection run's hop origin. Starter
+connections reports verified transaction distances without applying a plotting
+hop cutoff. Updated attribution can change which saved outputs reset to 0 when
 generating another layout. Plotting uses saved data only; run collection again
 to retrieve newly eligible activity. Boundary-only inspections do not increase
 the **Hops collected** measurement. The progress indicator may return to 0 as
@@ -115,12 +117,12 @@ destination. The available goals are shown together:
 | Goal | What it plots |
 | --- | --- |
 | Full investigation / Full trace | Saved activity reachable under the current stop/hop rules, using the current display settings. |
-| Starter connections | Verified paths between the starting transactions, within the selected maximum hops and current attribution stop/hop rules. |
+| Starter connections | All verified saved paths between selected starting transactions, without attribution stops, attribution hop caps, or a plotting hop cutoff. Existing labels and confirmation status are preserved. |
 | Paths to peg-outs | Transactions on verified paths from selected seed UTXOs to qualifying endpoints within the global hop range, respecting explicit stop rules and ignoring attribution hop caps. Every selected transaction displays all its inputs and outputs. |
 
 Choose **New board** and enter a name for a fresh arrangement, or choose
 **Update existing board** and a destination with the same plotting goal.
-Set the hop range and appearance, then choose **Generate & create board** or
+Set the appearance and, for peg-out paths, the hop range, then choose **Generate & create board** or
 **Generate & update board**. Each runs layout generation and Miro publication
 as one job. There is no required preview-review or separate sync step.
 
@@ -140,6 +142,20 @@ new connections link that section to existing objects. After syncing, you can
 manually merge that section into the investigation's working arrangement.
 Full-trace plots also reapply current stop/hop rules: tightening them excludes
 branches; loosening them restores only activity already in the saved evidence.
+
+**Starter connections** searches all verified links in the selected saved run.
+New plots ignore both `stop_tracing` and attribution `hop_limit` values and have
+no maximum-hop field. They preserve attribution names, colors, and confirmation
+status, including verified unconfirmed links already saved. A connection must
+start through a selected seed output and follow an exact, verified UTXO spend;
+shared addresses or matching names do not create connections. Other inputs and
+unrelated side branches are not added just to join starters. No blockchain
+requests are made. Missing links still require collection, which continues to
+respect its explicit stops, global hop ceiling, and resource budgets.
+
+Older saved Starter connections plots keep their recorded stop/hop rules and
+bounds. Generate a new layout to use all saved connections; syncing an old
+layout does not silently change its scope.
 
 **Paths to peg-outs** uses one circle per full address per network. Repeated
 UTXOs retain their separate connectors and transaction CSV rows. Unknown
@@ -405,7 +421,7 @@ Generate previews without publication when needed:
 
 ```sh
 liquid-trace plot --case CASE_DIRECTORY --goal full --run latest --open
-liquid-trace plot --case CASE_DIRECTORY --goal connections --run latest --max-hops 10 --open
+liquid-trace plot --case CASE_DIRECTORY --goal connections --run latest --open
 liquid-trace plot --case CASE_DIRECTORY --goal pegouts --run latest --min-hops 0 --max-hops 10 --open
 ```
 

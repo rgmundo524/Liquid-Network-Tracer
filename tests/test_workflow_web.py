@@ -66,6 +66,10 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertTrue(plot["reviewable"])
             self.assertEqual(plot["source_max_hops"], 10)
             self.assertIn(b"html", self.success(plot["artifact"]["preview_url"]).lower())
+            if plot["goal"] == "connections":
+                self.assertEqual(plot["connection_scope"], "all_saved")
+                self.assertEqual(plot["query"], {"connection_scope": "all_saved"})
+                self.assertIsNone(plot["max_hops"])
         self.assertNotIn(str(case), json.dumps(detail))
         self.assertNotIn("state_file", json.dumps(detail))
         self.assertEqual((case / "case.json").read_bytes(), before)
@@ -100,6 +104,19 @@ class WorkflowWebTests(unittest.TestCase):
                 start.assert_called_with(["plot", "--case", str(case), "--goal", goal, "--run", run,
                                           "--min-hops", "0", "--max-hops", "10"],
                                          action="plot", live=False, case=case)
+
+    def test_starter_action_accepts_no_hop_range_but_other_goals_require_it(self):
+        case, route, run = self.collected()
+        with patch.object(self.server, "start_job", return_value={"id": "plot"}) as start:
+            self.success(route + "/actions", {"action": "plot", "goal": "connections", "run_id": run}, 202)
+            start.assert_called_once_with(["plot", "--case", str(case), "--goal", "connections", "--run", run,
+                                          "--min-hops", "0", "--max-hops", "0"],
+                                         action="plot", live=False, case=case)
+            start.reset_mock()
+            for goal in ("full", "pegouts"):
+                self.assertEqual(self.request(route + "/actions", {"action": "plot", "goal": goal,
+                                                                  "run_id": run})[0], 400)
+            start.assert_not_called()
 
     def test_board_actions_use_one_contract_and_goal_bound_sync(self):
         case, route, _ = self.collected()

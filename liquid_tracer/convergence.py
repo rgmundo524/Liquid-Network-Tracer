@@ -11,7 +11,7 @@ from .common import TraceError, output_kind
 from .services import is_service_stop
 
 
-def _lineage_analysis(state, catalog, *, _layout=None, respect_attribution_hops=True):
+def _lineage_analysis(state, catalog, *, _layout=None, respect_attribution_hops=True, respect_stops=True):
     """Return input-merge records and per-outpoint origins, respecting boundaries."""
     if _layout is not None:
         _layout.update(transactions={}, inputs={}, outputs={})
@@ -61,10 +61,11 @@ def _lineage_analysis(state, catalog, *, _layout=None, respect_attribution_hops=
     def allowed(key):
         item = outputs[key]
         output = transactions[item["txid"]]["data"]["vout"][item["vout"]]
-        return (output_kind(output) == "spendable" and output.get("scriptpubkey_address") not in stop_addresses
-                and (respect_attribution_hops or not any(target in stop_targets for target in (
-                    ("outpoint", key), ("script", output.get("scriptpubkey")),
-                    ("address", output.get("scriptpubkey_address"))))))
+        return (output_kind(output) == "spendable" and (not respect_stops or
+                (output.get("scriptpubkey_address") not in stop_addresses
+                 and (respect_attribution_hops or not any(target in stop_targets for target in (
+                     ("outpoint", key), ("script", output.get("scriptpubkey")),
+                     ("address", output.get("scriptpubkey_address"))))))))
 
     while ready:
         txid = ready.popleft()
@@ -117,7 +118,8 @@ def _lineage_analysis(state, catalog, *, _layout=None, respect_attribution_hops=
                     if key in seeds and txid in indices:
                         values[indices[txid]] = math.inf
                     item = outputs[key]
-                    cap = output_budget(state["labels"], key, transactions[txid]["data"]["vout"][item["vout"]])
+                    cap = output_budget(state["labels"], key, transactions[txid]["data"]["vout"][item["vout"]],
+                                        respect_stops=respect_stops)
                     budgets[key] = {number: min(remaining, cap) for number, remaining in values.items()}
         for child in sorted(children[txid]):
             indegree[child] -= 1
@@ -142,7 +144,7 @@ def _numbers(bits):
     return result
 
 
-def branch_interactions(state, catalog, *, _layout=None, respect_attribution_hops=True):
+def branch_interactions(state, catalog, *, _layout=None, respect_attribution_hops=True, respect_stops=True):
     """Compute input merges and retroactive shared-address receipts separately.
 
     Scan every permitted tracked receipt, including seeds and stopped arrivals.
@@ -152,7 +154,8 @@ def branch_interactions(state, catalog, *, _layout=None, respect_attribution_hop
     so an address with many deposits does not create quadratic metadata copies.
     """
     transactions, origins = _lineage_analysis(state, catalog, _layout=_layout,
-                                              respect_attribution_hops=respect_attribution_hops)
+                                              respect_attribution_hops=respect_attribution_hops,
+                                              respect_stops=respect_stops)
     receipts = defaultdict(list)
     for key in sorted(origins):
         bits = origins[key]
@@ -259,12 +262,12 @@ def _branch_structure(graph, catalog, lineages):
             "edge_memberships": connections}
 
 
-def annotate_branch_interactions(graph, state, *, respect_attribution_hops=True):
+def annotate_branch_interactions(graph, state, *, respect_attribution_hops=True, respect_stops=True):
     """Decorate a freshly generated graph; never rewrite a saved trace or edges."""
     catalog = graph["activity_frames"]["starting_transactions"]
     lineages = {}
     result = branch_interactions(state, catalog, _layout=lineages,
-                                 respect_attribution_hops=respect_attribution_hops)
+                                 respect_attribution_hops=respect_attribution_hops, respect_stops=respect_stops)
     graph["branch_structure"] = _branch_structure(graph, catalog, lineages)
     graph["address_convergences"] = result["addresses"]
     for node in graph["nodes"]:

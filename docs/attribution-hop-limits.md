@@ -15,16 +15,17 @@ numbers; `0` is not the same as blank.
 
 ## Which phases use the rules
 
-Active `stop_tracing` rules apply to collection and every plotting goal. The
-attribution `hop_limit` is a local display/traversal cap for **Full trace** and
-**Starter connections** only:
+Active `stop_tracing` rules apply to collection, Full trace, and Paths to
+peg-outs. Attribution `hop_limit` is a local display/traversal cap for **Full
+trace** only. New **Starter connections** plots inspect all verified saved
+connections, without either attribution filter or an additional plotting hop cap:
 
 | Phase or goal | `stop_tracing=true` | Attribution `hop_limit`, including `0` |
 | --- | --- | --- |
 | Collect transaction data | Stops that path | Ignored |
 | Paths to peg-outs, including standalone searches | Stops that path | Ignored |
 | Full trace | Stops that path | Applied |
-| Starter connections | Stops that path | Applied |
+| Starter connections | Ignored | Ignored |
 
 Collection still obeys the run's overall hop ceiling, confirmation policy, and
 transaction, output, API-request, and time budgets. Peg-out tracing still obeys
@@ -32,11 +33,11 @@ its selected global hop range. Ignoring an address's local cap does not remove
 these limits or change the selected seeds. To stop collection or a peg-out path
 at an address, use `stop_tracing=true`; `hop_limit=0` alone does not stop them.
 
-## Counting additional hops in Full trace and Starter connections
+## Counting additional hops in Full trace
 
 An arrival at the annotated output consumes no local hop. One hop is its spend by
 the next transaction. Thus `hop_limit=1` includes the consolidation transaction
-and its outputs in these views, then stops further expansion along that path.
+and its outputs in this view, then stops further expansion along that path.
 A value of 2 allows one more transaction spend. The selected global hop ceiling
 and available saved evidence still bound the plotted activity.
 
@@ -51,8 +52,7 @@ shorten it. Independent selected outputs or other permitted paths keep their
 own allowance. A short exhausted path cannot lend its global hop depth to a
 longer open path. Named-group hop resets do not replenish these local budgets.
 
-Changing a saved limit affects the next generated Full trace or Starter
-connections plot. Tightening the limit removes paths from those new views;
+Changing a saved limit affects the next generated Full trace plot. Tightening the limit removes paths from those new views;
 loosening it restores only activity already collected. It does not delete saved
 transactions, raw responses, or historical plots, and does not establish common
 ownership or carry a service's attribution onto descendants. Use **Replace**
@@ -69,8 +69,12 @@ example, a branch previously capped at hop 3 can now be collected toward the
 saved overall ceiling of 10, unless an explicit address stop intervenes.
 
 Generate new plots from the resulting run. New peg-out plots ignore address
-hop caps; Full trace and Starter connections still apply them. Existing saved
-reports, endpoint tables, and plots retain their recorded rules and results.
+hop caps; Full trace still applies them. New Starter connections plots ignore
+both attribution caps and explicit stops, but can only find connections already
+verified in the saved evidence. They cannot recover data collection never
+fetched. Labels and colors remain visible. Existing saved reports, endpoint
+tables, and plots retain their recorded rules and results, including older
+Starter connections plots with a bounded scope.
 
 The CLI accepts `service-set --hop-limit 1`; `--hop-limit ''` clears it. Omitting
 the option when changing another assessment field preserves an existing limit.

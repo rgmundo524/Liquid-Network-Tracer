@@ -228,8 +228,10 @@ def parser():
         plot.add_argument("--board-record-id", help="Investigation board record to read for an update layout")
         plot.add_argument("--layout-settings-json", type=json.loads,
                           help="Validated layout settings snapshot for this operation")
-        plot.add_argument("--min-hops", type=int, default=0)
-        plot.add_argument("--max-hops", type=int, default=10)
+        plot.add_argument("--min-hops", type=int, default=0,
+                          help="Minimum endpoint distance for peg-out plots; ignored by Starter connections")
+        plot.add_argument("--max-hops", type=int, default=10,
+                          help="Maximum endpoint distance for peg-out plots; Starter connections uses all verified saved connections")
         plot.add_argument("--include-unspent", action="store_true",
                           help="Include paths to outputs recorded as unspent in peg-out plots")
         plot.add_argument("--include-unspendable", action="store_true",
@@ -267,7 +269,8 @@ def parser():
     connections = commands.add_parser("connections", help="Plot only saved directed paths between starting transactions")
     connections.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     connections.add_argument("--run", default="latest")
-    connections.add_argument("--hops", type=int, default=10, help="Maximum transaction hops per starter-to-starter path (default: 10)")
+    connections.add_argument("--hops", type=int, default=10,
+                             help="Compatibility flag; new connection graphs use all verified saved connections without a hop cutoff")
     connections.add_argument("--open", dest="open_browser", action="store_true")
     connection_publish = commands.add_parser("connections-publish", help="Publish a reviewed connection-only snapshot to a separate Miro board")
     connection_publish.add_argument("--case", type=Path, default=case_default, required=case_default is None)
