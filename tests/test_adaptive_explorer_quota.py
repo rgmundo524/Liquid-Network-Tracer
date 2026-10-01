@@ -222,6 +222,121 @@ class AdaptiveQuotaTests(unittest.TestCase):
         self.assertTrue(quota.pressure(admitted, 1.))
         self.assertAlmostEqual(quota.reserve().target_rps, grown.target_rps * .7)
 
+    def track_transactions(self, quota, *, commit_seconds=0.):
+        calls = []
+        original = quota._transaction
+
+        @contextmanager
+        def tracked():
+            calls.append(1)
+            with original() as db:
+                yield db
+                self.clock[0] += commit_seconds
+
+        quota._transaction = tracked
+        return calls
+
+    def test_parallel_waiters_reuse_denial_but_every_admission_reads_database(self):
+        quota = self.quota()
+        calls = self.track_transactions(quota)
+        first = self.admit(quota)
+        denied = quota.reserve()
+        count = len(calls)
+        for _ in range(64):
+            self.assertFalse(quota.reserve().admitted)
+        self.assertEqual(len(calls), count)
+        self.assertEqual(quota._pending_successes, {})
+        quota.success(first)
+        self.clock[0] += denied.wait_seconds + 1e-6
+        self.assertTrue(quota.reserve().admitted)
+        self.assertEqual(len(calls), count + 1)
+        self.assertEqual(quota._pending_successes, {})
+
+    def test_new_peer_cooldown_is_checked_after_cached_denial(self):
+        quota = self.quota()
+        self.admit(quota)
+        denied = quota.reserve()
+        peer = self.quota()
+        peer.cooldown(10.)
+        self.assertFalse(quota.reserve().admitted)
+        self.clock[0] += denied.wait_seconds + 1e-6
+        renewed = quota.reserve()
+        self.assertFalse(renewed.admitted)
+        self.assertEqual(renewed.reason, 'server_cooldown')
+        self.assertGreater(renewed.wait_seconds, 9.)
+        self.clock[0] += renewed.wait_seconds + 1e-6
+        self.assertTrue(quota.reserve().admitted)
+
+    def test_new_fixed_peer_is_checked_before_any_cached_waiter_can_start(self):
+        quota = self.quota()
+        self.admit(quota)
+        denied = quota.reserve()
+        peer = self.quota(adaptive=False, rate=4.)
+        self.assertFalse(peer.reserve().admitted)
+        self.clock[0] += denied.wait_seconds + 1e-6
+        renewed = quota.reserve()
+        self.assertFalse(renewed.admitted)
+        self.assertEqual(renewed.active_clients, 2)
+        self.assertEqual(renewed.effective_rps, 4.)
+        self.assertGreater(renewed.wait_seconds, .2)
+        peer.close()
+        self.assertTrue(quota.reserve().admitted)
+
+    def test_long_cached_cooldown_renews_lease_and_flushes_feedback(self):
+        quota = SharedExplorerQuota(ENDPOINT, 1 / 49, adaptive=True,
+                                    directory=self.temp.name, idle_seconds=.4,
+                                    clock=lambda: self.clock[0])
+        self.clients.append(quota)
+        first = self.admit(quota)
+        quota.cooldown(5.)
+        quota.reserve()
+        calls = self.track_transactions(quota)
+        quota.success(first)
+        self.clock[0] += .1
+        self.assertFalse(quota.reserve().admitted)
+        self.assertEqual(calls, [])
+        self.clock[0] += .11
+        self.assertFalse(quota.reserve().admitted)
+        self.assertEqual(len(calls), 1)
+        with sqlite3.connect(quota.path) as db:
+            expires = db.execute('SELECT expires_at FROM clients').fetchone()[0]
+            successes = db.execute('SELECT successes FROM adaptive_pacing').fetchone()[0]
+        self.assertGreater(expires, self.clock[0] + .39)
+        self.assertEqual(successes, 1)
+        self.assertEqual(quota._pending_successes, {})
+
+    def test_own_cooldown_and_pressure_invalidate_cached_denial(self):
+        quota = self.quota()
+        first = self.admit(quota)
+        quota.reserve()
+        quota.cooldown(3.)
+        denied = quota.reserve()
+        self.assertAlmostEqual(denied.wait_seconds, 3.)
+        quota.pressure(first, 8.)
+        denied = quota.reserve()
+        self.assertAlmostEqual(denied.wait_seconds, 8.)
+        self.assertEqual(denied.generation, 1)
+
+    def test_denied_commit_latency_is_not_added_to_retry_sleep(self):
+        quota = self.quota()
+        self.admit(quota)
+        self.track_transactions(quota, commit_seconds=.01)
+        denied = quota.reserve()
+        self.assertAlmostEqual(denied.wait_seconds, 1 / 49 - .01)
+        self.assertFalse(denied.admitted)
+        self.clock[0] += denied.wait_seconds + 1e-6
+        self.assertTrue(quota.reserve().admitted)
+
+    def test_elapsed_denial_during_slow_commit_never_grants_permission(self):
+        quota = self.quota()
+        self.admit(quota)
+        self.track_transactions(quota, commit_seconds=.1)
+        denied = quota.reserve()
+        self.assertFalse(denied.admitted)
+        self.assertGreater(denied.wait_seconds, 0.)
+        self.assertLess(denied.wait_seconds, .001)
+        self.assertTrue(quota.reserve().admitted)
+
     def test_admission_defaults_preserve_old_positional_construction(self):
         admission = Admission(True, 0., 2, 49., '')
         self.assertEqual(admission.mode, 'fixed')

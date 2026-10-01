@@ -166,21 +166,21 @@ class ExplorerPipelineTests(unittest.TestCase):
         def pause(seconds):
             clock[0] += seconds
 
-        original_attempt, original_observe = self.store.attempt, self.store.observe
+        original_attempt, original_response = self.store.attempt, self.store.record_response
 
         def attempt(*args):
             clock[0] += .1
             return original_attempt(*args)
 
-        def observe(*args):
-            clock[0] += .2
-            return original_observe(*args)
+        def record_response(*args):
+            clock[0] += .3
+            return original_response(*args)
 
         client.transport = transport
         with patch('liquid_tracer.api.time.monotonic', side_effect=lambda: clock[0]), \
              patch.object(client._cancelled, 'wait', side_effect=pause), \
              patch.object(self.store, 'attempt', side_effect=attempt), \
-             patch.object(self.store, 'observe', side_effect=observe):
+             patch.object(self.store, 'record_response', side_effect=record_response):
             client.get('/tx/one')
         metrics = client.request_metrics()
         self.assertAlmostEqual(metrics['network_seconds_total'], .5)

@@ -13,10 +13,14 @@ every response, including rejections, must still be saved exactly once.
 The --shared-quota option includes the production SQLite admission coordinator,
 isolated inside the benchmark's temporary directory. Without that option,
 injected transports use the in-memory coordinator or local fixed pacing.
+Use --evidence-commit-delay-ms and --quota-commit-delay-ms to model slow durable
+storage. These delay actual SQLite COMMIT statements, so combining writes into
+one transaction reduces the simulated storage cost without dropping evidence.
 """
 
 import argparse
 from collections import Counter, deque
+from contextlib import nullcontext
 import hashlib
 import importlib
 import json
@@ -43,12 +47,18 @@ def main():
     parser.add_argument("--shared-quota", action="store_true",
                         help="Include production SQLite request admission in an isolated temporary directory")
     parser.add_argument("--network-delay-ms", type=float, default=40)
-    parser.add_argument("--evidence-delay-ms", type=float, default=0)
+    parser.add_argument("--evidence-delay-ms", type=float, default=0,
+                        help="Legacy delay per evidence-write method; use commit delay to model durable storage")
+    parser.add_argument("--evidence-commit-delay-ms", type=float, default=0,
+                        help="Additional latency per actual evidence COMMIT")
+    parser.add_argument("--quota-commit-delay-ms", type=float, default=0,
+                        help="Additional latency per actual shared-quota COMMIT")
     args = parser.parse_args()
     if not 1 <= args.addresses <= 100000 or not 0 <= args.cached_addresses <= 1000000:
         parser.error("Choose 1–100000 fetched addresses and 0–1000000 cached addresses")
     if not 0 < args.requests_per_second <= 100000 or any(
-            not 0 <= value <= 1000 for value in (args.network_delay_ms, args.evidence_delay_ms)):
+            not 0 <= value <= 1000 for value in (args.network_delay_ms, args.evidence_delay_ms,
+                                               args.evidence_commit_delay_ms, args.quota_commit_delay_ms)):
         parser.error("Rate/delay outside synthetic benchmark bounds")
     if not 0 <= args.provider_rps <= 100000:
         parser.error("Choose a synthetic provider allowance of 0–100000 requests per second")
@@ -67,6 +77,8 @@ def main():
     admitted, successful_responses, rate_samples = deque(), [], []
     writes, json_bytes, save_seconds = 0, 0, 0.
     quota_reservations, quota_admitted, quota_reserve_seconds = 0, 0, 0.
+    commits = {kind: {"count": 0, "seconds": 0., "injected_wait_seconds": 0.}
+               for kind in ("evidence", "quota")}
     lock = threading.Lock()
 
     def progress(event):
@@ -105,6 +117,58 @@ def main():
 
     original_submit = Esplora.submit
     original_init = Esplora.__init__
+    original_connect = sqlite3.connect
+
+    class MeasuredConnection(sqlite3.Connection):
+        benchmark_kind = None
+
+        def _measure_commit(self, operation, *values):
+            begun = time.monotonic()
+            try:
+                return operation(*values)
+            finally:
+                if self.benchmark_kind:
+                    with lock:
+                        commits[self.benchmark_kind]["seconds"] += time.monotonic() - begun
+
+        def commit(self):
+            if self.in_transaction:
+                return self._measure_commit(super().commit)
+            return super().commit()
+
+        def __exit__(self, *values):
+            if values[0] is None and self.in_transaction:
+                return self._measure_commit(super().__exit__, *values)
+            return super().__exit__(*values)
+
+        def execute(self, sql, *values):
+            if sql.strip().upper().rstrip(";") in ("COMMIT", "END"):
+                return self._measure_commit(super().execute, sql, *values)
+            return super().execute(sql, *values)
+
+    def connect(database, *values, **options):
+        path = Path(database)
+        kind = "evidence" if path.name == "evidence.sqlite" else "quota" if path.parent.name == "quota" else None
+        if not kind:
+            return original_connect(database, *values, **options)
+        options["factory"] = MeasuredConnection
+        connection = original_connect(database, *values, **options)
+        connection.benchmark_kind = kind
+        delay = getattr(args, kind + "_commit_delay_ms") / 1000
+
+        def trace_statement(sql):
+            if sql.strip().upper().rstrip(";") != "COMMIT":
+                return
+            begun = time.monotonic()
+            if delay:
+                time.sleep(delay)
+            with lock:
+                commits[kind]["count"] += 1
+                if delay:
+                    commits[kind]["injected_wait_seconds"] += time.monotonic() - begun
+
+        connection.set_trace_callback(trace_statement)
+        return connection
 
     class BenchmarkSharedQuota(SharedExplorerQuota):
         def reserve(self):
@@ -170,7 +234,10 @@ def main():
              patch.object(Esplora, "__init__", initialize), \
              patch.object(Esplora, "submit", submit), \
              patch.object(Esplora, "bearer", return_value="synthetic-not-a-credential"), \
+             patch.object(sqlite3, "connect", connect), \
              patch.object(Store, "attempt", delayed(Store.attempt)), \
+             (patch.object(Store, "record_response", delayed(Store.record_response))
+              if hasattr(Store, "record_response") else nullcontext()), \
              patch.object(Store, "observe", delayed(Store.observe)):
             started = time.monotonic()
             report = counts_module._collect_counts(case, state, cached + fresh,
@@ -182,6 +249,7 @@ def main():
         with sqlite3.connect(case / "evidence.sqlite") as database:
             evidence = database.execute("SELECT endpoint, sha256 FROM observations WHERE status=200 ORDER BY endpoint").fetchall()
             all_evidence = database.execute("SELECT endpoint, status, sha256, body FROM observations ORDER BY id").fetchall()
+            attempts = database.execute("SELECT kind, endpoint, status FROM attempts ORDER BY kind, endpoint, status").fetchall()
         successful_requests = [address for address, status in requests if status == 200]
         if (report["fetched"] != len(fresh) or report["remaining"] or report["known"] != len(cached) + len(fresh)
                 or sorted(successful_requests) != sorted(fresh) or len(evidence) != len(fresh)):
@@ -194,6 +262,10 @@ def main():
             raise AssertionError("The selected checkout did not use adaptive pacing")
         if args.shared_quota and quota_admitted != len(requests):
             raise AssertionError("Shared admission did not account for every HTTP attempt")
+        expected_attempts = Counter(("esplora", "/address/" + address, label)
+                                    for address, status in requests for label in ("started", str(status)))
+        if Counter(attempts) != expected_attempts:
+            raise AssertionError("An HTTP attempt start or outcome was lost, duplicated, or changed")
         rolling = deque()
         peak_successful_rps = 0
         for timestamp in sorted(successful_responses):
@@ -214,11 +286,17 @@ def main():
             "peak_successful_responses_in_rolling_second": peak_successful_rps,
             "rate_target_changes": rate_samples,
             "network_delay_ms": args.network_delay_ms, "evidence_delay_ms": args.evidence_delay_ms,
+            "evidence_commit_delay_ms": args.evidence_commit_delay_ms,
+            "quota_commit_delay_ms": args.quota_commit_delay_ms,
+            "sqlite_commits": {kind: {key: round(value, 6) if isinstance(value, float) else value
+                                      for key, value in metrics.items()} for kind, metrics in commits.items()},
             "lookup_report": report, "peak_active_transport_requests": peak_active,
             "peak_retained_endpoint_futures": peak_retained, "full_json_cache_writes": writes,
             "full_json_cache_bytes_written": json_bytes, "full_json_save_seconds": round(save_seconds, 6),
             "counts_sha256": hashlib.sha256(canonical(normalized)).hexdigest(),
             "evidence_sha256": hashlib.sha256(canonical(evidence)).hexdigest(),
+            "http_attempt_rows": len(attempts),
+            "attempts_sha256": hashlib.sha256(canonical(attempts)).hexdigest(),
             "notice": "Synthetic provider; real evidence/cache writes and pacing. Not a live throughput forecast."
         }, indent=2))
 

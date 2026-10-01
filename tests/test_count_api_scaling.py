@@ -49,8 +49,8 @@ class CountAPIScalingTests(unittest.TestCase):
         def attempt(*_):
             clock[0] += .1
 
-        def observe(*_):
-            clock[0] += .2
+        def record_response(*_):
+            clock[0] += .3
             return 'observation'
 
         reserve = client._reserve_request
@@ -74,7 +74,7 @@ class CountAPIScalingTests(unittest.TestCase):
              patch.object(client._cancelled, 'wait', side_effect=pause), \
              patch.object(self.store, 'cached', side_effect=cached), \
              patch.object(self.store, 'attempt', side_effect=attempt), \
-             patch.object(self.store, 'observe', side_effect=observe), \
+             patch.object(self.store, 'record_response', side_effect=record_response), \
              patch('liquid_tracer.api.json.loads', side_effect=decode):
             self.assertEqual(client.get('/address/one'), ({}, 'observation'))
         metrics = client.request_metrics()
@@ -109,14 +109,14 @@ class CountAPIScalingTests(unittest.TestCase):
     def test_endpoint_sample_is_published_after_evidence_completes(self):
         entered, release = threading.Event(), threading.Event()
         client = self.client(Mock(return_value=(200, {}, b'{}')))
-        observe = self.store.observe
+        record_response = self.store.record_response
 
-        def delayed_observe(*args):
+        def delayed_response(*args):
             entered.set()
             self.assertTrue(release.wait(3))
-            return observe(*args)
+            return record_response(*args)
 
-        with patch.object(self.store, 'observe', side_effect=delayed_observe):
+        with patch.object(self.store, 'record_response', side_effect=delayed_response):
             future = client.submit('/address/one')
             try:
                 self.assertTrue(entered.wait(3))

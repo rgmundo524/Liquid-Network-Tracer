@@ -209,6 +209,8 @@ class Esplora:
         self._totals = {"network_seconds_total": 0., "pacing_wait_seconds_total": 0.,
                         "retry_wait_seconds_total": 0., "evidence_seconds_total": 0.,
                         "cache_hits": 0, "coalesced_hits": 0,
+                        "quota_reserve_calls": 0, "quota_reserve_seconds": 0.,
+                        "quota_admitted": 0, "quota_denied": 0,
                         "rate_limit_responses": 0, "retry_responses": 0,
                         "peak_in_flight": 0}
         self._in_flight = 0
@@ -428,8 +430,15 @@ class Esplora:
                     raise self._pacing_error
                 current = time.monotonic()
                 if self._shared_quota is not None:
-                    admission = self._shared_quota.reserve()
+                    quota_started = time.monotonic()
+                    try:
+                        admission = self._shared_quota.reserve()
+                    finally:
+                        with self._metrics_lock:
+                            self._totals["quota_reserve_calls"] += 1
+                            self._totals["quota_reserve_seconds"] += max(0., time.monotonic() - quota_started)
                     with self._metrics_lock:
+                        self._totals["quota_admitted" if admission.admitted else "quota_denied"] += 1
                         if getattr(admission, "target_rps", 0):
                             self.api_target_rps = admission.target_rps
                         if self._shared_metrics is None:
@@ -508,17 +517,19 @@ class Esplora:
         finally:
             self._add_seconds("retry_wait_seconds_total", started)
 
-    def call(self, method, url, kind, endpoint, headers=None, body=None):
+    def call(self, method, url, kind, endpoint, headers=None, body=None, *, archive_response=False):
         started = time.monotonic()
         with self._exclude_service():
             self._transport_slots.acquire()
             self._add_seconds("pacing_wait_seconds_total", started)
         try:
-            return self._call(method, url, kind, endpoint, headers, body)
+            return self._call(method, url, kind, endpoint, headers, body, archive_response=archive_response)
         finally:
             self._transport_slots.release()
 
-    def _call(self, method, url, kind, endpoint, headers=None, body=None):
+    def _call(self, method, url, kind, endpoint, headers=None, body=None, *, archive_response=False):
+        if archive_response and (kind != "esplora" or method != "GET"):
+            raise TraceError("Only explorer GET response bodies may be archived")
         timeout = self._admit(kind, endpoint)
         admission = getattr(self._admission_local, "admission", None)
         started = time.monotonic()
@@ -552,6 +563,11 @@ class Esplora:
                 with self._gate:
                     self._pacing_error = error
                     self._gate.notify_all()
+        if archive_response:
+            oid = self._evidence(self.store.record_response, self.run_id, kind, self.base,
+                                 endpoint, result[2], result[0])
+            self._remember(oid)
+            return (*result, oid)
         self._evidence(self.store.attempt, self.run_id, kind, endpoint, result[0])
         return result
 
@@ -886,7 +902,8 @@ class Esplora:
                         headers["Authorization"] = "Bearer " + self.bearer()
                         token_generation = self._token_generation
             try:
-                status, response_headers, raw = self.call("GET", self.base + endpoint, "esplora", endpoint, headers)
+                status, response_headers, raw, oid = self.call("GET", self.base + endpoint, "esplora", endpoint,
+                                                               headers, archive_response=True)
             except TransientExplorerConnection as error:
                 # Fresh, reused and proxy GET failures all consume the original
                 # request budget and network-error evidence. Their replacements
@@ -898,8 +915,6 @@ class Esplora:
                                       + endpoint + ": " + str(error)) from None
                 self._pause_retry(2 ** attempt)
                 continue
-            oid = self._evidence(self.store.observe, self.run_id, self.base, endpoint, raw, status)
-            self._remember(oid)
             if status == 200:
                 try:
                     return json.loads(raw), oid

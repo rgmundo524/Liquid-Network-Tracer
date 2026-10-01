@@ -190,7 +190,7 @@ class RollingTraceTests(unittest.TestCase):
                      workers=2, advertised_rps=1_000_000, shared_quota=quota) as api:
             state = new_state(self.seeds, api.base, limits, [])
             api.run_id = state["run_id"]
-            original_admit, original_observe = api._admit, store.observe
+            original_admit, original_response = api._admit, store.record_response
 
             def admit(kind=None, endpoint=None):
                 # Allow the first ordered output's dependency chain through,
@@ -200,9 +200,9 @@ class RollingTraceTests(unittest.TestCase):
                         raise AssertionError("First output never received its spending transaction")
                 return original_admit(kind, endpoint)
 
-            def observe(*args):
+            def record_response(*args):
                 self.assertFalse(trace_returned.is_set(), "Evidence was written after trace returned")
-                return original_observe(*args)
+                return original_response(*args)
 
             def checkpoint(path, value):
                 if self.seeds[0] in value["links"] and not interrupted.is_set():
@@ -216,7 +216,7 @@ class RollingTraceTests(unittest.TestCase):
                 save_json(path, value)
 
             with patch.object(api, "_admit", side_effect=admit), \
-                 patch.object(store, "observe", side_effect=observe), \
+                 patch.object(store, "record_response", side_effect=record_response), \
                  patch("liquid_tracer.trace.TraceCheckpoint", side_effect=lambda: TraceCheckpoint(max_operations=1)), \
                  patch("liquid_tracer.trace.save_json", side_effect=checkpoint), \
                  ThreadPoolExecutor(max_workers=1) as runner:
