@@ -208,6 +208,9 @@ def transaction_csv_rows(graph, state):
                 if grouped and (coinbase or pegin):
                     raise TraceError("Transaction CSV context summary cannot contain coinbase or peg-in inputs")
                 output = {} if coinbase else (vin.get("prevout") or {})
+                if not coinbase and graph.get("graph_options", {}).get("resolve_saved_inputs") is True:
+                    from .saved_inputs import saved_input_output
+                    output = saved_input_output(state["transactions"], vin)
                 outpoint = f"{vin.get('txid', txid)}:{vin.get('vout', io_index)}"
                 if coinbase:
                     flags.append("COINBASE")

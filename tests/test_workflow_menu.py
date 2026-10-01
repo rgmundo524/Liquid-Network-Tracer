@@ -55,7 +55,8 @@ class PlotCommandTests(unittest.TestCase):
             self.assertEqual(arguments[:7], ["plot", "--case", "case with spaces", "--goal", goal, "--run", "saved-run"])
             self.assertNotIn("--seed", arguments)
             self.assertNotIn("--txid", arguments)
-            if goal == "full":
+            if goal in ("full", "connections"):
+                self.assertNotIn("--min-hops", arguments)
                 self.assertNotIn("--max-hops", arguments)
             else:
                 self.assertEqual(arguments[arguments.index("--min-hops") + 1], "2" if goal == "pegouts" else "0")
@@ -63,9 +64,14 @@ class PlotCommandTests(unittest.TestCase):
 
     def test_missing_collection_and_invalid_ranges_do_not_start_work(self):
         for goal, run, minimum, maximum in [("full", None, "0", "10"), ("wrong", "run", "0", "10"),
-                ("pegouts", "run", "3", "2"), ("connections", "run", "0", "-1")]:
+                ("pegouts", "run", "3", "2"), ("pegouts", "run", "0", "-1")]:
             with self.subTest(goal=goal, run=run, minimum=minimum, maximum=maximum), self.assertRaises(TraceError):
                 plot_arguments("case", goal, run, minimum, maximum)
+
+    def test_starter_connections_ignores_stale_hidden_hop_values(self):
+        arguments, live = plot_arguments("case", "connections", "saved-run", "not a hop", "-1")
+        self.assertFalse(live)
+        self.assertEqual(arguments, ["plot", "--case", "case", "--goal", "connections", "--run", "saved-run", "--open"])
 
     def test_optional_endpoints_are_pegout_only_and_never_enable_live_collection(self):
         arguments, live = plot_arguments("case", "pegouts", "run", include_unspent=True, include_unspendable=True,
@@ -247,9 +253,12 @@ class WorkflowMenuTests(unittest.IsolatedAsyncioTestCase):
             app.screen.query_one("#plot-goal", Select).value = "connections"
             await pilot.pause()
             self.assertFalse(app.screen.query_one("#plot-endpoints").display)
+            self.assertFalse(app.screen.query_one("#plot-range").display)
             await self.click(app, pilot, "#plot-go")
             self.assertNotIn("--include-unspent", app.result[0])
             self.assertNotIn("--include-context", app.result[0])
+            self.assertNotIn("--min-hops", app.result[0])
+            self.assertNotIn("--max-hops", app.result[0])
 
     def board_rows(self):
         return [{"id": "board-full", "name": "Full graph", "goal": "full", "board_id": "FULL=",

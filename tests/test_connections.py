@@ -195,6 +195,7 @@ class ConnectionPreviewTests(unittest.TestCase):
         self.assertIn("#c4b5fd", (directory/"graph.mmd").read_text())
 
     def test_no_matches_create_empty_graph_and_no_publication_or_layout(self):
+        self.state, self.archive = saved_case(self.case, graph_state())
         with patch("liquid_tracer.elk_layout.optimize_graph", side_effect=AssertionError("no layout")):
             result = preview_connections(self.case, max_hops=1)
         graph, _ = reviewed_connections(self.case, result["preview_id"])
@@ -261,6 +262,7 @@ class ConnectionPreviewTests(unittest.TestCase):
         first = publish_connections(self.case, result["preview_id"], "snapshot-board", token="test", transport=remote, interval=0)
         second = publish_connections(self.case, result["preview_id"], "snapshot-board", token="test", transport=remote, interval=0)
         self.assertEqual(first["items"], second["items"])
+        set_service(self.case, "SYNTHETIC-c-address", name="New reviewed label", stop_tracing=False)
         next_preview = preview_connections(self.case, max_hops=3)
         with self.assertRaisesRegex(TraceError, "different board or plan"):
             publish_connections(self.case, next_preview["preview_id"], "snapshot-board", token="test", transport=remote, interval=0)

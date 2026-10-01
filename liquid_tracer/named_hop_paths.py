@@ -8,7 +8,8 @@ from .group_hops import reference_addresses
 from .hop_limits import output_budget
 
 
-def walk_outputs(state, seeds, links, limit, confirmed, *, seed_distances=None, respect_attribution_hops=True):
+def walk_outputs(state, seeds, links, limit, confirmed, *, seed_distances=None,
+                 respect_attribution_hops=True, respect_stops=True):
     """Keep path-local depth and attribution allowance for each output.
 
     A named output resets only its own path. A boundary output may inspect its
@@ -29,7 +30,8 @@ def walk_outputs(state, seeds, links, limit, confirmed, *, seed_distances=None, 
         if output_kind(output) == "fee" or depth > limit:
             return
         remaining = min(remaining, output_budget(state["labels"], key, output,
-                                                respect_attribution_hops=respect_attribution_hops))
+                                                respect_attribution_hops=respect_attribution_hops,
+                                                respect_stops=respect_stops))
         point = (key, depth, remaining)
         if previous is not None:
             predecessors[point].add(previous)

@@ -642,6 +642,8 @@ class LocalServer(ThreadingHTTPServer):
                         product.update(display_options)
                     if kind == "connections":
                         report = info["connections"]
+                        if report.get("connection_scope") == "all_saved":
+                            product["connection_scope"] = "all_saved"
                         product.update(preview_id=directory.name, max_hops=report["max_hops"],
                                        connection_count=report["connection_count"], connection_status=report["status"])
                         layout = info.get("layout")
@@ -1067,6 +1069,8 @@ class LocalServer(ThreadingHTTPServer):
                 from .connections import reviewed_connections
                 graph, _ = reviewed_connections(case, directory.name)
                 report = graph["connections"]
+                if report.get("connection_scope") == "all_saved":
+                    value["connection_scope"] = "all_saved"
                 value.update(preview_id=directory.name, max_hops=report["max_hops"],
                              connection_count=report["connection_count"], connection_status=report["status"])
             if action == "compact":

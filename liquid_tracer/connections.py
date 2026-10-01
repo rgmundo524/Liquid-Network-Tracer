@@ -1,4 +1,4 @@
-"""Bounded starter-to-starter paths, derived only from verified saved UTXO spends.
+"""Starter-to-starter paths, derived only from verified saved UTXO spends.
 
 The directed transaction DAG is the search graph. Address equality, co-inputs,
 shared descendants and display-layout edges cannot manufacture a connection.
@@ -28,6 +28,11 @@ def preview_files(directory):
 SCOPE = ("Search scope: verified spends in the selected saved run, from the selected starting outputs. "
          "This view does not fetch additional transactions. Unsearched, paused, stopped or hop-limited "
          "branches may contain undiscovered connections; no result is not proof of no connection.")
+ALL_SAVED_SCOPE = ("Search scope: all verified starter-to-starter spends in the selected saved run, "
+                  "including exact references proved by saved funding and spending transactions. "
+                  "Attribution stop rules, attribution hop limits, collection confirmation preferences "
+                  "and plot hop limits do not hide these connections. Labels and confirmation status remain visible. "
+                  "This view does not fetch additional transactions; missing evidence can still hide connections.")
 
 
 def validate_hops(value):
@@ -36,7 +41,76 @@ def validate_hops(value):
     return value
 
 
-def connecting_outpoints(state, max_hops=10):
+def validate_connection_scope(value):
+    if value not in (None, "all_saved"):
+        raise TraceError("Starter connections must use all saved transaction evidence")
+    return value
+
+
+def _saved_connection_evidence(state):
+    """Add exact saved input references to an isolated display state.
+
+    Collection may have stopped before requesting an outspend that another
+    saved starting transaction already proves. Only matching transaction IDs
+    and output indices establish these links; addresses never establish one.
+    """
+    from .trace import validate_transaction
+    from .saved_inputs import saved_input_output
+    result = deepcopy(state)
+    transactions, outputs, links = result["transactions"], result["outputs"], result["links"]
+    try:
+        actual_spends = {}
+        for txid, record in transactions.items():
+            validate_transaction(record["data"], txid)
+            for index, vin in enumerate(record["data"]["vin"]):
+                if vin.get("is_coinbase") or vin.get("is_pegin"):
+                    continue
+                parent = vin.get("txid")
+                if parent not in transactions:
+                    continue  # A context input without saved funding evidence is not a link.
+                output_index = vin.get("vout")
+                funding = transactions[parent]["data"]["vout"]
+                if (parent == txid or type(output_index) is not int
+                        or not 0 <= output_index < len(funding)):
+                    raise TraceError("Connection input references an invalid saved funding output")
+                key = f"{parent}:{output_index}"
+                if key in actual_spends:
+                    raise TraceError("Saved transactions contain conflicting spends of one output")
+                saved_input_output(transactions, vin)
+                actual_spends[key] = (txid, index)
+        for key, link in links.items():
+            parent, index = parse_outpoint(key)
+            tracked = outputs[key]
+            if (key != f"{parent}:{index}" or tracked.get("outpoint", key) != key
+                    or tracked["txid"] != parent or type(tracked["vout"]) is not int
+                    or tracked["vout"] != index or type(link["vin"]) is not int
+                    or actual_spends.get(key) != (link["spending_txid"], link["vin"])):
+                raise TraceError("Saved connection spend link disagrees with its transaction evidence")
+        for key, (child, vin) in actual_spends.items():
+            if key in links:
+                continue
+            parent, index = parse_outpoint(key)
+            outputs.setdefault(key, {"outpoint": key, "txid": parent, "vout": index,
+                                     "depth": transactions[parent].get("depth", 0),
+                                     "origin": "saved_transaction_input", "status": "spent_in_saved_evidence"})
+            links[key] = {"outpoint": key, "spending_txid": child, "vin": vin,
+                          "relationship": "saved_transaction_input"}
+        for key in result["seeds"]:
+            txid, index = parse_outpoint(key)
+            if txid in transactions and index >= len(transactions[txid]["data"]["vout"]):
+                raise TraceError("Selected seed output does not exist in its saved transaction")
+    except (KeyError, TypeError, ValueError, IndexError, AttributeError) as error:
+        raise TraceError("Connection search needs complete, consistent saved transaction evidence") from error
+    return result
+
+
+def connecting_outpoints(state, max_hops=10, *, connection_scope=None):
+    scope = validate_connection_scope(connection_scope)
+    evidence = _saved_connection_evidence(state) if scope == "all_saved" else state
+    return _connecting_outpoints(evidence, max_hops, connection_scope=scope)
+
+
+def _connecting_outpoints(state, max_hops=10, *, connection_scope=None):
     """Union of every edge on any directed path between distinct starters <= H.
 
     Two bounded BFS passes per starter suffice. In a DAG, an edge u->v belongs
@@ -45,7 +119,12 @@ def connecting_outpoints(state, max_hops=10):
     source's first edge must spend an explicitly selected seed output. Passing
     another starter never resets that source's distance.
     """
-    limit = validate_hops(max_hops)
+    all_saved = connection_scope == "all_saved"
+    if max_hops is not None or not all_saved:
+        validate_hops(max_hops)
+    # A verified DAG cannot have a directed path longer than N-1. This bound
+    # keeps the existing path-union algorithm finite without filtering paths.
+    limit = max(0, len(state["transactions"]) - 1) if all_saved else max_hops
     seeds = set(state["seeds"])
     roots = sorted({parse_outpoint(key)[0] for key in seeds})
     if len(roots) < 2:
@@ -78,21 +157,21 @@ def connecting_outpoints(state, max_hops=10):
             indegree[child] += 1
             forward[parent].append((child, key))
         ready = deque(key for key, count in indegree.items() if not count)
-        visited = 0
+        topology = []
         while ready:
-            parent = ready.popleft(); visited += 1
+            parent = ready.popleft(); topology.append(parent)
             for child, _ in forward[parent]:
                 indegree[child] -= 1
                 if not indegree[child]: ready.append(child)
-        if visited != len(transactions):
+        if len(topology) != len(transactions):
             raise TraceError("Saved UTXO spends contain a cycle; connection search cannot proceed")
         forward.clear()
         eligible = []
         for parent, child, key, vin in verified:
             output = transactions[parent]["data"]["vout"][parse_outpoint(key)[1]]
-            if any(label.get("stop") is True for label in match_labels(state["labels"], key, output)):
+            if not all_saved and any(label.get("stop") is True for label in match_labels(state["labels"], key, output)):
                 continue
-            if not state.get("include_unconfirmed", False) and any(
+            if not all_saved and not state.get("include_unconfirmed", False) and any(
                     transactions[txid]["data"].get("status", {}).get("confirmed") is not True
                     for txid in (parent, child)):
                 continue
@@ -119,16 +198,17 @@ def connecting_outpoints(state, max_hops=10):
     from .group_hops import reference_name
     name = reference_name(state)
     reference_fields = {}
-    if name:
+    if name and not all_saved:
         from .named_hop_paths import walk_outputs, retain_paths, transaction_depths
         confirmed = {txid for txid, record in transactions.items()
-                     if state.get("include_unconfirmed", False)
+                     if all_saved or state.get("include_unconfirmed", False)
                      or record["data"].get("status", {}).get("confirmed") is True}
         links = {key: child for _, child, key, _ in eligible}
         retained, pairs, output_depths = set(), [], defaultdict(set)
         for root in roots:
             starts = {key for key in seeds if parse_outpoint(key)[0] == root}
-            seen, predecessors = walk_outputs(state, starts, links, limit, confirmed)
+            seen, predecessors = walk_outputs(state, starts, links, limit, confirmed,
+                                               respect_attribution_hops=not all_saved, respect_stops=not all_saved)
             success = {point for point in seen
                        if point[0].rpartition(":")[0] in roots
                        and point[0].rpartition(":")[0] != root}
@@ -147,35 +227,85 @@ def connecting_outpoints(state, max_hops=10):
                                             transaction_depths(output_depths).items()},
             "output_reference_hops": {key: min(values) for key, values in output_depths.items()},
         }
-    elif has_hop_limits(state["labels"]):
+    elif not all_saved and has_hop_limits(state["labels"]):
         retained, pairs = bounded_connections(state, roots, seeds, eligible, limit)
     else:
         retained, pairs = set(), []
+        output_depths = defaultdict(set)
+        terminal_depths = defaultdict(set)
+        if name:
+            from .group_hops import reference_addresses
+            from .named_hop_paths import transaction_depths
+            addresses = reference_addresses(state)
         for root in roots:
             downstream = distances([root], forward, root)
             targets = [target for target in roots if target != root and target in downstream]
             if not targets: continue
             upstream = distances(targets, backward)
+            kept = set()
             for parent, child, key, _ in eligible:
                 if parent == root and key not in seeds: continue
                 if (parent in downstream and child in upstream
                         and downstream[parent] + 1 + upstream[child] <= limit):
-                    retained.add(key)
-            pairs.extend({"source": root, "target": target, "shortest_hops": downstream[target]} for target in targets)
-    return {"schema_version": 1, "max_hops": limit, "starting_transactions": roots, **reference_fields,
-            "pairs": pairs, "outpoints": sorted(retained), "scope": SCOPE,
+                    kept.add(key)
+            retained.update(kept)
+            if name:
+                # No cutoff or path budget applies in all-saved mode. Membership
+                # is ordinary reachability; only display distances reset at the
+                # named outputs. Keep one minimum arrival per transaction/output
+                # instead of enumerating every possible path-depth state.
+                arrivals, depths = {}, {key: 0 for key in seeds if parse_outpoint(key)[0] == root}
+                for parent in topology:
+                    if parent in arrivals:
+                        for index, output in enumerate(transactions[parent]["data"]["vout"]):
+                            kind = output_kind(output)
+                            if kind != "fee":
+                                depths[f"{parent}:{index}"] = (0 if kind == "spendable" and
+                                    output.get("scriptpubkey_address") in addresses else arrivals[parent])
+                    for child, key in forward.get(parent, ()):
+                        if key in depths:
+                            arrivals[child] = min(arrivals.get(child, float("inf")), depths[key] + 1)
+                retained_depths = kept | {f"{target}:{index}" for target in targets
+                    for index, output in enumerate(transactions[target]["data"]["vout"])
+                    if output_kind(output) != "fee"}
+                for key in retained_depths:
+                    output_depths[key].add(depths[key])
+                for target in targets:
+                    if not any(output_kind(output) != "fee" for output in transactions[target]["data"]["vout"]):
+                        terminal_depths[target].add(arrivals[target])
+                pairs.extend({"source": root, "target": target, "shortest_hops": min(
+                    (depths[f"{target}:{index}"] for index, output in enumerate(transactions[target]["data"]["vout"])
+                     if output_kind(output) != "fee"), default=arrivals[target])} for target in targets)
+            else:
+                pairs.extend({"source": root, "target": target, "shortest_hops": downstream[target]} for target in targets)
+        if name:
+            transaction_hops = {key: max(values) for key, values in transaction_depths(output_depths).items()}
+            transaction_hops.update({key: min(values) for key, values in terminal_depths.items()})
+            reference_fields = {
+                "hop_reference_name": name,
+                "transaction_reference_hops": transaction_hops,
+                "output_reference_hops": {key: min(values) for key, values in output_depths.items()},
+            }
+    return {"schema_version": 1, "max_hops": None if all_saved else limit,
+            **({"connection_scope": "all_saved"} if all_saved else {}),
+            "starting_transactions": roots, **reference_fields,
+            "pairs": pairs, "outpoints": sorted(retained), "scope": ALL_SAVED_SCOPE if all_saved else SCOPE,
             "source_run_status": state.get("status"), "source_stop_reason": state.get("stop_reason"),
             "source_max_hops": state.get("limits", {}).get("max_hops"),
             "status": "connections_found" if retained else "no_connection_found"}
 
 
-def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, center_name=None):
+def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, center_name=None, connection_scope=None):
     """Generate only connecting transaction/UTXO nodes; keep the archive intact."""
     from .export import build_graph
     from .layout import arrange
     from .miro_frames import activity_frames
 
-    report = connecting_outpoints(state, max_hops)
+    connection_scope = validate_connection_scope(connection_scope)
+    all_saved = connection_scope == "all_saved"
+    if all_saved:
+        state = _saved_connection_evidence(state)
+    report = _connecting_outpoints(state, max_hops, connection_scope=connection_scope)
     outpoints = set(report["outpoints"])
     selected = {key.rpartition(":")[0] for key in outpoints}
     selected.update(state["links"][key]["spending_txid"] for key in outpoints)
@@ -191,7 +321,9 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
     # A separate circle per outpoint avoids visual cross-spends between different
     # UTXOs at a reused address. The ordinary merged-address graph is unchanged.
     graph = build_graph(reduced, merge_addresses=False, include_fees=False,
-                        color_attribution_arrows=color_attribution_arrows, center_name=center_name)
+                        color_attribution_arrows=color_attribution_arrows, center_name=center_name,
+                        respect_attribution_hops=not all_saved, respect_stops=not all_saved,
+                        resolve_saved_inputs=all_saved)
     edge_ids = {"out:" + key for key in outpoints}
     edge_ids.update(f"in:{state['links'][key]['spending_txid']}:{state['links'][key]['vin']}" for key in outpoints)
     graph["edges"] = [e for e in graph["edges"] if e["id"] in edge_ids]
@@ -202,18 +334,24 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
     graph["activity_frames"] = activity_frames(graph)
     report.update(transaction_count=len(selected), connection_count=len(report["pairs"]))
     graph["connections"] = report
-    graph["graph_options"].update(view="starter_connections", connection_hops=max_hops)
+    graph["graph_options"].update(view="starter_connections", connection_hops=report["max_hops"])
+    if all_saved:
+        graph["graph_options"]["connection_scope"] = "all_saved"
     units = "group-relative hops" if report.get("hop_reference_name") else "transaction hops"
-    graph["notice"] = ((f"Starter-to-starter paths of at most {max_hops} {units}. "
+    introduction = ((f"All saved starter-to-starter paths. {len(report['pairs'])} ordered starter pair(s) connected. "
+                     if outpoints else "No starter-to-starter connection found in saved evidence. Nothing is plotted. ")
+                    if all_saved else
+                    (f"Starter-to-starter paths of at most {max_hops} {units}. "
                          f"{len(report['pairs'])} ordered starter pair(s) connected. " if outpoints else
-                         f"No connection found within {max_hops} hops in the saved searched data. Nothing is plotted. ")
-                        + SCOPE + " One circle per connecting UTXO, not address clustering. "
+                         f"No connection found within {max_hops} hops in the saved searched data. Nothing is plotted. "))
+    graph["notice"] = (introduction + report["scope"] + " One circle per connecting UTXO, not address clustering. "
                         "Every displayed edge belongs to a qualifying path; their union may also form longer routes. "
                         "UTXO reachability does not prove ownership or allocate confidential values.")
     if report.get("hop_reference_name"):
         graph["notice"] += (f" Hops count away from attribution group {report['hop_reference_name']}; "
                             "each reached output in that group resets its own path to 0. "
-                            "Outside outputs beyond the boundary are not followed.")
+                            + ("Distances describe saved paths without imposing a plot cutoff." if all_saved else
+                               "Outside outputs beyond the boundary are not followed."))
     return graph
 
 
@@ -251,11 +389,11 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
     settings = load_services(case)
     state["labels"] = apply_service_labels(state["labels"], settings)
     state["service_controls"] = {k: v for k, v in settings.items() if k != "history"}
-    from .address_counts import apply_saved_counts, ensure_counts
+    from .address_counts import apply_saved_counts
     apply_saved_counts(case, state)
     graph = connection_graph(state, max_hops, color_attribution_arrows=attribution_arrow_coloring(metadata),
-                              center_name=centered_name_group(metadata))
-    counts = ensure_counts(case, state, graph=graph, progress=progress) if graph["nodes"] else None
+                              center_name=centered_name_group(metadata), connection_scope="all_saved")
+    counts = None
     if graph["nodes"]:
         graph = optimize_graph(graph, connector_style=connector_appearance(metadata), progress=progress,
                                layout_attempts=layout_search_attempts(metadata))
@@ -290,7 +428,8 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
     if "layout_attempts" in graph.get("graph_options", {}):
         result["layout_attempts"] = graph["graph_options"]["layout_attempts"]
     return {**result, "address_counts": counts, "directory": str(destination.resolve()), "preview_id": destination.name,
-            "run_id": run_id, "include_fees": False, "max_hops": max_hops,
+            "run_id": run_id, "include_fees": False, "max_hops": report["max_hops"],
+            **({"connection_scope": "all_saved"} if report.get("connection_scope") == "all_saved" else {}),
             "color_attribution_arrows": graph["graph_options"]["color_attribution_arrows"],
             "center_name": graph["graph_options"]["center_name"],
             "connection_count": report["connection_count"], "transaction_count": report["transaction_count"],
@@ -336,6 +475,13 @@ def reviewed_connections(case, preview_id):
     verify_export(archive)
     settings = load_services(case)
     report = graph.get("connections", {})
+    scope = validate_connection_scope(report.get("connection_scope"))
+    if (graph["graph_options"].get("connection_scope") != scope
+            or graph["graph_options"].get("connection_hops") != report.get("max_hops")
+            or (scope == "all_saved" and report.get("max_hops") is not None)):
+        raise TraceError("Saved connection scope disagrees with its graph; regenerate the preview")
+    if scope is None:
+        validate_hops(report.get("max_hops"))
     if (report.get("archive_sha256") != digest((archive / "SHA256SUMS").read_bytes())
             or report.get("service_sha256") != digest(canonical({k: v for k, v in settings.items() if k != "history"}))
             or graph["graph_options"].get("color_attribution_arrows", False) is not attribution_arrow_coloring(metadata)

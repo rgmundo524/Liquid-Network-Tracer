@@ -40,6 +40,20 @@ def public_plot(value):
     if (value.get("layout_mode") == "update" and isinstance(counts, dict) and set(counts) == count_keys
             and all(type(count) is int and 0 <= count <= 2 ** 53 - 1 for count in counts.values())):
         result["update_counts"] = dict(counts)
+    if (value.get("goal") == "connections" and value.get("connection_scope") == "all_saved"
+            and value.get("max_hops") is None):
+        result["connection_scope"] = "all_saved"
+        query = value.get("query")
+        if (isinstance(query, dict) and set(query) <= {"connection_scope", "hop_reference_name"}
+                and query.get("connection_scope") == "all_saved"):
+            from .group_hops import normalize_reference_name
+            try:
+                name = normalize_reference_name(query.get("hop_reference_name", ""))
+                normalized = {"connection_scope": "all_saved", **({"hop_reference_name": name} if name else {})}
+                if query == normalized:
+                    result["query"] = normalized
+            except TraceError:
+                pass
     if value.get("goal") == "pegouts":
         from .pegout_paths import validate_query
         from .pegout_csv import validate_pegout_lbtc_summary
@@ -146,9 +160,11 @@ def workflow_action(server, case, metadata, body):
     action = body["action"]
     live = False
     if action in ("plot", "plot-sync"):
-        required = {"action", "goal", "run_id", "min_hops", "max_hops"}
+        required = {"action", "goal", "run_id"}
+        if body.get("goal") != "connections":
+            required.update({"min_hops", "max_hops"})
         endpoint_options = {"include_unspent", "include_unspendable"}
-        allowed = {"include_context", "layout_mode", "board_record_id", "layout_settings"}
+        allowed = {"include_context", "layout_mode", "board_record_id", "layout_settings", "min_hops", "max_hops"}
         if action == "plot-sync":
             allowed.add("name")
         if not required <= set(body) or set(body) - required - endpoint_options - allowed:
@@ -180,7 +196,7 @@ def workflow_action(server, case, metadata, body):
             raise RequestError("Include context addresses must be true or false.")
         if body["goal"] != "pegouts" and body.get("include_context", False):
             raise RequestError("Include context addresses applies only to peg-out paths plots.")
-        lower, upper = body.get("min_hops"), body.get("max_hops")
+        lower, upper = body.get("min_hops", 0), body.get("max_hops", 0)
         if type(lower) is not int or type(upper) is not int or not 0 <= lower <= upper <= 2147483647:
             raise RequestError("Enter whole-number hops from 0 to 2147483647, with minimum no greater than maximum.")
         if not isinstance(body.get("run_id"), str):

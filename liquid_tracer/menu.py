@@ -703,10 +703,11 @@ def create_app(root=None):
                 yield Button("Refresh address activity", id="address-refresh", disabled=True)
                 yield Checkbox("Enable this address assessment", id="service-enabled")
                 yield Checkbox("Stop tracing through this address", value=True, id="service-stop")
-                yield Label("hop_limit for Full trace and Starter connections")
+                yield Label("hop_limit for Full trace")
                 yield Input(id="service-hop-limit", placeholder="No local cap")
                 yield Static("Blank = no local cap; 0 = stop this plotted path; 1 = one consolidation hop. "
-                             "Collection and peg-out tracing ignore this cap. Use Stop tracing above to stop those paths.", markup=False)
+                             "Collection and peg-out tracing ignore this cap. Use Stop tracing above to stop those paths. "
+                             "Starter connections ignores both rules when inspecting saved evidence.", markup=False)
                 yield Label("Confidence (your assessment, not automatic verification)")
                 yield Select([("Suspected", "suspected"), ("Confirmed", "confirmed")],
                              value="suspected", allow_blank=False, id="service-confidence")
@@ -847,7 +848,7 @@ def create_app(root=None):
                     self.load_page()
                     self.query_one("#address-error", Static).update(
                         ("Address stop saved. It applies to the next run." if self.query_one("#service-stop", Checkbox).value
-                         else "Attribution and plot hop limit saved. Collection and peg-out tracing ignore this cap.") if enabled else
+                         else "Attribution and Full trace hop limit saved. Other goals ignore this cap.") if enabled else
                         "Assessment disabled. Future runs may trace through this address.")
             except ACTION_ERRORS as error:
                 self.query_one("#address-error", Static).update(str(error))

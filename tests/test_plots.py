@@ -233,6 +233,7 @@ class PlotTests(unittest.TestCase):
         self.assertEqual(before, self.bytes(self.archive))
 
     def test_empty_results_remain_reviewable_with_no_layout_or_miro_objects(self):
+        self.state, self.archive = saved_case(self.case, graph_state())
         for goal in ("connections", "pegouts"):
             with self.subTest(goal=goal):
                 result = preview_plot(self.case, goal, max_hops=0)

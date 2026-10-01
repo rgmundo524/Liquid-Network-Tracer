@@ -65,8 +65,8 @@ def plot_arguments(case, goal, run, minimum="0", maximum="10", *, include_unspen
     if layout_mode == "fresh" and board_record_id is not None:
         raise TraceError("A fresh layout does not use an existing board")
     arguments = ["plot-sync" if publish else "plot", "--case", str(case), "--goal", goal, "--run", run]
-    if goal != "full":
-        lower, upper = int(minimum) if goal == "pegouts" else 0, int(maximum)
+    if goal == "pegouts":
+        lower, upper = int(minimum), int(maximum)
         if not 0 <= lower <= upper <= 2147483647:
             raise TraceError("Use whole-number hops from 0 to 2147483647; minimum cannot exceed maximum")
         arguments += ["--min-hops", str(lower), "--max-hops", str(upper)]
@@ -122,7 +122,7 @@ def plot_screen(base, button, case):
                 yield Label("Maximum new Miro items")
                 yield Input(value=str(metadata.get("run_defaults", {}).get("max_new_items", 750)),
                             id="plot-max-items", type="integer")
-                yield Static("Full investigation: all displayed activity. Starter connections: verified paths between "
+                yield Static("Full investigation: all displayed activity. Starter connections: all verified saved paths between "
                              "starting transactions. Paths to peg-outs: verified paths ending in matching requests.", markup=False)
                 with Vertical(id="plot-range"):
                     with Vertical(id="plot-minimum"):
@@ -141,8 +141,9 @@ def plot_screen(base, button, case):
                                  "Group isolated context inputs layout setting.", markup=False)
                 yield Static("The selected hop range filters saved data; it does not collect additional transactions. "
                              "A starting transaction is hop 0. Missing matches may reflect incomplete coverage.", markup=False)
-                yield Static("All goals respect explicit stop-tracing rules. Full trace and Starter connections also "
-                             "respect attribution hop_limit values; Paths to peg-outs ignores those local caps, including 0.", markup=False)
+                yield Static("Full trace respects attribution stops and hop limits. Paths to peg-outs respects stops and its "
+                             "selected hop range, ignoring local attribution caps. Starter connections ignores both attribution "
+                             "stops and caps and has no plotting hop cutoff; labels and saved confirmation status remain.", markup=False)
                 yield Static("", id="workflow-error", markup=False)
             with Horizontal(classes="buttons form-actions"):
                 yield button("Back", id="workflow-back")
@@ -155,7 +156,7 @@ def plot_screen(base, button, case):
 
         def _range_visibility(self):
             goal = self.query_one("#plot-goal", Select).value
-            self.query_one("#plot-range").display = goal != "full"
+            self.query_one("#plot-range").display = goal == "pegouts"
             self.query_one("#plot-range").styles.height = "auto"
             self.query_one("#plot-minimum").display = goal == "pegouts"
             self.query_one("#plot-minimum").styles.height = "auto"

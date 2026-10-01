@@ -28,14 +28,17 @@ def has_hop_limits(labels):
     return any(label.get("hop_limit") is not None for label in labels)
 
 
-def output_budget(labels, key, output, *, respect_attribution_hops=True):
-    """Return a path allowance, always preserving an explicit stop boundary.
+def output_budget(labels, key, output, *, respect_attribution_hops=True, respect_stops=True):
+    """Return a path allowance under explicit view-specific boundaries.
 
     Collection and new peg-out queries ignore attribution display limits. Full
     plots and legacy saved queries retain them through the default behavior.
+    Only an all-saved starter connection view explicitly ignores stop rules.
     """
+    if not respect_attribution_hops and not respect_stops:
+        return math.inf
     matches = match_labels(labels, key, output)
-    if any(label.get("stop") is True for label in matches):
+    if respect_stops and any(label.get("stop") is True for label in matches):
         return 0
     if not respect_attribution_hops:
         return math.inf

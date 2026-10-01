@@ -1708,10 +1708,52 @@ test('all plotting goals are visible and plot only the selected saved run withou
     workflowEdit(view, 'min-hops', '2'); workflowEdit(view, 'max-hops', '10');
     await view.dispatch('workflow-plot');
     assert.deepEqual(view.calls.at(-1), {path: '/api/cases/case1/actions', body: {
-      action: 'plot', layout_settings: layoutDefaults, layout_mode: 'fresh', goal, run_id: 'older', min_hops: goal === 'pegouts' ? 2 : 0, max_hops: goal === 'full' ? 0 : 10}});
+      action: 'plot', layout_settings: layoutDefaults, layout_mode: 'fresh', goal, run_id: 'older', min_hops: goal === 'pegouts' ? 2 : 0, max_hops: goal === 'pegouts' ? 10 : 0}});
     assert.equal(view.state.job.live, false);
     assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 1);
   }
+});
+
+test('Starter connections hides hop controls and ignores a stale invalid range when generating', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'plotjob', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase();
+  await view.dispatch('view-plots');
+  await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+  assert.match(view.workspace(), /id="workflow-max-hops"/);
+  workflowEdit(view, 'min-hops', 'bad'); workflowEdit(view, 'max-hops', '-1');
+  await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
+  assert.doesNotMatch(view.workspace(), /id="workflow-(?:min|max)-hops"/);
+  assert.match(view.workspace(), /Attribution hop limits, stop-tracing rules, and plotting hop cutoffs are ignored; labels remain visible/);
+  assert.match(view.workspace(), /No additional transactions are fetched/);
+  await view.dispatch('workflow-plot');
+  assert.equal(view.calls.at(-1).body.goal, 'connections');
+  assert.equal(view.calls.at(-1).body.min_hops, 0);
+  assert.equal(view.calls.at(-1).body.max_hops, 0);
+});
+
+test('saved Starter layouts label all-saved scope and retain the range of older layouts', async () => {
+  for (const allSaved of [false, true]) {
+    const plot = workflowPlot('connections', 'connections1', allSaved
+      ? {max_hops: null, query: {connection_scope: 'all_saved'}} : {max_hops: 3});
+    const view = await harness();
+    view.state.activeCase = workflowCase({plots: [plot], boards: [workflowBoard('connections', 'board1', {preview_id: plot.preview_id})]});
+    for (const page of ['view-plots', 'view-history', 'view-boards']) {
+      await view.dispatch(page);
+      const html = view.workspace();
+      assert.match(html, allSaved ? /All saved connections/ : /Hops 0–3/);
+      assert.doesNotMatch(html, /Hops 0–null/);
+      if (allSaved) assert.match(html, /All verified saved connections/);
+    }
+  }
+});
+
+test('standalone Starter preview starts without a hop input', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'connectionjob', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase();
+  await view.dispatch('view-history');
+  assert.equal(view.elements.has('#connection-hops'), false);
+  await view.dispatch('connections');
+  assert.deepEqual(view.calls.at(-1), {path: '/api/cases/case1/actions', body: {action: 'connections', run_id: 'saved1'}});
 });
 
 test('plot views explain missing collection, retain all goals, and reject invalid bounds locally', async () => {
@@ -1751,7 +1793,7 @@ test('peg-out endpoints default off and optional booleans are submitted only for
       if (goal !== 'pegouts') assert.doesNotMatch(view.workspace(), /id="workflow-include-(?:unspent|unspendable)"/);
       await view.dispatch('workflow-plot');
       assert.deepEqual(view.calls.at(-1).body, {action: 'plot', layout_settings: layoutDefaults, layout_mode: 'fresh', goal, run_id: 'saved1',
-        min_hops: 0, max_hops: goal === 'full' ? 0 : 10,
+        min_hops: 0, max_hops: goal === 'pegouts' ? 10 : 0,
         ...(goal === 'pegouts' && includeUnspent ? {include_unspent: true} : {}),
         ...(goal === 'pegouts' && includeUnspendable ? {include_unspendable: true} : {})});
       assert.equal(view.state.job.live, false);
@@ -1798,7 +1840,7 @@ test('peg-out layouts always describe complete I/O without an optional context t
     await view.dispatch('plot-goal', {dataset: {goal}});
     await view.dispatch('workflow-plot');
     assert.deepEqual(view.calls.at(-1).body, {action: 'plot', layout_settings: layoutDefaults, layout_mode: 'fresh', goal, run_id: 'saved1',
-      min_hops: 0, max_hops: goal === 'full' ? 0 : 10,
+      min_hops: 0, max_hops: goal === 'pegouts' ? 10 : 0,
       ...(goal === 'pegouts' ? {include_unspent: true} : {})});
     assert.equal(view.state.job.live, false);
     assert.equal(view.calls.filter(call => call.body).length, 1, 'display choices neither update settings nor collect data');

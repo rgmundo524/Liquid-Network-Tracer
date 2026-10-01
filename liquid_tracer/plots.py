@@ -202,8 +202,9 @@ def _source(case, run_id):
 
 
 def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_unspendable=False,
-           include_context=False, transaction_io="complete", attribution_hop_limits="ignore"):
-    from .connections import validate_hops
+           include_context=False, transaction_io="complete", attribution_hop_limits="ignore",
+           connection_scope="all_saved"):
+    from .connections import validate_hops, validate_connection_scope
     from .pegout_paths import validate_query
     if not isinstance(goal, str) or goal not in GOALS:
         raise TraceError("Choose the full investigation, starter connections, or peg-out paths plot")
@@ -222,6 +223,10 @@ def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_un
                               transaction_io=transaction_io, attribution_hop_limits=attribution_hop_limits)
     reference = {"hop_reference_name": reference_name(state)} if reference_name(state) else {}
     if goal == "connections":
+        if validate_connection_scope(connection_scope) == "all_saved":
+            if max_hops is not None:
+                validate_hops(max_hops)  # Old clients may supply an unused, valid hop value.
+            return {"connection_scope": "all_saved", **reference}
         return {"max_hops": validate_hops(max_hops), **reference}
     return reference
 
@@ -248,7 +253,7 @@ def _graph(state, goal, query, settings):
     from .plot_scope import project_full_scope
     options = {key: settings[key] for key in ("color_attribution_arrows", "center_name")}
     if goal == "connections":
-        return connection_graph(state, query["max_hops"], **options)
+        return connection_graph(state, query.get("max_hops"), connection_scope=query.get("connection_scope"), **options)
     if goal == "pegouts":
         return pegout_graph(state, query, group_context_inputs=settings["group_context_inputs"], **options)
     return build_graph(project_full_scope(state), merge_addresses=True, **options,
@@ -378,6 +383,8 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
                   "status": "plotted" if graph["nodes"] else "empty"}
         if goal == "connections":
             report.update(connection_count=graph["connections"]["connection_count"], status=graph["connections"]["status"])
+            if "connection_scope" in query:
+                report["connection_scope"] = query["connection_scope"]
         elif goal == "pegouts":
             from .pegout_csv import pegout_lbtc_summary
             report.update(match_count=graph["pegouts"]["match_count"], status=graph["pegouts"]["status"])
@@ -469,6 +476,15 @@ def _snapshot(case, preview_id, *, with_inputs=False):
         if "pegout_lbtc_summary" in report:
             from .pegout_csv import validate_pegout_lbtc_summary
             validate_pegout_lbtc_summary(report["pegout_lbtc_summary"], report.get("match_count"))
+    elif report["goal"] == "connections":
+        query, connections, options = report["query"], graph.get("connections", {}), graph.get("graph_options", {})
+        if (any(canonical(value.get("connection_scope")) != canonical(query.get("connection_scope"))
+                for value in (report, connections, options))
+                or any(canonical(value) != canonical(query.get("max_hops")) for value in
+                       (report.get("max_hops"), connections.get("max_hops"), options.get("connection_hops")))
+                or any(canonical(report.get(key)) != canonical(connections.get(key))
+                       for key in ("connection_count", "status"))):
+            raise TraceError("Saved connection scope disagrees with its graph; regenerate the plot")
     _snapshot_settings(graph)
     _snapshot_board(graph, plan)
     inputs = _snapshot_inputs(directory, graph)
@@ -519,7 +535,8 @@ def _review_source(case, graph, source_cache=None, inputs=None):
                       include_unspendable=query.get("include_unspendable", False),
                       include_context=query.get("include_context", False),
                       transaction_io=query.get("transaction_io"),
-                      attribution_hop_limits=query.get("attribution_hop_limits"))
+                      attribution_hop_limits=query.get("attribution_hop_limits"),
+                      connection_scope=query.get("connection_scope"))
     settings = _snapshot_settings(graph)
     if settings is not None:
         from .export import PRESENTATION_VERSION
