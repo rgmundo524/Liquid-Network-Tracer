@@ -85,8 +85,8 @@ class SavedPlotCSVDownloadTests(unittest.TestCase):
         set_service(case, "SYNTHETIC-c-address", name="Changed name", confidence="suspected", stop_tracing=True)
         set_service(case, "SYNTHETIC-a-address", name="New stop", stop_tracing=True)
         saved, links = self.downloads(route, plot["preview_id"])
-        self.assertFalse(saved["reviewable"])
-        self.assertEqual(set(links), {"transactions.csv", "endpoints.csv"})
+        self.assertTrue(saved["reviewable"])
+        self.assertTrue({"transactions.csv", "endpoints.csv"}.issubset(links))
         self.assertEqual(self.success(links["endpoints.csv"]), original)
         self.assertEqual(self.success(links["transactions.csv"]), (Path(plot["directory"]) / "transactions.csv").read_bytes())
 

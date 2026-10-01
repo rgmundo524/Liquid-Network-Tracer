@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from liquid_tracer.elk_layout import _worker, optimize_graph
+from liquid_tracer.shared_render_resources import SharedRenderResources
 from liquid_tracer.mermaid import _render
 from liquid_tracer.processes import defer_cancellation_during_spawn
 from tests.test_elk_layout import crossing_graph, synthetic_candidate
@@ -71,14 +72,17 @@ class RendererCancellationTests(unittest.TestCase):
                         return synthetic_candidate(request, seeds)
                     return _worker(request, seeds, progress=progress, **kwargs)
 
-                def budget(attempts, *, peak_rss_mb=None):
+                def budget(attempts, *, peak_rss_mb=None, **kwargs):
                     count = min(attempts, 2) if peak_rss_mb else 1
                     return count, 8192, 8192 // count
 
                 previous = signal.signal(signum, interrupt)
                 try:
+                    resources = lambda: SharedRenderResources(directory=root / "resources",
+                                                              capacity=lambda: (16384, 8))
                     with patch.dict(os.environ, {"LIQUID_TRACER_ROOT": str(root),
                                                   "LIQUID_NODE_BIN": sys.executable}), \
+                            patch("liquid_tracer.elk_parallel.SharedRenderResources", side_effect=resources), \
                             patch("liquid_tracer.elk_parallel.elk_worker_budget", side_effect=budget), \
                             patch("liquid_tracer.elk_layout._worker", side_effect=worker), \
                             patch("liquid_tracer.elk_layout.subprocess.Popen", side_effect=launch_then_signal), \

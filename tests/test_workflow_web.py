@@ -2,6 +2,7 @@
 
 import contextlib
 import csv
+import fcntl
 import io
 import json
 import os
@@ -120,6 +121,57 @@ class WorkflowWebTests(unittest.TestCase):
             empty = preview_plot(case, "pegouts", max_hops=0)
             self.assertEqual(self.request(route + "/actions", {**body, "preview_id": empty["preview_id"]})[0], 400)
             start.assert_not_called()
+
+    def test_plot_settings_are_bound_to_job_without_mutating_defaults(self):
+        from liquid_tracer.plots import _settings, LAYOUT_SETTINGS
+        case, route, run = self.collected()
+        before = (case / "case.json").read_bytes()
+        settings = {key: value for key, value in _settings(read_case(case)).items() if key in LAYOUT_SETTINGS}
+        settings["connector_style"] = "curved"
+        body = {"action": "plot", "goal": "full", "run_id": "latest", "min_hops": 0,
+                "max_hops": 10, "layout_settings": settings}
+        with patch.object(self.server, "start_job", return_value={"id": "snapshot"}) as start:
+            self.success(route + "/actions", body, 202)
+            arguments = start.call_args.args[0]
+            captured = json.loads(arguments[arguments.index("--layout-settings-json") + 1])
+            self.assertEqual(captured["connector_style"], "curved")
+            self.assertIn("presentation_version", captured)
+            self.assertEqual(arguments[arguments.index("--run") + 1], run)
+            self.assertEqual((case / "case.json").read_bytes(), before)
+            start.reset_mock()
+            for invalid in ({}, {**settings, "extra": True}, {**settings, "connector_style": "invalid"}, None):
+                self.assertEqual(self.request(route + "/actions", {**body, "layout_settings": invalid})[0], 400)
+            start.assert_not_called()
+
+    def test_saved_plot_submission_is_available_while_collection_runs(self):
+        case, route, run = self.collected()
+        job = {**test_web.synthetic_running_job(read_case(case)["case_id"]), "resource_kind": "collection"}
+        with patch.dict(self.server.jobs, {job["id"]: job}), \
+                patch.object(self.server, "start_job", return_value={"id": "concurrent-plot"}) as start:
+            self.success(route + "/actions", {"action": "plot", "goal": "full", "run_id": "latest",
+                                               "min_hops": 0, "max_hops": 10}, 202)
+            arguments = start.call_args.args[0]
+            self.assertEqual(arguments[arguments.index("--run") + 1], run)
+            self.assertEqual(self.request(route + "/plot-settings", {"settings": {"include_fees": True}})[0], 409)
+
+    def test_real_plot_worker_uses_submitted_settings_while_collector_holds_its_lock(self):
+        from liquid_tracer.plots import _settings, LAYOUT_SETTINGS
+        case, route, run = self.collected()
+        before = (case / "case.json").read_bytes()
+        settings = {key: value for key, value in _settings(read_case(case)).items() if key in LAYOUT_SETTINGS}
+        settings.update(layout_attempts=1, connector_style="curved")
+        collector = {**test_web.synthetic_running_job(read_case(case)["case_id"]), "resource_kind": "collection"}
+        with (case / "trace.lock").open("a") as lock, patch.dict(self.server.jobs, {collector["id"]: collector}):
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            launched = self.success(route + "/actions", {"action": "plot", "goal": "full", "run_id": "latest",
+                "min_hops": 0, "max_hops": 10, "layout_settings": settings}, 202)
+            completed = self.wait(launched)
+            self.assertEqual(completed["status"], "plotted")
+            self.assertEqual(completed["layout_settings"]["connector_style"], "curved")
+            self.assertEqual(completed["layout_settings"]["layout_attempts"], 1)
+            self.assertEqual(completed["run_id"], run)
+            self.assertEqual(completed["input_snapshot_version"], 1)
+        self.assertEqual((case / "case.json").read_bytes(), before)
 
     def test_update_plot_requires_a_matching_board_and_requests_read_credentials(self):
         case, route, run = self.collected()
@@ -332,15 +384,17 @@ class WorkflowWebTests(unittest.TestCase):
                     "action": "board-create", "goal": "full", "name": "Overview", **values})[0], 400)
             start.assert_not_called()
 
-    def test_stale_plots_remain_listed_but_cannot_be_served_or_synced(self):
+    def test_frozen_plots_remain_available_after_new_attribution_is_imported(self):
         case, route, _ = self.collected()
         plot = preview_plot(case, "full")
         artifact = self.server.public_result(plot, "plot", case, [])["artifact"]
         set_service(case, "SYNTHETIC-a-address", name="Changed assessment", stop_tracing=False)
         detail = self.success(route)
-        self.assertFalse(detail["plots"][0]["reviewable"])
-        self.assertNotIn("artifact", detail["plots"][0])
-        self.assertEqual(self.request(artifact["preview_url"])[0], 400)
+        self.assertTrue(detail["plots"][0]["reviewable"])
+        self.assertEqual(detail["plots"][0]["input_snapshot_version"], 1)
+        self.assertEqual(detail["plots"][0]["input_snapshot_at"], plot["input_snapshot_at"])
+        self.assertIn("artifact", detail["plots"][0])
+        self.assertEqual(self.request(artifact["preview_url"])[0], 200)
 
     def test_saved_layout_settings_remain_available_and_syncable_after_preference_change(self):
         case, route, _ = self.collected()

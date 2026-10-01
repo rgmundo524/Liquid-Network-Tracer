@@ -158,14 +158,14 @@ def _available_cpu_count():
     return min(values) if values else 1
 
 
-def elk_worker_budget(attempts, *, peak_rss_mb=None):
+def elk_worker_budget(attempts, *, peak_rss_mb=None, node_count=0, edge_count=0):
     """Return worker count, total heap MiB, and an equal per-worker heap cap.
 
-    The first worker gets the entire allowance. Once its peak process memory is
-    measured, concurrent workers each receive at least twice that measured peak
-    (and at least 1024 MiB). The caller must wait for a whole batch to finish
-    before requesting another budget, using the largest observed peak so far.
-    LIQUID_RENDER_HEAP_MB is shared, never multiplied by the worker count.
+    Start with a graph-sized pilot, then use twice the measured peak process
+    memory (at least 1024 MiB) for each worker. Reserve only what this batch can
+    use, leaving capacity available to other investigations. The graph estimate
+    is a starting point, not a hard graph limit: a memory failure can retry once
+    with the full allowance. LIQUID_RENDER_HEAP_MB remains a shared upper bound.
     Mermaid retains its single-render budget.
     """
     if type(attempts) is not int or attempts < 1:
@@ -179,12 +179,20 @@ def elk_worker_budget(attempts, *, peak_rss_mb=None):
         raise TraceError(f"{_WORKER_SETTING} must be auto or an integer from 1 to 64; set it in devenv.nix")
     if peak_rss_mb is not None and (type(peak_rss_mb) is not int or not 1 <= peak_rss_mb <= 2147483647):
         raise TraceError("ELK worker peak memory must be a positive integer in MiB")
-    total_heap_mb = renderer_heap_mb()
+    if any(type(count) is not int or count < 0 for count in (node_count, edge_count)):
+        raise TraceError("ELK graph sizes must be nonnegative integers")
+    limit_mb = renderer_heap_mb()
     if peak_rss_mb is None:
-        return 1, total_heap_mb, total_heap_mb
-    memory_workers = max(1, total_heap_mb // max(1024, 2 * peak_rss_mb))
+        # Account for per-node/per-edge layout structures without granting a
+        # small graph tens of GiB merely because the host has spare RAM. Round
+        # up to 256 MiB. Only a measurement can establish the actual requirement.
+        estimate_mb = 1024 + (node_count + 3) // 4 + (edge_count + 15) // 16
+        pilot_mb = min(limit_mb, ((estimate_mb + 255) // 256) * 256)
+        return 1, pilot_mb, pilot_mb
+    heap_mb = min(limit_mb, max(1024, 2 * peak_rss_mb))
+    memory_workers = max(1, limit_mb // heap_mb)
     workers = min(ceiling, attempts, _available_cpu_count(), memory_workers)
-    return workers, total_heap_mb, total_heap_mb // workers
+    return workers, workers * heap_mb, heap_mb
 
 
 _ELK_FAILURE_DETAILS = {

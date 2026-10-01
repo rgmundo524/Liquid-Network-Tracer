@@ -66,6 +66,13 @@ ELK_STAGES = {
     "ready_with_failures": "ELK layout completed with failed attempts",
 }
 
+RESOURCE_WAIT_MESSAGES = {
+    "memory": "Waiting for unreserved ELK memory allowance",
+    "cpu": "Waiting for an available ELK CPU slot",
+    "fifo": "Waiting for an earlier ELK resource request",
+    "memory_retry": "Waiting to retry this ELK attempt with a larger memory allowance",
+}
+
 
 _ELK_MEMORY_FAILURES = {
     "heap_exhausted": "JavaScript heap exhausted; close other applications to free memory",
@@ -171,6 +178,15 @@ def public_progress(event):
         stage = event.get("stage")
         if isinstance(stage, str) and stage in ELK_STAGES:
             value.update(stage=stage, message=ELK_STAGES[stage])
+        if stage in ("resource_wait", "resource_allocated"):
+            for field in ("running_layouts", "waiting_layouts", "reserved_heap_mb", "available_heap_mb",
+                          "cpu_slots", "reserved_workers"):
+                number = event.get(field)
+                if type(number) is int and 0 <= number <= 2 ** 53 - 1:
+                    value[field] = number
+            reason = event.get("wait_reason")
+            if stage == "resource_wait" and isinstance(reason, str) and reason in RESOURCE_WAIT_MESSAGES:
+                value.update(wait_reason=reason, message=RESOURCE_WAIT_MESSAGES[reason])
         peak_rss = event.get("peak_rss_mb")
         if (stage == "memory_measured" and type(peak_rss) is int
                 and 1 <= peak_rss <= 2 ** 31 - 1):

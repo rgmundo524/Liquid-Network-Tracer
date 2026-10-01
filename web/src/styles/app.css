@@ -917,3 +917,6 @@ td .case-title:hover {
 .task-summary-message .job-progress-bar { margin: 6px 0 0; }
 .task-summary-message .job-progress-meta,
 .task-summary-message p { display: none; }
+
+.task-summary-count { flex-wrap: wrap; white-space: normal; }
+.task-activity-summary { flex-basis: 100%; font-size: 11px; font-weight: 400; }

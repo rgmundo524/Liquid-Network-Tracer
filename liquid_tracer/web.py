@@ -31,6 +31,7 @@ from .investigations import (create_investigation, default_root, load_settings,
 from .menu import _command, _environment, _lookup_reports, _project, _seed_values, _trace_arguments
 from .progress import public_progress
 from .performance import public_performance
+from .job_resources import PARALLEL_ACTIONS, conflicts, job_resources
 from .layout_search import MAX_LAYOUT_ATTEMPTS, normalize_layout_attempts
 from .layout_search_reporting import public_search_counts
 
@@ -728,6 +729,17 @@ class LocalServer(ThreadingHTTPServer):
         for identity in completed[:-128]:
             del self.jobs[identity]
 
+    def ensure_resources_available(self, case_id, resource):
+        self.ensure_open()
+        requested = {"case_id": case_id, **resource}
+        for job in self.jobs.values():
+            if job["status"] in ACTIVE_JOB_STATUSES and conflicts(job, requested):
+                scope = ("Miro board" if resource["resource_kind"] == "board"
+                         else "collection" if resource["resource_kind"] == "collection"
+                         else "investigation")
+                raise RequestError("This " + scope + " already has an active action (" + job["action"]
+                                   + "). Independent collection, saved plots and other boards remain available.", 409)
+
     def start_job(self, arguments, *, action, live=False, case=None, txids=None):
         case_id = read_case(case)["case_id"] if case is not None else None
         with self.job_lock:
@@ -735,10 +747,12 @@ class LocalServer(ThreadingHTTPServer):
                                    case_id=case_id, txids=txids)
 
     def _start_job(self, arguments, *, action, live, case, case_id, txids):
-        self.ensure_case_idle(case_id)
+        resource = job_resources(arguments, action, case)
+        self.ensure_resources_available(case_id, resource)
         identity = secrets.token_hex(16)
         self.jobs[identity] = {"id": identity, "status": "running", "action": action,
                                "case_id": case_id, "live": bool(live),
+                               **resource, "execution_state": "starting",
                                "started_at": time.time(),
                                "cancellable": action in CANCELLABLE_ACTIONS,
                                "message": ("Generating the layout and syncing Miro. Check the launching terminal if Proton Pass needs to unlock."
@@ -805,6 +819,7 @@ class LocalServer(ThreadingHTTPServer):
                     with self.job_lock:
                         working_message = self.jobs[identity]["message"]
                         self.jobs[identity]["message"] = "Waiting for another action to finish unlocking credentials in the launching terminal…"
+                        self.jobs[identity]["execution_state"] = "credentials_wait"
                     while not credential_gate:
                         with self.job_lock:
                             self.ensure_open()
@@ -813,6 +828,7 @@ class LocalServer(ThreadingHTTPServer):
                         credential_gate = self.credential_lock.acquire(timeout=.25)
                     with self.job_lock:
                         self.jobs[identity]["message"] = working_message
+                        self.jobs[identity]["execution_state"] = "credentials"
                 options = {"process_group": 0} if live else {"start_new_session": True}
                 # Inherit the terminal. Provider prompts and diagnostics are not
                 # captured into browser-readable job output.
@@ -824,6 +840,8 @@ class LocalServer(ThreadingHTTPServer):
                     process = subprocess.Popen(worker_command(request, result, live), cwd=_project(),
                                                env=_environment(), **options)
                     self.processes[identity] = process
+                    if not live:
+                        self.jobs[identity]["execution_state"] = "working"
                 terminal = handoff_terminal(process, live)
                 progress_path = Path(directory) / "progress.json"
                 credentials_ready = Path(directory) / "credentials-ready"
@@ -848,6 +866,8 @@ class LocalServer(ThreadingHTTPServer):
                             stream.write("ready\n")
                         self.credential_lock.release()
                         credential_gate = False
+                        with self.job_lock:
+                            self.jobs[identity]["execution_state"] = "working"
                     try:
                         status = process.wait(timeout=.25)
                     except subprocess.TimeoutExpired:
@@ -1103,6 +1123,8 @@ class LocalServer(ThreadingHTTPServer):
         from .cli import miro_recovery_status, resolve_latest, run_path, verify_export
 
         action = body.get("action")
+        if action not in PARALLEL_ACTIONS:
+            self.ensure_case_idle(metadata["case_id"])
         if action in ("plot", "plot-sync", "board-create", "board-create-sync", "board-link", "board-sync"):
             from .workflow_api import workflow_action
             return workflow_action(self, case, metadata, body)
@@ -1220,10 +1242,16 @@ class LocalServer(ThreadingHTTPServer):
                     raise RequestError("Choose a hop origin or legacy settings, not both.")
                 settings = validate_settings({**settings, "hop_reference_name": body["hop_reference_name"]})
             arguments, live = _trace_arguments(case, metadata, settings)
+            if "--resume" in arguments:
+                # A job can wait for credentials while another server finishes
+                # collection. Bind this continuation to the reviewed parent.
+                arguments[arguments.index("--resume") + 1] = metadata["latest_run"]
+            self.ensure_resources_available(metadata["case_id"], job_resources(arguments, action, case))
             # Current UI actions use saved defaults and a one-run hop allowance.
             # Keep explicit legacy API settings compatible without rewriting
             # defaults every time an ordinary run is started.
             if "settings" in body:
+                self.ensure_case_idle(metadata["case_id"])
                 update_case(case, {"run_defaults": settings})
             elif "hop_reference_name" in body:
                 save_collection_reference(case, settings["hop_reference_name"])
@@ -1476,6 +1504,7 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         self.server.ensure_open()
                         if (len(parts) == 4 and parts[:2] == ["api", "cases"]
+                                and parts[3] != "actions"
                                 and not self.read_only_case_request(parts[3], body)):
                             self.server.ensure_case_idle(parts[2])
                         result, status = self.post(parts, body)

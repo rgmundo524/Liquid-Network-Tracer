@@ -4,7 +4,7 @@ Collecting evidence is a separate operation. This module reads verified
 main-run archives and saved display/trace controls. Board updates additionally
 read the selected Miro board; neither mode fetches transactions or statistics.
 """
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 import fcntl
 import heapq
@@ -25,6 +25,7 @@ FILES = frozenset({"graph.html", "graph.svg", "graph.json", "layout-report.json"
                    "transactions.csv", "plot.json", "miro-plan.json", "details.html", "details.json",
                    "SHA256SUMS"})
 PEGOUT_CSV_FILES = frozenset({"path-transactions.csv", "trace-endpoints.csv"})
+INPUT_SNAPSHOT_FILES = frozenset({"inputs.json"})
 SCOPE = ("Saved-data-only plot. No additional transactions or address statistics were fetched. "
          "Paused, stopped, unconfirmed, unsearched or hop-limited branches may contain further activity. "
          "Use Collect data to extend the evidence, then regenerate this plot.")
@@ -32,15 +33,20 @@ SCOPE = ("Saved-data-only plot. No additional transactions or address statistics
 
 def plot_files(directory=None):
     if directory is None:
-        return FILES | PEGOUT_CSV_FILES
+        return FILES | PEGOUT_CSV_FILES | INPUT_SNAPSHOT_FILES
     report = read_json(_ordinary(Path(directory) / "plot.json"))
     if not isinstance(report, dict):
         raise TraceError("Malformed saved investigation plot")
-    if "csv_export_version" not in report:
-        return FILES  # Earlier immutable previews keep their original manifest.
-    if type(report["csv_export_version"]) is not int or report["csv_export_version"] != 1 or report.get("goal") != "pegouts":
-        raise TraceError("Unsupported saved plot CSV exports; regenerate the plot")
-    return FILES | PEGOUT_CSV_FILES
+    files = FILES
+    if "input_snapshot_version" in report:
+        if type(report["input_snapshot_version"]) is not int or report["input_snapshot_version"] != 1:
+            raise TraceError("Unsupported saved plot input snapshot; regenerate the plot")
+        files |= INPUT_SNAPSHOT_FILES
+    if "csv_export_version" in report:
+        if type(report["csv_export_version"]) is not int or report["csv_export_version"] != 1 or report.get("goal") != "pegouts":
+            raise TraceError("Unsupported saved plot CSV exports; regenerate the plot")
+        files |= PEGOUT_CSV_FILES
+    return files  # Earlier immutable previews keep their original manifest.
 
 
 def _ordinary(path):
@@ -52,12 +58,12 @@ def _ordinary(path):
 
 @contextmanager
 def _locked(case):
-    with (case / "trace.lock").open("a") as trace_lock, (case / "case.lock").open("a") as case_lock:
+    """Capture atomic preferences while collection continues in its own archive."""
+    with (case / "case.lock").open("a") as case_lock:
         try:
-            fcntl.flock(trace_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
             fcntl.flock(case_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise TraceError("Data collection or a settings change is active; retry the plot afterward") from None
+            raise TraceError("Investigation settings are being saved; retry the plot") from None
         yield
 
 
@@ -149,13 +155,11 @@ def _snapshot_board(graph, plan):
         raise TraceError("Saved board layout does not match its target; regenerate the plot")
 
 
-def _source(case, run_id):
-    from .address_counts import apply_saved_counts
-    from .cli import resolve_latest, run_path, verify_export
+def _archive_source(case, run_id, metadata=None):
+    """Verify only immutable collection bytes, without reading mutable inputs."""
+    from .cli import run_path, verify_export
     from .investigations import read_case
-    from .services import apply_service_labels, load_services
-    metadata = read_case(case)
-    run_id = resolve_latest(case, run_id)
+    metadata = metadata or read_case(case)
     if not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f]{16}", run_id):
         raise TraceError("Choose a saved collection run")
     archive = _ordinary(run_path(case, run_id))
@@ -169,12 +173,27 @@ def _source(case, run_id):
     state = read_json(archive / "trace.json")
     if not isinstance(state, dict) or state.get("run_id") != run_id or state.get("case_id") != metadata["case_id"]:
         raise TraceError("The selected collection run does not belong to this investigation")
-    controls = {key: value for key, value in load_services(case).items() if key != "history"}
+    return state, digest((archive / "SHA256SUMS").read_bytes())
+
+
+def _source(case, run_id):
+    from .address_counts import apply_saved_counts
+    from .cli import resolve_latest
+    from .investigations import read_case
+    from .services import apply_service_labels, load_services
+    # Collection checkpoints and latest-run publication do not mutate older
+    # run archives. Hold only the metadata lock while choosing one saved run
+    # and one complete CSV/settings revision, then release it before I/O/ELK.
+    with _locked(case):
+        metadata = read_case(case)
+        run_id = resolve_latest(case, run_id)
+        controls = {key: value for key, value in load_services(case).items() if key != "history"}
+        settings = _settings(metadata)
+    state, archive_sha256 = _archive_source(case, run_id, metadata)
     state["labels"] = apply_service_labels(state["labels"], controls)
     state["service_controls"] = controls
     counts = apply_saved_counts(case, state)
-    settings = _settings(metadata)
-    fingerprints = {"archive_sha256": digest((archive / "SHA256SUMS").read_bytes()),
+    fingerprints = {"archive_sha256": archive_sha256,
                     "service_sha256": digest(canonical(controls)),
                     "settings_sha256": digest(canonical(settings)),
                     "address_counts_sha256": digest(canonical(counts))}
@@ -291,7 +310,7 @@ def _summary(graph, preview_id, *, reviewable=True, reason=None):
 def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, include_unspent=False,
                  include_unspendable=False, include_context=False, open_browser=False, progress=None,
                  layout_mode="fresh", board_record_id=None, token=None, transport=http,
-                 interval=.02, workers=4, _preflight=None):
+                 interval=.02, workers=4, layout_settings=None, _preflight=None, _board_lock_held=False):
     """Plot saved evidence afresh, or review additions against a selected live board."""
     from .cli import open_preview
     from .elk_layout import optimize_graph
@@ -305,8 +324,16 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
             or layout_mode == "update" and not isinstance(board_record_id, str)):
         raise TraceError("Choose a target Miro board only when preparing an update layout")
     case = _ordinary(case)
-    with _locked(case):
+    with ExitStack() as operation:
+        if layout_mode == "update" and not _board_lock_held:
+            from .investigation_boards import _board_lock
+            operation.enter_context(_board_lock(case, board_record_id))
         state, settings, fingerprints = _source(case, run_id)
+        if layout_settings is not None:
+            settings = validate_layout_settings(layout_settings)
+        inputs = {"schema_version": 1, "case_id": state["case_id"], "run_id": state["run_id"],
+                  "captured_at": now(), "service_controls": deepcopy(state["service_controls"]),
+                  "address_tx_counts": deepcopy(state["address_tx_counts"])}
         query = _query(goal, state, min_hops, max_hops, include_unspent=include_unspent,
                        include_unspendable=include_unspendable, include_context=include_context)
         settings = _effective_settings(settings, goal, query)
@@ -340,6 +367,8 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
         graph["notice"] = coverage["coverage_notice"] + " " + graph["notice"]
         report = {"schema_version": 1, "case_id": state["case_id"], "run_id": state["run_id"],
                   "goal": goal, "query": query, "created_at": now(), **coverage, **fingerprints, **board_fields,
+                  "input_snapshot_version": 1, "input_snapshot_at": inputs["captured_at"],
+                  "inputs_sha256": digest(canonical(inputs)),
                   "layout_settings": deepcopy(settings), "settings_sha256": digest(canonical(settings)),
                   "min_hops": query.get("min_hops", 0), "max_hops": query.get("max_hops"),
                   "node_count": len(graph["nodes"]), "edge_count": len(graph["edges"]),
@@ -363,6 +392,7 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
             validate_plan(plan)
             save_json(destination / "miro-plan.json", plan)
             save_json(destination / "plot.json", report)
+            save_json(destination / "inputs.json", inputs)
             (destination / "graph.mmd").write_text(mermaid_source(graph) if graph["nodes"] else
                 "flowchart LR\n  %% No matching activity in saved collection data.\n", encoding="utf-8")
             write_transaction_csv(destination / "transactions.csv", graph, state)
@@ -382,7 +412,7 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
                 "browser_opened": open_preview(result["html"]) if open_browser else False}
 
 
-def _snapshot(case, preview_id):
+def _snapshot(case, preview_id, *, with_inputs=False):
     if not isinstance(preview_id, str) or not PREVIEW_ID.fullmatch(preview_id):
         raise TraceError("Choose a saved investigation plot")
     directory = _ordinary(case / "previews" / preview_id)
@@ -434,21 +464,48 @@ def _snapshot(case, preview_id):
             raise TraceError("Saved endpoint options disagree with the graph; regenerate the plot")
     _snapshot_settings(graph)
     _snapshot_board(graph, plan)
-    return graph, plan
+    inputs = _snapshot_inputs(directory, graph)
+    return (graph, plan, inputs) if with_inputs else (graph, plan)
 
 
-def _review_source(case, graph, source_cache=None):
+def _snapshot_inputs(directory, graph):
+    report = graph["plot"]
+    if "input_snapshot_version" not in report:
+        return None
+    inputs = read_json(_ordinary(directory / "inputs.json"))
+    keys = {"schema_version", "case_id", "run_id", "captured_at", "service_controls", "address_tx_counts"}
+    if ("layout_settings" not in report or not isinstance(inputs, dict) or set(inputs) != keys
+            or type(inputs.get("schema_version")) is not int or inputs["schema_version"] != 1
+            or not isinstance(inputs.get("captured_at"), str) or not inputs["captured_at"]
+            or inputs.get("case_id") != report["case_id"]
+            or inputs.get("run_id") != report["run_id"] or inputs.get("captured_at") != report.get("input_snapshot_at")
+            or not isinstance(inputs.get("service_controls"), dict) or not isinstance(inputs.get("address_tx_counts"), dict)
+            or digest(canonical(inputs)) != report.get("inputs_sha256")
+            or canonical(graph.get("service_controls")) != canonical(inputs["service_controls"])
+            or digest(canonical(inputs["service_controls"])) != report.get("service_sha256")
+            or digest(canonical(inputs["address_tx_counts"])) != report.get("address_counts_sha256")):
+        raise TraceError("Saved plot input snapshot changed or disagrees with its fingerprints; regenerate the plot")
+    return inputs
+
+
+def _review_source(case, graph, source_cache=None, inputs=None):
     report = graph["plot"]
     run_id = report["run_id"]
-    if source_cache is not None and run_id in source_cache:
-        state, fingerprints = source_cache[run_id]
+    frozen = inputs is not None
+    cache_key = (run_id, frozen)
+    if source_cache is not None and cache_key in source_cache:
+        state, fingerprints = source_cache[cache_key]
     else:
-        state, _, fingerprints = _source(case, run_id)
+        if frozen:
+            state, archive_sha256 = _archive_source(case, run_id)
+            fingerprints = {"archive_sha256": archive_sha256}
+        else:
+            state, _, fingerprints = _source(case, run_id)
         if source_cache is not None:
             # Several goals commonly share one large archive. Verify its bytes
             # once per listing, retaining only the seed/source identity here.
             state = {key: state[key] for key in ("seeds", "source", "hop_reference_name") if key in state}
-            source_cache[run_id] = state, fingerprints
+            source_cache[cache_key] = state, fingerprints
     query = report.get("query", {})
     expected = _query(report["goal"], state, query.get("min_hops", 0), query.get("max_hops", 10),
                       include_unspent=query.get("include_unspent", False),
@@ -466,12 +523,11 @@ def _review_source(case, graph, source_cache=None):
 
 
 def reviewed_plot(case, preview_id):
-    """Verify archived bytes, current evidence controls and frozen layout settings."""
+    """Verify archived bytes and frozen inputs; older plots keep strict review."""
     case = _ordinary(case)
-    with _locked(case):
-        graph, plan = _snapshot(case, preview_id)
-        _review_source(case, graph)
-        return graph, plan
+    graph, plan, inputs = _snapshot(case, preview_id, with_inputs=True)
+    _review_source(case, graph, inputs=inputs)
+    return graph, plan
 
 
 def list_plots(case):
@@ -480,16 +536,15 @@ def list_plots(case):
     recent = heapq.nlargest(100, (path for path in (case / "previews").glob("*-plots-*")
         if PREVIEW_ID.fullmatch(path.name) and not path.is_symlink()), key=lambda path: path.stat().st_mtime_ns)
     result, source_cache = [], {}
-    with _locked(case):
-        for directory in recent:
-            try:
-                graph, _ = _snapshot(case, directory.name)
-            except (TraceError, OSError, ValueError, TypeError, KeyError):
-                continue
-            reason = None
-            try:
-                _review_source(case, graph, source_cache)
-            except (TraceError, OSError, ValueError, TypeError, KeyError) as error:
-                reason = str(error)
-            result.append(_summary(graph, directory.name, reviewable=reason is None, reason=reason))
+    for directory in recent:
+        try:
+            graph, _, inputs = _snapshot(case, directory.name, with_inputs=True)
+        except (TraceError, OSError, ValueError, TypeError, KeyError):
+            continue
+        reason = None
+        try:
+            _review_source(case, graph, source_cache, inputs)
+        except (TraceError, OSError, ValueError, TypeError, KeyError) as error:
+            reason = str(error)
+        result.append(_summary(graph, directory.name, reviewable=reason is None, reason=reason))
     return sorted(result, key=lambda value: (value["created_at"], value["id"]), reverse=True)

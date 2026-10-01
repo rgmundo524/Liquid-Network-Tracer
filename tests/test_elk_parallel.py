@@ -27,7 +27,7 @@ def measured_candidate(request, seeds, progress=None, **kwargs):
 
 
 def budget_for(workers, total):
-    def budget(attempts, *, peak_rss_mb=None):
+    def budget(attempts, *, peak_rss_mb=None, **kwargs):
         count = min(workers, attempts) if peak_rss_mb is not None else 1
         return count, total, total // count
     return budget
@@ -108,7 +108,7 @@ class ParallelLayoutTests(unittest.TestCase):
         first_batch = threading.Barrier(3)
         seeds = layout_seeds(7)
 
-        def budget(attempts, *, peak_rss_mb=None):
+        def budget(attempts, *, peak_rss_mb=None, **kwargs):
             budget_peaks.append(peak_rss_mb)
             count = 3 if peak_rss_mb is not None and peak_rss_mb < 3000 else 1
             count = min(count, attempts)

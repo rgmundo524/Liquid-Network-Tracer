@@ -265,8 +265,8 @@ def create_board(case, goal, name=None, *, team_id=None, transport=http, creatio
     case, metadata, path = _paths(case)
     name = _name(metadata, goal, name)
     body = board_options(name, team_id, "private")
-    with _lock(case), ExitStack() as operation:
-        with _registry_lock(case):
+    with ExitStack() as operation:
+        with _lock(case), _registry_lock(case):
             registry = _read(path, read_case(case))
             record = next((item for item in registry["boards"] if item["goal"] == goal and (
                 item.get("creation_preview_id") == creation_preview_id if creation_preview_id is not None
@@ -401,13 +401,9 @@ def create_and_sync(case, preview_id, name=None, *, team_id=None, max_items=750,
                     token=None, interval=.02, progress=None, workers=4):
     """Create one private board per reviewed fresh plot, then resume its publication."""
     from .miro import sync
-    from .plots import reviewed_plot
 
     case, _, _ = _paths(case)
-    # Keep the reviewed evidence stable across board creation and its first
-    # publication; another instance must not invalidate it after the POST.
-    with _lock(case, trace=True):
-        graph, plan = reviewed_plot(case, preview_id)
+    with _publication_review(case, preview_id) as (graph, plan):
         if graph["plot"].get("layout_mode", "fresh") != "fresh" or "board_layout" in plan:
             raise TraceError("This layout updates an existing board; use Update board for its selected target")
         if not graph.get("nodes"):
@@ -422,6 +418,19 @@ def create_and_sync(case, preview_id, name=None, *, team_id=None, max_items=750,
                             token=token, interval=interval, workers=workers, progress=progress)
     return {**result, "board_id": record["board_id"], "board_url": record["board_url"],
             "created_board": record["created"], "reused_board": record["reused"]}
+
+
+@contextmanager
+def _publication_review(case, preview_id):
+    """Frozen plots publish independently; legacy plans retain input locks."""
+    from .plots import reviewed_plot
+    graph, plan = reviewed_plot(case, preview_id)
+    if graph.get("plot", {}).get("input_snapshot_version") == 1:
+        yield graph, plan
+    else:
+        # Recheck after acquisition so legacy reviews cannot race an import.
+        with _lock(case, trace=True):
+            yield reviewed_plot(case, preview_id)
 
 
 def _publication_budget(case, graph, record, max_items):
@@ -471,7 +480,7 @@ def _check_unfinished_creation(case):
 def generate_and_sync(case, goal, run_id="latest", min_hops=0, max_hops=10, *, include_unspent=False,
                       include_unspendable=False, include_context=False, layout_mode="fresh",
                       board_record_id=None, name=None, team_id=None, max_items=750, token=None,
-                      transport=http, interval=.02, progress=None, workers=4):
+                      transport=http, interval=.02, progress=None, workers=4, layout_settings=None):
     """Save one plot, then create its board or apply its bound board update.
 
     This is one live action over already collected evidence. On publication
@@ -506,45 +515,49 @@ def generate_and_sync(case, goal, run_id="latest", min_hops=0, max_hops=10, *, i
     token = token or os.getenv("MIRO_ACCESS_TOKEN")
     if not isinstance(token, str) or not token or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in token):
         raise TraceError("MIRO_ACCESS_TOKEN is missing or malformed; load its raw value through SecretSpec")
-    if progress:
-        progress({"phase": "building_plan", "completed": 0, "total": 1})
-    plot = preview_plot(case, goal, run_id, min_hops, max_hops, include_unspent=include_unspent,
-                        include_unspendable=include_unspendable, include_context=include_context,
-                        layout_mode=layout_mode, board_record_id=board_record_id, token=token,
-                        transport=transport, interval=interval, progress=progress, workers=workers,
-                        _preflight=lambda graph, record: _publication_budget(case, graph, record, max_items))
-    if plot["empty"] and layout_mode == "fresh":
-        return {**plot, "published": False, "created_board": False, "reused_board": False,
-                "status": "empty", "publication_notice": "No matching paths were found in the saved data; no Miro board was created."}
-    if progress:
-        progress({"phase": "building_plan", "completed": 1, "total": 1})
-    options = {"max_items": max_items, "transport": transport, "token": token,
-               "interval": interval, "progress": progress, "workers": workers}
-    try:
-        if layout_mode == "fresh":
-            _check_unfinished_creation(case)
-            published = create_and_sync(case, plot["preview_id"], name, team_id=team_id, **options)
-        else:
-            published = sync_board(case, board_record_id, plot["preview_id"], **options)
-    except (TraceError, OSError, ValueError) as error:
-        raise TraceError(str(error) + " Saved plot " + plot["preview_id"] +
-                         " is available for recovery; resume that saved plot instead of generating another.") from error
-    return {**plot, **published, "published": True, "status": "synced"}
+    with ExitStack() as operation:
+        if layout_mode == "update":
+            operation.enter_context(_board_lock(case, board_record_id))
+        if progress:
+            progress({"phase": "building_plan", "completed": 0, "total": 1})
+        plot = preview_plot(case, goal, run_id, min_hops, max_hops, include_unspent=include_unspent,
+                            include_unspendable=include_unspendable, include_context=include_context,
+                            layout_mode=layout_mode, board_record_id=board_record_id, token=token,
+                            transport=transport, interval=interval, progress=progress, workers=workers,
+                            layout_settings=layout_settings, _board_lock_held=layout_mode == "update",
+                            _preflight=lambda graph, record: _publication_budget(case, graph, record, max_items))
+        if plot["empty"] and layout_mode == "fresh":
+            return {**plot, "published": False, "created_board": False, "reused_board": False,
+                    "status": "empty", "publication_notice": "No matching paths were found in the saved data; no Miro board was created."}
+        if progress:
+            progress({"phase": "building_plan", "completed": 1, "total": 1})
+        options = {"max_items": max_items, "transport": transport, "token": token,
+                   "interval": interval, "progress": progress, "workers": workers}
+        try:
+            if layout_mode == "fresh":
+                _check_unfinished_creation(case)
+                published = create_and_sync(case, plot["preview_id"], name, team_id=team_id, **options)
+            else:
+                published = sync_board(case, board_record_id, plot["preview_id"], _board_lock_held=True, **options)
+        except (TraceError, OSError, ValueError) as error:
+            raise TraceError(str(error) + " Saved plot " + plot["preview_id"] +
+                             " is available for recovery; resume that saved plot instead of generating another.") from error
+        return {**plot, **published, "published": True, "status": "synced"}
 
 
-def sync_board(case, record_id, preview_id, *, reorganize=False, max_items=750, **kwargs):
+def sync_board(case, record_id, preview_id, *, reorganize=False, max_items=750, _board_lock_held=False, **kwargs):
     """Apply a reviewed fresh publication or a board-bound incremental layout."""
-    from .plots import reviewed_plot
     from .miro import sync
 
     case, metadata, path = _paths(case)
-    with _lock(case, trace=True), ExitStack() as operation:
+    with ExitStack() as operation:
         with _registry_lock(case):
             record = next((item for item in list_boards(case) if item["id"] == record_id), None)
             if record is None or not record["can_sync"]:
                 raise TraceError("Select a linked managed board; historical snapshots remain read-only")
-            operation.enter_context(_board_lock(case, record_id))
-        graph, plan = reviewed_plot(case, preview_id)
+            if not _board_lock_held:
+                operation.enter_context(_board_lock(case, record_id))
+        graph, plan = operation.enter_context(_publication_review(case, preview_id))
         if graph.get("plot", {}).get("goal") != record["goal"]:
             raise TraceError("The selected plot has a different goal from this board")
         layout_mode = graph["plot"].get("layout_mode")

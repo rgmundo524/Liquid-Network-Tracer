@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from liquid_tracer.common import LBTC, TraceError, canonical, digest, read_json, save_json
 from liquid_tracer.investigations import create_investigation, read_case, update_case
-from liquid_tracer.plots import FILES, PEGOUT_CSV_FILES, list_plots, plot_files, preview_plot, reviewed_plot
+from liquid_tracer.plots import FILES, INPUT_SNAPSHOT_FILES, PEGOUT_CSV_FILES, list_plots, plot_files, preview_plot, reviewed_plot
 from liquid_tracer.services import set_service
 from tests.test_attribution_convergence import graph_state, tx
 from tests.test_connections import saved_case
@@ -47,6 +47,11 @@ class PlotTests(unittest.TestCase):
         (directory / "SHA256SUMS").write_text("".join(digest((directory / name).read_bytes()) + "  " + name + "\n"
                                                     for name in sorted(plot_files(directory) - {"SHA256SUMS"})))
 
+    def legacy_inputs(self, directory, graph):
+        for key in ("input_snapshot_version", "input_snapshot_at", "inputs_sha256"):
+            graph["plot"].pop(key, None)
+        (directory / "inputs.json").unlink()
+
     def test_three_goals_share_saved_evidence_without_fetching_or_archive_mutation(self):
         before = self.bytes(self.archive)
         case_before = (self.case / "case.json").read_bytes()
@@ -59,7 +64,7 @@ class PlotTests(unittest.TestCase):
                 self.assertEqual(plan["schema_version"], 2)
                 self.assertEqual(graph["plot"], read_json(Path(result["directory"]) / "plot.json"))
                 self.assertEqual(set(path.name for path in Path(result["directory"]).iterdir()),
-                                 FILES | PEGOUT_CSV_FILES if goal == "pegouts" else FILES)
+                                 FILES | INPUT_SNAPSHOT_FILES | (PEGOUT_CSV_FILES if goal == "pegouts" else set()))
                 self.assertTrue(result["saved_data_only"])
                 self.assertEqual(result["source_max_hops"], 10)
                 self.assertEqual(result["source_run_status"], "bounded_complete")
@@ -96,7 +101,7 @@ class PlotTests(unittest.TestCase):
         self.assertEqual([row["Outpoint"] for row in endpoints], [endpoint])
         self.assertNotIn(tx("e") + ":0", {value for row in paths for value in row.values()})
         self.assertEqual(set(line.split("  ")[1] for line in (directory / "SHA256SUMS").read_text().splitlines()),
-                         (FILES | PEGOUT_CSV_FILES) - {"SHA256SUMS"})
+                         (FILES | INPUT_SNAPSHOT_FILES | PEGOUT_CSV_FILES) - {"SHA256SUMS"})
         with (directory / "trace-endpoints.csv").open("a") as stream:
             stream.write("changed\n")
         with self.assertRaisesRegex(TraceError, "changed"):
@@ -106,6 +111,7 @@ class PlotTests(unittest.TestCase):
         result = preview_plot(self.case, "pegouts")
         directory = Path(result["directory"])
         graph = read_json(directory / "graph.json")
+        self.legacy_inputs(directory, graph)
         graph["plot"].pop("csv_export_version")
         save_json(directory / "graph.json", graph)
         save_json(directory / "plot.json", graph["plot"])
@@ -351,15 +357,14 @@ class PlotTests(unittest.TestCase):
         self.assertIn("request_limit", result["coverage_notice"])
         self.assertEqual(result["max_hops"], 10)
 
-    def test_changed_controls_invalidate_review_but_keep_history_visible(self):
+    def test_changed_controls_apply_to_new_plots_while_saved_snapshot_stays_reviewable(self):
         result = preview_plot(self.case, "pegouts")
+        original = reviewed_plot(self.case, result["preview_id"])
         set_service(self.case, "SYNTHETIC-c-address", name="Stop", stop_tracing=True)
-        with self.assertRaisesRegex(TraceError, "changed"):
-            reviewed_plot(self.case, result["preview_id"])
+        self.assertEqual(reviewed_plot(self.case, result["preview_id"]), original)
         listed = list_plots(self.case)
         self.assertEqual(len(listed), 1)
-        self.assertFalse(listed[0]["reviewable"])
-        self.assertIn("changed", listed[0]["review_error"])
+        self.assertTrue(listed[0]["reviewable"])
         fresh = preview_plot(self.case, "pegouts")
         self.assertTrue(fresh["empty"])
 
@@ -473,6 +478,7 @@ class PlotTests(unittest.TestCase):
         directory = Path(result["directory"])
         graph = read_json(directory / "graph.json")
         graph["plot"].pop("layout_settings")
+        self.legacy_inputs(directory, graph)
         save_json(directory / "graph.json", graph)
         save_json(directory / "plot.json", graph["plot"])
         self.rehash_preview(directory)
@@ -520,9 +526,22 @@ class PlotTests(unittest.TestCase):
             self.assertEqual(len(listed), 1)
             self.assertFalse(listed[0]["reviewable"])
 
-    def test_attribution_changes_still_invalidate_a_saved_layout(self):
+    def test_attribution_changes_do_not_retarget_a_saved_layout(self):
         result = preview_plot(self.case, "full")
+        original = reviewed_plot(self.case, result["preview_id"])
         update_case(self.case, {"run_defaults": {"connector_style": "elbowed"}})
+        set_service(self.case, "SYNTHETIC-c-address", name="New assessment", stop_tracing=False)
+        self.assertEqual(reviewed_plot(self.case, result["preview_id"]), original)
+
+    def test_legacy_plot_without_input_snapshot_still_rejects_changed_controls(self):
+        result = preview_plot(self.case, "full")
+        directory = Path(result["directory"])
+        graph = read_json(directory / "graph.json")
+        self.legacy_inputs(directory, graph)
+        save_json(directory / "graph.json", graph)
+        save_json(directory / "plot.json", graph["plot"])
+        self.rehash_preview(directory)
+        reviewed_plot(self.case, result["preview_id"])
         set_service(self.case, "SYNTHETIC-c-address", name="New assessment", stop_tracing=False)
         with self.assertRaisesRegex(TraceError, "changed"):
             reviewed_plot(self.case, result["preview_id"])
@@ -587,7 +606,7 @@ class PlotTests(unittest.TestCase):
         preview_plot(self.case, "pegouts")
         self.assertEqual(before, self.bytes(legacy))
 
-    def test_saved_address_counts_are_used_and_updated_counts_require_refresh(self):
+    def test_saved_counts_stay_frozen_and_new_plots_use_updated_counts(self):
         address = "SYNTHETIC-c-address"
         cache = {"schema_version": 1, "case_id": self.state["case_id"], "source": self.state["source"],
                  "counts": {address: {"address": address, "source": self.state["source"],
@@ -602,8 +621,11 @@ class PlotTests(unittest.TestCase):
         self.assertEqual(node["tx_count"], 13)
         cache["counts"][address]["confirmed_tx_count"] = 14
         save_cache()
-        with self.assertRaisesRegex(TraceError, "changed"):
-            reviewed_plot(self.case, result["preview_id"])
+        self.assertEqual(reviewed_plot(self.case, result["preview_id"])[0], graph)
+        fresh = preview_plot(self.case, "full")
+        current, _ = reviewed_plot(self.case, fresh["preview_id"])
+        current_node = next(node for node in current["nodes"] if node.get("details", {}).get("address") == address)
+        self.assertEqual(current_node["tx_count"], 15)
 
     def test_listing_multiple_goals_verifies_shared_source_once(self):
         from liquid_tracer.cli import verify_export

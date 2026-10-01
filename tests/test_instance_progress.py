@@ -33,9 +33,23 @@ class InstanceProgressTests(unittest.TestCase):
             self.assertEqual(public_progress(value), value)
             self.assertNotIn("PRIVATE", json.dumps(value))
 
+    def test_specific_resource_waits_preserve_only_bounded_scheduler_metrics(self):
+        fields = dict(running_layouts=1, waiting_layouts=3, reserved_heap_mb=4096,
+                      available_heap_mb=12000, cpu_slots=8, reserved_workers=1)
+        for reason, phrase in (("memory", "unreserved ELK memory"), ("cpu", "ELK CPU slot"),
+                               ("fifo", "earlier ELK resource request"),
+                               ("memory_retry", "larger memory allowance")):
+            value = public_progress(self.event(wait_reason=reason, **fields))
+            self.assertIn(phrase, value["message"])
+            self.assertEqual(value["wait_reason"], reason)
+            self.assertTrue(all(value[key] == number for key, number in fields.items()))
+            self.assertEqual(public_progress(value), value)
+        self.assertNotIn("wait_reason", public_progress(self.event(wait_reason="PRIVATE")))
+
     def test_invalid_scheduler_numbers_and_untrusted_reasons_are_discarded(self):
         for invalid in (True, -1, "PRIVATE", [], {}, None, float("inf"), float("nan"), 10 ** 400):
-            for field in ("active_layouts", "machine_heap_mb"):
+            for field in ("active_layouts", "machine_heap_mb", "running_layouts", "waiting_layouts",
+                          "reserved_heap_mb", "available_heap_mb", "cpu_slots", "reserved_workers"):
                 with self.subTest(field=field, invalid=invalid):
                     value = public_progress(self.event(**{field: invalid}))
                     self.assertNotIn(field, value)

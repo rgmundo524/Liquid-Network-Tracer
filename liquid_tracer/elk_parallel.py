@@ -84,11 +84,11 @@ def _batch(request, jobs, worker, progress_for_attempt, worker_count, total_heap
 def iter_attempts(request, seeds, worker, progress_for_attempt, metadata):
     """Yield each configured seed once, in order, with bounded live candidates.
 
-    Start with a full-budget pilot and use its measured peak RAM to size later
+    Start with a graph-sized pilot and use its measured peak RAM to size later
     batches. A process failure caused by possible memory pressure in a parallel
-    batch or reduced shared allowance gets one retry alone after other batches
-    drain. Remaining work stays sequential. A retry replaces that seed's outcome
-    and never adds a configured attempt.
+    batch or reduced allowance gets one retry alone with the full pool after
+    other batches drain. Remaining work stays sequential. A retry replaces that
+    seed's outcome and never adds a configured attempt.
     """
     if not request["children"]:
         yield from _iter_attempts(request, seeds, worker, progress_for_attempt, metadata, None)
@@ -119,10 +119,13 @@ def _iter_attempts(request, seeds, worker, progress_for_attempt, metadata, resou
             # The first successful measured attempt is the pilot. If an older
             # worker cannot report peak RAM, keep running alone rather than
             # guessing how many complete graphs will fit in memory.
-            worker_count, total_heap_mb, heap_mb = elk_worker_budget(remaining, peak_rss_mb=observed_peak)
+            worker_count, total_heap_mb, heap_mb = elk_worker_budget(
+                remaining, peak_rss_mb=observed_peak,
+                node_count=len(request["children"]), edge_count=len(request.get("edges", [])))
         requested_heap_mb = total_heap_mb
         lease = resources.acquire(worker_count, total_heap_mb, peak_rss_mb=None if sequential else observed_peak,
-                                  progress=progress_for_attempt(next_index, seeds[next_index - 1]))
+                                  progress=progress_for_attempt(next_index, seeds[next_index - 1]),
+                                  worker_heap_mb=heap_mb)
         worker_count, total_heap_mb, heap_mb = lease.worker_count, lease.total_heap_mb, lease.heap_mb
         metadata["worker_count"] = max(metadata["worker_count"], worker_count)
         if worker_count > 1:
@@ -164,9 +167,9 @@ def _iter_attempts(request, seeds, worker, progress_for_attempt, metadata, resou
                                  and outcome.failure_code in MEMORY_PRESSURE_CODES for outcome in outcomes.values())
         for index, seed in jobs:
             outcome = outcomes.pop(index)
-            if ((worker_count > 1 or total_heap_mb < requested_heap_mb or lease.active_layouts > 1)
-                    and isinstance(outcome, ElkWorkerFailure)
-                    and outcome.failure_code in MEMORY_PRESSURE_CODES):
+            if (isinstance(outcome, ElkWorkerFailure) and outcome.failure_code in MEMORY_PRESSURE_CODES
+                    and (worker_count > 1 or total_heap_mb < requested_heap_mb or lease.active_layouts > 1
+                         or (not sequential and heap_mb < renderer_heap_mb()))):
                 # No sibling is running here, so the retry can use a freshly
                 # calculated full pool without multiplying the memory cap.
                 metadata["memory_retry_count"] += 1

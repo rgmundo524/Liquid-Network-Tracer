@@ -164,8 +164,17 @@ def read_live(requests, base, headers, state, remote=None):
     from .address_migration import _inventory
     from .miro import _bounds
     from .miro_reads import preflight
-    inventory = _items(requests, base, headers)
-    connectors = {item_id: {**body, "type": "connector"} for item_id, body in _inventory(requests, base, headers).items()}
+    inventories = {}
+
+    def read(kind):
+        # Each endpoint's cursor chain is sequential. The two independent
+        # chains share the existing worker bound and Miro credit pacing gate.
+        return (_items if kind == "items" else _inventory)(requests, base, headers)
+
+    requests.map(("items", "connectors"), read,
+                 lambda kind, result: inventories.__setitem__(kind, result))
+    inventory = inventories["items"]
+    connectors = {item_id: {**body, "type": "connector"} for item_id, body in inventories["connectors"].items()}
     inventory.update(connectors)
     if remote is None:
         remote = preflight(requests, base, headers, state, {})
