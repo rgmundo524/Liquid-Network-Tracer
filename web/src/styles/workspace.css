@@ -109,6 +109,28 @@
   width: 18px;
   height: 18px;
 }
+.investigation-export { flex: none; white-space: nowrap; }
+.endpoint-export-notice {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 38px;
+  border-bottom: 1px solid var(--line);
+  background: #f1f8f5;
+  font-size: 12px;
+}
+.endpoint-export-notice.error { background: #fff5f3; }
+.endpoint-export-notice p { margin: 4px 0; }
+.endpoint-export-notice details { margin-top: 6px; }
+.endpoint-export-notice summary { cursor: pointer; }
+.endpoint-export-notice ul {
+  max-height: 130px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  margin: 7px 0 0;
+  padding-left: 20px;
+}
 .form-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 300px;
@@ -899,6 +921,7 @@ dialog::backdrop {
     padding-left: 25px;
     padding-right: 25px;
   }
+  .endpoint-export-notice { padding-left: 25px; padding-right: 25px; }
   .job-banner {
     padding-left: 25px;
     padding-right: 25px;
@@ -1051,6 +1074,8 @@ dialog::backdrop {
     padding-left: 18px;
     padding-right: 18px;
   }
+  .endpoint-export-notice { padding-left: 18px; padding-right: 18px; }
+  .investigation-export { max-width: 116px; white-space: normal; }
   .investigation-tab {
     min-width: 145px;
     max-width: 220px;

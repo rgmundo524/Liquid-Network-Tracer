@@ -24,14 +24,17 @@ const defaults = {hops: 1, hop_reference_name: '', max_transactions: 20, max_out
 async function harness(respond = () => undefined, {hash = '', storage = new Map(), importAction, importPending = () => false} = {}) {
   frameRecovery.resetFrameRecovery();
   const calls = [], listeners = {}, windowListeners = {}, dialogListeners = {}, notifications = [], importActions = [];
-  const editorResets = [];
+  const editorResets = [], downloads = [], downloadBlobs = [], revokedDownloads = [];
   const elements = new Map();
   let currentForm = null;
   const app = {innerHTML: '', addEventListener(name, callback) {listeners[name] = callback;}};
   const dialog = {innerHTML: '', open: false, addEventListener(name, callback) {dialogListeners[name] = callback;},
     close() {if (this.open) {this.open = false; dialogListeners.close?.();}}, showModal() {this.open = true;}, querySelector() {return null;}};
   const context = vm.createContext({
-    Error, URL, console, ...frameRecovery, collectionPerformancePanel,
+    Error, Blob, URL: class extends URL {
+      static createObjectURL(blob) {downloadBlobs.push(blob); return `blob:export-${downloadBlobs.length}`;}
+      static revokeObjectURL(url) {revokedDownloads.push(url);}
+    }, console, ...frameRecovery, collectionPerformancePanel,
     resetNameColors(caseId) {editorResets.push({editor: 'colors', caseId});},
     resetAddressImport(caseId) {editorResets.push({editor: 'addresses', caseId});},
     resetChangeOutputs(caseId) {editorResets.push({editor: 'change-outputs', caseId});}, resetInputImport() {},
@@ -60,7 +63,8 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
         return elements.get(selector) ?? null;
       },
       addEventListener() {},
-      createElement() {return {remove() {}};},
+      body: {append() {}},
+      createElement(tag) {return {remove() {}, click() {if (tag === 'a') downloads.push({url: this.href, filename: this.download});}};},
     },
     window: {addEventListener(name, callback) {windowListeners[name] = callback;}, scrollY: 0, scrollTo() {},
       sessionStorage: {getItem(key) {return storage.get(key) ?? null;}, setItem(key, value) {storage.set(key, value);}}},
@@ -83,7 +87,7 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
   script.runInContext(context);
   await context.startup;
   return {
-    ...context.appTest, app, dialog, calls, notifications, importActions, elements, storage, windowListeners, editorResets,
+    ...context.appTest, app, dialog, calls, notifications, importActions, elements, storage, windowListeners, editorResets, downloads, downloadBlobs, revokedDownloads,
     async submitDialog(values = {}) {
       dialogListeners.submit({target: {values, reportValidity: () => true}, preventDefault() {}});
       await new Promise(setImmediate);
@@ -3515,7 +3519,7 @@ const valueSummary = (lbtc, extra = {}) => ({lbtc, value_base_units: '123456789'
   valued_lbtc_count: 2, unknown_amount_count: 0, unknown_asset_count: 0, non_lbtc_count: 0, ...extra});
 const valuePlot = (preview_id, run_id, created_at, summary) => ({preview_id, run_id, created_at, goal: 'pegouts',
   min_hops: 0, max_hops: 10, pegout_lbtc_summary: summary, node_count: 4, edge_count: 4, transaction_count: 2,
-  status: 'matches_found', reviewable: true, artifact: {downloads: [{name: 'trace-endpoints.csv', url: '/files/endpoints.csv'}]}});
+  status: 'matches_found', reviewable: true, artifact: {downloads: [{name: 'endpoints.csv', url: '/files/endpoints.csv'}]}});
 
 test('collected data shows the newest peg-out LBTC total for only the selected snapshot', async () => {
   const view = await harness(tabResponse);
@@ -3561,4 +3565,106 @@ test('old peg-out plots request a new trace instead of showing an invented LBTC 
   view.state.activeCase.plots = [valuePlot('legacy', 'a-new', '2026-10-01T02:00:00Z', undefined)];
   assert.match(view.workspace(), /Generate a new peg-out trace to calculate the total for this snapshot/);
   assert.doesNotMatch(view.workspace(), /<strong>0 LBTC/);
+});
+
+const combinedExport = (extra = {}) => ({filename: 'open-investigation-endpoints.csv',
+  content_type: 'text/csv; charset=utf-8', csv: 'Source,Status,Investigation ID\r\nseed,Pegout,a1\r\n', endpoint_count: 1,
+  included: [{case_id: 'a1', name: 'Alpha & partners', run_id: 'a-old', plot_id: 'plot-a', endpoint_count: 1}],
+  skipped: [{case_id: 'b2', name: 'Beta', run_id: 'b-new', reason: 'No saved peg-out trace for this snapshot.'}], ...extra});
+
+test('combined endpoint export captures only open tabs and each selected run while other jobs continue', async () => {
+  const view = await harness(path => path === '/api/endpoint-exports' ? combinedExport() : tabResponse(path));
+  await view.openCase('a1');
+  view.state.selectedRun = 'a-old';
+  await view.openCase('b2');
+  view.state.jobs.set('working', {id: 'working', action: 'trace', caseId: 'a1', status: 'running', started: Date.now()});
+  view.render();
+  assert.match(view.app.innerHTML, /data-action="export-open-endpoints"/);
+  assert.doesNotMatch(view.app.innerHTML, /data-action="export-open-endpoints"[^>]*disabled/);
+  await view.dispatch('export-open-endpoints');
+  assert.deepEqual(view.calls.find(call => call.path === '/api/endpoint-exports').body, {
+    investigations: [{case_id: 'a1', run_id: 'a-old'}, {case_id: 'b2', run_id: 'b-new'}],
+  });
+  assert.deepEqual(view.downloads, [{url: 'blob:export-1', filename: 'open-investigation-endpoints.csv'}]);
+  assert.equal(await view.downloadBlobs[0].text(), combinedExport().csv);
+  assert.equal('csv' in view.state.endpointExport.result, false, 'large CSV is not retained in UI state');
+  assert.match(view.app.innerHTML, /Included 1 · Skipped 1/);
+  assert.match(view.app.innerHTML, /Beta: skipped/);
+  assert.match(view.app.innerHTML, /Shared endpoints remain separate rows/);
+  assert.equal(view.state.activeCase.id, 'b2');
+  assert.equal(view.state.jobs.get('working').status, 'running');
+});
+
+test('changing open tabs during export keeps the captured scope and prevents duplicate requests', async () => {
+  let release;
+  const wait = new Promise(resolve => {release = resolve;});
+  const view = await harness(path => path === '/api/endpoint-exports' ? wait : tabResponse(path));
+  await view.openCase('a1');
+  await view.openCase('b2');
+  const exporting = view.dispatch('export-open-endpoints');
+  await view.dispatch('export-open-endpoints');
+  await view.dispatch('close-investigation-tab', {dataset: {id: 'a1'}});
+  view.navigate('new');
+  view.state.draft.name = 'Next investigation';
+  release(combinedExport());
+  await exporting;
+  assert.equal(view.calls.filter(call => call.path === '/api/endpoint-exports').length, 1);
+  assert.deepEqual(view.calls.find(call => call.path === '/api/endpoint-exports').body.investigations.map(item => item.case_id), ['a1', 'b2']);
+  assert.deepEqual([...view.state.openCases], ['b2']);
+  assert.equal(view.state.page, 'new');
+  assert.equal(view.state.draft.name, 'Next investigation');
+  assert.equal(view.downloads.length, 1);
+  assert.equal(view.state.endpointExport.pending, false);
+});
+
+test('combined export reports missing traces without downloading an empty misleading result', async () => {
+  const view = await harness(path => path === '/api/endpoint-exports' ? combinedExport({included: [], endpoint_count: 0}) : tabResponse(path));
+  await view.openCase('b2');
+  await view.dispatch('export-open-endpoints');
+  assert.equal(view.downloads.length, 0);
+  assert.match(view.app.innerHTML, /No saved endpoint traces to export/);
+  assert.match(view.app.innerHTML, /Generate a Paths to peg-outs plot/);
+  assert.match(view.app.innerHTML, /Beta: skipped/);
+});
+
+test('a completed trace with zero endpoints downloads a header-only combined CSV', async () => {
+  const product = combinedExport({endpoint_count: 0, csv: 'Source,Status,Investigation ID\r\n', skipped: [],
+    included: [{case_id: 'a1', name: 'Alpha', run_id: 'a-new', plot_id: 'empty', endpoint_count: 0}]});
+  const view = await harness(path => path === '/api/endpoint-exports' ? product : tabResponse(path));
+  await view.openCase('a1');
+  await view.dispatch('export-open-endpoints');
+  assert.equal(view.downloads.length, 1);
+  assert.equal(await view.downloadBlobs[0].text(), product.csv);
+  assert.match(view.app.innerHTML, /Exported 0 endpoint rows from 1 investigation/);
+});
+
+test('failed combined exports retain current work and report escaped errors without a partial download', async () => {
+  let fail = true;
+  const view = await harness(path => path === '/api/endpoint-exports'
+    ? (fail ? {error: '<unsafe> saved trace failed verification'} : combinedExport({skipped: []})) : tabResponse(path));
+  await view.openCase('a1');
+  view.state.error = 'Existing action error';
+  await view.dispatch('export-open-endpoints');
+  assert.equal(view.downloads.length, 0);
+  assert.equal(view.state.error, 'Existing action error');
+  assert.match(view.app.innerHTML, /&lt;unsafe&gt; saved trace failed verification/);
+  assert.doesNotMatch(view.app.innerHTML, /<unsafe>/);
+  fail = false;
+  await view.dispatch('export-open-endpoints');
+  assert.equal(view.downloads.length, 1);
+  await view.dispatch('dismiss-endpoint-export');
+  assert.equal(view.state.endpointExport.result, null);
+  assert.equal(view.state.endpointExport.error, '');
+});
+
+test('combined export skips closed cases and does nothing when no tabs are open', async () => {
+  const view = await harness(path => path === '/api/endpoint-exports' ? combinedExport() : tabResponse(path));
+  await view.dispatch('export-open-endpoints');
+  assert.equal(view.calls.some(call => call.path === '/api/endpoint-exports'), false);
+  await view.openCase('a1');
+  await view.openCase('b2');
+  await view.dispatch('close-investigation-tab', {dataset: {id: 'a1'}});
+  await view.dispatch('export-open-endpoints');
+  assert.deepEqual(view.calls.find(call => call.path === '/api/endpoint-exports').body.investigations,
+    [{case_id: 'b2', run_id: 'b-new'}]);
 });

@@ -1498,6 +1498,14 @@ class Handler(BaseHTTPRequestHandler):
                 # their representation. Individual source limits still apply.
                 import_limit = 12 * 1024 * 1024 if is_import and parts[3] == "input-import" else 4 * 1024 * 1024
                 body = self.body(import_limit if is_import else MAX_BODY)
+                if parts == ["api", "endpoint-exports"]:
+                    # Immutable multi-case downloads can be substantial. Do not
+                    # block job admission, progress polling, or cancellation.
+                    with self.server.job_lock:
+                        self.server.ensure_open()
+                    result, status = self.post(parts, body)
+                    self.send(status, result)
+                    return
                 with self.server.job_lock:
                     if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "cancel":
                         result, status = self.server.cancel_job(parts[2]), 202
@@ -1583,6 +1591,14 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def post(self, parts, body):
+        if parts == ["api", "endpoint-exports"]:
+            from .combined_endpoint_csv import build_combined_endpoint_csv
+            if set(body) != {"investigations"}:
+                raise RequestError("Endpoint export accepts open investigation selections only")
+            try:
+                return build_combined_endpoint_csv(body["investigations"], self.server.case), 200
+            except TraceError as error:
+                raise RequestError(str(error)) from None
         if parts == ["api", "settings"]:
             return {"settings": save_settings(self.server.root, body.get("settings"))}, 200
         if parts in (["api", "lookup"], ["api", "cases"]):

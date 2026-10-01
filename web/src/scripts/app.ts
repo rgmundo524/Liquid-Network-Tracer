@@ -58,6 +58,11 @@ type Run = {
   performance?: CollectionPerformance;
 };
 type Download = { name: string; url: string };
+type EndpointExport = {
+  filename: string; content_type: string; csv: string; endpoint_count: number;
+  included: {case_id: string; name: string; run_id: string; plot_id: string; endpoint_count: number}[];
+  skipped: {case_id: string; name: string; run_id: string | null; reason: string}[];
+};
 type Artifact = RenderingMetadata & {
   max_hops?: number; connection_count?: number; connection_status?: string;
   downloads: Download[];
@@ -280,6 +285,7 @@ const state = {
   page: "dashboard" as Page,
   activeCase: null as Case | null,
   openCases: [] as string[],
+  endpointExport: {pending: false, caseCount: 0, result: null as Omit<EndpointExport, "csv"> | null, error: ""},
   openingCase: null as {id: string; name: string; generation: number} | null,
   selectedRun: "latest",
   addressReview: {
@@ -398,7 +404,44 @@ function investigationTabs(): string {
     const name = state.cases.find(item => item.id === id)?.name || (state.activeCase?.id === id ? state.activeCase.name : id);
     const active = viewingCase(id), count = runningJobs().filter(job => job.caseId === id).length;
     return `<div class="investigation-tab${active ? " active" : ""}"><button class="investigation-tab-open" data-case="${esc(id)}" title="${esc(name)}"${active ? ' aria-current="page"' : ""}${disabled(isCaseOpening(id))}><span class="investigation-tab-name">${esc(name)}</span><span class="investigation-tab-status"${count ? ' role="status"' : ""}>${count ? `${count} running` : ""}</span></button><button class="investigation-tab-close" data-action="close-investigation-tab" data-id="${esc(id)}" aria-label="Close ${esc(name)} tab" title="Close tab; running tasks continue">${icon("close")}</button></div>`;
-  }).join("")}</div><button class="investigation-tab-add" data-page="new" aria-label="New investigation" title="New investigation">${icon("plus")}</button></nav>`;
+  }).join("")}</div><button class="btn small investigation-export" data-action="export-open-endpoints" title="Export the latest saved endpoint trace for each open investigation’s selected snapshot"${disabled(state.endpointExport.pending)}>${icon("download")}<span>${state.endpointExport.pending ? "Exporting…" : "Export endpoints"}</span></button><button class="investigation-tab-add" data-page="new" aria-label="New investigation" title="New investigation">${icon("plus")}</button></nav>`;
+}
+
+function endpointExportNotice(): string {
+  const {pending, caseCount, result, error} = state.endpointExport;
+  if (!pending && !result && !error) return "";
+  const title = pending ? "Preparing endpoint CSV"
+    : error ? "Endpoint export could not be completed"
+    : result!.included.length ? `Exported ${result!.endpoint_count} endpoint row${result!.endpoint_count === 1 ? "" : "s"} from ${result!.included.length} investigation${result!.included.length === 1 ? "" : "s"}`
+    : "No saved endpoint traces to export";
+  return `<div class="endpoint-export-notice${error ? " error" : ""}" role="status"><div><strong>${esc(title)}</strong><p>${esc(pending ? `Reading saved traces for ${caseCount} open investigation${caseCount === 1 ? "" : "s"}…` : error || (result!.included.length ? "Shared endpoints remain separate rows for each investigation." : "Generate a Paths to peg-outs plot for the selected snapshots, then export again."))}</p>${result ? `<details${result.skipped.length ? " open" : ""}><summary>Included ${result.included.length} · Skipped ${result.skipped.length}</summary><ul>${result.included.map(item => `<li>${esc(item.name)}: ${item.endpoint_count} endpoint row${item.endpoint_count === 1 ? "" : "s"} · run ${esc(item.run_id)}</li>`).join("")}${result.skipped.map(item => `<li>${esc(item.name)}: skipped. ${esc(item.reason)}</li>`).join("")}</ul></details>` : ""}</div>${!pending ? `<button class="dismiss" data-action="dismiss-endpoint-export" aria-label="Dismiss endpoint export status">${icon("close")}</button>` : ""}</div>`;
+}
+
+async function exportOpenEndpoints(): Promise<void> {
+  if (state.endpointExport.pending || !state.openCases.length) return;
+  rememberInvestigationView(); saveDraft();
+  const investigations = state.openCases.map(case_id => ({case_id,
+    run_id: viewingCase(case_id) ? currentRun()?.id || state.selectedRun
+      : investigationViews.get(case_id)?.selectedRun || "latest"}));
+  state.endpointExport = {pending: true, caseCount: investigations.length, result: null, error: ""};
+  render();
+  try {
+    const product = await api<EndpointExport>("/api/endpoint-exports", {investigations});
+    if (product.included.length) {
+      const url = URL.createObjectURL(new Blob([product.csv], {type: product.content_type}));
+      const link = document.createElement("a");
+      link.href = url; link.download = product.filename; link.hidden = true;
+      document.body.append(link);
+      try {link.click();} finally {link.remove(); setTimeout(() => URL.revokeObjectURL(url), 30_000);}
+    }
+    const {csv: _csv, ...summary} = product;
+    state.endpointExport.result = summary;
+  } catch (error) {
+    state.endpointExport.error = error instanceof Error ? error.message : "Could not export saved endpoints.";
+  } finally {
+    state.endpointExport.pending = false;
+    render();
+  }
 }
 
 async function closeInvestigationTab(id: string): Promise<void> {
@@ -885,7 +928,7 @@ function render(focus = false): void {
     "case-settings": "Investigation settings",
     addresses: "Address review",
   };
-  app.innerHTML = `<div class="layout">${sidebar()}<div class="main-shell"><header class="workspace-header"><div class="topbar"><div class="breadcrumb">${icon("folder")}<span>Workspace</span>${icon("chevron")}<strong>${esc(names[state.page])}</strong></div><div class="topbar-right"><span class="local-pill">${icon("lock")} LOCAL SESSION</span><span class="avatar" aria-label="Investigation workspace">LT</span></div></div>${investigationTabs()}${jobBanner()}${caseOpeningBanner()}</header><main id="main" class="content" tabindex="-1">${state.error ? `<div class="alert error" role="alert">${icon("info")}<div><strong>Unable to complete the action</strong><p>${esc(state.error)}</p></div><button class="dismiss" data-action="dismiss-error" aria-label="Dismiss error">${icon("close")}</button></div>` : ""}${miroEditConflictsPanel()}${state.page === "dashboard" ? dashboard() : state.page === "new" ? newCase() : state.page === "case" ? workspace() : state.page === "addresses" ? addressReviewPage() : settingsPage()}</main></div></div>`;
+  app.innerHTML = `<div class="layout">${sidebar()}<div class="main-shell"><header class="workspace-header"><div class="topbar"><div class="breadcrumb">${icon("folder")}<span>Workspace</span>${icon("chevron")}<strong>${esc(names[state.page])}</strong></div><div class="topbar-right"><span class="local-pill">${icon("lock")} LOCAL SESSION</span><span class="avatar" aria-label="Investigation workspace">LT</span></div></div>${investigationTabs()}${endpointExportNotice()}${jobBanner()}${caseOpeningBanner()}</header><main id="main" class="content" tabindex="-1">${state.error ? `<div class="alert error" role="alert">${icon("info")}<div><strong>Unable to complete the action</strong><p>${esc(state.error)}</p></div><button class="dismiss" data-action="dismiss-error" aria-label="Dismiss error">${icon("close")}</button></div>` : ""}${miroEditConflictsPanel()}${state.page === "dashboard" ? dashboard() : state.page === "new" ? newCase() : state.page === "case" ? workspace() : state.page === "addresses" ? addressReviewPage() : settingsPage()}</main></div></div>`;
   workspaceHeaderObserver?.disconnect();
   const tabList = document.querySelector(".investigation-tab-list");
   if (tabList) tabList.scrollLeft = tabScroll;
@@ -1736,7 +1779,8 @@ function pegoutLbtcTotal(detail: Case, run?: Run): string {
   if (summary.unknown_amount_count) notes.push(`${summary.unknown_amount_count} hidden or unavailable amount${summary.unknown_amount_count === 1 ? "" : "s"}`);
   if (summary.unknown_asset_count) notes.push(`${summary.unknown_asset_count} unidentified asset${summary.unknown_asset_count === 1 ? "" : "s"}`);
   if (summary.non_lbtc_count) notes.push(`${summary.non_lbtc_count} non-LBTC output${summary.non_lbtc_count === 1 ? "" : "s"} excluded`);
-  const endpoints = plot.artifact?.downloads.find(item => item.name === "trace-endpoints.csv");
+  const endpoints = plot.artifact?.downloads.find(item => item.name === "endpoints.csv")
+    || plot.artifact?.downloads.find(item => item.name === "trace-endpoints.csv");
   return `<div class="pegout-total" role="group" aria-label="Peg-out LBTC total"><div><span>Peg-out LBTC total</span><strong>${esc(amount)}</strong><p>${esc(notes.join(" · "))}.</p><p class="small muted">Latest peg-out trace for this snapshot${plot.max_hops != null ? ` · Hops ${esc(plot.min_hops)}–${esc(plot.max_hops)}` : ""}${plot.created_at ? ` · ${esc(formatDate(plot.created_at))}` : ""}. Sums full endpoint values in the saved trace.</p></div>${downloadLink(endpoints, "Endpoint CSV", "small")}</div>`;
 }
 
@@ -2551,6 +2595,11 @@ async function caseAction(action: string): Promise<void> {
 }
 
 async function dispatch(action: string, element?: HTMLElement): Promise<void> {
+  if (action === "export-open-endpoints") {await exportOpenEndpoints(); return;}
+  if (action === "dismiss-endpoint-export") {
+    if (!state.endpointExport.pending) {state.endpointExport.result = null; state.endpointExport.error = ""; render();}
+    return;
+  }
   if (action === "close-investigation-tab") {
     await closeInvestigationTab(element?.dataset.id || "");
     return;
