@@ -25,10 +25,18 @@ It does not publish to Miro. Continuing a run resumes its saved branches and
 adds the selected **additional hops** to the previous hop ceiling.
 
 Check the collection status. A request, transaction, output, or time budget can
-stop collection before the hop ceiling is reached. Service stop rules,
-attribution hop limits, and the confirmation policy still apply. For a chart
-covering up to 10 hops, collect enough data to cover that depth before plotting.
-Choosing 10 in a plotting form does not fetch missing transactions.
+stop collection before the hop ceiling is reached. Active `stop_tracing` rules
+and the confirmation policy still apply. Collection ignores attribution
+`hop_limit` values, including `0`; these caps remain available for Full trace
+and Starter connections layouts. For a chart covering up to 10 hops, collect
+enough data to cover that depth before plotting. Choosing 10 in a plotting form
+does not fetch missing transactions.
+
+If an older run stopped branches at attribution hop caps, continue collection
+with **0 additional hops** to fill eligible gaps within its current global
+ceiling, or add hops to increase that ceiling. Collection still respects
+explicit address stops and resource budgets. Then generate new plots from the
+new run. Existing saved reports and plots retain their original results.
 
 During collection, the header's progress bar shows **Processing hop N of M**.
 The target is the run's cumulative hop limit, including additional hops on a
@@ -78,8 +86,10 @@ beyond the limit are saved as inspected boundary evidence and are not followed.
 The tracer cannot discover a return behind an outside output beyond that
 boundary. A maximum of 0 can follow internal group transfers. Transaction,
 output, request, and time budgets still bound the work. Stop-tracing rules still
-apply, and per-address hop allowances decrease on every spend, including
-internal transfers; a named-group reset does not replenish those allowances.
+apply. Attribution hop caps do not restrict collection or peg-out tracing.
+For Full trace and Starter connections layouts, local attribution allowances
+still decrease on every spend, including internal transfers; a named-group
+reset does not replenish those local allowances.
 
 The chosen name is saved with each run and shown in collection history. For the
 same hop origin, continuation adds the entered hops to the previous ceiling.
@@ -105,8 +115,8 @@ destination. The available goals are shown together:
 | Goal | What it plots |
 | --- | --- |
 | Full investigation / Full trace | Saved activity reachable under the current stop/hop rules, using the current display settings. |
-| Starter connections | Verified paths between the starting transactions, within the selected maximum hops. |
-| Paths to peg-outs | Verified paths from selected seed UTXOs to peg-out requests, optionally also unspent UTXOs and unspendable outputs, within an inclusive hop range. |
+| Starter connections | Verified paths between the starting transactions, within the selected maximum hops and current attribution stop/hop rules. |
+| Paths to peg-outs | Transactions on verified paths from selected seed UTXOs to qualifying endpoints within the global hop range, respecting explicit stop rules and ignoring attribution hop caps. Every selected transaction displays all its inputs and outputs. |
 
 Choose **New board** and enter a name for a fresh arrangement, or choose
 **Update existing board** and a destination with the same plotting goal.
@@ -139,27 +149,33 @@ spends establish qualifying paths; sharing a circle does not create a new spend.
 
 Under this goal, **Include unspent UTXOs** and **Include unspendable outputs**
 add those endpoint types while retaining peg-outs. Both are off by default.
-The selected hop range and current attribution stop/hop limits apply to every
-path. Unspent endpoints require a saved unspent observation for the exact UTXO;
+The selected global hop range and active `stop_tracing` rules apply to every
+path. Attribution `hop_limit` values, including `0`, are ignored. Unspent
+endpoints require a saved unspent observation for the exact UTXO;
 unchecked, stopped, or hop-limited outputs do not qualify merely because no
 spending transaction was collected. A saved spending input overrides an older
 unspent observation. This is the state observed in the selected run, not a live
-balance. Unspendable event diamonds remain separate by output, and fee outputs
-are excluded.
+balance. Unspendable event diamonds remain separate by output. Fee outputs
+are excluded from endpoint selection, but displayed as transaction context.
 
 The saved plot records its endpoint choices and counts by type, so the ELK SVG
 and Miro sync use the same selection. These choices belong to the generated
 layout, like its hop range. To change them, generate another layout and select
 it for the managed board. Plotting does not fetch fresh spend observations.
 
-**Include context addresses** adds other input addresses and spendable sibling
-outputs around the transactions already on matching paths. It is off by default.
-Context uses thinner arrows and is marked `CONTEXT` in the transaction CSV. The
-extra addresses do not create traced links, change hop counts or endpoint matches,
-or cause earlier/later transactions to be added. No fee outputs or additional
-event outputs are included as context. A shared address keeps one circle, with
-each traced or context UTXO retaining its own arrow. The saved layout records
-this choice for both SVG export and Miro sync. Generate a new layout to change it.
+Every transaction selected for a new peg-out plot automatically shows **all
+inputs and outputs**, including fees and outputs on branches that are not
+followed. There is no context-display toggle. The endpoint and hop filters decide
+which transactions belong to the plot, not which objects of an included
+transaction are visible. An excluded branch retains its initial output/address
+without extending that branch or treating it as an endpoint match.
+
+Context uses thinner arrows and is marked `CONTEXT` in the transaction CSV.
+Context does not create traced links, change hop counts or endpoint matches,
+or cause earlier/later transactions to be added. A shared address keeps one
+circle, with each traced or context UTXO retaining its own arrow. SVG export
+and Miro sync use the same saved graph. Older saved layouts retain their
+original context choices; regenerate a layout to show complete transactions.
 
 ### CSVs for paths and endpoints
 
@@ -169,7 +185,7 @@ previews also offer both downloads.
 
 | Download | Rows included |
 | --- | --- |
-| **All trace transactions CSV** (`transactions.csv`) | The existing full accounting of displayed transaction inputs and outputs for this peg-out trace, including optional context. |
+| **All trace transactions CSV** (`transactions.csv`) | Every input and output of the transactions displayed in the peg-out trace, including context. Older saved layouts retain their original scope. |
 | **Endpoints only CSV** (`endpoints.csv`) | One row per matched ending output, including its qualifying source seeds. Intermediate transactions are excluded. |
 
 The endpoint table starts with the example-style columns **Source**, **Source
@@ -212,18 +228,19 @@ contain them; the peg-out interface presents only the two downloads above.
 Set layout attempts, connector appearance, attribution arrow coloring, and
 named-group centering here. **Full trace** also supports **Separate branch hubs**,
 **Group isolated context inputs**, and **Include transaction fee flows**.
-**Group isolated context inputs** is also available for **Paths to peg-outs**
-when **Include context addresses** is enabled. It combines at least two eligible
-external input addresses used only by one transaction into a context summary.
+**Group isolated context inputs** is also available for **Paths to peg-outs**.
+It combines at least two eligible external input addresses used only by one
+transaction into a context summary.
 Traced, shared, attributed, and otherwise protected addresses remain separate,
 as do sibling outputs. Every input retains its exact UTXO connector and CSV row;
 the full member addresses stay available in local details. Endpoint matches,
 hop limits, and trace evidence are unchanged.
 
 Grouping is saved as an investigation layout preference and captured with each
-generated layout. Disabling context or choosing Starter connections preserves
-the preference without applying it. Separate branch hubs and fee flows remain
-Full trace-only. **Generate & update board** applies grouping changes. Replaced
+generated layout. Choosing Starter connections preserves the preference without
+applying it. Separate branch hubs and the optional fee-flow toggle remain
+Full trace-only; new peg-out layouts always display their transaction fees.
+**Generate & update board** applies grouping changes. Replaced
 context objects join the newly arranged additions.
 
 **Save layout settings** persists the preferences with this investigation, even

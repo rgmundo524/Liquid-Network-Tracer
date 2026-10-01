@@ -286,7 +286,7 @@ def preview_pegouts(case, search_id, *, open_browser=False, progress=None):
         _progress(progress, "pegout_paths")
         # Search archives describe collection. The new display policy belongs
         # to this preview, so regenerating never rewrites its source archive.
-        plot_query = validate_query(**query, transaction_io="complete")
+        plot_query = validate_query(**query, transaction_io="complete", attribution_hop_limits="ignore")
         graph = pegout_graph(state, plot_query, color_attribution_arrows=attribution_arrow_coloring(metadata),
                               group_context_inputs=context_input_grouping(metadata),
                               center_name=centered_name_group(metadata))
@@ -348,7 +348,8 @@ def saved_pegout_snapshot(case, preview_id):
     plot_query = report.get("query")
     if not isinstance(plot_query, dict) or validate_query(**plot_query) != plot_query:
         raise TraceError("Peg-out preview has an invalid saved display query")
-    search_query = {key: value for key, value in plot_query.items() if key != "transaction_io"}
+    search_query = {key: value for key, value in plot_query.items()
+                    if key not in {"transaction_io", "attribution_hop_limits"}}
     if (graph.get("namespace", {}).get("case_id") != metadata["case_id"]
             or graph.get("namespace", {}).get("source") != state.get("source")
             or graph.get("run_id") != state["run_id"] or plan.get("run_id") != state["run_id"]

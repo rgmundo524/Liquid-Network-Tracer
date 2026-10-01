@@ -16,6 +16,7 @@ from .trace_checkpoint import TraceCheckpoint
 from .trace_fetch import FrontierFetcher, TraceConcurrency
 
 TERMINAL = {"spent", "fee", "pegout", "provably_unspendable"}
+COLLECTION_POLICY = {"schema_version": 1, "attribution_hop_limits": "ignore", "stop_tracing": "respect"}
 
 
 def new_state(seeds, source, limits, labels, parent=None, case_id=None):
@@ -33,7 +34,7 @@ def new_state(seeds, source, limits, labels, parent=None, case_id=None):
                   "ancestor_runs": parent.get("ancestor_runs", []) + [parent["run_id"]] if parent else [],
                   "started_at": now(), "finished_at": None, "limits": asdict(limits),
                   "labels": labels, "status": "running", "errors": [], "stats": {},
-                  "performance": {}})
+                  "performance": {}, "collection_policy": dict(COLLECTION_POLICY)})
     state.setdefault("root_run_id", state["run_id"])
     files = sorted(Path(__file__).parent.glob("*.py"))
     state["software"] = {"version": __version__, "python": platform.python_version(),
@@ -62,6 +63,8 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
 
     Every spendable child output is a candidate. Other inputs are context, never
     traversed backward, clustered, or used as address-history expansion seeds.
+    Attribution hop limits belong to plotting; collection respects explicit
+    stops, the run's global hop ceiling and its request/resource budgets.
     """
     limits.validate()
     started = time.monotonic()
@@ -115,6 +118,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
     new_transactions = 0
     labels = state["labels"]
     state["include_unconfirmed"] = include_unconfirmed
+    state["collection_policy"] = dict(COLLECTION_POLICY)
     state["selected_frontier"] = sorted(only) if only is not None else None
     from .hop_limits import HopScope, has_hop_limits
     from .group_hops import reference_name, refresh_reference_hops, refresh_seed_depths
@@ -123,7 +127,12 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
     was_named = any("reference_hops" in record for record in state["transactions"].values())
     if named_hops or was_named:
         refresh_seed_depths(state)
-    scope = HopScope(state) if named_hops or was_named or has_hop_limits(labels) else ServiceScope(state)
+    # Rebuild legacy capped paths without their display allowances. Keep the
+    # linear address-stop scope for ordinary runs, and use HopScope when named
+    # distances, saved allowances or script/outpoint stops need reconstruction.
+    detailed_scope = (named_hops or was_named or has_hop_limits(labels)
+                      or any(label.get("stop") is True and label.get("kind") != "address" for label in labels))
+    scope = HopScope(state, respect_attribution_hops=False) if detailed_scope else ServiceScope(state)
 
     def within_hops(depth):
         return depth <= limits.max_hops if named_hops else depth < limits.max_hops

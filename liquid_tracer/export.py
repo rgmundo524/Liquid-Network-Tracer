@@ -154,7 +154,7 @@ def _reference_fields(item, enabled):
 
 
 def build_graph(state, merge_addresses=True, include_fees=False, *, group_context_inputs=False, hub_addresses=None,
-                color_attribution_arrows=None, center_name=None, edge_ids=None):
+                color_attribution_arrows=None, center_name=None, edge_ids=None, respect_attribution_hops=True):
     """Build display nodes, optionally limited to exact input/output edges.
 
     Apply a path's edge selection before shared-address aggregation so excluded
@@ -162,6 +162,8 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
     transaction evidence and vin/vout indices remain intact.
     """
     from .investigations import validate_settings
+    if type(respect_attribution_hops) is not bool:
+        raise TraceError("Attribution hop limits must be respected or explicitly ignored for graph lineage")
     if edge_ids is not None:
         edge_ids = frozenset(edge_ids)
     if center_name is None:
@@ -304,7 +306,7 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
         parts = names + [node["label"]]
         limits = sorted({m["hop_limit"] for m in records if m.get("hop_limit") is not None})
         if limits and not any(m.get("stop") is True for m in records):
-            parts.append("Hop limit: " + str(min(limits)))
+            parts.append(("Hop limit: " if respect_attribution_hops else "Display hop limit: ") + str(min(limits)))
         if any(m.get("stop") is True for m in records):
             parts.append("STOP TRACING")
         node["attribution_reference"] = attribution_reference(node["id"])
@@ -360,7 +362,7 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
         node["starting_transaction_index"] = entry["index"]
         node["label"] = node["label"].replace("TX\n", f"Starting TX {entry['index']}\n", 1)
     from .convergence import annotate_branch_interactions
-    annotate_branch_interactions(graph, state)
+    annotate_branch_interactions(graph, state, respect_attribution_hops=respect_attribution_hops)
     from .address_counts import annotate
     annotate(graph, state)
     from .change_layout import annotate_changes
@@ -598,14 +600,22 @@ def export_run(store, state, destination, merge_addresses=True, offline_preview=
         "miro_board": state.get("investigation", {}).get("miro_board"),
         "note": "Board selection recorded at trace time. Subsequent publication details are in the case's miro/reports directory.",
     })
-    graph = build_graph(state, merge_addresses, state.get("graph_options", {}).get("include_fees", False))
+    from .plot_scope import project_collected_full_scope
+    display_state = project_collected_full_scope(state)
+    graph = build_graph(display_state, merge_addresses, state.get("graph_options", {}).get("include_fees", False))
     save_json(destination / "graph.json", graph)
     if offline_preview:
         svg = svg_graph(graph)
         (destination / "graph.svg").write_text(svg, encoding="utf-8")
         (destination / "graph.html").write_text(html_graph(graph, svg), encoding="utf-8")
     from .transaction_csv import write_transaction_csv
-    write_transaction_csv(destination / "transactions.csv", graph, state)
+    # Full-run accounting includes every collected transaction, independently
+    # of the narrower graph's attribution display limits.
+    same_scope = (display_state is state or all(display_state[key].keys() == state[key].keys()
+                                                for key in ("transactions", "outputs", "links")))
+    accounting_graph = (graph if same_scope else
+                        build_graph(state, merge_addresses, state.get("graph_options", {}).get("include_fees", False)))
+    write_transaction_csv(destination / "transactions.csv", accounting_graph, state)
     write_csv(destination / "nodes.csv", node_csv_rows(graph), NODE_CSV_FIELDS)
     write_csv(destination / "edges.csv", graph["edges"],
         ["id", "source", "target", "role", "outpoint", "label", "quantity", "details"])

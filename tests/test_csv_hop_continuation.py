@@ -1,4 +1,4 @@
-"""CSV limit changes release older branches through saved CLI continuations."""
+"""CSV caps remain display rules across wider CLI collection continuations."""
 
 import contextlib
 import hashlib
@@ -11,6 +11,7 @@ from pathlib import Path
 from liquid_tracer.cli import main, verify_export
 from liquid_tracer.common import read_json, save_json
 from liquid_tracer.investigations import create_investigation
+from liquid_tracer.plot_scope import project_full_scope
 from liquid_tracer.services import load_services
 from tests.fixtures import CONFIRMED, output
 
@@ -102,12 +103,19 @@ class CsvHopContinuationTests(unittest.TestCase):
         return self.trace("--resume", "latest", "--additional-hops", str(additional))
 
     def assert_branches(self, state, service_depth, open_depth):
+        collected = {self.ids["service"][0]}
+        for branch in ("service", "open"):
+            collected.update(self.ids[branch][1:open_depth + 1])
+            self.assertEqual(state["outputs"][self.ids[branch][open_depth] + ":0"]["status"], "hop_limit")
+        self.assertEqual(set(state["transactions"]), collected)
+        self.assertEqual(state["collection_policy"]["attribution_hop_limits"], "ignore")
         expected = {self.ids["service"][0]}
         for branch, depth in (("service", service_depth), ("open", open_depth)):
             expected.update(self.ids[branch][1:depth + 1])
-        self.assertEqual(set(state["transactions"]), expected)
+        projected = project_full_scope(state)
+        self.assertEqual(set(projected["transactions"]), expected)
         self.assertEqual(state["limits"]["max_hops"], open_depth)
-        self.assertEqual(state["outputs"][self.ids["service"][service_depth] + ":0"]["status"],
+        self.assertEqual(projected["outputs"][self.ids["service"][service_depth] + ":0"]["trace_control"]["reason"],
                          "attribution_hop_limit")
         self.assertEqual(state["outputs"][self.ids["open"][open_depth] + ":0"]["status"],
                          "hop_limit")
@@ -123,13 +131,13 @@ class CsvHopContinuationTests(unittest.TestCase):
         self.assertEqual(first["limits"]["max_hops"], 2)
         held = self.continue_trace(global_depth - 2)
         self.assert_branches(held, 2 + limit, global_depth)
-        # Save another run with the same exhausted branch before changing CSV.
+        # Saving at the same global ceiling needs no additional transactions.
         unchanged = self.continue_trace(0)
         self.assert_branches(unchanged, 2 + limit, global_depth)
         self.assertEqual(unchanged["stats"]["new_transactions_this_run"], 0)
         return unchanged
 
-    def test_csv_one_to_two_backfills_hop_four_while_open_branch_reaches_five(self):
+    def test_csv_one_to_two_changes_plot_while_both_branches_collect_to_five(self):
         for workers in (1, 8):
             with self.subTest(workers=workers):
                 self.prepare_case(workers)
@@ -140,11 +148,11 @@ class CsvHopContinuationTests(unittest.TestCase):
                 state = self.continue_trace(1)
                 self.assert_branches(state, 4, 5)
                 self.assertEqual(set(state["transactions"]) - set(held["transactions"]),
-                                 {self.ids["service"][4], self.ids["open"][5]})
+                                 {self.ids["service"][5], self.ids["open"][5]})
                 self.assertEqual(state["service_controls"]["rules"][self.addresses["service"][2]]["hop_limit"], 2)
                 self.assert_archives_unchanged()
 
-    def test_csv_two_to_four_fetches_each_missing_intermediate_transaction(self):
+    def test_csv_two_to_four_reveals_already_collected_intermediate_transactions(self):
         for workers in (1, 8):
             with self.subTest(workers=workers):
                 self.prepare_case(workers)
@@ -153,7 +161,7 @@ class CsvHopContinuationTests(unittest.TestCase):
                 state = self.continue_trace(1)
                 self.assert_branches(state, 6, 7)
                 self.assertEqual(set(state["transactions"]) - set(held["transactions"]),
-                                 {self.ids["service"][5], self.ids["service"][6], self.ids["open"][7]})
+                                 {self.ids["service"][7], self.ids["open"][7]})
                 for depth in (4, 5):
                     self.assertEqual(state["links"][self.ids["service"][depth] + ":0"]["spending_txid"],
                                      self.ids["service"][depth + 1])
@@ -162,7 +170,7 @@ class CsvHopContinuationTests(unittest.TestCase):
                 self.assertEqual(history[-1]["rule"]["hop_limit"], 4)
                 self.assert_archives_unchanged()
 
-    def test_default_keep_does_not_change_limit_or_release_the_older_branch(self):
+    def test_default_keep_preserves_display_limit_without_restricting_collection(self):
         self.prepare_case(8)
         self.reach_older_boundary(2, 6)
         before = (self.case / "services.json").read_bytes()
@@ -175,11 +183,11 @@ class CsvHopContinuationTests(unittest.TestCase):
         self.assertEqual(state["service_controls"]["rules"][self.addresses["service"][2]]["hop_limit"], 2)
         self.assert_archives_unchanged()
 
-    def test_raised_csv_limit_backfills_without_increasing_existing_global_ceiling(self):
+    def test_raised_csv_limit_reuses_evidence_at_existing_global_ceiling(self):
         self.prepare_case(8)
         self.reach_older_boundary(1, 4)
         self.import_limit(2, replace=True)
         state = self.continue_trace(0)
         self.assert_branches(state, 4, 4)
-        self.assertEqual(state["stats"]["new_transactions_this_run"], 1)
+        self.assertEqual(state["stats"]["new_transactions_this_run"], 0)
         self.assert_archives_unchanged()

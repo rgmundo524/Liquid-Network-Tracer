@@ -5,7 +5,7 @@ The attribution **import** accepts an optional `hop_limit`. This is separate fro
 
 ```csv
 Address,Name,confidence,stop_tracing,hop_limit,source,notes
-REPLACE_WITH_DEPOSIT_ADDRESS,Example Exchange,suspected,false,1,Investigator research,Include consolidation then stop
+REPLACE_WITH_DEPOSIT_ADDRESS,Example Exchange,suspected,false,1,Investigator research,Show one consolidation hop in Full trace
 ```
 
 Replace the placeholder before importing. The terminal and browser import review
@@ -13,39 +13,64 @@ show the limit. Address review can edit or clear it individually. Existing impor
 files without the column remain valid. Values must be blank or nonnegative whole
 numbers; `0` is not the same as blank.
 
-## Counting additional hops
+## Which phases use the rules
+
+Active `stop_tracing` rules apply to collection and every plotting goal. The
+attribution `hop_limit` is a local display/traversal cap for **Full trace** and
+**Starter connections** only:
+
+| Phase or goal | `stop_tracing=true` | Attribution `hop_limit`, including `0` |
+| --- | --- | --- |
+| Collect transaction data | Stops that path | Ignored |
+| Paths to peg-outs, including standalone searches | Stops that path | Ignored |
+| Full trace | Stops that path | Applied |
+| Starter connections | Stops that path | Applied |
+
+Collection still obeys the run's overall hop ceiling, confirmation policy, and
+transaction, output, API-request, and time budgets. Peg-out tracing still obeys
+its selected global hop range. Ignoring an address's local cap does not remove
+these limits or change the selected seeds. To stop collection or a peg-out path
+at an address, use `stop_tracing=true`; `hop_limit=0` alone does not stop them.
+
+## Counting additional hops in Full trace and Starter connections
 
 An arrival at the annotated output consumes no local hop. One hop is its spend by
 the next transaction. Thus `hop_limit=1` includes the consolidation transaction
-and its outputs, then stops further expansion along that path. A value of 2 allows
-one more transaction spend. The overall run hop/request/time limits still apply.
+and its outputs in these views, then stops further expansion along that path.
+A value of 2 allows one more transaction spend. The selected global hop ceiling
+and available saved evidence still bound the plotted activity.
 
 * `stop_tracing=true`: stop at the annotated address, regardless of `hop_limit`.
-* `stop_tracing=false`, blank `hop_limit`: normal tracing, without a local cap.
-* `stop_tracing=false`, `hop_limit=0`: stop at this output.
-* `stop_tracing=false`, positive `hop_limit`: allow that many additional spends.
+* `stop_tracing=false`, blank `hop_limit`: no local cap.
+* `stop_tracing=false`, `hop_limit=0`: stop this plotted path at the output.
+* `stop_tracing=false`, positive `hop_limit`: display that many additional spends.
 
-Every inherited budget decreases along the path. Reusing the address, reaching
-another annotation, or continuing/restarting the investigation does not refill
-it. A stricter downstream rule can shorten it. Independent selected outputs or
-other permitted paths keep their own allowance. A short exhausted path cannot
-lend its global hop depth to a longer open path.
+Every inherited local budget decreases along the path. Reusing the address or
+reaching another annotation does not refill it. A stricter downstream rule can
+shorten it. Independent selected outputs or other permitted paths keep their
+own allowance. A short exhausted path cannot lend its global hop depth to a
+longer open path. Named-group hop resets do not replenish these local budgets.
 
-The limit applies to fresh traces and continuations. Adding it to an already
-expanded run holds frontier reachable only beyond the new boundary. It does not
-delete old transactions, links, raw responses, or existing board objects. The
-full graph remains the saved evidence view; the starter-connections view applies
-the current cap separately to each source starter. It does not claim common
-ownership or carry a service's attribution onto all descendants.
+Changing a saved limit affects the next generated Full trace or Starter
+connections plot. Tightening the limit removes paths from those new views;
+loosening it restores only activity already collected. It does not delete saved
+transactions, raw responses, or historical plots, and does not establish common
+ownership or carry a service's attribution onto descendants. Use **Replace**
+when importing a changed CSV; **Keep existing** retains the previous limit.
 
-Increasing a saved limit reopens the stopped branch on the next continuation,
-even if other branches have advanced in the meantime. For example, a service
-reached at overall hop 2 with a local limit of 1 stops at hop 3. Raising its local
-limit to 2 allows that branch to fetch hop 4, subject to the run's overall ceiling
-and request, transaction, and time budgets. It does not skip directly to the
-furthest hop reached elsewhere. Use **Replace** when importing the changed CSV;
-**Keep existing** leaves the previous limit in effect. A continuation with zero
-additional hops can fill newly permitted paths inside the existing ceiling.
+## Existing investigations collected with address caps
+
+Older collection runs may lack transactions because an attribution `hop_limit`
+previously stopped their branches. Updating the application does not fill those
+gaps automatically. **Continue collection with 0 additional hops** to revisit
+eligible branches within the saved global ceiling, or add hops to increase that
+ceiling. Current `stop_tracing` rules and resource budgets still apply. For
+example, a branch previously capped at hop 3 can now be collected toward the
+saved overall ceiling of 10, unless an explicit address stop intervenes.
+
+Generate new plots from the resulting run. New peg-out plots ignore address
+hop caps; Full trace and Starter connections still apply them. Existing saved
+reports, endpoint tables, and plots retain their recorded rules and results.
 
 The CLI accepts `service-set --hop-limit 1`; `--hop-limit ''` clears it. Omitting
 the option when changing another assessment field preserves an existing limit.

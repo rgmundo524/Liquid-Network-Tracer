@@ -1890,6 +1890,36 @@ test('saved context grouping labels use each plot snapshot across plot, download
   }
 });
 
+test('collection and new peg-out controls explain attribution limits without changing global hop controls', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase();
+  await view.dispatch('view-collect');
+  assert.match(view.workspace(), /The collection hop ceiling, resource budgets and explicit tracing stops apply/);
+  assert.match(view.workspace(), /Attribution CSV hop_limit values are ignored, including zero/);
+  assert.match(view.workspace(), /0 additional hops fills eligible gaps within its existing ceiling/);
+  await view.dispatch('view-plots');
+  await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+  assert.match(view.workspace(), /Peg-out paths ignore attribution CSV hop_limit values/);
+  assert.match(view.workspace(), /Explicit stop-tracing rules and the selected hop range still apply/);
+  assert.match(view.workspace(), /id="workflow-max-hops"[^>]*value="10"/);
+});
+
+test('saved peg-out scope reports the captured attribution policy for old and new layouts', async () => {
+  for (const ignore of [false, true]) {
+    const view = await harness();
+    const plot = workflowPlot('pegouts', 'policy', {query: {transaction_io: 'complete',
+      ...(ignore ? {attribution_hop_limits: 'ignore'} : {})}});
+    view.state.activeCase = workflowCase({plots: [plot],
+      boards: [workflowBoard('pegouts', 'policy-board', {preview_id: plot.preview_id})]});
+    for (const page of ['plots', 'history', 'boards']) {
+      await view.dispatch('view-' + page);
+      assert.match(view.workspace(), ignore
+        ? /Attribution hop limits ignored; explicit stop-tracing rules and the selected hop range applied/
+        : /Attribution hop limits, stop-tracing rules and the selected hop range applied/);
+    }
+  }
+});
+
 test('complete I/O saved scope appears across plots, downloads and boards without changing endpoint counts', async () => {
   const view = await harness();
   const plot = workflowPlot('pegouts', 'complete', {query: {transaction_io: 'complete'},

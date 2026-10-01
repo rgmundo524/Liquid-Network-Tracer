@@ -88,7 +88,8 @@ def legend_notes(graph=None):
     if name:
         notes.append(f"Hops count away from attribution group {name}. A reached output in that group resets "
                      "its own branch to 0; outside outputs continue independently. Attribution stop rules "
-                     "and hop allowances still apply.")
+                     + ("still apply." if (graph or {}).get("pegouts", {}).get("query", {}).get("attribution_hop_limits") == "ignore"
+                        else "and hop allowances still apply."))
     if (graph or {}).get("graph_options", {}).get("view") == "pegout_paths":
         from .common import TraceError
         from .pegout_paths import validate_query
@@ -102,7 +103,8 @@ def legend_notes(graph=None):
                                include_unspendable=query.get("include_unspendable", False),
                                include_context=query.get("include_context", False),
                                hop_reference_name=query.get("hop_reference_name", ""),
-                               transaction_io=query.get("transaction_io"))
+                               transaction_io=query.get("transaction_io"),
+                               attribution_hop_limits=query.get("attribution_hop_limits"))
         complete_io = query.get("transaction_io") == "complete"
         if "seeds" in query:
             count = len({seed.split(":")[0] for seed in query["seeds"]})
@@ -129,6 +131,9 @@ def legend_notes(graph=None):
             "Peg-out diamonds are Liquid requests, not confirmation of Bitcoin payouts.",
             coverage + "Stopped, unconfirmed or unsearched branches may contain undiscovered peg-outs; no result does not prove absence.",
         ])
+        if query.get("attribution_hop_limits") == "ignore":
+            notes.append("Attribution CSV hop limits are ignored for these paths. Explicit stop-tracing rules "
+                         "and the selected plot hop range still apply. Only saved transactions are available.")
         if graph.get("address_mode") == "merged":
             notes.append("One circle per full address per network; each UTXO keeps its own arrows. "
                          "Sharing a circle does not establish a spend between unrelated outputs.")

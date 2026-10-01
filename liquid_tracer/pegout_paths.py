@@ -21,7 +21,7 @@ SEED_SCOPE = SCOPE.replace("from the chosen transaction", "from the selected see
 
 def validate_query(txid=None, min_hops=0, max_hops=10, *, seeds=None,
                    include_unspent=False, include_unspendable=False, include_context=False,
-                   hop_reference_name="", transaction_io=None):
+                   hop_reference_name="", transaction_io=None, attribution_hop_limits=None):
     if seeds is not None:
         if txid is not None:
             raise TraceError("Choose either selected seed outputs or one transaction for a peg-out search")
@@ -48,6 +48,10 @@ def validate_query(txid=None, min_hops=0, max_hops=10, *, seeds=None,
         raise TraceError("Peg-out transaction I/O must use complete transaction context")
     if transaction_io is not None:
         options["transaction_io"] = transaction_io
+    if attribution_hop_limits not in (None, "ignore"):
+        raise TraceError("Peg-out attribution hop policy must ignore per-address hop limits")
+    if attribution_hop_limits is not None:
+        options["attribution_hop_limits"] = attribution_hop_limits
     name = normalize_reference_name(hop_reference_name)
     if name:
         options["hop_reference_name"] = name
@@ -74,7 +78,7 @@ def _pegout(output):
     return output_kind(output) == "pegout"
 
 
-def _evidence(state):
+def _evidence(state, *, respect_attribution_hops=True):
     """Fail closed on corrupt evidence, including links excluded by stop rules."""
     forward, incoming = defaultdict(list), defaultdict(list)
     transactions, outputs = state["transactions"], state["outputs"]
@@ -113,7 +117,8 @@ def _evidence(state):
                 for field in ("scriptpubkey", "scriptpubkey_type", "scriptpubkey_address", "value", "valuecommitment",
                               "asset", "assetcommitment", "pegout"))):
             raise TraceError("Peg-out spending input disagrees with its saved funding output")
-        forward[parent].append((child, key, output_budget(state["labels"], key, output)))
+        forward[parent].append((child, key, output_budget(state["labels"], key, output,
+                                                        respect_attribution_hops=respect_attribution_hops)))
         indegree[child] += 1
     ready = deque(txid for txid, count in indegree.items() if not count)
     visited = 0
@@ -136,7 +141,8 @@ def _paths(state, query, *, seed_distances=None):
     by this query, including its attribution budgets and group-relative range.
     """
     try:
-        forward, pegouts = _evidence(state)
+        respect_attribution_hops = query.get("attribution_hop_limits") != "ignore"
+        forward, pegouts = _evidence(state, respect_attribution_hops=respect_attribution_hops)
         endpoints = {txid: {index: "pegout" for index in indices} for txid, indices in pegouts.items()}
         if query.get("include_unspent"):
             from .export import _unspent_endpoints
@@ -177,7 +183,8 @@ def _paths(state, query, *, seed_distances=None):
             links = {key: child for rows in forward.values() for child, key, _ in rows}
             seed_arrivals = {} if seed_distances is not None else None
             seen, predecessors = walk_outputs(state, starts, links, limit, confirmed,
-                                               seed_distances=seed_arrivals)
+                                               seed_distances=seed_arrivals,
+                                               respect_attribution_hops=respect_attribution_hops)
             successful = set()
             distances = defaultdict(set)
             for point in seen:
@@ -281,7 +288,8 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
                            seeds=query.get("seeds"), include_unspent=query.get("include_unspent", False),
                            include_unspendable=query.get("include_unspendable", False),
                            include_context=query.get("include_context", False), hop_reference_name=name,
-                           transaction_io=query.get("transaction_io"))
+                           transaction_io=query.get("transaction_io"),
+                           attribution_hop_limits=query.get("attribution_hop_limits"))
     complete_io = query.get("transaction_io") == "complete"
     include_context = complete_io or query.get("include_context", False)
     outpoints, endpoint_matches, depths, output_depths = _paths(state, query)
@@ -333,7 +341,8 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
         edge_ids.update(context_edge_ids)
     graph = build_graph(reduced, merge_addresses=True, include_fees=complete_io,
                         color_attribution_arrows=color_attribution_arrows, center_name=center_name,
-                        edge_ids=edge_ids)
+                        edge_ids=edge_ids,
+                        respect_attribution_hops=query.get("attribution_hop_limits") != "ignore")
     node_ids = {edge[field] for edge in graph["edges"] for field in ("source", "target")}
     graph["nodes"] = [node for node in graph["nodes"] if node["id"] in node_ids]
     if not complete_io:
@@ -342,6 +351,9 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
                               reduced["transactions"], graph["fee_items"])
     graph["activity_frames"] = activity_frames(graph)
     scope = SEED_SCOPE if "seeds" in query else SCOPE
+    if query.get("attribution_hop_limits") == "ignore":
+        scope += (" Attribution CSV hop limits do not restrict these paths. Explicit stop-tracing rules "
+                  "and the selected plot hop range still apply; only saved transactions can be displayed.")
     extra_endpoints = query.get("include_unspent") or query.get("include_unspendable")
     if query.get("include_unspent"):
         scope += (" Unspent endpoints require a saved unspent observation with no saved spending input; "

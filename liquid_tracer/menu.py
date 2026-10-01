@@ -362,7 +362,10 @@ def create_app(root=None):
                     source = "Synthetic data: no Blockstream requests." if self.metadata.get("fixture") else "Live Liquid: running this trace may consume Blockstream credits."
                     yield Static(source, markup=False)
                     if self.metadata.get("latest_run"):
-                        yield Static("Adds hops to the saved run's existing ceiling. Use 0 to retry the current frontier.", markup=False)
+                        yield Static("Adds hops to the saved run's existing ceiling. Use 0 to retry eligible branches within that ceiling, "
+                                     "including gaps left by older attribution hop caps.", markup=False)
+                    yield Static("Collection respects explicit stop-tracing rules and the overall hop/resource limits. "
+                                 "It ignores attribution hop_limit values, including 0.", markup=False)
                     yield Static("Tracing saves a new run. Miro is updated separately.", markup=False)
                 if self.mode in ("global", "case"):
                     yield Label("Graph layout", classes="title")
@@ -700,8 +703,10 @@ def create_app(root=None):
                 yield Button("Refresh address activity", id="address-refresh", disabled=True)
                 yield Checkbox("Enable this address assessment", id="service-enabled")
                 yield Checkbox("Stop tracing through this address", value=True, id="service-stop")
-                yield Label("hop_limit (blank = no local cap; 0 = stop; 1 = one consolidation hop)")
+                yield Label("hop_limit for Full trace and Starter connections")
                 yield Input(id="service-hop-limit", placeholder="No local cap")
+                yield Static("Blank = no local cap; 0 = stop this plotted path; 1 = one consolidation hop. "
+                             "Collection and peg-out tracing ignore this cap. Use Stop tracing above to stop those paths.", markup=False)
                 yield Label("Confidence (your assessment, not automatic verification)")
                 yield Select([("Suspected", "suspected"), ("Confirmed", "confirmed")],
                              value="suspected", allow_blank=False, id="service-confidence")
@@ -842,7 +847,7 @@ def create_app(root=None):
                     self.load_page()
                     self.query_one("#address-error", Static).update(
                         ("Address stop saved. It applies to the next run." if self.query_one("#service-stop", Checkbox).value
-                         else "Attribution and hop limit saved. Blank means no local cap.") if enabled else
+                         else "Attribution and plot hop limit saved. Collection and peg-out tracing ignore this cap.") if enabled else
                         "Assessment disabled. Future runs may trace through this address.")
             except ACTION_ERRORS as error:
                 self.query_one("#address-error", Static).update(str(error))

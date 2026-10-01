@@ -140,8 +140,10 @@ class CollectionProgressTests(unittest.TestCase):
                 resumed, requests, events, _ = self.collect(**options, parent=parent, callback=broken)
                 self.assertEqual(requests, [])
                 self.assertEqual(resumed["links"], parent["links"])
-                self.assertEqual(events, [{"phase": "collection_empty", "completed": 0, "total": 0,
-                                           "message": "No eligible outputs remain to collect"}])
+                # The CSV cap is display-only, so collection reached the run's
+                # global hop boundary. Rechecking that frontier needs no API.
+                self.assertEqual([(event["phase"], event["completed"], event["total"]) for event in events],
+                                 [("collecting", 4, 4), ("collection_complete", 4, 4)])
 
     def test_cli_callback_flows_from_trace_to_counts_and_saved_archive(self):
         fixture_path = self.root / "api.json"

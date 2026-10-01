@@ -12,7 +12,7 @@ from .investigations import read_case
 from .hop_limits import hop_limit_value, UNSET
 
 MANAGED_BY = "case_service_rules"
-SERVICE_STATUSES = {"suspected_service_stop", "held_behind_service", "attribution_hop_limit"}
+SERVICE_STATUSES = {"suspected_service_stop", "analyst_stop", "held_behind_service", "attribution_hop_limit"}
 CONFIDENCES = {"suspected", "confirmed"}
 
 
