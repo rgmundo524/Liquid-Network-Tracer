@@ -7,6 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from contextlib import contextmanager
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from email.utils import parsedate_to_datetime
 from http.client import HTTPException
@@ -171,6 +172,9 @@ class Esplora:
         self._results = {}
         self._metrics_lock = threading.Lock()
         self._latency_seconds = None
+        self._service_latency_seconds = None
+        self._completed_endpoints = 0
+        self._service_local = threading.local()
         self._completed_requests = 0
         self._pressure_events = 0
         self._totals = {"network_seconds_total": 0., "pacing_wait_seconds_total": 0.,
@@ -273,7 +277,10 @@ class Esplora:
 
         Shared wait seconds is the latest estimated delay, not cumulative
         threaded waiting time. Network latency and completed_requests retain
-        their Esplora-only semantics for adaptive concurrency. Cumulative
+        their Esplora-only semantics. service_latency_seconds measures the
+        complete endpoint operation, including cache lookup and evidence/JSON
+        processing, but excluding admission, authentication and retry waits.
+        completed_endpoints advances only after that operation finishes. Cumulative
         timings include OAuth and are overlapping worker seconds, never
         additive phase wall time. Retry waits exclude 429 admission cooldowns,
         which count as pacing waits. cache_hits counts accepted SQLite cached
@@ -282,12 +289,36 @@ class Esplora:
         """
         with self._metrics_lock:
             metrics = {"latency_seconds": self._latency_seconds,
+                       "service_latency_seconds": self._service_latency_seconds,
+                       "completed_endpoints": self._completed_endpoints,
                        "completed_requests": self._completed_requests,
                        "pressure_events": self._pressure_events}
             metrics.update(self._totals)
             if self._shared_metrics is not None:
                 metrics.update(self._shared_metrics)
             return metrics
+
+    @contextmanager
+    def _exclude_service(self):
+        """Exclude nested waits from this worker's endpoint service sample.
+
+        Admission and authentication can contain further waits. Count the
+        outer interval once so a token refresh cannot subtract nested pacing
+        twice, or include another thread's overlapping wait time.
+        """
+        sample = getattr(self._service_local, "sample", None)
+        if sample is None:
+            yield
+            return
+        outer = sample["depth"] == 0
+        started = time.monotonic() if outer else None
+        sample["depth"] += 1
+        try:
+            yield
+        finally:
+            sample["depth"] -= 1
+            if outer:
+                sample["excluded"] += max(0., time.monotonic() - started)
 
     def _measure_request(self, started, kind, status=None, failed=False):
         elapsed = max(0., time.monotonic() - started)
@@ -317,15 +348,23 @@ class Esplora:
 
     def _admit(self, kind=None, endpoint=None):
         started = time.monotonic()
-        with self._gate:
+        with self._exclude_service():
+            self._gate.acquire()
             try:
-                self._reserve_request()
-            finally:
-                self._add_seconds("pacing_wait_seconds_total", started)
+                try:
+                    self._reserve_request()
+                finally:
+                    self._add_seconds("pacing_wait_seconds_total", started)
+            except BaseException:
+                self._gate.release()
+                raise
+        try:
             if kind is not None:
                 self._evidence(self.store.attempt, self.run_id, kind, endpoint, "started")
             self.last_call = time.monotonic()
             return self.budget.timeout()
+        finally:
+            self._gate.release()
 
     def _reserve_request(self):
         # Reserve starts under one shared gate. Increasing workers never
@@ -365,6 +404,10 @@ class Esplora:
             self.budget.request()
 
     def _cooldown(self, seconds):
+        with self._exclude_service():
+            return self._set_cooldown(seconds)
+
+    def _set_cooldown(self, seconds):
         with self._gate:
             if self._shared_quota is not None:
                 # Publish the cooldown before deciding whether this run can
@@ -396,6 +439,10 @@ class Esplora:
 
     def _pause_retry(self, seconds):
         """Wait between retries without hiding attempts or delaying cancellation."""
+        with self._exclude_service():
+            return self._wait_retry(seconds)
+
+    def _wait_retry(self, seconds):
         started = time.monotonic()
         try:
             self.budget.check_request()
@@ -410,8 +457,9 @@ class Esplora:
 
     def call(self, method, url, kind, endpoint, headers=None, body=None):
         started = time.monotonic()
-        self._transport_slots.acquire()
-        self._add_seconds("pacing_wait_seconds_total", started)
+        with self._exclude_service():
+            self._transport_slots.acquire()
+            self._add_seconds("pacing_wait_seconds_total", started)
         try:
             return self._call(method, url, kind, endpoint, headers, body)
         finally:
@@ -568,7 +616,8 @@ class Esplora:
         if self._drain(futures):
             raise KeyboardInterrupt()
 
-    def prefetch(self, endpoints, *, on_result=None, concurrency=None, on_idle=None):
+    def prefetch(self, endpoints, *, on_result=None, concurrency=None, on_idle=None,
+                 retain_results=True):
         """Return ordered unique endpoints mapped to results or TraceError.
 
         Stream completed results on the calling thread before replenishing the
@@ -577,6 +626,10 @@ class Esplora:
         can vary concurrency up to worker_ceiling without changing rate limits.
         The optional advisory idle callback runs on the calling thread so UI
         progress can report a shared cooldown while no response is completing.
+        With retain_results=False the callback consumes results as they finish;
+        completed endpoint Futures and response bodies are released, and the
+        returned mapping is empty. In-flight duplicate requests still coalesce,
+        and later lookups can recover successful responses from saved evidence.
         """
         endpoints = list(dict.fromkeys(endpoints))
         if not endpoints:
@@ -618,6 +671,16 @@ class Esplora:
                 if stop is None:
                     stop = StopRun("prefetch_stopped")
 
+        def release(endpoint, future):
+            if not retain_results:
+                # Evict only this completed Future. Existing callers can still
+                # hold/use it, and a replacement or unrelated request survives.
+                with self._results_lock:
+                    if future.done() and self._results.get(endpoint) is future:
+                        self._results.pop(endpoint)
+                results.pop(endpoint, None)
+                delivered.discard(endpoint)
+
         try:
             submit()
             while pending:
@@ -642,10 +705,12 @@ class Esplora:
                     endpoint = pending[future]
                     deliver(endpoint)
                     pending.pop(future)
+                    release(endpoint, future)
                 if stop is None:
                     submit()
-            for endpoint in remaining:
-                results[endpoint] = StopRun("prefetch_stopped" if callback_stopped else str(stop))
+            if retain_results:
+                for endpoint in remaining:
+                    results[endpoint] = StopRun("prefetch_stopped" if callback_stopped else str(stop))
         except BaseException as error:
             # Interruptions must not let a response race the run snapshot or
             # Store.close(). close() also catches a job interrupted between
@@ -667,10 +732,29 @@ class Esplora:
                         deliver(endpoint)
                     except BaseException:
                         break
+            for future, endpoint in pending.items():
+                release(endpoint, future)
             raise
+        if not retain_results:
+            return {}
         return {endpoint: results[endpoint] for endpoint in endpoints}
 
     def _get(self, endpoint):
+        started = time.monotonic()
+        sample = {"excluded": 0., "depth": 0}
+        previous = getattr(self._service_local, "sample", None)
+        self._service_local.sample = sample
+        try:
+            return self._get_response(endpoint)
+        finally:
+            self._service_local.sample = previous
+            elapsed = max(0., time.monotonic() - started - sample["excluded"])
+            with self._metrics_lock:
+                self._service_latency_seconds = (elapsed if self._service_latency_seconds is None else
+                                                  .2 * elapsed + .8 * self._service_latency_seconds)
+                self._completed_endpoints += 1
+
+    def _get_response(self, endpoint):
         self.budget.check()
         # Only transaction bodies cross run boundaries. Spend status is refreshed each run.
         ttl = self.tx_cache_seconds if endpoint.count("/") == 2 and endpoint.startswith("/tx/") else 0
@@ -696,9 +780,10 @@ class Esplora:
             from . import __version__
             headers = {"Accept": "application/json", "User-Agent": "liquid-utxo-tracer/" + __version__}
             if self.auth == "blockstream":
-                with self._token_lock:
-                    headers["Authorization"] = "Bearer " + self.bearer()
-                    token_generation = self._token_generation
+                with self._exclude_service():
+                    with self._token_lock:
+                        headers["Authorization"] = "Bearer " + self.bearer()
+                        token_generation = self._token_generation
             try:
                 status, response_headers, raw = self.call("GET", self.base + endpoint, "esplora", endpoint, headers)
             except TransientExplorerConnection as error:
@@ -719,9 +804,10 @@ class Esplora:
                 except (ValueError, UnicodeDecodeError):
                     raise TraceError("Explorer returned invalid JSON for " + endpoint) from None
             if status == 401 and self.auth == "blockstream" and not auth_retried:
-                with self._token_lock:
-                    if token_generation == self._token_generation:
-                        self.token = None
+                with self._exclude_service():
+                    with self._token_lock:
+                        if token_generation == self._token_generation:
+                            self.token = None
                 auth_retried = True
                 continue
             if status == 429 or status in (500, 502, 503, 504):

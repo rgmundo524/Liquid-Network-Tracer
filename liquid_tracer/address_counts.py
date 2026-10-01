@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .address_activity import validate_address
+from .address_count_cache import CountCacheJournal, read_snapshot
 from .common import StopRun, TraceError, canonical, digest, read_json, save_json
 
 COUNT_GAP = 20
@@ -65,7 +66,7 @@ def addresses(state):
     return sorted(result)
 
 
-def _cache(case, state):
+def _legacy_cache(case, state):
     path = Path(case) / 'address-counts.json'
     if path.is_symlink():
         raise TraceError('Address count storage must not be a symbolic link')
@@ -80,6 +81,18 @@ def _cache(case, state):
     counts = data.get('counts')
     if not isinstance(counts, dict) or any(not _valid(v, state['source'], k) for k,v in counts.items()):
         raise TraceError('Invalid address transaction count observation')
+    return counts
+
+
+def _cache(case, state):
+    # Establish the journal snapshot before opening JSON. A writer may replace
+    # JSON and clear its journal concurrently, but this ordering cannot lose an
+    # observation between the two cache representations.
+    with read_snapshot(case, state['case_id'], state['source'], _valid) as rows:
+        counts = _legacy_cache(case, state)
+        for address, record in rows:
+            if address not in counts or record['observed_at'] >= counts[address]['observed_at']:
+                counts[address] = record
     return counts
 
 
@@ -193,7 +206,7 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
         fetched, examined, stop = 0, 0, None
         failures = []
         concurrency_report = {}
-        store, api = None, None
+        store, api, journal = None, None, None
         _progress(progress, "address_counts", len(wanted)-len(todo), len(wanted))
         try:
             if todo:
@@ -217,17 +230,21 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
                     scaling = CountConcurrency(api.workers, len(todo),
                                                0 if api.fixture is not None else api.effective_rps)
                     started = last_saved = time.monotonic()
-                    dirty = 0
+                    pending = {}
+                    checkpoint_count = 0
+                    checkpoint_seconds = 0.0
                     failure = None
+                    journal = CountCacheJournal(case, state['case_id'], source)
 
                     def checkpoint(*, force=False):
-                        nonlocal dirty, last_saved
-                        if dirty and (force or dirty >= 32 or time.monotonic() - last_saved >= 1):
-                            data = {"schema_version": 1, "case_id": state["case_id"], "source": source, "counts": counts}
-                            data["sha256"] = digest(canonical(data))
-                            save_json(case/"address-counts.json", data)
-                            dirty = 0
+                        nonlocal last_saved, checkpoint_count, checkpoint_seconds
+                        if pending and (force or len(pending) >= 32 or time.monotonic() - last_saved >= 1):
+                            saving_started = time.monotonic()
+                            journal.write(pending)
+                            pending.clear()
                             last_saved = time.monotonic()
+                            checkpoint_count += 1
+                            checkpoint_seconds += last_saved - saving_started
 
                     def workers():
                         return scaling.target(api.request_metrics())
@@ -243,7 +260,7 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
                                   len(wanted), **metrics())
 
                     def receive(endpoint, result):
-                        nonlocal fetched, examined, stop, failure, dirty
+                        nonlocal fetched, examined, stop, failure
                         address = endpoint.removeprefix("/address/")
                         try:
                             if isinstance(result, TraceError):
@@ -266,7 +283,7 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
                                 "observed_at": observation["fetched_at"],
                                 "confirmed_tx_count": confirmed, "mempool_tx_count": mempool,
                                 "observation_ids": [oid]}
-                            dirty += 1
+                            pending[address] = counts[address]
                             fetched += 1
                             checkpoint()
                         examined += 1
@@ -278,11 +295,24 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
                     _progress(progress, "address_counts", len(wanted)-len(todo), len(wanted), **metrics())
                     try:
                         api.prefetch(["/address/" + address for address in todo],
-                                     on_result=receive, concurrency=workers, on_idle=idle_progress)
+                                     on_result=receive, concurrency=workers, on_idle=idle_progress,
+                                     retain_results=False)
                     finally:
                         checkpoint(force=True)
+                        if fetched:
+                            saving_started = time.monotonic()
+                            # Compatibility export once per lookup, rather than
+                            # hashing and rewriting all preceding counts for
+                            # every checkpoint. A failed export leaves the
+                            # committed journal intact for the next reader.
+                            data = {"schema_version": 1, "case_id": state["case_id"], "source": source, "counts": counts}
+                            data["sha256"] = digest(canonical(data))
+                            save_json(case/"address-counts.json", data)
+                            journal.compacted()
+                            checkpoint_seconds += time.monotonic() - saving_started
                     concurrency_report = {"concurrency_mode": scaling.mode, "peak_workers": scaling.peak,
                         "worker_limit": scaling.ceiling, "elapsed_seconds": time.monotonic() - started,
+                        "checkpoint_count": checkpoint_count, "checkpoint_seconds": checkpoint_seconds,
                         "observed_rps": fetched / max(.001, time.monotonic() - started)}
                     if failure is not None:
                         raise failure
@@ -299,6 +329,8 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
                     **concurrency_report, "requests_this_lookup": api.budget.requests if api is not None else 0,
                     "notice": notice}
         finally:
+            if journal is not None:
+                journal.close()
             if api is not None:
                 api.close()
             if store is not None:
@@ -405,7 +437,10 @@ def public_count_report(report):
         number = report.get(key)
         if type(number) is int and 1 <= number <= 64:
             value[key] = number
-    for key in ("elapsed_seconds", "observed_rps"):
+    number = report.get("checkpoint_count")
+    if type(number) is int and 0 <= number <= 2**53-1:
+        value["checkpoint_count"] = number
+    for key in ("elapsed_seconds", "observed_rps", "checkpoint_seconds"):
         number = report.get(key)
         if type(number) in (int, float) and math.isfinite(number) and 0 <= number <= 2**53-1:
             value[key] = number
