@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from liquid_tracer.common import TraceError, save_json
-from liquid_tracer.investigations import create_investigation, read_case
+from liquid_tracer.investigations import create_investigation, read_case, update_case
 from liquid_tracer.menu import create_app
 from liquid_tracer.workflow_menu import _compatible_plot, _endpoint_summary, boards_screen, plot_arguments, plot_screen
 
@@ -26,6 +26,7 @@ class PlotCommandTests(unittest.TestCase):
         self.assertNotIn("--name", updated)
         self.assertNotIn("--open", updated)
         self.assertIn("--include-context", updated)
+        self.assertEqual(updated[-2:], ["--max-items", "0"])
         for name, limit in ((None, 750), ("", 750), ("Board", -1), ("Board", True)):
             with self.subTest(name=name, limit=limit), self.assertRaises(TraceError):
                 plot_arguments("case", "full", "run", publish=True, name=name, max_items=limit)
@@ -178,13 +179,17 @@ class WorkflowMenuTests(unittest.IsolatedAsyncioTestCase):
                                           "--min-hops", "2", "--max-hops", "10", "--open"], False))
 
     async def test_update_layout_selects_matching_board_and_combines_generation_with_sync(self):
-        from textual.widgets import Select
+        from textual.widgets import Input, Select
         run = "saved-run"
         save_json(self.case / "runs" / run / "trace.json", {})
         save_json(self.case / "case.json", {**read_case(self.case), "latest_run": run})
         with patch("liquid_tracer.investigation_boards.list_boards", return_value=self.board_rows()):
             app = self.app_for(plot_screen)
             async with app.run_test(size=(110, 55)) as pilot:
+                item_budget = app.screen.query_one("#plot-max-items", Input)
+                self.assertTrue(item_budget.disabled)
+                self.assertEqual(item_budget.value, "0")
+                item_budget.value = "invalid stale value"
                 app.screen.query_one("#plot-mode", Select).value = "update"
                 await pilot.pause()
                 app.screen.query_one("#plot-board", Select).value = "board-full"
@@ -192,20 +197,26 @@ class WorkflowMenuTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(app.result[1])
                 self.assertEqual(app.result[0][0], "plot-sync")
                 self.assertEqual(app.result[0][-6:],
-                                 ["--layout-mode", "update", "--board-record-id", "board-full", "--max-items", "750"])
+                                 ["--layout-mode", "update", "--board-record-id", "board-full", "--max-items", "0"])
+                self.assertEqual(read_case(self.case)["run_defaults"]["max_new_items"], 750)
 
     async def test_new_board_primary_action_collects_name_before_generation(self):
         from textual.widgets import Input
         run = "saved-run"
         save_json(self.case / "runs" / run / "trace.json", {})
         save_json(self.case / "case.json", {**read_case(self.case), "latest_run": run})
-        app = self.app_for(plot_screen)
-        async with app.run_test(size=(110, 55)) as pilot:
-            app.screen.query_one("#plot-name", Input).value = "New assessment"
-            app.screen.query_one("#plot-max-items", Input).value = "200"
-            await self.click(app, pilot, "#plot-go")
-            self.assertEqual(app.result, (["plot-sync", "--case", str(self.case), "--goal", "full", "--run", run,
-                                         "--name", "New assessment", "--max-items", "200"], True))
+        update_case(self.case, {"run_defaults": {"budget_limits_enabled": True}})
+        for maximum in ("200", "0"):
+            with self.subTest(maximum=maximum):
+                app = self.app_for(plot_screen)
+                async with app.run_test(size=(110, 55)) as pilot:
+                    app.screen.query_one("#plot-name", Input).value = "New assessment"
+                    item_budget = app.screen.query_one("#plot-max-items", Input)
+                    self.assertFalse(item_budget.disabled)
+                    item_budget.value = maximum
+                    await self.click(app, pilot, "#plot-go")
+                    self.assertEqual(app.result, (["plot-sync", "--case", str(self.case), "--goal", "full", "--run", run,
+                                                 "--name", "New assessment", "--max-items", maximum], True))
 
     async def test_create_and_sync_selects_fresh_plot_without_prior_board(self):
         from textual.widgets import Input, Select
@@ -214,11 +225,33 @@ class WorkflowMenuTests(unittest.IsolatedAsyncioTestCase):
                 patch("liquid_tracer.plots.list_plots", return_value=plots):
             app = self.app_for(boards_screen)
             async with app.run_test(size=(110, 55)) as pilot:
+                item_budget = app.screen.query_one("#workflow-max-items", Input)
+                self.assertTrue(item_budget.disabled)
+                self.assertEqual(item_budget.value, "0")
+                item_budget.value = "75"
                 app.screen.query_one("#workflow-name", Input).value = "New board"
                 app.screen.query_one("#workflow-create-preview", Select).value = "full-plot"
                 await self.click(app, pilot, "#workflow-create-sync")
                 self.assertEqual(app.result, (["investigation-board-create-sync", "--case", str(self.case),
-                    "--preview", "full-plot", "--name", "New board", "--max-items", "750"], True))
+                    "--preview", "full-plot", "--name", "New board", "--max-items", "0"], True))
+                self.assertEqual(read_case(self.case)["run_defaults"]["max_new_items"], 750)
+
+    async def test_plot_submission_uses_current_budget_toggle(self):
+        from textual.widgets import Input
+        run = "saved-run"
+        save_json(self.case / "runs" / run / "trace.json", {})
+        save_json(self.case / "case.json", {**read_case(self.case), "latest_run": run})
+        update_case(self.case, {"run_defaults": {"budget_limits_enabled": True, "max_new_items": 200}})
+        app = self.app_for(plot_screen)
+        async with app.run_test(size=(110, 55)) as pilot:
+            item_budget = app.screen.query_one("#plot-max-items", Input)
+            self.assertFalse(item_budget.disabled)
+            self.assertEqual(item_budget.value, "200")
+            settings = {**read_case(self.case)["run_defaults"], "budget_limits_enabled": False}
+            update_case(self.case, {"run_defaults": settings})
+            await self.click(app, pilot, "#plot-go")
+            self.assertEqual(app.result[0][-2:], ["--max-items", "0"])
+            self.assertEqual(read_case(self.case)["run_defaults"]["max_new_items"], 200)
 
     async def test_terminal_options_are_visible_only_for_pegouts_and_default_off(self):
         from textual.widgets import Checkbox, Select
@@ -294,7 +327,7 @@ class WorkflowMenuTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(app.screen.query_one("#workflow-sync", Button).disabled)
                 await self.click(app, pilot, "#workflow-reorganize")
                 self.assertEqual(app.result, (["investigation-board-sync", "--case", str(self.case), "--record", "board-pegouts",
-                                              "--preview", "pegout-plot", "--max-items", "750", "--reorganize"], True))
+                                              "--preview", "pegout-plot", "--max-items", "0", "--reorganize"], True))
 
     async def test_legacy_board_can_open_but_cannot_receive_managed_sync(self):
         from textual.widgets import Button, Select

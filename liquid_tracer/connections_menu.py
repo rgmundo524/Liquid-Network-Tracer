@@ -2,7 +2,7 @@
 from pathlib import Path
 from .common import TraceError
 from .connections import PREVIEW_ID, SCOPE, reviewed_connections
-from .investigations import read_case
+from .investigations import effective_run_settings, read_case
 
 
 def connection_screen(base, button, case, *, publish=False):
@@ -17,6 +17,7 @@ def connection_screen(base, button, case, *, publish=False):
                 yield Label("Publish starter connections" if publish else "Starter connections", classes="title")
                 yield Static(SCOPE, markup=False)
                 if publish:
+                    settings = effective_run_settings(read_case(case).get("run_defaults", {}))
                     rows = []
                     directory = Path(case) / "previews"
                     for path in sorted(directory.glob("*-connections-*"), reverse=True):
@@ -37,6 +38,7 @@ def connection_screen(base, button, case, *, publish=False):
                     yield Static("The full-trace board is protected. One immutable snapshot per board. "
                                  "Repeating the same publication reuses acknowledged items. "
                                  "Older snapshots keep their original stop rules and hop bounds.", markup=False)
+                    yield Static(f"New Miro item budget: {settings['max_new_items'] or 'unlimited'}.", markup=False)
                 else:
                     yield Static("Uses all verified connections in the latest saved run, with no plotting hop cutoff. "
                                  "Attribution stops and hop limits do not prune this view; labels and recorded confirmation status remain. "
@@ -64,10 +66,11 @@ def connection_screen(base, button, case, *, publish=False):
                         raise TraceError("Review the snapshot and confirm publication first")
                     target = board_id(self.query_one("#connection-board", Input).value)
                     metadata = read_case(case)
+                    settings = effective_run_settings(metadata.get("run_defaults", {}))
                     if metadata.get("miro_board") and target == board_id(metadata["miro_board"]):
                         raise TraceError("Choose a separate Miro board; the full trace is protected")
                     arguments = ["connections-publish", "--case", str(case), "--preview", preview,
-                                 "--board", target, "--max-items", str(metadata.get("run_defaults", {}).get("max_new_items", 750))]
+                                 "--board", target, "--max-items", str(settings["max_new_items"])]
                 else:
                     arguments = ["connections", "--case", str(case), "--run", resolve_latest(case, "latest"),
                                  "--open"]

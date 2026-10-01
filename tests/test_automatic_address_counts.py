@@ -143,7 +143,8 @@ class AutomaticCountsTests(unittest.TestCase):
 
     def test_budget_exhaustion_reports_missing_and_next_chart_resumes_automatically(self):
         self.trace(legacy=True)
-        update_case(self.case, {"run_defaults": {**read_case(self.case)["run_defaults"], "max_requests": 2}})
+        update_case(self.case, {"run_defaults": {**read_case(self.case)["run_defaults"], "max_requests": 2,
+                                                   "budget_limits_enabled": True}})
         result = layout_preview_run(self.case)
         report = result["address_counts"]
         self.assertEqual(report["fetched"], 2)

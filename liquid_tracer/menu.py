@@ -15,15 +15,15 @@ import time
 from pathlib import Path
 
 from .common import LBTC, TraceError, parse_outpoint, read_json
-from .investigations import (create_investigation, default_root, list_investigations,
+from .investigations import (create_investigation, default_root, effective_run_settings, list_investigations,
                              load_settings, read_case, save_settings, update_case, validate_settings)
 
 
 LIMIT_FIELDS = (
     ("hops", "Initial / additional hops", int, 0),
-    ("max_transactions", "Maximum new transactions per run", int, 1),
-    ("max_outpoints", "Maximum examined outputs per run", int, 1),
-    ("max_requests", "Maximum API attempts per run", int, 1),
+    ("max_transactions", "Maximum new transactions per run", int, 0),
+    ("max_outpoints", "Maximum examined outputs per run", int, 0),
+    ("max_requests", "Maximum API attempts per run", int, 0),
     ("max_seconds", "Maximum tracing seconds per run", float, 0),
     ("max_new_items", "Maximum new Miro items per sync", int, 0),
 )
@@ -172,6 +172,7 @@ def _status(case, metadata):
 
 def _trace_arguments(case, metadata, settings):
     """Validate saved source/evidence before invoking SecretSpec or any remote call."""
+    settings = effective_run_settings(settings)
     arguments = ["trace", "--case", str(case)]
     from .group_hops import normalize_reference_name, reference_addresses, reference_name
     reference = normalize_reference_name(settings.get("hop_reference_name", ""))
@@ -208,6 +209,20 @@ def _trace_arguments(case, metadata, settings):
     for key in ("max_transactions", "max_outpoints", "max_requests", "max_seconds"):
         arguments.extend(["--" + key.replace("_", "-"), str(settings[key])])
     return arguments, not bool(fixture)
+
+
+def _budget_value(value):
+    return str(value) if value else "unlimited"
+
+
+def _trace_budget_summary(settings):
+    settings = effective_run_settings(settings)
+    if not settings["budget_limits_enabled"]:
+        return "Run budgets: unlimited. Optional budgets are off."
+    return (f"Optional run budgets: {_budget_value(settings['max_transactions'])} transactions, "
+            f"{_budget_value(settings['max_outpoints'])} output lookups, "
+            f"{_budget_value(settings['max_requests'])} API attempts, "
+            f"{_budget_value(settings['max_seconds'])} seconds.")
 
 
 def _address_activity_text(summary):
@@ -329,6 +344,7 @@ def create_app(root=None):
                              if case else load_settings(investigation_root))
 
         def compose(self) -> ComposeResult:
+            effective_settings = effective_run_settings(self.settings)
             titles = {"new": "New investigation", "global": "Workspace defaults", "case": "Investigation settings",
                       "run": "Continue latest run" if self.metadata.get("latest_run") else "Start first run",
                       "preview": "Preview Miro changes", "sync": "Sync latest to Miro",
@@ -364,7 +380,7 @@ def create_app(root=None):
                     if self.metadata.get("latest_run"):
                         yield Static("Adds hops to the saved run's existing ceiling. Use 0 to retry eligible branches within that ceiling, "
                                      "including gaps left by older attribution hop caps.", markup=False)
-                    yield Static("Collection respects explicit stop-tracing rules and the overall hop/resource limits. "
+                    yield Static("Collection respects the hop allowance, explicit stop-tracing rules and any enabled optional budgets. "
                                  "It ignores attribution hop_limit values, including 0.", markup=False)
                     yield Static("Tracing saves a new run. Miro is updated separately.", markup=False)
                 if self.mode in ("global", "case"):
@@ -406,8 +422,8 @@ def create_app(root=None):
                                  "Mermaid uses its own layout. Large calculations can take time and can be cancelled.", markup=False)
                 if self.mode in ("preview", "sync", "layout", "frames"):
                     yield Static("Linked Miro board: " + (self.metadata.get("miro_board") or "Not linked"), markup=False)
-                    yield Static(f"New item budget: {self.settings['max_new_items']}. "
-                                 "Edit the board and sync budget in Investigation settings.", markup=False)
+                    yield Static(f"New item budget: {_budget_value(effective_settings['max_new_items'])}. "
+                                 "Edit optional budgets in Investigation settings.", markup=False)
                 if self.mode in ("preview", "sync", "layout"):
                     yield Static("Offline change preview." if self.mode == "preview" else "Updates the linked Miro board.", markup=False)
                     yield Static("Transaction fee flows: " + ("included" if self.settings["include_fees"] else "hidden"),
@@ -427,11 +443,10 @@ def create_app(root=None):
                                  "Sync any new run first. This action does not trace, fetch address counts, "
                                  "or calculate a new layout.", id="frames-notice", markup=False)
                 if self.mode in ("global", "case"):
-                    yield Label("Tracing and sync limits", classes="title")
+                    yield Label("Hop allowance", classes="title")
                 if self.mode in ("new", "run"):
-                    yield Static(f"Saved limits: {self.settings['max_transactions']} transactions, "
-                                 f"{self.settings['max_outpoints']} output lookups, {self.settings['max_requests']} API attempts, "
-                                 f"{self.settings['max_seconds']} seconds. Edit these in Investigation settings.", markup=False)
+                    yield Static(_trace_budget_summary(self.settings) + " Edit optional budgets in Investigation settings.",
+                                 markup=False)
                 if self.mode == "new":
                     yield Static(f"Starting preferences: {self.settings['hops']} additional hops. "
                                  "Uses workspace defaults; edit Investigation settings after creating the case.", markup=False)
@@ -440,6 +455,12 @@ def create_app(root=None):
                 for key, label, converter, _ in LIMIT_FIELDS:
                     if self.mode not in ("global", "case") and not (self.mode == "run" and key == "hops"):
                         continue
+                    if key == "max_transactions":
+                        yield Label("Optional run and sync budgets", classes="title")
+                        yield Checkbox("Enable optional budgets", value=self.settings["budget_limits_enabled"],
+                                       id="budget-limits-enabled")
+                        yield Static("Off means unlimited transactions, outputs, API attempts, tracing time and new Miro items. "
+                                     "Saved numbers apply only when enabled; 0 means unlimited for that budget.", markup=False)
                     yield Label(label)
                     yield Input(str(self.settings[key]), id=key,
                                 type="number" if converter is float else "integer")
@@ -474,13 +495,14 @@ def create_app(root=None):
                     continue
                 try:
                     value = converter(self.query_one("#" + key, Input).value)
-                    if not math.isfinite(value) or value < minimum or (converter is float and value <= 0):
+                    if not math.isfinite(value) or value < minimum:
                         raise ValueError
                 except ValueError:
-                    qualifier = "positive number" if converter is float else f"whole number of at least {minimum}"
+                    qualifier = "nonnegative number" if converter is float else f"whole number of at least {minimum}"
                     raise TraceError(label + ": enter a " + qualifier) from None
                 settings[key] = value
             if self.mode in ("global", "case"):
+                settings["budget_limits_enabled"] = self.query_one("#budget-limits-enabled", Checkbox).value
                 try:
                     settings["layout_attempts"] = int(self.query_one("#layout_attempts", Input).value)
                 except ValueError:
@@ -546,6 +568,7 @@ def create_app(root=None):
                     if not board:
                         raise TraceError("Link a Miro board in Investigation settings first.")
                     _latest(self.case, read_case(self.case), verify=True)
+                    settings = effective_run_settings(settings)
                     arguments = ["miro-frames" if self.mode == "frames" else "miro-sync", "--case", str(self.case), "--run", "latest", "--board", board,
                                  "--max-new-items", str(settings["max_new_items"])]
                     if self.mode == "preview":
@@ -950,7 +973,7 @@ def create_app(root=None):
             _, state = _latest(case, self.metadata, verify=True)
             self.run_id = self.progress["run_id"] if self.resume else state["run_id"]
             self.source = self.progress["previous_board_id"] if self.resume else self.metadata.get("miro_board")
-            self.settings = validate_settings(self.metadata.get("run_defaults", {}))
+            self.settings = effective_run_settings(self.metadata.get("run_defaults", {}))
 
         def compose(self) -> ComposeResult:
             from .boards import default_board_name
@@ -970,10 +993,14 @@ def create_app(root=None):
                 name = self.progress.get("name") if self.resume else None
                 yield Input(name or default_board_name(self.metadata)[:50] + " · Rebuilt", id="board-name",
                             disabled=self.resume)
-                yield Label("New item budget for this rebuild")
-                yield Input(str(self.settings["max_new_items"]), id="max_new_items", type="integer")
-                yield Static("Include all graph objects and connections. The layout and full budget are checked "
-                             "before creating the board. This one-time budget does not change investigation defaults. "
+                yield Label("New item budget for this rebuild (0 = unlimited)")
+                yield Input(str(self.settings["max_new_items"]), id="max_new_items", type="integer",
+                            disabled=not self.settings["budget_limits_enabled"])
+                if not self.settings["budget_limits_enabled"]:
+                    yield Static("New item budget: unlimited. Enable optional budgets in Investigation settings to set a cap.",
+                                 markup=False)
+                yield Static("Include all graph objects and connections. The layout and any enabled budget are checked "
+                             "before creating the board. A one-time budget does not change investigation defaults. "
                              "An acknowledged replacement board is reused when resuming.", markup=False)
                 yield Static("", id="form-error", markup=False)
             with Horizontal(classes="buttons form-actions"):
@@ -998,7 +1025,9 @@ def create_app(root=None):
                     verify_export(run_path(self.case, self.run_id))
                     name = self.query_one("#board-name", Input).value.strip()
                     board_options(name, visibility="private")
-                    budget = int(self.query_one("#max_new_items", Input).value)
+                    settings = effective_run_settings(read_case(self.case).get("run_defaults", {}))
+                    budget = (int(self.query_one("#max_new_items", Input).value)
+                              if settings["budget_limits_enabled"] else 0)
                     if not 0 <= budget <= 2 ** 53 - 1:
                         raise TraceError("Enter a nonnegative whole-number budget for all objects and connections.")
                     self.dismiss((["miro-rebuild-board", "--case", str(self.case), "--run", self.run_id,
@@ -1025,8 +1054,9 @@ def create_app(root=None):
                 yield Button("Open saved comparison", id="compact-open")
                 yield Checkbox("I reviewed this comparison and approve replacing managed positions.",
                                value=False, id="compact-reviewed")
+                settings = effective_run_settings(read_case(self.case).get("run_defaults", {}))
                 yield Static("Uses the comparison's saved graph settings. "
-                             "The investigation's saved maximum new-item budget still applies.", markup=False)
+                             f"New item budget: {_budget_value(settings['max_new_items'])}.", markup=False)
                 yield Static("", id="form-error", markup=False)
             with Horizontal(classes="buttons form-actions"):
                 yield Button("Cancel", id="cancel")
@@ -1066,7 +1096,7 @@ def create_app(root=None):
                 recovery = miro_recovery_status(self.case)
                 if recovery.get("pending_count") or recovery.get("unavailable"):
                     raise TraceError("Miro sync needs recovery. Resolve the pending sync before applying a compact layout.")
-                settings = validate_settings(metadata.get("run_defaults", {}))
+                settings = effective_run_settings(metadata.get("run_defaults", {}))
                 arguments = ["miro-sync", "--case", str(self.case), "--run", self.run_id,
                              "--compact-preview", self.preview_id, "--reorganize",
                              "--max-new-items", str(settings["max_new_items"])]
@@ -1169,7 +1199,7 @@ def create_app(root=None):
                     yield Button("Export input CSVs", id="input-export")
                 yield Static("", id="input-export-status", markup=False)
                 yield Button("Fetch address transaction counts", id="address-counts")
-                yield Static("Counts use one statistics request per uncached address, within this investigation's API/time budget. Then regenerate a preview or sync Miro.", markup=False)
+                yield Static("Counts use one statistics request per uncached address. API/time budgets apply only when optional budgets are enabled. Then regenerate a preview or sync Miro.", markup=False)
                 yield Button("Merge duplicate addresses", id="address-merge")
                 with Horizontal(classes="buttons"):
                     yield Button("Compact graph (local preview)", id="compact-preview")
@@ -1302,7 +1332,7 @@ def create_app(root=None):
                     self.app.push_screen(CompactApplyScreen(self.case, state["run_id"], preview_id), self.perform)
                 elif action == "address-counts":
                     metadata = read_case(self.case)
-                    settings = validate_settings(metadata.get("run_defaults", {}))
+                    settings = effective_run_settings(metadata.get("run_defaults", {}))
                     self.perform((["address-counts", "--case", str(self.case), "--run", "latest",
                                    "--max-requests", str(settings["max_requests"]), "--max-seconds", str(settings["max_seconds"])], not bool(metadata.get("fixture"))))
                 elif action == "csv":

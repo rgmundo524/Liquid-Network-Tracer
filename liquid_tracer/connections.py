@@ -493,10 +493,10 @@ def reviewed_connections(case, preview_id):
     return graph, plan
 
 
-def publish_connections(case, preview_id, board, *, max_items=750, **kwargs):
+def publish_connections(case, preview_id, board, *, max_items=0, **kwargs):
     """Keep reviewed stops/colors and board designation stable during publication."""
     if type(max_items) is not int or max_items < 0:
-        raise TraceError("The Miro item budget must be a nonnegative whole number")
+        raise TraceError("The Miro item budget must be a nonnegative whole number (0 means unlimited)")
     case = Path(case)
     with (case / "trace.lock").open("a") as trace_lock, (case / "case.lock").open("a") as case_lock:
         try:
@@ -507,7 +507,7 @@ def publish_connections(case, preview_id, board, *, max_items=750, **kwargs):
         return _publish_connections(case, preview_id, board, max_items=max_items, **kwargs)
 
 
-def _publish_connections(case, preview_id, board, *, max_items=750, **kwargs):
+def _publish_connections(case, preview_id, board, *, max_items=0, **kwargs):
     """Publish a reviewed immutable snapshot, never replace the full trace board."""
     from .cli import board_id
     from .investigations import read_case

@@ -34,12 +34,14 @@ this mode explicitly; the search will not substitute all outputs automatically.
 
 The search fetches transactions using the investigation's API source, confirmed
 transaction cache, request throttling, and bounded parallel fetching. Each
-search or continuation uses the saved transaction, output, API attempt, and time
-budgets. CLI flags can override those budgets for one invocation. Active
+search or continuation has no transaction, output, API-attempt, or total-time
+cap unless **Use optional run budgets** is on for the investigation. Saved
+numeric caps stay inactive when it is off, including for older investigations.
+Positive CLI flags explicitly cap one invocation; `0` means unlimited. Active
 `stop_tracing` rules and the investigation's confirmation policy apply.
 Attribution `hop_limit` values, including `0`, are ignored. The selected global
-hop range and resource budgets still bound the search. Address reuse and other
-inputs do not create traversal links.
+hop range still bounds the search; optional resource budgets can stop it early.
+Address reuse and other inputs do not create traversal links.
 
 The plot selects transactions on paths reaching matching requests, then shows
 all inputs and outputs of each selected transaction, including fees. Outputs
@@ -66,7 +68,8 @@ and results. Start a new search to use the current tracing policy. For the main
 saved-data plotting workflow, fill gaps left by older attribution-capped runs
 with **Continue collection**, using 0 additional hops within the existing ceiling
 or additional hops for a larger ceiling, then regenerate the peg-out plot.
-Explicit address stops and resource budgets still apply.
+Explicit address stops and any enabled resource budgets still apply. Request
+pacing, per-request timeouts, and retry safeguards remain active.
 
 Select a saved search to resume with the same saved seed selection or custom
 transaction and range. Saved searches show their starting scope. Later changes
@@ -107,7 +110,9 @@ The search accepts `--max-transactions`, `--max-outpoints`, `--max-requests`, an
 
 After reviewing the preview, publish its immutable snapshot to a **separate Miro
 board**. The main investigation board and boards with existing full-trace or
-starter-connection mappings are protected. The saved item budget applies.
+starter-connection mappings are protected. Publication has no application item
+cap by default. The interfaces use the saved item budget only when resource
+budgets are enabled; a positive CLI `--max-items` sets an explicit cap.
 Repeating the same publication reuses acknowledged items; a different snapshot
 needs a different board.
 
@@ -116,7 +121,7 @@ from the saved search and publish it to a different board. Existing snapshots
 and their boards retain their original presentation.
 
 ```sh
-python3 -m liquid_tracer pegouts-publish --case CASE_DIRECTORY --preview PREVIEW_ID --board BOARD_ID --max-items 750
+python3 -m liquid_tracer pegouts-publish --case CASE_DIRECTORY --preview PREVIEW_ID --board BOARD_ID
 ```
 
 The diamonds identify **PEG-OUT REQUESTS** in the Liquid transaction data. They

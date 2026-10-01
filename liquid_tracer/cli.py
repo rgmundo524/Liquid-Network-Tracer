@@ -166,10 +166,10 @@ def parser():
     run.add_argument("--additional-hops", type=int, help="Increase the resumed run's hop ceiling by this many")
     run.add_argument("--hop-reference-name", default=None,
                      help="Count hops from this attribution name, resetting each matching output to zero; blank uses seed hops")
-    run.add_argument("--max-transactions", type=int, default=250, help="New unique transactions per run, including seed funding transactions")
-    run.add_argument("--max-outpoints", type=int, default=2000)
-    run.add_argument("--max-requests", type=int, default=600, help="All HTTP attempts, including OAuth and retries")
-    run.add_argument("--max-seconds", type=float, default=300)
+    run.add_argument("--max-transactions", type=int, default=0, help="New unique transactions per run; 0 means unlimited (default)")
+    run.add_argument("--max-outpoints", type=int, default=0, help="Output lookup budget; 0 means unlimited (default)")
+    run.add_argument("--max-requests", type=int, default=0, help="All HTTP attempts, including OAuth and retries; 0 means unlimited (default)")
+    run.add_argument("--max-seconds", type=float, default=0, help="Total tracing duration; 0 means unlimited (default)")
     run.add_argument("--base-url", default=ENTERPRISE)
     run.add_argument("--auth", choices=["blockstream", "none"], default="blockstream")
     run.add_argument("--fixture", type=Path, help="Offline synthetic API responses; no network calls")
@@ -190,7 +190,7 @@ def parser():
     fee_arguments(run)
     run.add_argument("--offline-preview", action="store_true", help="Also save optional HTML/SVG inspection files")
     run.add_argument("--miro-board", help="Sync the saved run to this Miro board URL or ID")
-    run.add_argument("--max-new-items", type=int, default=750, help="Maximum new Miro shapes plus connectors")
+    run.add_argument("--max-new-items", type=int, default=0, help="Maximum new Miro shapes plus connectors; 0 means unlimited (default)")
     shared = commands.add_parser("shared-collect", help="Collect shared workspace evidence using one investigation's policy")
     shared.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     shared.add_argument("--request", help="Prepared immutable collection request ID")
@@ -252,7 +252,7 @@ def parser():
             plot.add_argument("--open", dest="open_browser", action="store_true")
         else:
             plot.add_argument("--name", help="Name for a new private Miro board")
-            plot.add_argument("--max-items", type=int, default=750)
+            plot.add_argument("--max-items", type=int, default=0)
     managed_boards = commands.add_parser("investigation-boards", help="List every saved Miro board for an investigation")
     managed_boards.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     for command, help_text in (("investigation-board-create", "Create a private Miro board for a plotting goal"),
@@ -269,13 +269,13 @@ def parser():
     managed_sync.add_argument("--record", required=True)
     managed_sync.add_argument("--preview", required=True)
     managed_sync.add_argument("--reorganize", action="store_true")
-    managed_sync.add_argument("--max-items", type=int, default=750)
+    managed_sync.add_argument("--max-items", type=int, default=0)
     managed_create_sync = commands.add_parser("investigation-board-create-sync",
         help="Create a private Miro board and sync a reviewed fresh plot")
     managed_create_sync.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     managed_create_sync.add_argument("--preview", required=True)
     managed_create_sync.add_argument("--name", required=True)
-    managed_create_sync.add_argument("--max-items", type=int, default=750)
+    managed_create_sync.add_argument("--max-items", type=int, default=0)
     connections = commands.add_parser("connections", help="Plot only saved directed paths between starting transactions")
     connections.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     connections.add_argument("--run", default="latest")
@@ -286,7 +286,7 @@ def parser():
     connection_publish.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     connection_publish.add_argument("--preview", required=True)
     connection_publish.add_argument("--board", required=True)
-    connection_publish.add_argument("--max-items", type=int, default=750)
+    connection_publish.add_argument("--max-items", type=int, default=0)
     pegouts = commands.add_parser("pegouts", help="Trace forward from saved selected seeds and plot peg-out requests in an inclusive hop range")
     pegouts.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     origin = pegouts.add_mutually_exclusive_group()
@@ -306,7 +306,7 @@ def parser():
     pegout_publish.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     pegout_publish.add_argument("--preview", required=True)
     pegout_publish.add_argument("--board", required=True)
-    pegout_publish.add_argument("--max-items", type=int, default=750)
+    pegout_publish.add_argument("--max-items", type=int, default=0)
     compact = commands.add_parser("compact-preview", help="Compact an ELK layout locally and save a before/after comparison for review")
     compact.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     compact.add_argument("--run", default="latest")
@@ -317,8 +317,8 @@ def parser():
     counts = commands.add_parser("address-counts", help="Fetch missing address transaction counts without tracing or layout")
     counts.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     counts.add_argument("--run", default="latest")
-    counts.add_argument("--max-requests", type=int, default=1000)
-    counts.add_argument("--max-seconds", type=int, default=300)
+    counts.add_argument("--max-requests", type=int, default=0, help="HTTP attempt budget; 0 means unlimited (default)")
+    counts.add_argument("--max-seconds", type=float, default=0, help="Total duration budget; 0 means unlimited (default)")
     counts.add_argument("--refresh", action="store_true", help="Refresh already cached counts too")
     csv = commands.add_parser("csv-export", help="Export displayed transaction input/output rows without API calls")
     csv.add_argument("--case", type=Path, default=case_default, required=case_default is None,
@@ -338,8 +338,8 @@ def parser():
     rebuild.add_argument("--run", default="latest", help="Saved run ID (default: latest; a retry retains its original run)")
     rebuild.add_argument("--source-board", required=True, help="Currently linked board ID or URL; keep this original value when retrying")
     rebuild.add_argument("--name", help="New board name (default: investigation name, at most 60 characters)")
-    rebuild.add_argument("--max-new-items", type=int, default=750,
-                         help="Maximum new shapes plus connectors; the entire graph must fit before board creation")
+    rebuild.add_argument("--max-new-items", type=int, default=0,
+                         help="Maximum new shapes plus connectors; 0 means unlimited (default)")
     migration = commands.add_parser("miro-merge-addresses", help="Review or resume in-place conversion to shared address circles")
     migration.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     migration.add_argument("--board", help="Existing mapped board (default: saved case board)")
@@ -359,18 +359,18 @@ def parser():
     context_arguments(update)
     update.add_argument("--reorganize", action="store_true",
                         help="Apply the current automatic layout to managed graph items, replacing their manual positions")
-    update.add_argument("--max-new-items", type=int, default=750)
+    update.add_argument("--max-new-items", type=int, default=0)
     frames = commands.add_parser("miro-frames", help="Create or update Miro export frames after the graph is finished")
     frames.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     frames.add_argument("--run", default="latest", help="Already synced run ID (default: latest saved run)")
     frames.add_argument("--board", help="Miro board URL or ID (default: saved case board)")
-    frames.add_argument("--max-new-items", type=int, default=750, help="Maximum new frames for this action")
+    frames.add_argument("--max-new-items", type=int, default=0, help="Maximum new frames for this action; 0 means unlimited (default)")
     frames.add_argument("--dry-run", action="store_true", help="Check saved mapping and frame counts without network or writes")
     miro = commands.add_parser("miro-publish", help="Legacy: create a separate snapshot; use miro-sync for cumulative graphs")
     miro.add_argument("--plan", type=Path, required=True)
     miro.add_argument("--board-id", required=True)
     miro.add_argument("--state", type=Path, required=True, help="Persistent local publication state")
-    miro.add_argument("--max-items", type=int, default=750)
+    miro.add_argument("--max-items", type=int, default=0)
     reconcile = commands.add_parser("miro-resolve", help="Resolve a POST with uncertain outcome after inspecting the board")
     reconcile.add_argument("--state", type=Path, required=True)
     reconcile.add_argument("--key", help="Logical item key to reconcile when multiple creations have uncertain outcomes")
@@ -759,7 +759,7 @@ def recover_miro_run(case, confirmed_empty=False, progress=None):
     return {**report, "board_url": "https://miro.com/app/board/" + quote(target, safe="") + "/"}
 
 
-def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_path=None,
+def sync_run(case, run_id, board=None, max_new_items=0, dry_run=False, plan_path=None,
              include_fees=None, reorganize=False, progress=None, connector_style=None, compact_preview=None,
              group_context_inputs=None, layout_attempts=None):
     if compact_preview is not None and (not reorganize or plan_path is not None):
@@ -850,7 +850,7 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
     return report
 
 
-def frame_run(case, run_id="latest", board=None, max_new_items=750, dry_run=False, progress=None):
+def frame_run(case, run_id="latest", board=None, max_new_items=0, dry_run=False, progress=None):
     """Frame the exact published presentation without recalculating its graph."""
     from .miro import sync_frames
     from .miro_state import load_state

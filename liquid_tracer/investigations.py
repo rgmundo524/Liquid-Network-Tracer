@@ -14,6 +14,7 @@ from .layout_search import DEFAULT_LAYOUT_ATTEMPTS, normalize_layout_attempts
 DEFAULTS = {
     "hops": 1,
     "hop_reference_name": "",
+    "budget_limits_enabled": False,
     "max_transactions": 20,
     "max_outpoints": 100,
     "max_requests": 30,
@@ -31,6 +32,8 @@ DEFAULTS = {
 
 PLOT_SETTING_KEYS = frozenset({"layout_attempts", "connector_style", "include_fees",
                               "color_attribution_arrows", "group_context_inputs", "center_name", "hub_addresses"})
+
+RUN_BUDGET_KEYS = frozenset({"max_transactions", "max_outpoints", "max_requests", "max_seconds", "max_new_items"})
 
 
 def validate_blockchain(value):
@@ -79,7 +82,7 @@ def validate_settings(settings):
             if not isinstance(value, str) or value not in ("straight", "curved", "elbowed"):
                 raise TraceError("connector_style must be straight, curved, or elbowed")
             continue
-        if key in ("include_fees", "color_attribution_arrows", "group_context_inputs"):
+        if key in ("include_fees", "color_attribution_arrows", "group_context_inputs", "budget_limits_enabled"):
             if type(value) is not bool:
                 raise TraceError(f"{key} must be true or false")
             continue
@@ -87,11 +90,22 @@ def validate_settings(settings):
             raise TraceError(f"{key} must be a finite number")
         if key != "max_seconds" and not isinstance(value, int):
             raise TraceError(f"{key} must be a whole number")
-        minimum = 0 if key in ("hops", "max_new_items", "max_seconds") else 1
-        if key == "max_seconds" and value <= 0:
-            raise TraceError("max_seconds must be positive")
+        minimum = 0 if key == "hops" or key in RUN_BUDGET_KEYS else 1
         if value < minimum:
             raise TraceError(f"{key} must be at least {minimum}")
+    return result
+
+
+def effective_run_settings(settings):
+    """Resolve opt-in run budgets without overwriting saved numeric preferences.
+
+    Missing flags on older investigations mean hop-only collection and unlimited
+    Miro item counts. Historical evidence retains the limits recorded at the time.
+    Zero is the explicit unlimited sentinel accepted by collectors/publishers.
+    """
+    result = validate_settings(settings)
+    if not result["budget_limits_enabled"]:
+        result.update({key: 0 for key in RUN_BUDGET_KEYS})
     return result
 
 

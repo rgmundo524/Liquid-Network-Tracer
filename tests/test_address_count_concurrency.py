@@ -156,6 +156,14 @@ class AddressCountConcurrencyTests(unittest.TestCase):
         self.assertEqual((report["fetched"], report["known"], report["remaining"]), (2, 2, 6))
         self.assertEqual(set(self.cached()), set(transport.calls))
 
+    def test_zero_budgets_fetch_the_complete_address_list(self):
+        wanted = self.wanted(102)
+        transport = CountTransport()
+        report = self.collect(wanted, transport, max_requests=0, max_seconds=0)
+        self.assertEqual((report["fetched"], report["remaining"]), (102, 0))
+        self.assertEqual(report["requests_this_lookup"], 102)
+        self.assertCountEqual(transport.calls, wanted)
+
     def test_global_failure_stops_new_requests_and_keeps_inflight_successes(self):
         wanted = self.wanted(6)
         failures = ((TraceError("Network request failed: TimeoutError"), "network_failed"),

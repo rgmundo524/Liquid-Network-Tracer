@@ -12,7 +12,7 @@ For ten starting transactions with separate investigations:
 1. Open the ten investigations and verify their selected transaction outputs.
 2. Focus the investigation whose collection policy you want to use. In
    **Collect data**, start **Shared collection** and review the selected
-   investigations, hop allowance, resource budgets, and policy source.
+   investigations, hop allowance, optional resource budgets, and policy source.
 3. Collect the shared evidence. Repeated seed outpoints are collected once.
 4. In each investigation's **Plots & Miro**, choose **Data source → Shared
    collection** and the same saved **Shared snapshot**. Choose the plotting goal
@@ -32,6 +32,13 @@ open investigations. The focused investigation supplies its collection limits,
 stop-tracing rules, and optional named-group hop origin. The job records that
 policy and its source investigation. Other cases' rules are not combined into
 an implicit policy.
+
+Shared collection has no transaction, output, request, or total-time cap by
+default, including continuations. The focused investigation's **Use optional run
+budgets** setting activates its saved numeric caps; each `0` remains unlimited.
+The request captures that choice and its values at launch. Existing finite
+values do not silently limit a case that has not enabled budgets. API rate
+pacing, request timeouts, retries, and cancellation still apply.
 
 Opening or closing investigation tabs, or editing another investigation after
 launch, does not change the captured request. Closing the focused tab does not
@@ -60,7 +67,7 @@ dataset; start a shared collection and reuse its completed snapshots.
 | Which seeds start an individual chart? | The current investigation's selected outputs, never all shared seeds automatically. |
 | Which annotations affect the chart? | The current investigation's rules and presentation settings. Each plotting goal retains its normal rules. |
 | What if a needed branch was never collected? | Plotting cannot supply it. Continue or recollect shared data with suitable limits and stop rules. |
-| Does a collected hop count guarantee complete coverage? | No. It records depth reached; request, time, transaction, output, confirmation, and stop limits can leave gaps. |
+| Does a collected hop count guarantee complete coverage? | No. It records depth reached; confirmation policy, explicit stops, failures, interruption, or an enabled resource budget can leave gaps. |
 | Is an unchecked branch an unspent endpoint? | No. Unspent status requires saved spending-status evidence. |
 | Do private collections change? | No. Their saved runs, latest private run selection, and existing plots remain available. |
 

@@ -282,13 +282,23 @@ class PegoutSearchTests(unittest.TestCase):
                 self.assertLessEqual(self.state(result)["stats"]["requests_this_run"], options.get("max_requests", 100))
 
     def test_default_case_budgets_apply_without_mutating_defaults(self):
-        update_case(self.case, {"run_defaults": {"max_transactions": 1, "max_requests": 3,
+        update_case(self.case, {"run_defaults": {"budget_limits_enabled": True, "max_transactions": 1, "max_requests": 3,
                                                 "max_outpoints": 2, "max_seconds": 12}})
         result = search_pegouts(self.case, A, 0, 3)
         state = self.state(result)
         self.assertEqual(state["limits"], {"max_hops": 3, "max_transactions": 1,
                                           "max_requests": 3, "max_outpoints": 2, "max_seconds": 12})
         self.assertEqual(read_case(self.case)["run_defaults"]["hops"], 1)
+
+    def test_saved_numeric_preferences_do_not_limit_search_when_budgets_are_disabled(self):
+        update_case(self.case, {"run_defaults": {"max_transactions": 1, "max_requests": 1,
+                                                "max_outpoints": 1, "max_seconds": .001}})
+        result = search_pegouts(self.case, A, 0, 3)
+        state = self.state(result)
+        self.assertEqual(state["status"], "bounded_complete")
+        self.assertEqual(set(state["transactions"]), {A, B, C, D})
+        self.assertTrue(all(value == 0 for name, value in state["limits"].items() if name != "max_hops"))
+        self.assertEqual(read_case(self.case)["run_defaults"]["max_requests"], 1)
 
     def test_preview_after_layout_failure_never_refetches(self):
         with patch("liquid_tracer.elk_layout.optimize_graph", side_effect=TraceError("synthetic layout failure")):
@@ -553,13 +563,21 @@ class PegoutSearchTests(unittest.TestCase):
         result = self.search()
         with self.assertRaises(TraceError):
             search_pegouts(self.case, resume=result["search_id"], txid=A)
-        for value in (True, 0, -1, 1.5):
+        for value in (True, -1, 1.5):
             with self.subTest(value=value), self.assertRaises(TraceError):
                 self.search(max_transactions=value)
         link = self.case / "previews" / ("0" * 16 + "-pegouts-12345678")
         link.symlink_to(Path(result["directory"]), target_is_directory=True)
         with self.assertRaisesRegex(TraceError, "symbolic"):
             reviewed_pegouts(self.case, link.name)
+
+    def test_explicit_zero_budgets_find_endpoints_within_the_requested_hops(self):
+        result = self.search(max_transactions=0, max_outpoints=0, max_requests=0, max_seconds=0)
+        state = self.state(result)
+        self.assertEqual(state["status"], "bounded_complete")
+        self.assertEqual(set(state["transactions"]), {A, B, C, D})
+        self.assertEqual(state["limits"], {"max_hops": 3, "max_transactions": 0, "max_outpoints": 0,
+                                          "max_requests": 0, "max_seconds": 0})
 
 
 if __name__ == "__main__":

@@ -173,7 +173,7 @@ class LocalWebTests(unittest.TestCase):
     def test_run_hop_allowance_preserves_saved_defaults(self):
         _, case = self.create()
         path, metadata = self.server.case(case["id"])
-        settings = {**metadata["run_defaults"], "hops": 4, "max_transactions": 83,
+        settings = {**metadata["run_defaults"], "budget_limits_enabled": True, "hops": 4, "max_transactions": 83,
                     "include_fees": True, "group_context_inputs": True, "center_name": "Treasury"}
         update_case(path, {"run_defaults": settings})
         before = (path / "case.json").read_bytes()

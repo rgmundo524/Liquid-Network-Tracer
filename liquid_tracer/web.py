@@ -25,7 +25,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 from .common import TraceError, parse_outpoint, read_json
 from .inspection import parse_transaction_hashes
-from .investigations import (create_investigation, default_root, load_settings,
+from .investigations import (create_investigation, default_root, effective_run_settings, load_settings,
                              read_case, save_collection_reference, save_plot_settings, save_settings, update_case,
                              validate_blockchain, validate_settings)
 from .menu import _command, _environment, _lookup_reports, _project, _seed_values, _trace_arguments
@@ -1239,7 +1239,7 @@ class LocalServer(ThreadingHTTPServer):
                     raise RequestError("Choose a separate Miro board; the full-trace board is protected.")
                 settings = validate_settings(metadata.get("run_defaults", {}))
                 arguments = ["pegouts-publish", "--case", str(case), "--preview", body["preview_id"],
-                             "--board", target, "--max-items", str(settings["max_new_items"])]
+                             "--board", target, "--max-items", str(effective_run_settings(settings)["max_new_items"])]
                 live = True
             return self.start_job(arguments, action=action, live=live, case=case)
         if action in ("miro-frame-review", "miro-frame-recover"):
@@ -1334,14 +1334,15 @@ class LocalServer(ThreadingHTTPServer):
             if metadata.get("miro_board") and target == board_id(metadata["miro_board"]):
                 raise RequestError("Choose a separate Miro board; the full-trace board is protected.")
             arguments = ["connections-publish", "--case", str(case), "--preview", preview_id,
-                         "--board", target, "--max-items", str(settings["max_new_items"])]
+                         "--board", target, "--max-items", str(effective_run_settings(settings)["max_new_items"])]
             live = bool(graph["nodes"])
         elif action == "address-counts":
             selected = resolve_latest(case, selected)
             safe_path(case, ["runs", selected, "trace.json"])
             verify_export(run_path(case, selected))
             arguments = ["address-counts", "--case", str(case), "--run", selected,
-                         "--max-requests", str(settings["max_requests"]), "--max-seconds", str(settings["max_seconds"])]
+                         "--max-requests", str(effective_run_settings(settings)["max_requests"]),
+                         "--max-seconds", str(effective_run_settings(settings)["max_seconds"])]
             live = not bool(metadata.get("fixture"))
         elif action == "address-inspect":
             from .address_activity import validate_address
@@ -1371,6 +1372,8 @@ class LocalServer(ThreadingHTTPServer):
             budget = body.get("max_new_items")
             if type(budget) is not int or not 0 <= budget <= 2 ** 53 - 1:
                 raise RequestError("Enter a nonnegative whole-number budget for all shapes and connections.")
+            if not settings["budget_limits_enabled"]:
+                budget = 0
             arguments = ["miro-rebuild-board", "--case", str(case), "--run", selected,
                          "--source-board", source, "--name", name, "--max-new-items", str(budget)]
             live = True
@@ -1418,7 +1421,7 @@ class LocalServer(ThreadingHTTPServer):
                     raise RequestError("Create or link a Miro board in investigation settings first.")
                 command = "miro-frames" if action == "miro-frames" else "miro-sync"
                 arguments = [command, "--case", str(case), "--run", selected,
-                             "--board", metadata["miro_board"], "--max-new-items", str(settings["max_new_items"])]
+                             "--board", metadata["miro_board"], "--max-new-items", str(effective_run_settings(settings)["max_new_items"])]
                 if action == "miro-frames":
                     if miro_recovery_status(case)["pending_count"]:
                         raise RequestError("Recover the pending Miro items before creating or updating frames.")

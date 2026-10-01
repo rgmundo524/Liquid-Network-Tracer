@@ -27,7 +27,7 @@ class BoardRebuildMenuTests(unittest.IsolatedAsyncioTestCase):
             root = Path(directory) / "cases"
             fixture = PROJECT / "tests/data/synthetic-api.json"
             case = create_investigation(root, "Updated graph", board="OLD=", fixture=str(fixture),
-                                        run_defaults={"max_new_items": 750})
+                                        run_defaults={"budget_limits_enabled": True, "max_new_items": 750})
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(main(["trace", "--case", str(case), "--fixture", str(fixture),
                     "--seeds-file", str(PROJECT / "tests/data/synthetic-seeds.txt"), "--hops", "0"]), 0)
@@ -64,15 +64,21 @@ class BoardRebuildMenuTests(unittest.IsolatedAsyncioTestCase):
                         "--case", str(case), "--run", run, "--source-board", "OLD=", "--name",
                         "Refreshed graph", "--max-new-items", "5000"])
                     self.assertEqual(read_case(case)["run_defaults"]["max_new_items"], 750)
-                    update_case(case, {"miro_board": "NEW="})
+                    update_case(case, {"miro_board": "NEW=", "run_defaults":
+                                      dict(read_case(case)["run_defaults"], budget_limits_enabled=False)})
                     status.return_value = {"status": "syncing", "previous_board_id": "OLD=", "board_id": "NEW=",
                                            "run_id": run, "name": "Refreshed graph", "notice": "Resume the saved rebuild."}
                     app.screen.update_summary()
                     self.assertEqual(str(app.screen.query_one("#rebuild-board", Button).label), "Resume board rebuild")
                     await click(pilot, "#rebuild-board")
                     self.assertTrue(app.screen.query_one("#board-name", Input).disabled)
+                    self.assertTrue(app.screen.query_one("#max_new_items", Input).disabled)
+                    self.assertEqual(app.screen.query_one("#max_new_items", Input).value, "0")
+                    app.screen.query_one("#max_new_items", Input).value = "5000"
                     await click(pilot, "#submit")
                     command = process.call_args.args[0]
+                    self.assertEqual(command[command.index("--max-new-items") + 1], "0")
+                    self.assertEqual(read_case(case)["run_defaults"]["max_new_items"], 750)
                     self.assertEqual(command[command.index("--source-board") + 1], "OLD=")
                     self.assertEqual(command[command.index("--run") + 1], run)
                     status.side_effect = TraceError("private path")

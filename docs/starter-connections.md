@@ -45,9 +45,9 @@ their shortest verified distances.
 
 The plot can only use evidence that was collected and verified. It does not
 fetch missing transactions. Collection still obeys explicit `stop_tracing`
-rules, its global hop ceiling, confirmation policy, and request, time,
-transaction, and output budgets. A stop that prevented collection can therefore
-leave a connection unavailable even though the plotting goal ignores that stop.
+rules, its global hop ceiling, and confirmation policy. Request, time,
+transaction, and output caps are optional and disabled by default. A stop that
+prevented collection can therefore leave a connection unavailable even though the plotting goal ignores that stop.
 “No connection found in the saved searched data” is not proof that no on-chain
 connection exists.
 
@@ -104,7 +104,7 @@ board workflow supports repeated updates from new layouts instead.
 liquid-trace plot --case /path/to/investigation --goal connections --run latest --open
 liquid-trace connections --case /path/to/investigation --run latest --open
 liquid-trace connections-publish --case /path/to/investigation \
-  --preview RUN_ID-connections-PREVIEW_ID --board SEPARATE_BOARD_ID --max-items 750
+  --preview RUN_ID-connections-PREVIEW_ID --board SEPARATE_BOARD_ID
 ```
 
 The standalone `connections` command returns the actual `preview_id` for

@@ -124,7 +124,8 @@ class TracePerformanceTests(unittest.TestCase):
                 result, many = self.collect(data, seeds, limits=limits, transport=RecordingTransport(data))
                 self.assertEqual(evidence_topology(result), evidence_topology(serial))
                 self.assertEqual(Counter(many.calls), Counter(one.calls))
-                self.assertLessEqual(result['performance']['request_count'], limits.max_requests)
+                if limits.max_requests:
+                    self.assertLessEqual(result['performance']['request_count'], limits.max_requests)
 
     def test_auto_preserves_explicit_lower_worker_cap_and_other_policy_environment(self):
         with patch.dict(os.environ, {'LIQUID_COUNT_WORKERS': '64', 'LIQUID_TRACE_WORKERS': 'auto'}):

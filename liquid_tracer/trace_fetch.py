@@ -11,7 +11,12 @@ class TraceConcurrency(CountConcurrency):
     """Use measured response latency without increasing the explorer's quota."""
 
     def __init__(self, initial_workers, total, rate):
-        super().__init__(initial_workers, total, rate, setting="LIQUID_TRACE_WORKERS",
+        if type(total) is not int or total < 0:
+            raise TraceError("Transaction output limit must be a non-negative whole number")
+        # Zero is an unknown/unlimited trace frontier, not an empty backlog.
+        # Actual in-flight work remains bounded by resources and the 64-worker
+        # ceiling already enforced by the shared concurrency policy.
+        super().__init__(initial_workers, total or 64, rate, setting="LIQUID_TRACE_WORKERS",
                          label="Transaction fetch")
 
 
@@ -69,5 +74,11 @@ class FrontierFetcher:
                     for callback in self.callbacks.pop(endpoint):
                         callback(self.results[endpoint])
         except BaseException:
-            self.api.drain_pending(cancel=True)
+            # Signal the admission gate before draining. With no run deadline,
+            # active workers could otherwise wait forever for another client's
+            # shared cooldown after the investigation was already canceled.
+            try:
+                self.api.close()
+            except BaseException:
+                pass  # Preserve the original cancellation or consumer failure.
             raise

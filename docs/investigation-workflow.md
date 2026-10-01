@@ -22,12 +22,20 @@ offered for reuse. Opening does not fetch blockchain data or contact Miro.
 ## 1. Collect data
 
 Select the investigation's seed UTXOs, then collect transaction data with the
-hop allowance and budgets you need. Collection retrieves and archives evidence.
+hop allowance you need. Collection retrieves and archives evidence.
 It does not publish to Miro. Continuing a run resumes its saved branches and
 adds the selected **additional hops** to the previous hop ceiling.
 
-Check the collection status. A request, transaction, output, or time budget can
-stop collection before the hop ceiling is reached. Active `stop_tracing` rules
+Collection has no request, transaction, output, or total-time cap by default.
+Miro actions likewise have no application item-count cap. In **Investigation
+settings**, **Use optional run budgets** activates the saved optional caps; a
+value of **0 means unlimited** for that budget. The values remain saved when
+the control is off. Existing investigations without this setting also default
+to unlimited, even when they retain older finite values. Workspace defaults
+sets the starting preference for future investigations.
+
+Check the collection status. An explicitly enabled budget can stop collection
+before the hop ceiling is reached. Active `stop_tracing` rules
 and the confirmation policy still apply. Collection ignores attribution
 `hop_limit` values, including `0`; these caps remain available for Full trace
 layouts. For a chart covering up to 10 hops, collect
@@ -37,8 +45,8 @@ does not fetch missing transactions.
 If an older run stopped branches at attribution hop caps, continue collection
 with **0 additional hops** to fill eligible gaps within its current global
 ceiling, or add hops to increase that ceiling. Collection still respects
-explicit address stops and resource budgets. Then generate new plots from the
-new run. Existing saved reports and plots retain their original results.
+explicit address stops and any enabled resource budgets. Then generate new
+plots from the new run. Existing saved reports and plots retain their original results.
 
 During collection, the header's progress bar shows **Processing hop N of M**.
 The target is the run's cumulative hop limit, including additional hops on a
@@ -108,8 +116,8 @@ returning outputs. Outputs returning to the group reset to 0; outside outputs
 beyond the limit are saved as inspected boundary evidence and are not followed.
 The tracer cannot discover a return behind an outside output beyond that
 boundary. A maximum of 0 can follow internal group transfers. Transaction,
-output, request, and time budgets still bound the work. Stop-tracing rules still
-apply. Attribution hop caps do not restrict collection or peg-out tracing.
+output, request, and time caps apply only when resource budgets are enabled.
+Stop-tracing rules still apply. Attribution hop caps do not restrict collection or peg-out tracing.
 For Full trace layouts, local attribution allowances still decrease on every
 spend, including internal transfers; a named-group reset does not replenish
 those local allowances. Starter connections ignores both attribution stops
@@ -174,7 +182,7 @@ start through a selected seed output and follow an exact, verified UTXO spend;
 shared addresses or matching names do not create connections. Other inputs and
 unrelated side branches are not added just to join starters. No blockchain
 requests are made. Missing links still require collection, which continues to
-respect its explicit stops, global hop ceiling, and resource budgets.
+respect its explicit stops, global hop ceiling, and any enabled resource budgets.
 
 Older saved Starter connections plots keep their recorded stop/hop rules and
 bounds. Generate a new layout to use all saved connections; syncing an old
@@ -427,7 +435,7 @@ investigation data.
 
 ## CLI
 
-Collection keeps its existing command and limits:
+Collection uses the selected hop allowance with unlimited resource budgets by default:
 
 ```sh
 liquid-live trace --case CASE_DIRECTORY --resume latest --additional-hops 3
@@ -436,9 +444,14 @@ liquid-live trace --case CASE_DIRECTORY --resume latest --additional-hops 3
 Generate and publish a new board, or generate and apply an existing-board update:
 
 ```sh
-liquid-live plot-sync --case CASE_DIRECTORY --goal pegouts --run latest --max-hops 10 --name "Peg-out paths" --max-items 750
-liquid-live plot-sync --case CASE_DIRECTORY --goal full --run latest --layout-mode update --board-record-id BOARD_RECORD_ID --max-items 750
+liquid-live plot-sync --case CASE_DIRECTORY --goal pegouts --run latest --max-hops 10 --name "Peg-out paths"
+liquid-live plot-sync --case CASE_DIRECTORY --goal full --run latest --layout-mode update --board-record-id BOARD_RECORD_ID
 ```
+
+Add a positive `--max-transactions`, `--max-outpoints`, `--max-requests`,
+`--max-seconds`, or `--max-items` to explicitly cap the corresponding CLI
+action. These flags use `0` for unlimited. API rate pacing, per-request
+timeouts, retries, cancellation, and layout resource coordination remain active.
 
 Generate previews without publication when needed:
 
@@ -451,7 +464,7 @@ liquid-trace plot --case CASE_DIRECTORY --goal pegouts --run latest --min-hops 0
 Publish or resume a saved fresh layout, or link a provided board:
 
 ```sh
-liquid-live investigation-board-create-sync --case CASE_DIRECTORY --preview PREVIEW_ID --name "Peg-out paths" --max-items 750
+liquid-live investigation-board-create-sync --case CASE_DIRECTORY --preview PREVIEW_ID --name "Peg-out paths"
 liquid-trace investigation-board-link --case CASE_DIRECTORY --goal connections --name "Starter connections" --board BOARD_ID
 liquid-trace investigation-boards --case CASE_DIRECTORY
 ```
@@ -462,5 +475,5 @@ interruption:
 
 ```sh
 liquid-live plot --case CASE_DIRECTORY --goal full --run latest --layout-mode update --board-record-id BOARD_RECORD_ID --open
-liquid-live investigation-board-sync --case CASE_DIRECTORY --record BOARD_RECORD_ID --preview PREVIEW_ID --max-items 750
+liquid-live investigation-board-sync --case CASE_DIRECTORY --record BOARD_RECORD_ID --preview PREVIEW_ID
 ```

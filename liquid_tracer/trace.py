@@ -206,7 +206,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
         if cached is not None and cached["data"].get("status", {}).get("confirmed"):
             cached["depth"] = min(depth, cached["depth"])
             return cached["data"]
-        if cached is None and new_transactions >= limits.max_transactions:
+        if cached is None and limits.max_transactions and new_transactions >= limits.max_transactions:
             raise StopRun("transaction_limit")
         data, oid = get("/tx/" + txid)
         validate_transaction(data, txid)
@@ -237,7 +237,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
         # Count distinct funding endpoints, not merely eight adjacent outputs
         # from one large transaction. The output cap bounds speculative scope.
         unique_limit = min(worker_ceiling, max(workers, target * 2))
-        scan_limit = min(256, limits.max_outpoints - count)
+        scan_limit = min(256, limits.max_outpoints - count) if limits.max_outpoints else 256
         for candidate_depth, key in heapq.nsmallest(scan_limit, queue):
             item = state["outputs"][key]
             if (candidate_depth != depth or candidate_depth != scope.depth(item)
@@ -253,14 +253,14 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
         funding_ids = list(dict.fromkeys(item["txid"] for item in window))
         missing = [txid for txid in funding_ids if txid not in state["transactions"]]
         possible_children = len(window) if within_hops(depth) else 0
-        if len(missing) + possible_children > limits.max_transactions - new_transactions:
+        if limits.max_transactions and len(missing) + possible_children > limits.max_transactions - new_transactions:
             return
         fetch_ids = {txid for txid in funding_ids
                      if not state["transactions"].get(txid, {}).get("data", {}).get("status", {}).get("confirmed")}
         nominal_requests = len(fetch_ids) + (len(funding_ids) + possible_children if possible_children else 0)
         if api.auth == "blockstream" and not api.token:
             nominal_requests += 1
-        if nominal_requests > limits.max_requests - api.budget.requests:
+        if limits.max_requests and nominal_requests > limits.max_requests - api.budget.requests:
             return
         prepared.update(seen)
         fetching = FrontierFetcher(api, concurrency, report_activity)
@@ -359,7 +359,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
         save(force=True)
         while queue:
             api.budget.check()
-            if count >= limits.max_outpoints:
+            if limits.max_outpoints and count >= limits.max_outpoints:
                 raise StopRun("outpoint_limit")
             pending_depth, pending_key = queue[0]
             pending = state["outputs"][pending_key]

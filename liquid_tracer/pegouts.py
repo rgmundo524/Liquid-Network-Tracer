@@ -152,7 +152,8 @@ def _archive(store, state, query, directory):
 
 
 def _limits(metadata, max_hops, overrides):
-    settings = validate_settings({**metadata.get("run_defaults", {}),
+    from .investigations import effective_run_settings
+    settings = validate_settings({**effective_run_settings(metadata.get("run_defaults", {})),
                                   **{key: value for key, value in overrides.items() if value is not None}})
     return Limits(max_hops, settings["max_transactions"], settings["max_outpoints"],
                   settings["max_requests"], settings["max_seconds"])
@@ -417,11 +418,11 @@ def list_pegout_searches(case):
     return sorted(result, key=lambda value: (value["created_at"], value["id"]), reverse=True)
 
 
-def publish_pegouts(case, preview_id, board, *, max_items=750, **kwargs):
+def publish_pegouts(case, preview_id, board, *, max_items=0, **kwargs):
     from .cli import board_id
     from .miro import publish
     if type(max_items) is not int or max_items < 0:
-        raise TraceError("The Miro item budget must be a nonnegative whole number")
+        raise TraceError("The Miro item budget must be a nonnegative whole number (0 means unlimited)")
     case = _ordinary(Path(case))
     with _locked(case):
         graph, plan = reviewed_pegouts(case, preview_id)

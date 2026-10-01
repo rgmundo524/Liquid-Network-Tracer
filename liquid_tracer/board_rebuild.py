@@ -179,7 +179,7 @@ def _create(receipt, path, transport):
     return target
 
 
-def rebuild_board(case, run_id="latest", source_board=None, name=None, max_new_items=750, progress=None,
+def rebuild_board(case, run_id="latest", source_board=None, name=None, max_new_items=0, progress=None,
                   transport=http):
     """Create once per source board; retry the same frozen graph on its replacement.
 
@@ -195,7 +195,7 @@ def rebuild_board(case, run_id="latest", source_board=None, name=None, max_new_i
     metadata = read_case(case)
     source = board_id(source_board)
     if type(max_new_items) is not int or max_new_items < 0:
-        raise TraceError("--max-new-items must be a nonnegative integer")
+        raise TraceError("--max-new-items must be a nonnegative integer (0 means unlimited new items)")
     if name is not None:
         board_options(name)
     directory = _directory(case, source)

@@ -8,7 +8,7 @@ from pathlib import Path
 from liquid_tracer.cli import main, verify_export
 from liquid_tracer.common import TraceError, read_json, save_json
 from liquid_tracer.investigations import (
-    DEFAULTS, create_investigation, list_investigations, load_settings,
+    DEFAULTS, RUN_BUDGET_KEYS, create_investigation, effective_run_settings, list_investigations, load_settings,
     read_case, save_plot_settings, save_settings, update_case, validate_settings,
 )
 
@@ -167,10 +167,38 @@ class InvestigationTests(unittest.TestCase):
         save_settings(self.root, expected)
         self.assertEqual(load_settings(Path(str(self.root))), expected)
         original = (self.root / "settings.json").read_bytes()
-        for values in ({"max_seconds": float("nan")}, {"hops": 1.5}, {"max_requests": 0}, {"MIRO_ACCESS_TOKEN": "never-store"}):
+        for values in ({"max_seconds": float("nan")}, {"hops": 1.5}, {"max_requests": -1}, {"MIRO_ACCESS_TOKEN": "never-store"}):
             with self.subTest(values=values), self.assertRaises(TraceError):
                 save_settings(self.root, values)
         self.assertEqual((self.root / "settings.json").read_bytes(), original)
+
+    def test_old_numeric_preferences_are_unlimited_until_explicitly_enabled(self):
+        legacy = {key: value for key, value in DEFAULTS.items() if key != "budget_limits_enabled"}
+        legacy.update(hops=12, max_transactions=1, max_outpoints=2, max_requests=3, max_seconds=4, max_new_items=5)
+        case = create_investigation(self.root, "Legacy settings")
+        metadata = read_case(case)
+        save_json(case / "case.json", {**metadata, "run_defaults": legacy})
+        before = (case / "case.json").read_bytes()
+        normalized = validate_settings(legacy)
+        effective = effective_run_settings(read_case(case)["run_defaults"])
+        self.assertFalse(effective["budget_limits_enabled"])
+        self.assertEqual({key: effective[key] for key in RUN_BUDGET_KEYS}, dict.fromkeys(RUN_BUDGET_KEYS, 0))
+        self.assertEqual(effective["hops"], 12)
+        self.assertEqual({key: normalized[key] for key in RUN_BUDGET_KEYS}, {key: legacy[key] for key in RUN_BUDGET_KEYS})
+        self.assertEqual((case / "case.json").read_bytes(), before)
+        enabled = effective_run_settings({**legacy, "budget_limits_enabled": True})
+        self.assertEqual({key: enabled[key] for key in RUN_BUDGET_KEYS}, {key: legacy[key] for key in RUN_BUDGET_KEYS})
+
+    def test_optional_budgets_accept_zero_and_reject_invalid_flags_and_values(self):
+        settings = {"budget_limits_enabled": True, **dict.fromkeys(RUN_BUDGET_KEYS, 0)}
+        self.assertEqual(effective_run_settings(settings), validate_settings(settings))
+        for flag in (None, 0, 1, "false", []):
+            with self.subTest(flag=flag), self.assertRaises(TraceError):
+                validate_settings({"budget_limits_enabled": flag})
+        for key in RUN_BUDGET_KEYS:
+            for value in (-1, True, float("inf"), float("nan")):
+                with self.subTest(key=key, value=value), self.assertRaises(TraceError):
+                    validate_settings({key: value})
 
     def test_invalid_creation_does_not_create_case_and_name_cannot_escape_root(self):
         for values in ({"name": ""}, {"name": "case", "board": "https://other.example/"},

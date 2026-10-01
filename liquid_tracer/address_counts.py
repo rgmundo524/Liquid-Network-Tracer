@@ -312,18 +312,23 @@ def ensure_counts(case, state, *, graph=None, progress=None, fixture=None, trans
     saved_graph. CSV, read-only pages, dry runs and immutable snapshot publication
     remain offline. Only addresses in the selected graph are queried when supplied.
     """
-    from .investigations import read_case
+    from .investigations import read_case, effective_run_settings
     metadata = read_case(case)
     if metadata["case_id"] != state["case_id"]:
         raise TraceError("Address counts do not match this investigation")
     wanted = (addresses(state) if graph is None else
               {node["details"]["address"] for node in graph["nodes"]
                if node["kind"] == "address" and node["details"].get("network") == "liquid"})
-    defaults = metadata.get("run_defaults", {})
-    limits = state.get("limits", {})
+    settings = metadata.get("run_defaults", {})
+    if metadata.get("shared_dataset") is True:
+        # The shared collector freezes one focused investigation's policy at
+        # launch. Its ancillary count phase must use that same snapshot, not
+        # the workspace dataset's initial/default preferences.
+        settings = state.get("shared_collection", {}).get("settings", settings)
+    defaults = effective_run_settings(settings)
     report = _collect_counts(case, state, wanted,
-        max_requests=defaults.get("max_requests", limits.get("max_requests", 1000)),
-        max_seconds=defaults.get("max_seconds", limits.get("max_seconds", 300)),
+        max_requests=defaults["max_requests"],
+        max_seconds=defaults["max_seconds"],
         fixture=fixture or metadata.get("fixture"), progress=progress,
         transport=transport, best_effort=True)
     if graph is not None:
@@ -343,7 +348,7 @@ def ensure_graph_counts(case, graph, *, progress=None):
     return ensure_counts(case, state, graph=graph, progress=progress)
 
 
-def fetch_counts(case, run_id="latest", max_requests=1000, max_seconds=300, refresh=False, progress=None, transport=None):
+def fetch_counts(case, run_id="latest", max_requests=0, max_seconds=0, refresh=False, progress=None, transport=None):
     """Explicit missing-count lookup/refresh; ordinary visual jobs call ensure_counts."""
     from .cli import resolve_latest, run_path, verify_export
     from .investigations import read_case

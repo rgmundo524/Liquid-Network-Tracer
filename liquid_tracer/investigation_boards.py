@@ -397,7 +397,7 @@ def _check_legacy_removals(plan, record, state_path):
                          "The existing board remains unchanged.")
 
 
-def create_and_sync(case, preview_id, name=None, *, team_id=None, max_items=750, transport=http,
+def create_and_sync(case, preview_id, name=None, *, team_id=None, max_items=0, transport=http,
                     token=None, interval=.02, progress=None, workers=4):
     """Create one private board per reviewed fresh plot, then resume its publication."""
     from .miro import sync
@@ -457,7 +457,7 @@ def _publication_budget(case, graph, record, max_items):
             replacements.add(item["key"])
     count = sum(item["key"] not in mapped or item["key"] in replacements
                 for endpoint in ("shapes", "connectors") for item in plan[endpoint])
-    if count > max_items:
+    if max_items and count > max_items:
         raise TraceError(f"Sync needs {count} new items, above max-items={max_items}; "
                          "reduce the trace or explicitly raise the limit")
 
@@ -479,7 +479,7 @@ def _check_unfinished_creation(case):
 
 def generate_and_sync(case, goal, run_id="latest", min_hops=0, max_hops=10, *, include_unspent=False,
                       include_unspendable=False, include_context=False, layout_mode="fresh",
-                      board_record_id=None, name=None, team_id=None, max_items=750, token=None,
+                      board_record_id=None, name=None, team_id=None, max_items=0, token=None,
                       transport=http, interval=.02, progress=None, workers=4, layout_settings=None,
                       data_source="investigation", dataset_id=None):
     """Save one plot, then create its board or apply its bound board update.
@@ -495,7 +495,7 @@ def generate_and_sync(case, goal, run_id="latest", min_hops=0, max_hops=10, *, i
     if layout_mode not in ("fresh", "update"):
         raise TraceError("Choose a fresh layout or an update to an existing Miro board")
     if type(max_items) is not int or max_items < 0:
-        raise TraceError("max-items must be a nonnegative integer (it limits new items)")
+        raise TraceError("max-items must be a nonnegative integer (0 means unlimited new items)")
     if (isinstance(interval, bool) or not isinstance(interval, (int, float))
             or not math.isfinite(interval) or interval < 0):
         raise TraceError("Miro interval must be finite and nonnegative")
@@ -547,7 +547,7 @@ def generate_and_sync(case, goal, run_id="latest", min_hops=0, max_hops=10, *, i
         return {**plot, **published, "published": True, "status": "synced"}
 
 
-def sync_board(case, record_id, preview_id, *, reorganize=False, max_items=750, _board_lock_held=False, **kwargs):
+def sync_board(case, record_id, preview_id, *, reorganize=False, max_items=0, _board_lock_held=False, **kwargs):
     """Apply a reviewed fresh publication or a board-bound incremental layout."""
     from .miro import sync
 
