@@ -292,6 +292,20 @@ class TraceHubPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(TraceError, "forward entry into a hub"):
             _apply_candidate(graph, candidate, ports, fees, "elbowed")
 
+    def test_anchored_hub_returns_and_spends_use_different_faces(self):
+        graph = return_graph()
+        request, ports, _ = _request_graph(graph)
+        sides = {port["id"]: port["layoutOptions"]["elk.port.side"]
+                 for node in request["children"] for port in node["ports"]}
+        self.assertEqual(sides[ports["out:" + txid("start") + ":0"][1]], "WEST")
+        self.assertEqual(sides[ports["out:" + txid("return") + ":0"][1]], "NORTH")
+        self.assertEqual(sides[ports["in:" + txid("return") + ":0"][0]], "EAST")
+        graph["graph_options"]["layout_style"] = "standard"
+        request, ports, _ = _request_graph(graph)
+        sides = {port["id"]: port["layoutOptions"]["elk.port.side"]
+                 for node in request["children"] for port in node["ports"]}
+        self.assertEqual(sides[ports["out:" + txid("return") + ":0"][1]], "EAST")
+
     def test_standard_style_retains_original_global_hub_behavior(self):
         graph = mixed_terminal_graph()
         graph["graph_options"]["layout_style"] = "standard"
@@ -347,7 +361,9 @@ class TraceHubEngineTests(unittest.TestCase):
         self.assertNotEqual(initial["routing_exception"], "return")
         self.assertEqual(returning["routing_exception"], "return")
         self.assertLess(float(initial["attachment"]["endItem"]["position"]["x"].rstrip("%")), 50)
-        self.assertGreater(float(returning["attachment"]["endItem"]["position"]["x"].rstrip("%")), 50)
+        position = returning["attachment"]["endItem"]["position"]
+        self.assertGreater(abs(float(position["y"].rstrip("%")) - 50),
+                           abs(float(position["x"].rstrip("%")) - 50))
         for edge in result["edges"]:
             self.assertEqual(edge["route"][0], attachment_point(nodes[edge["source"]], edge["attachment"]["startItem"]))
             self.assertEqual(edge["route"][-1], attachment_point(nodes[edge["target"]], edge["attachment"]["endItem"]))

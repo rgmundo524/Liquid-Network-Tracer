@@ -328,8 +328,19 @@ def _routes(graph, nodes, original, aligned):
             departure = a["x"] + (60 if a["x"] >= source["x"] else -60)
             arrival = b["x"] + (60 if b["x"] >= target["x"] else -60)
             lane = min(source["y"] - source["height"] / 2, target["y"] - target["height"] / 2) - 60
-            route = [a, {"x": departure, "y": a["y"]}, {"x": departure, "y": lane},
-                     {"x": arrival, "y": lane}, {"x": arrival, "y": b["y"]}, b]
+            end_position = attachment["endItem"]["position"]
+            px, py = (float(end_position[axis].rstrip("%")) for axis in ("x", "y"))
+            if abs(py - 50) > abs(px - 50):
+                # ELK may mirror a return onto either vertical side during
+                # cycle routing. Keep its actual approach when rows move.
+                lane = (min(lane, b["y"] - 60) if py < 50 else
+                        max(source["y"] + source["height"] / 2,
+                            target["y"] + target["height"] / 2, b["y"]) + 60)
+                route = [a, {"x": departure, "y": a["y"]}, {"x": departure, "y": lane},
+                         {"x": b["x"], "y": lane}, b]
+            else:
+                route = [a, {"x": departure, "y": a["y"]}, {"x": departure, "y": lane},
+                         {"x": arrival, "y": lane}, {"x": arrival, "y": b["y"]}, b]
             reason = "return"
         else:
             middle = (a["x"] + b["x"]) / 2

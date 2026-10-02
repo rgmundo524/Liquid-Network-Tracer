@@ -63,6 +63,21 @@ class TraceHubChannelsTests(unittest.TestCase):
         inputs = [edge for edge in standard['edges'] if edge['source'] == 'hub']
         self.assertEqual(len({edge['route'][1]['x'] for edge in inputs}), 1)
 
+    def test_fallback_return_preserves_upper_and_lower_vertical_approaches(self):
+        for side in ('0%', '100%'):
+            with self.subTest(side=side):
+                graph = fixture()
+                edge = next(edge for edge in graph['edges'] if edge['id'] == 'first-return')
+                graph['edges'] = [edge]
+                edge['attachment']['endItem']['position'] = {'x': '50%', 'y': side}
+                self.move_rows(graph)
+                before, end = edge['route'][-2:]
+                self.assertEqual(before['x'], end['x'])
+                self.assertEqual(before['y'] < end['y'], side == '0%')
+                self.assertEqual(edge['routing_exception'], 'return')
+                self.assertTrue(all(a['x'] == b['x'] or a['y'] == b['y']
+                                    for a, b in zip(edge['route'], edge['route'][1:])))
+
     def test_reversed_rows_or_changed_attachment_sides_use_fallback(self):
         edge = fixture()['edges'][0]
         self.assertIsNone(_retarget_channel(edge, {'x': 150, 'y': 1000}, {'x': 750, 'y': 100}))

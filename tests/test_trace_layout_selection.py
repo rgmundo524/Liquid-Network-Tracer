@@ -8,11 +8,11 @@ from tests.test_elk_layout import HAS_ELK
 
 
 def score(*, style=True, drift=0, distance=1, interleaving=0, crossings=0, overlap=0,
-          intersection=0, coincident=0, truncated=False):
+          intersection=0, coincident=0, truncated=False, connector_overlaps=0, inversions=0):
     geometry = dict(node_overlaps=overlap, node_intersections=intersection, crossings=crossings,
-                    connector_overlaps=0, edge_length=1000, truncated=truncated)
+                    connector_overlaps=connector_overlaps, edge_length=1000, truncated=truncated)
     return _candidate_score(geometry, geometry,
-        dict(endpoint_order_inversions=0, coincident_ports=coincident),
+        dict(endpoint_order_inversions=inversions, coincident_ports=coincident),
         dict(weighted_vertical_travel=0),
         dict(flow_order_inversions=0, sibling_interleavings=0, transaction_distance=100,
              transaction_center_drift=0),
@@ -44,6 +44,11 @@ class TraceSelectionTests(unittest.TestCase):
         good = score(drift=10)
         for unsafe in [score(overlap=1), score(intersection=1), score(coincident=1)]:
             self.assertLess(good, unsafe)
+
+    def test_shared_connector_segments_cannot_buy_better_alignment_or_input_order(self):
+        self.assertLess(score(drift=10, inversions=3), score(connector_overlaps=1))
+        self.assertLess(score(connector_overlaps=1), score(connector_overlaps=3))
+        self.assertLess(score(connector_overlaps=10), score(intersection=1))
 
     def test_complete_measurement_preferred_over_lower_bound(self):
         self.assertLess(score(drift=10), score(truncated=True))

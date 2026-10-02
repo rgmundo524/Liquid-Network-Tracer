@@ -382,8 +382,10 @@ def _request_graph(graph):
     graph = hub_layout_view(graph)
     # Source-first layering keeps independent hub spenders in a vertical
     # column even when some output branches terminate earlier than others.
+    hubs = hub_plan(graph)
+    anchored_hubs = set(hubs.get("entries", {}))
     hub_layering = ({"elk.layered.layering.strategy": "LONGEST_PATH_SOURCE"}
-                    if hub_plan(graph)["hubs"] or graph.get("graph_options", {}).get("layout_style") == "trace" else {})
+                    if hubs["hubs"] or graph.get("graph_options", {}).get("layout_style") == "trace" else {})
     nodes = {node["id"]: node for node in graph["nodes"]}
     fee_ids = {key for key, item in graph.get("fee_items", {}).items() if item["endpoint"] == "shapes"}
     main = {key: node for key, node in nodes.items() if key not in fee_ids}
@@ -420,9 +422,16 @@ def _request_graph(graph):
                 east = columns[other] > columns[key]
                 if columns[other] == columns[key]:
                     east = not outgoing
+            side = "EAST" if east else "WEST"
+            # Keep deposits from the left, spends to the right, and returns
+            # on a separate vertical side of an anchored hub. Mixing both directions on its right arc
+            # crowds distinct outpoints into almost indistinguishable ports.
+            if (not outgoing and key in anchored_hubs and main[other]["kind"] == "transaction"
+                    and columns[other] > columns[key]):
+                side = "NORTH"
             port_id = "p" + str(index) + ("s" if outgoing else "t")
             children[key]["ports"].append({"id": port_id, "width": 0, "height": 0,
-                                           "layoutOptions": {"elk.port.side": "EAST" if east else "WEST"}})
+                                           "layoutOptions": {"elk.port.side": side}})
             ports.append(port_id)
         port_map[edge["id"]] = ports
         item = {"id": edge["id"], "sources": [ports[0]], "targets": [ports[1]],
@@ -803,12 +812,14 @@ def _candidate_score(metrics, miro, ports, organization, neighborhoods, boundari
     edges = max(1, trace["edge_count"])
     readability = (4 * trace["spine_alignment"] + 2 * trace["terminal_distance"]
                    + 3 * trace["branch_interleaving"] + 4 * trace.get("terminal_column_drift", 0)
-                   + 2 * (metrics["crossings"] + miro["crossings"]) / edges
-                   + (metrics["connector_overlaps"] + miro["connector_overlaps"]) / edges)
+                   + 2 * (metrics["crossings"] + miro["crossings"]) / edges)
     return (bool(metrics["truncated"] or miro["truncated"]),
             metrics["node_overlaps"], metrics["node_intersections"], miro["node_intersections"],
-            ports["coincident_ports"], ports["endpoint_order_inversions"],
-            round(readability, 8), *standard[3:])
+            ports["coincident_ports"],
+            # Positive-length shared segments hide which arrow is which.
+            # A straighter spine or preferred input order must not buy them.
+            metrics["connector_overlaps"] + miro["connector_overlaps"],
+            round(readability, 8), ports["endpoint_order_inversions"], *standard[3:])
 
 
 def optimize_graph(graph, connector_style="straight", progress=None, *, layout_attempts=None, validation_graph=None):

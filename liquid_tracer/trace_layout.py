@@ -13,7 +13,7 @@ from .hub_layout import hub_layout_view, hub_plan
 from .named_group_layout import selected_members
 
 
-TRACE_LAYOUT_VERSION = 3
+TRACE_LAYOUT_VERSION = 4
 SPINE_STRAIGHTNESS = 96
 TERMINAL_STRAIGHTNESS = 16
 
