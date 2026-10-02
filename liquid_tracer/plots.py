@@ -208,6 +208,8 @@ def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_un
     from .pegout_paths import validate_query
     if not isinstance(goal, str) or goal not in GOALS:
         raise TraceError("Choose the full investigation, starter connections, or peg-out paths plot")
+    if goal != "connections" and connection_scope not in (None, "all_saved"):
+        raise TraceError("Connection scope applies only to Starter connections")
     if type(include_unspent) is not bool or type(include_unspendable) is not bool:
         raise TraceError("Additional endpoint options must be true or false")
     if goal != "pegouts" and (include_unspent or include_unspendable):
@@ -226,10 +228,13 @@ def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_un
         if transaction_io not in (None, "complete"):
             raise TraceError("Starter connection transaction inputs and outputs must be complete")
         io = {"transaction_io": transaction_io} if transaction_io is not None else {}
-        if validate_connection_scope(connection_scope) == "all_saved":
+        scope = validate_connection_scope(connection_scope)
+        if scope == "all_saved":
             if max_hops is not None:
                 validate_hops(max_hops)  # Old clients may supply an unused, valid hop value.
             return {"connection_scope": "all_saved", **io, **reference}
+        if scope == "hop_limited":
+            return {"connection_scope": scope, "max_hops": validate_hops(max_hops), **io, **reference}
         return {"max_hops": validate_hops(max_hops), **io, **reference}
     return reference
 
@@ -324,7 +329,7 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
                  include_unspendable=False, include_context=False, open_browser=False, progress=None,
                  layout_mode="fresh", board_record_id=None, token=None, transport=http,
                  interval=.02, workers=4, layout_settings=None, data_source="investigation", dataset_id=None,
-                 _preflight=None, _board_lock_held=False):
+                 connection_scope="all_saved", _preflight=None, _board_lock_held=False):
     """Plot saved evidence afresh, or review additions against a selected live board."""
     from .cli import open_preview
     from .elk_layout import optimize_graph
@@ -354,7 +359,8 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
                   "captured_at": now(), "service_controls": deepcopy(state["service_controls"]),
                   "address_tx_counts": deepcopy(state["address_tx_counts"])}
         query = _query(goal, state, min_hops, max_hops, include_unspent=include_unspent,
-                       include_unspendable=include_unspendable, include_context=include_context)
+                       include_unspendable=include_unspendable, include_context=include_context,
+                       connection_scope=connection_scope)
         settings = _effective_settings(settings, goal, query)
         graph = _graph(state, goal, query, settings)
         graph["graph_options"].update({key: deepcopy(settings[key]) for key in LAYOUT_SETTINGS})

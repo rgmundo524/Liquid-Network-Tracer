@@ -47,16 +47,25 @@ def public_plot(value):
     if (value.get("layout_mode") == "update" and isinstance(counts, dict) and set(counts) == count_keys
             and all(type(count) is int and 0 <= count <= 2 ** 53 - 1 for count in counts.values())):
         result["update_counts"] = dict(counts)
-    if (value.get("goal") == "connections" and value.get("connection_scope") == "all_saved"
-            and value.get("max_hops") is None):
-        result["connection_scope"] = "all_saved"
+    scope, maximum = value.get("connection_scope"), value.get("max_hops")
+    if (value.get("goal") == "connections" and
+            ((scope == "all_saved" and maximum is None) or
+             (scope == "hop_limited" and type(maximum) is int and 0 <= maximum <= 2147483647))):
+        result["connection_scope"] = scope
         query = value.get("query")
-        if (isinstance(query, dict) and set(query) <= {"connection_scope", "hop_reference_name", "transaction_io"}
-                and query.get("connection_scope") == "all_saved"):
+        allowed = {"connection_scope", "hop_reference_name", "transaction_io"}
+        if scope == "hop_limited":
+            allowed.add("max_hops")
+        if (isinstance(query, dict) and set(query) <= allowed
+                and query.get("connection_scope") == scope):
             from .group_hops import normalize_reference_name
             try:
                 name = normalize_reference_name(query.get("hop_reference_name", ""))
-                normalized = {"connection_scope": "all_saved", **({"hop_reference_name": name} if name else {})}
+                normalized = {"connection_scope": scope, **({"hop_reference_name": name} if name else {})}
+                if scope == "hop_limited":
+                    if type(query.get("max_hops")) is not int or query["max_hops"] != maximum:
+                        raise TraceError("Saved connection hop limit disagrees with its query")
+                    normalized["max_hops"] = maximum
                 if query.get("transaction_io") == "complete":
                     normalized["transaction_io"] = "complete"
                 if query == normalized:
@@ -179,13 +188,18 @@ def workflow_action(server, case, metadata, body):
             required.update({"min_hops", "max_hops"})
         endpoint_options = {"include_unspent", "include_unspendable"}
         allowed = {"include_context", "layout_mode", "board_record_id", "layout_settings", "min_hops", "max_hops",
-                   "data_source", "dataset_id"}
+                   "data_source", "dataset_id", "connection_scope"}
         if action == "plot-sync":
             allowed.add("name")
         if not required <= set(body) or set(body) - required - endpoint_options - allowed:
             raise RequestError("Choose a saved collection, plotting goal, and hop range.")
         if not isinstance(body.get("goal"), str) or body["goal"] not in GOALS:
             raise RequestError("Choose full trace, starter connections, or peg-out paths.")
+        scope = body.get("connection_scope", "all_saved")
+        if scope not in ("all_saved", "hop_limited") or ("connection_scope" in body and body["goal"] != "connections"):
+            raise RequestError("Choose a connection search scope for Starter connections only.")
+        if scope == "hop_limited" and "max_hops" not in body:
+            raise RequestError("Choose the maximum number of transaction hops for Starter connections.")
         mode = body.get("layout_mode", "fresh")
         if mode not in ("fresh", "update"):
             raise RequestError("Choose a fresh layout or an update for an existing board.")
@@ -232,6 +246,8 @@ def workflow_action(server, case, metadata, body):
             verify_export(run_path(case, selected))
         arguments = [action, "--case", str(case), "--goal", body["goal"], "--run", selected,
                      "--min-hops", str(lower), "--max-hops", str(upper)]
+        if "connection_scope" in body:
+            arguments.extend(["--connection-scope", scope])
         if data_source == "shared":
             arguments.extend(["--data-source", "shared", "--dataset-id", dataset_id])
         if "layout_settings" in body:

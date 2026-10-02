@@ -148,7 +148,7 @@ destination. The available goals are shown together:
 | Goal | What it plots |
 | --- | --- |
 | Full investigation / Full trace | Saved activity reachable under the current stop/hop rules, using the current display settings. |
-| Starter connections | Transactions on all verified saved paths between selected starting transactions, without attribution stops, attribution hop caps, or a plotting hop cutoff. Every selected transaction displays all its inputs and outputs. Existing labels and confirmation status are preserved. |
+| Starter connections | Transactions on verified saved paths between selected starting transactions, optionally limited by maximum transaction hops. Attribution stops and hop caps are ignored. Every selected transaction displays all its inputs and outputs. Existing labels and confirmation status are preserved. |
 | Paths to peg-outs | Transactions on verified paths from selected seed UTXOs to qualifying endpoints within the global hop range, respecting explicit stop rules and ignoring attribution hop caps. Every selected transaction displays all its inputs and outputs. |
 
 Choose **New board** and enter a name for a fresh arrangement, or choose
@@ -175,8 +175,13 @@ Full-trace plots also reapply current stop/hop rules: tightening them excludes
 branches; loosening them restores only activity already in the saved evidence.
 
 **Starter connections** searches all verified links in the selected saved run.
-New plots ignore both `stop_tracing` and attribution `hop_limit` values and have
-no maximum-hop field. They preserve attribution names, colors, and confirmation
+New plots ignore both `stop_tracing` and attribution `hop_limit` values. Choose
+**Within hop limit** and set **Maximum connection hops**, then increase the
+limit and generate another preview or board update to reveal longer routes.
+The limit counts ordinary transaction steps from each selected starter to
+another, without resetting at named groups or intermediate starters. Choose
+**All saved connections** to remove this plotting cutoff. They preserve
+attribution names, colors, and confirmation
 status, including verified unconfirmed links already saved. A connection must
 start through a selected seed output and follow an exact, verified UTXO spend;
 shared addresses or matching names do not create connections. Every selected

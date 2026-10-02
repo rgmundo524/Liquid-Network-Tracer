@@ -2,9 +2,10 @@
 
 **Starter connections** selects transactions on verified saved paths between
 starting transactions, then displays every input and output of each selected
-transaction. New plots search every verified saved connection in the selected
-run. They ignore attribution `stop_tracing` and `hop_limit` values and
-have no additional plotting hop cutoff. Attribution labels, colors, and recorded
+transaction. Choose **Within hop limit** to start with shorter paths, or
+**All saved connections** to search without a plotting cutoff. Both modes use
+the selected saved run and ignore attribution `stop_tracing` and `hop_limit`
+values. Attribution labels, colors, and recorded
 confirmation status remain visible.
 
 Use **Collect data → Plots & Miro** for the main workflow described in
@@ -17,16 +18,26 @@ saved observations; missing counts stay unknown.
 ## Example: three starters
 
 Select outputs from starting transactions A, B, and C and collect the evidence.
-Then choose **Starter connections** and generate a layout. There is no maximum
-hop field for this goal.
+Then choose **Starter connections**, **Within hop limit**, and a maximum number
+of connection hops. New browser drafts start at 10; lower it for a smaller chart.
+Increase the value and generate another preview or update the same board to
+reveal more connections from the same saved evidence.
 
 A verified route such as `A -> X -> Y -> B` is included. One hop means one
 transaction spending an output of the previous transaction, so this route is
 three hops. The transaction-to-address and address-to-transaction lines are not
 two separate hops. Direct starter-to-starter spends also qualify.
 
-Every verified saved route is considered, not only the shortest route. A longer
-saved route remains eligible even when an intermediate address has a stop rule
+At a limit of 2, this three-hop route is excluded. At 3, it is included. The
+limit counts from each starter independently and does not reset when a path
+reaches another starter or a named group. Named-group distances may still be
+displayed as annotations. Each saved layout records the selected search scope
+and limit; switching back to a board restores its saved choice. A limit of 0
+cannot connect two distinct starter transactions.
+
+Every verified saved route within the chosen bound is considered, not only the
+shortest route. **All saved connections** removes that bound. A longer saved
+route remains eligible even when an intermediate address has a stop rule
 or an attribution hop cap. The chart contains the union of those transactions
 with their complete inputs and outputs, including fees, peg-outs, unspendable
 outputs, and context addresses. Other inputs and outputs provide local context;
@@ -65,13 +76,14 @@ Older saved Starter connections queries retain their original stop rules,
 attribution caps, hop bounds, and input/output selection. Their reports and
 publication scope do not change when the application is updated. Generate a new
 layout to display complete transaction inputs and outputs on all verified saved
-connections. Saved preview selectors distinguish **all saved connections** from
-older bounded snapshots.
+connections. Saved preview selectors distinguish **all saved connections**, new
+transaction hop limits, and older bounded snapshots.
 
 ## Browser and terminal
 
 In the browser, open **Plots & Miro**, select the collection snapshot and
-**Starter connections**, then choose the board destination and generate.
+**Starter connections**, select the connection search scope and maximum hops,
+then choose the board destination and generate.
 **Generate preview only** creates local output without publishing. Update
 previews read Miro to retain existing positions; they still make no blockchain
 requests.
@@ -111,15 +123,19 @@ board workflow supports repeated updates from new layouts instead.
 
 ```sh
 liquid-trace plot --case /path/to/investigation --goal connections --run latest --open
+liquid-trace plot --case /path/to/investigation --goal connections --run latest \
+  --connection-scope hop_limited --max-hops 3 --open
 liquid-trace connections --case /path/to/investigation --run latest --open
 liquid-trace connections-publish --case /path/to/investigation \
   --preview RUN_ID-connections-PREVIEW_ID --board SEPARATE_BOARD_ID
 ```
 
 The standalone `connections` command returns the actual `preview_id` for
-`connections-publish`. Its `--hops` flag remains accepted for compatibility but
-does not limit newly generated connection graphs. The shared plot command's
-`--min-hops` and `--max-hops` flags likewise do not restrict this goal.
+`connections-publish`. CLI commands keep **all saved connections** as their
+default for compatibility. Add `--connection-scope hop_limited` to use
+`--max-hops` with `plot` / `plot-sync`, or `--hops` with `connections`.
+`--min-hops` does not filter Starter connections. These options also work when
+the main plot commands use `--data-source shared`.
 
 Standalone previews are saved in the case's `previews/` directory with
 `graph.json`, `graph.svg`, `graph.html`, `graph.mmd`, `transactions.csv`,

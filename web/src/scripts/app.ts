@@ -72,7 +72,7 @@ type EndpointExport = {
   skipped: {case_id: string; name: string; run_id: string | null; reason: string; collection_source?: CollectionSource}[];
 };
 type Artifact = RenderingMetadata & {
-  max_hops?: number | null; connection_count?: number; connection_status?: string; connection_scope?: "all_saved";
+  max_hops?: number | null; connection_count?: number; connection_status?: string; connection_scope?: ConnectionScope;
   transaction_io?: "complete"; context_edge_count?: number;
   downloads: Download[];
   preview_url?: string;
@@ -111,6 +111,7 @@ type JobProgress = {
 };
 type PlotGoal = "full" | "connections" | "pegouts";
 type PlotLayoutMode = "fresh" | "update";
+type ConnectionScope = "hop_limited" | "all_saved";
 type PegoutLbtcSummary = {
   lbtc: string; value_base_units: string; pegout_count: number; valued_lbtc_count: number;
   unknown_amount_count: number; unknown_asset_count: number; non_lbtc_count: number;
@@ -121,7 +122,7 @@ type Plot = {
   hop_reference_name?: string;
   created_at: string; status: string; node_count: number; edge_count: number; transaction_count: number;
   match_count?: number; connection_count?: number; source_max_hops?: number; source_run_status?: string;
-  query?: {include_unspent?: boolean; include_unspendable?: boolean; include_context?: boolean; transaction_io?: "complete"; attribution_hop_limits?: "ignore"; connection_scope?: "all_saved"};
+  query?: {include_unspent?: boolean; include_unspendable?: boolean; include_context?: boolean; transaction_io?: "complete"; attribution_hop_limits?: "ignore"; connection_scope?: ConnectionScope};
   endpoint_count?: number; endpoint_counts?: {pegout: number; unspent: number; unspendable: number};
   pegout_lbtc_summary?: PegoutLbtcSummary;
   context_edge_count?: number;
@@ -175,7 +176,7 @@ type CountReport = { known: number; total: number; remaining: number; failed: nu
 type Result = RenderingMetadata & {
   performance?: CollectionPerformance;
   address_counts?: CountReport;
-  max_hops?: number | null; connection_count?: number; connection_status?: string; connection_scope?: "all_saved";
+  max_hops?: number | null; connection_count?: number; connection_status?: string; connection_scope?: ConnectionScope;
   transaction_io?: "complete"; context_edge_count?: number;
   connector_style?: ConnectorStyle;
   layout_metrics?: LayoutMetrics;
@@ -341,7 +342,7 @@ let dialogRebuild: { caseId: string; sourceBoard: string; runId: string; budgetL
 let submitting = false;
 let pageGeneration = 0;
 let viewRevision = 0;
-let workflowDraft = {caseId: "", dataSource: "investigation" as "investigation" | "shared", sharedRun: "", datasetId: "", goal: "full" as PlotGoal, minHops: "0", maxHops: "10", includeUnspent: false, includeUnspendable: false, layoutMode: "fresh" as PlotLayoutMode, layoutBoard: "", plot: "", board: "", boardPlot: "", boardGoal: "full" as PlotGoal, boardName: "", savedBoardName: "", linkedBoardName: "", boardUrl: ""};
+let workflowDraft = {caseId: "", dataSource: "investigation" as "investigation" | "shared", sharedRun: "", datasetId: "", goal: "full" as PlotGoal, minHops: "0", maxHops: "10", connectionScope: "hop_limited" as ConnectionScope, connectionMaxHops: "10", includeUnspent: false, includeUnspendable: false, layoutMode: "fresh" as PlotLayoutMode, layoutBoard: "", plot: "", board: "", boardPlot: "", boardGoal: "full" as PlotGoal, boardName: "", savedBoardName: "", linkedBoardName: "", boardUrl: ""};
 let pegoutDraft = {caseId: "", custom: false, txid: "", minHops: "0", maxHops: "10", selected: "", board: "", approved: ""};
 const pegoutDrafts = new Map<string, typeof pegoutDraft>();
 type InvestigationView = {
@@ -1333,7 +1334,7 @@ function csvDownloads(artifact: Artifact | undefined, saved: boolean, includeFee
 
 const plotGoals: {id: PlotGoal; name: string; description: string}[] = [
   {id: "full", name: "Full trace", description: "Every collected transaction and its traced branches."},
-  {id: "connections", name: "Starter connections", description: "All saved paths connecting your starting transactions."},
+  {id: "connections", name: "Starter connections", description: "Paths connecting your starting transactions, within a hop limit or across all saved data."},
   {id: "pegouts", name: "Paths to peg-outs", description: "Paths to peg-out requests, optionally including unspent UTXOs and unspendable outputs."},
 ];
 
@@ -1346,7 +1347,7 @@ const workflowDrafts = new Map<string, typeof workflowDraft>();
 function currentWorkflow(detail: Case): typeof workflowDraft {
   if (workflowDraft.caseId !== detail.id) {
     if (workflowDraft.caseId) workflowDrafts.set(workflowDraft.caseId, workflowDraft);
-    workflowDraft = workflowDrafts.get(detail.id) || {caseId: detail.id, dataSource: "investigation", sharedRun: "", datasetId: "", goal: "full", minHops: "0", maxHops: "10", includeUnspent: false, includeUnspendable: false, layoutMode: "fresh" as PlotLayoutMode, layoutBoard: "", plot: "", board: "", boardPlot: "", boardGoal: "full", boardName: "", savedBoardName: "", linkedBoardName: "", boardUrl: ""};
+    workflowDraft = workflowDrafts.get(detail.id) || {caseId: detail.id, dataSource: "investigation", sharedRun: "", datasetId: "", goal: "full", minHops: "0", maxHops: "10", connectionScope: "hop_limited" as ConnectionScope, connectionMaxHops: "10", includeUnspent: false, includeUnspendable: false, layoutMode: "fresh" as PlotLayoutMode, layoutBoard: "", plot: "", board: "", boardPlot: "", boardGoal: "full", boardName: "", savedBoardName: "", linkedBoardName: "", boardUrl: ""};
   }
   return workflowDraft;
 }
@@ -1410,7 +1411,7 @@ function chosenBoardPlot(detail: Case, board: InvestigationBoard): Plot | undefi
 }
 
 const plotLayoutDrafts = new Map<string, LayoutSettings>();
-type LayoutFormDraft = Pick<typeof workflowDraft, "dataSource" | "sharedRun" | "datasetId" | "goal" | "minHops" | "maxHops" | "includeUnspent" | "includeUnspendable"> & {settings: LayoutSettings};
+type LayoutFormDraft = Pick<typeof workflowDraft, "dataSource" | "sharedRun" | "datasetId" | "goal" | "minHops" | "maxHops" | "connectionScope" | "connectionMaxHops" | "includeUnspent" | "includeUnspendable"> & {settings: LayoutSettings};
 const layoutFormDrafts = new Map<string, Map<string, LayoutFormDraft>>();
 
 function layoutDraftKey(detail: Case): string {
@@ -1425,6 +1426,7 @@ function saveDestinationDraft(detail: Case): void {
   let drafts = layoutFormDrafts.get(detail.id);
   if (!drafts) {drafts = new Map(); layoutFormDrafts.set(detail.id, drafts);}
   drafts.set(key, {dataSource: draft.dataSource, sharedRun: draft.sharedRun, datasetId: draft.datasetId, goal: draft.goal, minHops: draft.minHops, maxHops: draft.maxHops,
+    connectionScope: draft.connectionScope, connectionMaxHops: draft.connectionMaxHops,
     includeUnspent: draft.includeUnspent, includeUnspendable: draft.includeUnspendable,
     settings: currentLayoutSettings(detail)});
 }
@@ -1440,6 +1442,8 @@ function selectLayoutDestination(detail: Case, mode: PlotLayoutMode, board?: Inv
   const restored = remembered || (plot ? {dataSource: plot.collection_source?.kind === "shared" ? "shared" as const : "investigation" as const,
     sharedRun: plot.collection_source?.run_id || "", datasetId: plot.collection_source?.dataset_id || "", goal: board!.goal,
     minHops: String(plot.min_hops ?? 0), maxHops: String(plot.max_hops ?? 10),
+    connectionScope: plot.goal === "connections" ? savedConnectionScope(plot) : draft.connectionScope,
+    connectionMaxHops: plot.goal === "connections" ? String(plot.max_hops ?? 10) : draft.connectionMaxHops,
     includeUnspent: Boolean(plot.query?.include_unspent), includeUnspendable: Boolean(plot.query?.include_unspendable),
     settings: selectLayoutSettings({...defaults, ...detail.run_defaults, ...plot.layout_settings})} : undefined);
   if (restored) {
@@ -1513,7 +1517,10 @@ function plotContextScope(plot: Plot): string {
 function plotEndpointSummary(plot: Plot | undefined): string {
   if (plot?.goal === "connections") {
     const scope = plot.query?.connection_scope === "all_saved"
-      ? '<p class="small muted">All verified saved connections. Attribution hop limits, stop-tracing rules, and plotting hop cutoffs are ignored; labels remain visible.</p>' : "";
+      ? '<p class="small muted">All verified saved connections. Attribution hop limits, stop-tracing rules, and plotting hop cutoffs are ignored; labels remain visible.</p>'
+      : plot.query?.connection_scope === "hop_limited"
+        ? `<p class="small muted">Connecting paths within ${esc(plot.max_hops)} ordinary transaction steps from each selected starter to another. Attribution hop limits and stop-tracing rules are ignored; labels remain visible. Named groups affect displayed hop labels only.</p>`
+        : '<p class="small muted">Legacy bounded connections. This saved layout retains the tracing rules and hop basis used when it was generated.</p>';
     const complete = plot.query?.transaction_io === "complete";
     const contextCount = complete && plot.context_edge_count !== undefined
       ? ` ${plot.context_edge_count} context connections, excluded from starter-pair counts.` : "";
@@ -1558,8 +1565,13 @@ function plotHopReference(plot: Plot): string {
   return plot.hop_reference_name ?? state.activeCase?.runs?.find(run => run.id === plot.run_id)?.hop_reference_name ?? "";
 }
 
+function savedConnectionScope(plot: Plot): ConnectionScope {
+  return plot.query?.connection_scope || (plot.max_hops == null ? "all_saved" : "hop_limited");
+}
+
 function plotHopSummary(plot: Plot): string {
   if (plot.goal === "connections" && plot.query?.connection_scope === "all_saved") return " · All saved connections";
+  if (plot.goal === "connections" && plot.query?.connection_scope === "hop_limited") return ` · Within ${plot.max_hops} hops of each starter`;
   return plot.goal === "full" ? "" : ` · Hops ${plot.min_hops}–${plot.max_hops}`;
 }
 
@@ -1586,6 +1598,11 @@ function plotBoardSummary(plot: Plot | undefined): string {
   const counts = plot.update_counts;
   const labels: Record<string, string> = {new_nodes: "Objects to add", retained_nodes: "Objects kept", removed_nodes: "Objects to remove", new_connectors: "Connections to add", removed_connectors: "Connections to remove"};
   return `<p class="artifact-note"><strong>Update existing board:</strong> ${esc(plot.board_name || plot.board_record_id)}. Existing positions are preserved; additions occupy a separate empty area for manual merging.</p>${counts ? `<p class="small muted">${Object.entries(counts).filter(([, value]) => Number.isFinite(value)).map(([key, value]) => `${esc(labels[key] || human(key))}: ${esc(value)}`).join(" · ")}</p>` : ""}<p class="small muted">If you move board objects after generating this layout, generate the update again before syncing.</p>`;
+}
+
+function connectionHopFields(draft: typeof workflowDraft): string {
+  if (draft.goal !== "connections") return "";
+  return `<div class="field-row"><label class="field"><span>Connection search</span><select id="workflow-connection-scope"${disabled(draftBusy())}><option value="hop_limited"${draft.connectionScope === "hop_limited" ? " selected" : ""}>Within hop limit</option><option value="all_saved"${draft.connectionScope === "all_saved" ? " selected" : ""}>All saved connections</option></select></label>${draft.connectionScope === "hop_limited" ? `<label class="field"><span>Maximum connection hops</span><input id="workflow-connection-max-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.connectionMaxHops)}"${disabled(draftBusy())}/><small>Maximum ordinary transaction steps from each selected starter to another. The starter is hop 0. Increase this limit to reveal longer connections.</small></label>` : ""}</div>`;
 }
 
 function plotEndpointFields(draft: typeof workflowDraft): string {
@@ -1625,14 +1642,14 @@ function plotLayoutsPanel(detail: Case, saved: boolean): string {
   const unavailable = !saved || actionBusy("plot", workflowResourceBody(detail)) || draft.layoutMode === "update" && !updateLayoutBoards(detail, draft.goal).some(board => board.id === draft.layoutBoard);
   const pending = pendingFreshCreation(detail);
   const settings = {...defaults, ...detail.run_defaults, ...currentLayoutSettings(detail)};
-  return `<section class="panel" id="plot-layouts-panel"><div class="panel-head"><div><h2>Generate a Miro graph</h2><p>Choose the goal and destination, then generate and sync in one step.</p></div><span class="badge gray">Saved transactions</span></div><div class="panel-body">${plotDataSourceFields(detail)}<div class="plot-goals" role="group" aria-label="Plotting goal">${plotGoals.map(goal => `<button class="plot-goal${draft.goal === goal.id ? " selected" : ""}" data-action="plot-goal" data-goal="${goal.id}" aria-pressed="${draft.goal === goal.id}"${disabled(draftBusy())}><strong>${goal.name}</strong><span>${goal.description}</span></button>`).join("")}</div>${draft.goal === "pegouts" ? `<div class="field-row"><label class="field"><span>Minimum hops</span><input id="workflow-min-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.minHops)}"${disabled(draftBusy())}/></label><label class="field"><span>Maximum hops</span><input id="workflow-max-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.maxHops)}"${disabled(draftBusy())}/></label></div>` : ""}<p class="artifact-note">${draft.goal === "connections" ? "Starter connections shows all verified saved paths between selected starting transactions. Attribution hop limits, stop-tracing rules, and plotting hop cutoffs are ignored; labels remain visible. No additional transactions are fetched." : "Plotting makes no blockchain requests. A hop filter cannot reveal data beyond your collection coverage."} If a path is missing, collect more data first and generate another plot.</p><p class="small muted">${esc(hopBasis(plotRun?.hop_reference_name))}. ${esc(hopBasisExplanation(plotRun?.hop_reference_name))} ${draft.goal === "connections" ? "The hop basis changes displayed distances only; it does not limit connections." : "Uses the selected collection run’s hop basis with current attribution rules."}</p>${draft.goal === "pegouts" ? '<p class="small muted">Only selected starting UTXOs are followed. A peg-out request does not confirm the separate Bitcoin payout.</p>' : ""}${plotEndpointFields(draft)}${plotDestinationFields(detail)}<form id="plot-layout-form" data-case-id="${esc(detail.id)}"><fieldset class="layout-fields"${disabled(draftBusy())}><legend>Layout settings</legend>${graphFields(settings, true, draft.goal)}</fieldset><p class="small muted">Each generation captures this selected run, investigation rules, and layout settings. Other jobs can continue independently. Use Save layout settings to set the defaults for future layouts.</p><div class="task-actions">${button(draft.layoutMode === "update" ? "Generate & update board" : "Generate & create board", "workflow-plot-sync", "graph", "primary", unavailable || actionBusy("plot-sync", workflowResourceBody(detail)) || draft.layoutMode === "fresh" && Boolean(pending))}${button("Save layout settings", "plot-settings-save", "check", "", isBusy())}</div>${draft.layoutMode === "fresh" && pending ? `<p class="artifact-note">The creation of ${esc(pending.name)} has an uncertain result. Check Miro and link the created board to its saved entry below before starting another new board.</p>` : ""}<p class="small muted">Miro credentials are retrieved through the launching terminal. The saved preview remains available after syncing.</p><details class="tool-details"><summary>Preview without syncing</summary><p class="small muted">Save a layout and SVG without publishing. A new-board preview works offline; an update preview reads Miro to preserve the current arrangement.</p>${button("Generate preview only", "workflow-plot", "graph", "", unavailable)}</details></form>${!saved ? '<p class="artifact-note">Collect transaction data before generating a plot.</p>' : ""}</div></section>`;
+  return `<section class="panel" id="plot-layouts-panel"><div class="panel-head"><div><h2>Generate a Miro graph</h2><p>Choose the goal and destination, then generate and sync in one step.</p></div><span class="badge gray">Saved transactions</span></div><div class="panel-body">${plotDataSourceFields(detail)}<div class="plot-goals" role="group" aria-label="Plotting goal">${plotGoals.map(goal => `<button class="plot-goal${draft.goal === goal.id ? " selected" : ""}" data-action="plot-goal" data-goal="${goal.id}" aria-pressed="${draft.goal === goal.id}"${disabled(draftBusy())}><strong>${goal.name}</strong><span>${goal.description}</span></button>`).join("")}</div>${draft.goal === "pegouts" ? `<div class="field-row"><label class="field"><span>Minimum hops</span><input id="workflow-min-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.minHops)}"${disabled(draftBusy())}/></label><label class="field"><span>Maximum hops</span><input id="workflow-max-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.maxHops)}"${disabled(draftBusy())}/></label></div>` : ""}${connectionHopFields(draft)}<p class="artifact-note">${draft.goal === "connections" ? `Starter connections searches ${draft.connectionScope === "hop_limited" ? "within the selected connection hop limit" : "all saved paths"} between selected starting transactions. Attribution hop limits and stop-tracing rules are ignored; labels remain visible. No additional transactions are fetched.` : "Plotting makes no blockchain requests. A hop filter cannot reveal data beyond your collection coverage."} ${draft.goal === "connections" ? "Increase the connection hop limit or select All saved connections to search further. Collect more data only if the required transactions are missing." : "If a path is missing, collect more data first and generate another plot."}</p><p class="small muted">${esc(hopBasis(plotRun?.hop_reference_name))}. ${esc(hopBasisExplanation(plotRun?.hop_reference_name))} ${draft.goal === "connections" ? "Named groups affect displayed hop labels only. The connection limit counts ordinary transaction steps from each selected starter." : "Uses the selected collection run’s hop basis with current attribution rules."}</p>${draft.goal === "pegouts" ? '<p class="small muted">Only selected starting UTXOs are followed. A peg-out request does not confirm the separate Bitcoin payout.</p>' : ""}${plotEndpointFields(draft)}${plotDestinationFields(detail)}<form id="plot-layout-form" data-case-id="${esc(detail.id)}"><fieldset class="layout-fields"${disabled(draftBusy())}><legend>Layout settings</legend>${graphFields(settings, true, draft.goal)}</fieldset><p class="small muted">Each generation captures this selected run, investigation rules, and layout settings. Other jobs can continue independently. Use Save layout settings to set the defaults for future layouts.</p><div class="task-actions">${button(draft.layoutMode === "update" ? "Generate & update board" : "Generate & create board", "workflow-plot-sync", "graph", "primary", unavailable || actionBusy("plot-sync", workflowResourceBody(detail)) || draft.layoutMode === "fresh" && Boolean(pending))}${button("Save layout settings", "plot-settings-save", "check", "", isBusy())}</div>${draft.layoutMode === "fresh" && pending ? `<p class="artifact-note">The creation of ${esc(pending.name)} has an uncertain result. Check Miro and link the created board to its saved entry below before starting another new board.</p>` : ""}<p class="small muted">Miro credentials are retrieved through the launching terminal. The saved preview remains available after syncing.</p><details class="tool-details"><summary>Preview without syncing</summary><p class="small muted">Save a layout and SVG without publishing. A new-board preview works offline; an update preview reads Miro to preserve the current arrangement.</p>${button("Generate preview only", "workflow-plot", "graph", "", unavailable)}</details></form>${!saved ? '<p class="artifact-note">Collect transaction data before generating a plot.</p>' : ""}</div></section>`;
 }
 
 function savedPlotsPanel(detail: Case): string {
   const plot = currentPlot(detail), artifact = plot?.artifact;
   const preview = safeLocalUrl(artifact?.preview_url);
   const published = plot && (detail.boards || []).find(board => board.status === "synced" && board.preview_id === plot.preview_id);
-  return `<section class="panel" id="saved-plots-panel"><div class="panel-head"><div><h2>Saved plot layouts</h2><p>Each layout records its collection run, tracing goal, destination, and saved appearance. New layouts also freeze the investigation rules and address counts used to generate them.</p></div><span class="badge gray">${detail.plots?.length || 0} plots</span></div><div class="panel-body">${detail.plots_notice ? `<p class="artifact-note" role="status">${esc(detail.plots_notice)}</p>` : ""}${plot ? `<label class="field"><span>Plot layout</span><select id="workflow-plot-picker">${(detail.plots || []).map(item => `<option value="${esc(item.preview_id)}"${item.preview_id === plot.preview_id ? " selected" : ""}>${esc(plotChoiceLabel(item))}</option>`).join("")}</select></label><p>${esc(goalName(plot.goal))} · Run ${esc(short(plot.run_id, 8))}${esc(plotHopSummary(plot))} · ${plot.node_count} objects · ${plot.edge_count} connections.</p><p class="small muted">${esc(hopBasis(plotHopReference(plot)))}. ${esc(hopBasisExplanation(plotHopReference(plot)))}</p>${plotEndpointSummary(plot)}${plotBoardSummary(plot)}${plot.input_snapshot_version ? `<p class="small muted">Investigation inputs captured${plot.input_snapshot_at ? ` ${esc(formatDate(plot.input_snapshot_at))}` : ""}. Later collection and CSV edits do not change this saved layout.</p>` : ""}${plot.coverage_notice && !plot.notice?.includes(plot.coverage_notice) ? `<p class="artifact-note">${esc(plot.coverage_notice)}</p>` : ""}${plot.notice ? `<p class="artifact-note">${esc(plot.notice)}</p>` : ""}${plot.empty && plot.layout_mode !== "update" ? '<p class="artifact-note">No matching paths were found in this saved data. Collect more data or review the selected plotting goal and its options.</p>' : ""}${!plot.reviewable ? `<p class="artifact-note">${esc(plot.reason || "No matching paths in this saved data.")}</p>` : ""}${savedLayoutSummary(plot)}<p class="small muted">The saved preview and ELK SVG remain available after publication. Preview-only layouts can be published without recalculating.</p><div class="task-actions">${published?.board_id ? `<a class="btn" href="${esc(boardUrl(published.board_id))}" target="_blank" rel="noopener noreferrer">Open synced Miro board ${icon("external")}</a>` : button(plot.layout_mode === "fresh" ? "Publish saved layout" : plot.layout_mode === "update" ? "Apply saved board update" : "Sync with Miro", "plot-boards", "board", "", !plotCanSync(plot) || draftBusy())}${downloadLink(artifact?.downloads.find(item => item.name === "graph.svg"), "Download ELK SVG")}${detailPagesLink(artifact?.downloads)}${preview ? `<a class="btn small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">Open full view</a>` : ""}</div>${endpointCsvDownloads(plot)}` : '<p class="artifact-note">Your generated plots will appear here. All three goals use the same saved collection data.</p>'}</div>${preview ? `<iframe loading="lazy" class="graph-preview" src="${esc(preview)}#chart" title="${esc(goalName(plot!.goal))} saved plot" sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe>` : ""}</section>`;
+  return `<section class="panel" id="saved-plots-panel"><div class="panel-head"><div><h2>Saved plot layouts</h2><p>Each layout records its collection run, tracing goal, destination, and saved appearance. New layouts also freeze the investigation rules and address counts used to generate them.</p></div><span class="badge gray">${detail.plots?.length || 0} plots</span></div><div class="panel-body">${detail.plots_notice ? `<p class="artifact-note" role="status">${esc(detail.plots_notice)}</p>` : ""}${plot ? `<label class="field"><span>Plot layout</span><select id="workflow-plot-picker">${(detail.plots || []).map(item => `<option value="${esc(item.preview_id)}"${item.preview_id === plot.preview_id ? " selected" : ""}>${esc(plotChoiceLabel(item))}</option>`).join("")}</select></label><p>${esc(goalName(plot.goal))} · Run ${esc(short(plot.run_id, 8))}${esc(plotHopSummary(plot))} · ${plot.node_count} objects · ${plot.edge_count} connections.</p><p class="small muted">${esc(hopBasis(plotHopReference(plot)))}. ${esc(hopBasisExplanation(plotHopReference(plot)))}</p>${plotEndpointSummary(plot)}${plotBoardSummary(plot)}${plot.input_snapshot_version ? `<p class="small muted">Investigation inputs captured${plot.input_snapshot_at ? ` ${esc(formatDate(plot.input_snapshot_at))}` : ""}. Later collection and CSV edits do not change this saved layout.</p>` : ""}${plot.coverage_notice && !plot.notice?.includes(plot.coverage_notice) ? `<p class="artifact-note">${esc(plot.coverage_notice)}</p>` : ""}${plot.notice ? `<p class="artifact-note">${esc(plot.notice)}</p>` : ""}${plot.empty && plot.layout_mode !== "update" ? `<p class="artifact-note">${plot.goal === "connections" ? "No starter connections found within this scope. Increase the connection hop limit or choose All saved connections; collect more only if evidence is missing." : "No matching paths were found in this saved data. Collect more data or review the selected plotting goal and its options."}</p>` : ""}${!plot.reviewable ? `<p class="artifact-note">${esc(plot.reason || "No matching paths in this saved data.")}</p>` : ""}${savedLayoutSummary(plot)}<p class="small muted">The saved preview and ELK SVG remain available after publication. Preview-only layouts can be published without recalculating.</p><div class="task-actions">${published?.board_id ? `<a class="btn" href="${esc(boardUrl(published.board_id))}" target="_blank" rel="noopener noreferrer">Open synced Miro board ${icon("external")}</a>` : button(plot.layout_mode === "fresh" ? "Publish saved layout" : plot.layout_mode === "update" ? "Apply saved board update" : "Sync with Miro", "plot-boards", "board", "", !plotCanSync(plot) || draftBusy())}${downloadLink(artifact?.downloads.find(item => item.name === "graph.svg"), "Download ELK SVG")}${detailPagesLink(artifact?.downloads)}${preview ? `<a class="btn small" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">Open full view</a>` : ""}</div>${endpointCsvDownloads(plot)}` : '<p class="artifact-note">Your generated plots will appear here. All three goals use the same saved collection data.</p>'}</div>${preview ? `<iframe loading="lazy" class="graph-preview" src="${esc(preview)}#chart" title="${esc(goalName(plot!.goal))} saved plot" sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe>` : ""}</section>`;
 }
 
 function plotDownloadsPanel(detail: Case): string {
@@ -1718,7 +1735,7 @@ function workflowInput(element: HTMLInputElement | HTMLSelectElement): boolean {
     else return false;
     return true;
   }
-  const fields: Record<string, "minHops" | "maxHops" | "plot" | "boardName" | "savedBoardName" | "linkedBoardName" | "boardUrl"> = {"workflow-min-hops": "minHops", "workflow-max-hops": "maxHops", "workflow-plot-picker": "plot", "workflow-board-name": "boardName", "workflow-saved-board-name": "savedBoardName", "workflow-link-board-name": "linkedBoardName", "workflow-board-url": "boardUrl"};
+  const fields: Record<string, "minHops" | "maxHops" | "connectionMaxHops" | "plot" | "boardName" | "savedBoardName" | "linkedBoardName" | "boardUrl"> = {"workflow-min-hops": "minHops", "workflow-max-hops": "maxHops", "workflow-connection-max-hops": "connectionMaxHops", "workflow-plot-picker": "plot", "workflow-board-name": "boardName", "workflow-saved-board-name": "savedBoardName", "workflow-link-board-name": "linkedBoardName", "workflow-board-url": "boardUrl"};
   if (element.id === "workflow-data-source" && ["investigation", "shared"].includes(element.value)) {
     savePlotLayoutDraft();
     draft.dataSource = element.value as "investigation" | "shared";
@@ -1728,6 +1745,10 @@ function workflowInput(element: HTMLInputElement | HTMLSelectElement): boolean {
         draft.datasetId = shared.dataset_id || ""; draft.sharedRun = shared.latest_run || "";
       }
     }
+    render();
+  } else if (element.id === "workflow-connection-scope" && ["hop_limited", "all_saved"].includes(element.value)) {
+    savePlotLayoutDraft();
+    draft.connectionScope = element.value as ConnectionScope;
     render();
   } else if (element.id === "workflow-shared-run") {
     const shared = detail.shared_collection;
@@ -1797,10 +1818,13 @@ async function workflowAction(action: string, element?: HTMLElement): Promise<bo
   if (action === "workflow-plot" || action === "workflow-plot-sync") {
     const sourceRun = currentPlotRun(detail);
     if (!sourceRun) throw new Error("Collect transaction data first, then select an available saved snapshot for this data source.");
-    const min = draft.goal === "pegouts" ? draft.minHops.trim() : "0", max = draft.goal === "pegouts" ? draft.maxHops.trim() : "0";
+    const min = draft.goal === "pegouts" ? draft.minHops.trim() : "0";
+    const max = draft.goal === "pegouts" ? draft.maxHops.trim()
+      : draft.goal === "connections" && draft.connectionScope === "hop_limited" ? draft.connectionMaxHops.trim() : "0";
     if ([min, max].some(value => !/^\d+$/.test(value) || Number(value) > 2147483647) || Number(min) > Number(max)) throw new Error("Enter whole-number hop limits from 0 to 2147483647, with minimum no greater than maximum.");
     if (action === "workflow-plot-sync" && draft.layoutMode === "fresh" && pendingFreshCreation(detail)) throw new Error("Resolve the uncertain board creation below before creating another board.");
     body = {action: action === "workflow-plot-sync" ? "plot-sync" : "plot", goal: draft.goal, run_id: sourceRun.id, min_hops: Number(min), max_hops: Number(max), layout_mode: draft.layoutMode};
+    if (draft.goal === "connections") body.connection_scope = draft.connectionScope;
     if (draft.dataSource === "shared") {body.data_source = "shared"; body.dataset_id = draft.datasetId;}
     if (draft.layoutMode === "update") {
       const board = updateLayoutBoards(detail, draft.goal).find(item => item.id === draft.layoutBoard);

@@ -1714,13 +1714,13 @@ test('all plotting goals are visible and plot only the selected saved run withou
     workflowEdit(view, 'min-hops', '2'); workflowEdit(view, 'max-hops', '10');
     await view.dispatch('workflow-plot');
     assert.deepEqual(view.calls.at(-1), {path: '/api/cases/case1/actions', body: {
-      action: 'plot', layout_settings: layoutDefaults, layout_mode: 'fresh', goal, run_id: 'older', min_hops: goal === 'pegouts' ? 2 : 0, max_hops: goal === 'pegouts' ? 10 : 0}});
+      action: 'plot', layout_settings: layoutDefaults, layout_mode: 'fresh', goal, run_id: 'older', min_hops: goal === 'pegouts' ? 2 : 0, max_hops: goal === 'full' ? 0 : 10, ...(goal === 'connections' ? {connection_scope: 'hop_limited'} : {})}});
     assert.equal(view.state.job.live, false);
     assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 1);
   }
 });
 
-test('Starter connections hides hop controls and ignores a stale invalid range when generating', async () => {
+test('Starter connections has its own hop limit and ignores stale peg-out limits', async () => {
   const view = await harness(path => path.endsWith('/actions') ? {id: 'plotjob', status: 'running'} : undefined);
   view.state.activeCase = workflowCase();
   await view.dispatch('view-plots');
@@ -1729,24 +1729,31 @@ test('Starter connections hides hop controls and ignores a stale invalid range w
   workflowEdit(view, 'min-hops', 'bad'); workflowEdit(view, 'max-hops', '-1');
   await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
   assert.doesNotMatch(view.workspace(), /id="workflow-(?:min|max)-hops"/);
-  assert.match(view.workspace(), /Attribution hop limits, stop-tracing rules, and plotting hop cutoffs are ignored; labels remain visible/);
+  assert.match(view.workspace(), /Attribution hop limits and stop-tracing rules are ignored; labels remain visible/);
+  assert.match(view.workspace(), /id="workflow-connection-max-hops"[^>]*value="10"/);
   assert.match(view.workspace(), /No additional transactions are fetched/);
   await view.dispatch('workflow-plot');
   assert.equal(view.calls.at(-1).body.goal, 'connections');
   assert.equal(view.calls.at(-1).body.min_hops, 0);
-  assert.equal(view.calls.at(-1).body.max_hops, 0);
+  assert.equal(view.calls.at(-1).body.max_hops, 10);
+  assert.equal(view.calls.at(-1).body.connection_scope, 'hop_limited');
 });
 
-test('saved Starter layouts label all-saved scope and retain the range of older layouts', async () => {
-  for (const allSaved of [false, true]) {
-    const plot = workflowPlot('connections', 'connections1', allSaved
-      ? {max_hops: null, query: {connection_scope: 'all_saved'}} : {max_hops: 3});
+test('saved Starter layouts distinguish all-saved, bounded and legacy scopes', async () => {
+  for (const scope of ['all_saved', 'hop_limited', undefined]) {
+    const allSaved = scope === 'all_saved';
+    const plot = workflowPlot('connections', 'connections1',
+      {max_hops: allSaved ? null : 3, ...(scope ? {query: {connection_scope: scope}} : {})});
     const view = await harness();
     view.state.activeCase = workflowCase({plots: [plot], boards: [workflowBoard('connections', 'board1', {preview_id: plot.preview_id})]});
     for (const page of ['view-plots', 'view-history', 'view-boards']) {
       await view.dispatch(page);
       const html = view.workspace();
-      assert.match(html, allSaved ? /All saved connections/ : /Hops 0–3/);
+      assert.match(html, allSaved ? /All saved connections/ : scope === 'hop_limited' ? /Within 3 hops of each starter/ : /Hops 0–3/);
+      if (!scope) {
+        assert.match(html, /Legacy bounded connections/);
+        assert.doesNotMatch(html, /Connecting paths within 3 ordinary transaction steps/);
+      }
       assert.doesNotMatch(html, /Hops 0–null/);
       if (allSaved) assert.match(html, /All verified saved connections/);
     }
@@ -1813,7 +1820,7 @@ test('peg-out endpoints default off and optional booleans are submitted only for
       if (goal !== 'pegouts') assert.doesNotMatch(view.workspace(), /id="workflow-include-(?:unspent|unspendable)"/);
       await view.dispatch('workflow-plot');
       assert.deepEqual(view.calls.at(-1).body, {action: 'plot', layout_settings: layoutDefaults, layout_mode: 'fresh', goal, run_id: 'saved1',
-        min_hops: 0, max_hops: goal === 'pegouts' ? 10 : 0,
+        min_hops: 0, max_hops: goal === 'full' ? 0 : 10, ...(goal === 'connections' ? {connection_scope: 'hop_limited'} : {}),
         ...(goal === 'pegouts' && includeUnspent ? {include_unspent: true} : {}),
         ...(goal === 'pegouts' && includeUnspendable ? {include_unspendable: true} : {})});
       assert.equal(view.state.job.live, false);
@@ -1860,7 +1867,7 @@ test('peg-out layouts always describe complete I/O without an optional context t
     await view.dispatch('plot-goal', {dataset: {goal}});
     await view.dispatch('workflow-plot');
     assert.deepEqual(view.calls.at(-1).body, {action: 'plot', layout_settings: layoutDefaults, layout_mode: 'fresh', goal, run_id: 'saved1',
-      min_hops: 0, max_hops: goal === 'pegouts' ? 10 : 0,
+      min_hops: 0, max_hops: goal === 'full' ? 0 : 10, ...(goal === 'connections' ? {connection_scope: 'hop_limited'} : {}),
       ...(goal === 'pegouts' ? {include_unspent: true} : {})});
     assert.equal(view.state.job.live, false);
     assert.equal(view.calls.filter(call => call.body).length, 1, 'display choices neither update settings nor collect data');
@@ -1924,7 +1931,7 @@ test('Starter connections includes complete accounting and captures context grou
     view.plotForm({group_context_inputs_present: '1', ...(grouped ? {group_context_inputs: 'on'} : {})});
     await view.dispatch('workflow-plot');
     assert.deepEqual(view.calls.at(-1).body, {action: 'plot', layout_mode: 'fresh', goal: 'connections', run_id: 'saved1',
-      min_hops: 0, max_hops: 0, layout_settings: {...layoutDefaults, group_context_inputs: grouped}});
+      min_hops: 0, max_hops: 10, connection_scope: 'hop_limited', layout_settings: {...layoutDefaults, group_context_inputs: grouped}});
     assert.equal(view.calls.filter(call => call.body).length, 1, 'plotting does not collect or mutate preferences');
   }
 });
@@ -4169,3 +4176,133 @@ for (const flag of [undefined, false]) {
     assert.equal(view.calls.find(call => call.path.endsWith('/actions')).body.max_new_items, 0);
   });
 }
+
+
+test('Starter connection hop limit validates integers and can be increased without fetching', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'limited-starters', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase();
+  await view.dispatch('view-plots');
+  await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
+  for (const invalid of ['', '-1', '1.5', 'bad', '2147483648']) {
+    workflowEdit(view, 'connection-max-hops', invalid);
+    await assert.rejects(view.dispatch('workflow-plot'), /whole-number hop limits/);
+  }
+  for (const valid of ['0', '3', '15', '2147483647']) {
+    workflowEdit(view, 'connection-max-hops', valid);
+    await view.dispatch('workflow-plot');
+    assert.equal(view.calls.at(-1).body.max_hops, Number(valid));
+    assert.equal(view.calls.at(-1).body.connection_scope, 'hop_limited');
+    assert.equal(view.calls.at(-1).body.min_hops, 0);
+    assert.equal(view.state.job.live, false);
+    view.state.jobs.clear();
+  }
+  assert.deepEqual(view.calls.filter(call => call.body).map(call => call.body.action), ['plot', 'plot', 'plot', 'plot']);
+});
+
+test('All saved connections ignores hidden hop values and restores the bounded draft when toggled', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'all-starters', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase();
+  await view.dispatch('view-plots');
+  await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
+  workflowEdit(view, 'connection-max-hops', 'bad');
+  workflowEdit(view, 'connection-scope', 'all_saved');
+  assert.doesNotMatch(view.workspace(), /id="workflow-connection-max-hops"/);
+  assert.match(view.workspace(), /value="all_saved" selected/);
+  await view.dispatch('workflow-plot');
+  assert.equal(view.calls.at(-1).body.connection_scope, 'all_saved');
+  assert.equal(view.calls.at(-1).body.max_hops, 0);
+  view.state.jobs.clear();
+  workflowEdit(view, 'connection-scope', 'hop_limited');
+  assert.match(view.workspace(), /id="workflow-connection-max-hops"[^>]*value="bad"/);
+  await assert.rejects(view.dispatch('workflow-plot'), /whole-number hop limits/);
+});
+
+test('Starter scope and limit survive source and case switches independently of peg-out bounds', async () => {
+  const alpha = workflowCase({shared_collection: sharedCollection()}), beta = workflowCase({id: 'case2'});
+  const view = await harness(path => path === '/api/cases/case1' ? alpha : path === '/api/cases/case2' ? beta : undefined);
+  await view.openCase('case1');
+  await view.dispatch('view-plots');
+  await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
+  workflowEdit(view, 'connection-max-hops', '6');
+  workflowEdit(view, 'data-source', 'shared');
+  workflowEdit(view, 'shared-run', 'shared-old');
+  await view.openCase('case2');
+  assert.equal(view.currentWorkflow(beta).connectionScope, 'hop_limited');
+  assert.equal(view.currentWorkflow(beta).connectionMaxHops, '10');
+  workflowEdit(view, 'connection-scope', 'all_saved');
+  await view.openCase('case1');
+  assert.equal(view.currentWorkflow(alpha).connectionScope, 'hop_limited');
+  assert.equal(view.currentWorkflow(alpha).connectionMaxHops, '6');
+  assert.equal(view.currentWorkflow(alpha).sharedRun, 'shared-old');
+  workflowEdit(view, 'data-source', 'investigation');
+  await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+  assert.equal(view.currentWorkflow(alpha).maxHops, '10');
+  workflowEdit(view, 'max-hops', '12');
+  await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
+  assert.match(view.workspace(), /id="workflow-connection-max-hops"[^>]*value="6"/);
+});
+
+test('Starter board updates restore legacy and modern scope while preserving each destination draft', async () => {
+  const plots = [workflowPlot('connections', 'all', {max_hops: null, query: {connection_scope: 'all_saved'}}),
+    workflowPlot('connections', 'legacy', {max_hops: 3}),
+    workflowPlot('connections', 'limited', {max_hops: 7, query: {connection_scope: 'hop_limited'},
+      collection_source: {kind: 'shared', dataset_id: 'pool', run_id: 'shared-old'}})];
+  const detail = workflowCase({shared_collection: sharedCollection(), plots,
+    boards: plots.map(plot => workflowBoard('connections', plot.preview_id, {preview_id: plot.preview_id}))});
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'starter-update', status: 'running'} : undefined);
+  view.state.activeCase = detail; await view.dispatch('view-plots');
+  await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
+  workflowEdit(view, 'connection-max-hops', '4');
+  await view.dispatch('workflow-board-prepare', boardControl('all'));
+  assert.equal(view.currentWorkflow(detail).connectionScope, 'all_saved');
+  assert.doesNotMatch(view.workspace(), /id="workflow-connection-max-hops"/);
+  workflowEdit(view, 'layout-board', 'legacy');
+  assert.equal(view.currentWorkflow(detail).connectionScope, 'hop_limited');
+  assert.equal(view.currentWorkflow(detail).connectionMaxHops, '3');
+  workflowEdit(view, 'connection-max-hops', '5');
+  workflowEdit(view, 'layout-board', 'limited');
+  assert.equal(view.currentWorkflow(detail).connectionMaxHops, '7');
+  assert.equal(view.currentWorkflow(detail).dataSource, 'shared');
+  await view.dispatch('workflow-plot-sync');
+  assert.equal(view.calls.at(-1).body.action, 'plot-sync');
+  assert.equal(view.calls.at(-1).body.connection_scope, 'hop_limited');
+  assert.equal(view.calls.at(-1).body.max_hops, 7);
+  assert.equal(view.calls.at(-1).body.run_id, 'shared-old');
+  assert.equal(view.calls.at(-1).body.data_source, 'shared');
+  assert.equal(view.calls.at(-1).body.board_record_id, 'limited');
+  view.state.jobs.clear();
+  workflowEdit(view, 'layout-board', 'legacy');
+  assert.equal(view.currentWorkflow(detail).connectionMaxHops, '5');
+  workflowEdit(view, 'layout-board', 'all');
+  assert.equal(view.currentWorkflow(detail).connectionScope, 'all_saved');
+  workflowEdit(view, 'layout-mode', 'fresh');
+  assert.equal(view.currentWorkflow(detail).connectionScope, 'hop_limited');
+  assert.equal(view.currentWorkflow(detail).connectionMaxHops, '4');
+});
+
+test('Starter new-board generation includes selected connection bound with shared provenance', async () => {
+  const detail = workflowCase({shared_collection: sharedCollection()});
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'starter-create', status: 'running'} : undefined);
+  view.state.activeCase = detail; await view.dispatch('view-plots');
+  await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
+  workflowEdit(view, 'data-source', 'shared'); workflowEdit(view, 'shared-run', 'shared-old');
+  workflowEdit(view, 'connection-max-hops', '8');
+  workflowEdit(view, 'board-name', 'Eight-hop starter connections');
+  await view.dispatch('workflow-plot-sync');
+  assert.deepEqual(view.calls.at(-1).body, {action: 'plot-sync', goal: 'connections', run_id: 'shared-old',
+    min_hops: 0, max_hops: 8, connection_scope: 'hop_limited', layout_mode: 'fresh',
+    data_source: 'shared', dataset_id: 'pool', name: 'Eight-hop starter connections', layout_settings: layoutDefaults});
+});
+
+
+test('empty Starter preview suggests broadening the search before collecting more data', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [workflowPlot('connections', 'empty-starters', {
+    empty: true, node_count: 0, edge_count: 0, max_hops: 3, layout_mode: 'fresh',
+    query: {connection_scope: 'hop_limited'},
+  })]});
+  await view.dispatch('view-plots');
+  assert.match(view.workspace(), /No starter connections found within this scope/);
+  assert.match(view.workspace(), /Increase the connection hop limit or choose All saved connections; collect more only if evidence is missing/);
+  assert.doesNotMatch(view.workspace(), /No matching paths were found in this saved data/);
+});

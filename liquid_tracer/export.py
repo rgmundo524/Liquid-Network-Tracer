@@ -43,6 +43,8 @@ def legend_lines(graph=None):
     colors = validate_role_colors((graph or {}).get("service_controls", {}).get("role_colors", {}))
     all_saved_connections = ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
                              and (graph or {}).get("connections", {}).get("connection_scope") == "all_saved")
+    limited_connections = ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
+                           and (graph or {}).get("connections", {}).get("connection_scope") == "hop_limited")
     def name(key):
         return colors.get(key, PALETTE[key][0])
     arrows = ("Arrows: assigned name colors identify links directly entering or leaving that Liquid address; "
@@ -61,13 +63,18 @@ def legend_lines(graph=None):
         "Optional context rectangles summarize isolated input addresses; each input remains a separate arrow. Full members stay in local exports; a summary does not imply common ownership.",
         "Captions: vin/vout number · amount asset. ?? = not publicly available. L-BTC amounts use whole-token units (100,000,000 base units = 1 L-BTC); other assets use base units.",
         ("Collection stop: retained attribution only; does not limit this saved-data view. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards."
-         if all_saved_connections else "STOP TRACING: an explicit address boundary, independent of confidence. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards."),
+         if all_saved_connections or limited_connections else "STOP TRACING: an explicit address boundary, independent of confidence. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards."),
         "Thick red border: INPUT MERGE = distinct starting lineages meet in a transaction; shared-address receipts from distinct branches also highlight the receiving address and all participating senders. Neither proves ownership or value allocation.",
         "TX count inside circles: confirmed + mempool transactions at last lookup; ?? = unavailable. Not the number of visible arrows.",
         "Unspent refers to tracked outputs at their last check, not all funds or inactivity at that address. Arrows do not allocate stolen value.",
     ]
     if all_saved_connections:
         lines.append("Starter connections use all verified saved paths, including unconfirmed spends, without stop rules, attribution hop limits or a plot hop cutoff. No additional data is fetched.")
+    if limited_connections:
+        maximum = graph["connections"]["max_hops"]
+        lines.append(f"Starter connections include paths of at most {maximum} transaction steps from each selected starter to another. "
+                     "Named groups do not reset this limit. Attribution stops and hop limits are ignored; "
+                     "verified saved unconfirmed spends remain eligible. No additional data is fetched.")
     if ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
             and (graph or {}).get("connections", {}).get("transaction_io") == "complete"):
         lines.append("Every input and output of each connecting transaction is included, including fees. "
