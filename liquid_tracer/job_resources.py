@@ -60,8 +60,11 @@ def job_resources(arguments, action, case=None):
     elif action in PARALLEL_ACTIONS:
         from .investigation_boards import list_boards
 
-        records = list_boards(case) if case is not None else []
         record_id = option(arguments, "--record") or option(arguments, "--board-record-id")
+        # A fresh graph reserves new-board immediately. Scanning unrelated
+        # mapping files here adds validation I/O while the jobs lock is held.
+        records = (list_boards(case) if case is not None
+                   and (record_id or action == "board-create-sync") else [])
         record = next((item for item in records if record_id and item["id"] == record_id), None)
         if record is None and action == "board-create-sync":
             record = next((item for item in records if preview_id

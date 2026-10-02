@@ -156,7 +156,7 @@ def _snapshot_board(graph, plan):
         raise TraceError("Saved board layout does not match its target; regenerate the plot")
 
 
-def _archive_source(case, run_id, metadata=None):
+def _archive_source(case, run_id, metadata=None, *, progress=None):
     """Verify only immutable collection bytes, without reading mutable inputs."""
     from .cli import run_path, verify_export
     from .investigations import read_case
@@ -170,14 +170,17 @@ def _archive_source(case, run_id, metadata=None):
             parts = line.split("  ", 1)
             if len(parts) == 2:
                 _ordinary(archive / parts[1])
-    verify_export(archive)
+    from .progress import report_progress
+    verify_export(archive, progress=progress)
+    report_progress(progress, "loading_collection", 0, 1)
     state = read_json(archive / "trace.json")
+    report_progress(progress, "loading_collection", 1, 1)
     if not isinstance(state, dict) or state.get("run_id") != run_id or state.get("case_id") != metadata["case_id"]:
         raise TraceError("The selected collection run does not belong to this investigation")
     return state, digest((archive / "SHA256SUMS").read_bytes())
 
 
-def _source(case, run_id):
+def _source(case, run_id, *, progress=None):
     from .address_counts import apply_saved_counts
     from .cli import resolve_latest
     from .investigations import read_case
@@ -190,7 +193,7 @@ def _source(case, run_id):
         run_id = resolve_latest(case, run_id)
         controls = {key: value for key, value in load_services(case).items() if key != "history"}
         settings = _settings(metadata)
-    state, archive_sha256 = _archive_source(case, run_id, metadata)
+    state, archive_sha256 = _archive_source(case, run_id, metadata, progress=progress)
     state["labels"] = apply_service_labels(state["labels"], controls)
     state["service_controls"] = controls
     counts = apply_saved_counts(case, state)
@@ -337,6 +340,8 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
     from .mermaid import mermaid_source
     from .miro import validate_plan
     from .transaction_csv import write_transaction_csv
+    from .progress import report_progress
+    report_progress(progress, "preparing_plot", 0, 1)
     if layout_mode not in ("fresh", "update"):
         raise TraceError("Choose a fresh layout or an update to an existing Miro board")
     if (layout_mode == "fresh" and board_record_id is not None
@@ -347,12 +352,13 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
         raise TraceError("Choose investigation data or a saved shared collection")
     if data_source == "shared":
         from .shared_projection import materialize_shared_run
-        run_id = materialize_shared_run(case, run_id, dataset_id=dataset_id)
+        run_id = materialize_shared_run(case, run_id, dataset_id=dataset_id, progress=progress)
     with ExitStack() as operation:
         if layout_mode == "update" and not _board_lock_held:
             from .investigation_boards import _board_lock
             operation.enter_context(_board_lock(case, board_record_id))
-        state, settings, fingerprints = _source(case, run_id)
+        state, settings, fingerprints = _source(case, run_id, progress=progress)
+        report_progress(progress, "layout", 0, 1)
         if layout_settings is not None:
             settings = validate_layout_settings(layout_settings)
         inputs = {"schema_version": 1, "case_id": state["case_id"], "run_id": state["run_id"],

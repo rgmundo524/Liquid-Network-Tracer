@@ -174,7 +174,7 @@ def case_workflow(case):
 
 def workflow_action(server, case, metadata, body):
     from .boards import board_options
-    from .cli import board_id, resolve_latest, run_path, verify_export
+    from .cli import board_id, resolve_latest, run_path
     from .investigation_boards import GOALS, list_boards
     from .plots import reviewed_plot
     from .web import RequestError
@@ -234,16 +234,19 @@ def workflow_action(server, case, metadata, body):
         if data_source not in ("investigation", "shared"):
             raise RequestError("Choose this investigation's collection or the shared collection.")
         if data_source == "shared":
-            from .shared_collection import resolve_shared_run
+            from .shared_collection import pin_shared_run
             dataset_id = body.get("dataset_id")
             if not isinstance(dataset_id, str) or not re.fullmatch(r"[0-9a-f]{32}", dataset_id):
                 raise RequestError("Choose a compatible shared collection dataset.")
-            selected, _ = resolve_shared_run(case, body["run_id"], dataset_id=dataset_id)
+            selected, _ = pin_shared_run(case, body["run_id"], dataset_id=dataset_id)
         else:
             if "dataset_id" in body:
                 raise RequestError("A shared dataset ID applies only to shared collection data.")
             selected = resolve_latest(case, body["run_id"])
-            verify_export(run_path(case, selected))
+            if not re.fullmatch(r"[0-9a-f]{16}", selected) or not run_path(case, selected).is_dir():
+                raise RequestError("Choose a saved collection to plot.")
+            # The worker verifies the pinned archive before using any evidence.
+            # Hashing here would delay registration and hold the jobs API lock.
         arguments = [action, "--case", str(case), "--goal", body["goal"], "--run", selected,
                      "--min-hops", str(lower), "--max-hops", str(upper)]
         if "connection_scope" in body:

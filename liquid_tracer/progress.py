@@ -12,6 +12,10 @@ from .performance import public_api_diagnostics
 
 
 MESSAGES = {
+    "preparing_plot": "Checking saved plot inputs and destination",
+    "verifying_files": "Verifying saved file checksums",
+    "loading_collection": "Loading verified transaction data",
+    "projecting_collection": "Preparing this investigation's shared collection snapshot",
     "collecting": "Collecting transaction data",
     "collection_complete": "Transaction data collection finished",
     "collection_paused": "Transaction data collection paused",
@@ -143,6 +147,8 @@ def public_progress(event):
         return None
     value = {"phase": event["phase"], "completed": done, "total": total,
              "message": MESSAGES[event["phase"]]}
+    if value["phase"] == "verifying_files" and total:
+        value["message"] += f"; {done / 1048576:,.1f} of {total / 1048576:,.1f} MiB checked"
     if value["phase"].startswith("address_counts"):
         value.update(_public_api_workers(event))
         fetched = event.get("fetched")

@@ -11,6 +11,7 @@ import uuid
 
 from .common import TraceError, canonical, digest, now, parse_outpoint, read_json, save_json
 from .investigations import effective_run_settings, list_investigations, read_case, validate_settings
+from .progress import report_progress
 
 DIRECTORY = ".shared-collection"
 IDENTITY = re.compile(r"[0-9a-f]{32}\Z")
@@ -41,7 +42,7 @@ def dataset_path(case):
     return _safe(_safe(case).parent / DIRECTORY)
 
 
-def _source(case, metadata=None, *, verify=True):
+def _source(case, metadata=None, *, verify=True, progress=None):
     """Determine source identity without contacting an API."""
     from .api import ENTERPRISE
     from .cli import run_path, verify_export
@@ -58,8 +59,10 @@ def _source(case, metadata=None, *, verify=True):
             parent = cached[1]
         else:
             if verify:
-                verify_export(archive)
+                verify_export(archive, progress=progress)
+            report_progress(progress, "loading_collection", 0, 1)
             parent = read_json(trace_file)
+            report_progress(progress, "loading_collection", 1, 1)
             _remember(_SOURCE_HINTS, trace_file, (signature, {key: parent.get(key) for key in ("case_id", "run_id", "source")}))
         if parent.get("case_id") != metadata["case_id"] or parent.get("run_id") != metadata["latest_run"]:
             raise TraceError("The selected collection does not belong to its investigation")
@@ -83,22 +86,41 @@ def _dataset_metadata(path):
     return metadata
 
 
-def _compatible(case, dataset, *, verify=True):
+def _compatible(case, dataset, *, verify=True, progress=None):
     metadata = read_case(case)
-    source, _ = _source(case, metadata, verify=verify)
+    source, _ = _source(case, metadata, verify=verify, progress=progress)
     if metadata["blockchain"] != dataset["blockchain"] or source != dataset["source"]:
         raise TraceError("Shared collection requires the same blockchain and API source or identical fixture")
     return source
 
 
-def load_shared_run(case, run_id="latest", *, dataset_id=None):
+def pin_shared_run(case, run_id="latest", dataset_id=None):
+    """Select an immutable run for admission without loading or trusting evidence.
+
+    The worker must still call load_shared_run for full source compatibility,
+    path, checksum, and archive identity validation before using the selection.
+    """
+    from .cli import resolve_latest, run_path
+    path = dataset_path(case)
+    metadata = _dataset_metadata(path)
+    if dataset_id is not None and dataset_id != metadata["case_id"]:
+        raise TraceError("The shared dataset identity changed; select its current saved collection")
+    selected = resolve_latest(path, run_id)
+    if not isinstance(selected, str) or not RUN_ID.fullmatch(selected):
+        raise TraceError("Choose a saved shared collection run")
+    if not _safe(run_path(path, selected)).is_dir():
+        raise TraceError("Choose a saved shared collection run")
+    return selected, path
+
+
+def load_shared_run(case, run_id="latest", *, dataset_id=None, progress=None):
     """Verify a pinned dataset archive and compatibility with a focused case."""
     from .cli import run_path, resolve_latest, verify_export
     path = dataset_path(case)
     metadata = _dataset_metadata(path)
     if dataset_id is not None and dataset_id != metadata["case_id"]:
         raise TraceError("The shared dataset identity changed; select its current saved collection")
-    _compatible(_safe(case), metadata)
+    _compatible(_safe(case), metadata, progress=progress)
     run_id = resolve_latest(path, run_id)
     if not isinstance(run_id, str) or not RUN_ID.fullmatch(run_id):
         raise TraceError("Choose a saved shared collection run")
@@ -108,8 +130,10 @@ def load_shared_run(case, run_id="latest", *, dataset_id=None):
         parts = line.split("  ", 1)
         if len(parts) == 2:
             _safe(archive / parts[1])
-    verify_export(archive)
+    verify_export(archive, progress=progress)
+    report_progress(progress, "loading_collection", 0, 1)
     state = read_json(archive / "trace.json")
+    report_progress(progress, "loading_collection", 1, 1)
     if (state.get("case_id") != metadata["case_id"] or state.get("run_id") != run_id
             or state.get("source") != metadata["source"]
             or state.get("shared_collection", {}).get("dataset_id") != metadata["case_id"]):

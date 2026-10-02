@@ -15,6 +15,7 @@ import tempfile
 from .common import TraceError, canonical, digest, output_kind, parse_outpoint, read_json, save_json
 from .group_hops import normalize_reference_name
 from .investigations import read_case
+from .progress import report_progress
 
 
 def _project(state, seeds, case_id, hop_reference_name):
@@ -172,7 +173,7 @@ def _copy_observations(state, archive, destination, manifest_names):
     save_json(destination / "evidence-index.json", copied)
 
 
-def materialize_shared_run(case, run_id="latest", dataset_id=None):
+def materialize_shared_run(case, run_id="latest", dataset_id=None, *, progress=None):
     """Return a sealed local source run; never update private latest/history."""
     from .cli import verify_export
     from .export import build_graph
@@ -188,7 +189,7 @@ def materialize_shared_run(case, run_id="latest", dataset_id=None):
             raise TraceError("Choose this investigation's starting outputs before plotting shared data")
         seeds = sorted({f"{txid}:{index}" for txid, index in map(parse_outpoint, raw_seeds)})
         reference = normalize_reference_name(metadata.get("run_defaults", {}).get("hop_reference_name", ""))
-    _, source, archive = load_shared_run(case, run_id, dataset_id=dataset_id)
+    _, source, archive = load_shared_run(case, run_id, dataset_id=dataset_id, progress=progress)
     manifest = (archive / "SHA256SUMS").read_bytes()
     names = {line.split("  ", 1)[1] for line in manifest.decode().splitlines()}
     for name in names:
@@ -209,8 +210,10 @@ def materialize_shared_run(case, run_id="latest", dataset_id=None):
                 parts = line.split("  ", 1)
                 if len(parts) == 2:
                     _ordinary(target / parts[1])
-            verify_export(target)
+            verify_export(target, progress=progress)
+            report_progress(progress, "loading_collection", 0, 1)
             saved = read_json(_ordinary(target / "trace.json"))
+            report_progress(progress, "loading_collection", 1, 1)
             if (saved.get("projection_sha256") != fingerprint or saved.get("run_id") != derived_id
                     or saved.get("case_id") != metadata["case_id"] or saved.get("seeds") != seeds
                     or saved.get("hop_reference_name", "") != reference
@@ -218,6 +221,7 @@ def materialize_shared_run(case, run_id="latest", dataset_id=None):
                            for key in ("dataset_id", "run_id", "archive_sha256"))):
                 raise TraceError("Shared projection identity conflicts with an existing saved run")
             return derived_id
+        report_progress(progress, "projecting_collection", 0, 1)
         state = _project(source, seeds, metadata["case_id"], reference)
         state.update(run_id=derived_id, root_run_id=derived_id, projection_sha256=fingerprint,
                      investigation={"case_id": metadata["case_id"], "name": metadata.get("name"), "miro_board": None})
@@ -249,7 +253,7 @@ def materialize_shared_run(case, run_id="latest", dataset_id=None):
             files = sorted(path for path in temporary.rglob("*") if path.is_file())
             (temporary / "SHA256SUMS").write_text("".join(
                 digest(path.read_bytes()) + "  " + str(path.relative_to(temporary)) + "\n" for path in files), encoding="utf-8")
-            verify_export(temporary)
+            verify_export(temporary, progress=progress)
             temporary.rename(target)
         finally:
             if temporary.exists():

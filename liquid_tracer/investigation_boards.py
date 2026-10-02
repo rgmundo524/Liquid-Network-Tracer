@@ -493,7 +493,9 @@ def generate_and_sync(case, goal, run_id="latest", min_hops=0, max_hops=10, *, i
     sync_board; resuming must not generate a second layout or board.
     """
     from .plots import preview_plot
+    from .progress import report_progress
 
+    report_progress(progress, "preparing_plot", 0, 1)
     goal = _goal(goal)
     case, metadata, _ = _paths(case)
     if layout_mode not in ("fresh", "update"):

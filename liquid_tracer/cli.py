@@ -1,5 +1,6 @@
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import subprocess
@@ -452,26 +453,43 @@ def save_latest(case, run_id):
         save_json(path, metadata)
 
 
-def verify_export(directory):
-    """Verify archived bytes before using a completed run as new evidence input."""
+def verify_export(directory, *, progress=None):
+    """Verify archived bytes with bounded memory and cancellable progress."""
     directory = Path(directory)
     manifest = directory / "SHA256SUMS"
     if not manifest.is_file():
         raise TraceError("Saved run has no SHA256SUMS manifest; use an intact completed export")
-    seen = set()
+    seen, files = set(), []
+    base = directory.resolve()
     for line in manifest.read_text(encoding="utf-8").splitlines():
         parts = line.split("  ", 1)
         if len(parts) != 2 or len(parts[0]) != 64 or any(c not in "0123456789abcdef" for c in parts[0]):
             raise TraceError("Malformed saved-run checksum manifest")
         checksum, name = parts
         path = directory / name
-        if not path.resolve().is_relative_to(directory.resolve()) or name in seen or not path.is_file():
+        if not path.resolve().is_relative_to(base) or name in seen or not path.is_file():
             raise TraceError("Missing, duplicated, or invalid file in saved-run manifest: " + name)
-        if digest(path.read_bytes()) != checksum:
-            raise TraceError("Saved-run checksum mismatch: " + name + "; restore the original evidence")
+        files.append((path, name, checksum, path.stat().st_size))
         seen.add(name)
     if not {"trace.json", "graph.json", "miro-plan.json"}.issubset(seen):
         raise TraceError("Saved-run manifest is missing required trace or graph files")
+    total = sum(size for _, _, _, size in files)
+    completed = 0
+    started = time.monotonic()
+    report_progress(progress, "verifying_files", completed, total)
+    for path, name, checksum, size in files:
+        hashed, read = hashlib.sha256(), 0
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                read += len(chunk)
+                if read > size:
+                    raise TraceError("Saved-run file changed during verification: " + name)
+                hashed.update(chunk)
+                completed += len(chunk)
+                report_progress(progress, "verifying_files", completed, total,
+                                elapsed_seconds=time.monotonic() - started)
+        if read != size or hashed.hexdigest() != checksum:
+            raise TraceError("Saved-run checksum mismatch: " + name + "; restore the original evidence")
 
 
 def board_id(value):

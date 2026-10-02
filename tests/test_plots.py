@@ -678,7 +678,7 @@ class PlotTests(unittest.TestCase):
             preview_plot(self.case, goal)
         with patch("liquid_tracer.cli.verify_export", wraps=verify_export) as verify:
             self.assertEqual(len(list_plots(self.case)), 3)
-        verify.assert_called_once_with(self.archive)
+        verify.assert_called_once_with(self.archive, progress=None)
 
     def test_bootstrap_collection_without_transactions_has_empty_reviewable_full_plot(self):
         state = deepcopy(self.state)

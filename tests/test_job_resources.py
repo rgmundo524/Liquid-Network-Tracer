@@ -14,6 +14,14 @@ class JobResourceTests(unittest.TestCase):
             resource = job_resources(["plot-sync", "--name", name, "--max-items", "750"], "plot-sync")
             self.assertEqual(resource, {"resource_kind": "board", "resource_key": "new-board"})
 
+    def test_fresh_graph_reservation_does_not_inspect_board_mappings(self):
+        with patch("liquid_tracer.investigation_boards.list_boards",
+                   side_effect=AssertionError("Mapping validation belongs in the worker")):
+            resource = job_resources(["plot-sync", "--case", "/synthetic/case", "--run", "a" * 16,
+                                      "--name", "New graph"], "plot-sync", Path("/synthetic/case"))
+        self.assertEqual(resource, {"resource_kind": "board", "resource_key": "new-board",
+                                    "source_run_id": "a" * 16})
+
     def test_old_previews_remain_case_exclusive_before_credential_access(self):
         with tempfile.TemporaryDirectory() as directory:
             case = Path(directory)
