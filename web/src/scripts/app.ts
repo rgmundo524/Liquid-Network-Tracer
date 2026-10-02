@@ -2620,7 +2620,9 @@ async function pollJob(identity: string): Promise<void> {
     }
     if (active.action === "shared-trace" && state.activeCase?.id && state.activeCase.id !== active.caseId)
       await refreshSharedCollection(state.activeCase.id);
-    await refreshSession();
+    // Output lookups only populate their editor; refreshing every investigation
+    // can be expensive and must not delay displaying these completed results.
+    if (!["lookup", "change-output-lookup"].includes(active.action)) await refreshSession();
     refreshJobView();
   } catch (error) {
     if (active.action.startsWith("miro-frame-") && canApplyJobView(active)) {resetFrameRecovery(); dialog.close();}

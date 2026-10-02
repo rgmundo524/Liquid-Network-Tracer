@@ -448,7 +448,12 @@ class LocalServer(ThreadingHTTPServer):
         runs = []
         directory = safe_path(case, ["runs"])
         if directory.is_dir():
-            for path in directory.iterdir():
+            # Case lists expose only the selected snapshot. Historical and
+            # projected plot archives can be large; load them only for detail.
+            latest = summary["latest_run"]
+            paths = (directory.iterdir() if detail else
+                     [directory / latest] if isinstance(latest, str) and RUN_ID.fullmatch(latest) else [])
+            for path in paths:
                 if not RUN_ID.fullmatch(path.name) or path.is_symlink() or not path.is_dir():
                     continue
                 try:

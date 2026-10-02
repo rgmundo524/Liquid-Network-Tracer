@@ -22,7 +22,7 @@ const txid = 'a'.repeat(64);
 const defaults = {hops: 1, hop_reference_name: '', max_transactions: 20, max_outpoints: 100, max_requests: 30,
   max_seconds: 60, max_new_items: 750, layout_attempts: 25, connector_style: 'straight'};
 
-async function harness(respond = () => undefined, {hash = '', storage = new Map(), importAction, importPending = () => false, systemNotification} = {}) {
+async function harness(respond = () => undefined, {hash = '', storage = new Map(), importAction, importPending = () => false, systemNotification, changeOutputHandlers = {}} = {}) {
   frameRecovery.resetFrameRecovery();
   const calls = [], listeners = {}, windowListeners = {}, dialogListeners = {}, notifications = [], importActions = [];
   const editorResets = [], downloads = [], downloadBlobs = [], revokedDownloads = [];
@@ -51,6 +51,7 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
     },
     changeOutputsPending() {return false;}, changeOutputsPanel() {return "";},
     changeOutputsAction() {return false;}, changeOutputsLookupComplete() {return false;},
+    ...changeOutputHandlers,
     nameColorsPanel() {return "";}, nameColorsAction() {return false;}, addressImportAction() {return false;},
     document: {
       querySelector(selector) {
@@ -4306,3 +4307,66 @@ test('empty Starter preview suggests broadening the search before collecting mor
   assert.match(view.workspace(), /Increase the connection hop limit or choose All saved connections; collect more only if evidence is missing/);
   assert.doesNotMatch(view.workspace(), /No matching paths were found in this saved data/);
 });
+
+
+for (const action of ['lookup', 'change-output-lookup']) {
+  for (const sessionState of ['deferred', 'failed']) {
+    test(`output lookup completion renders ${action} without a ${sessionState} workspace refresh`, async () => {
+      let releaseSession;
+      const sessionWait = new Promise(resolve => {releaseSession = resolve;});
+      const session = {csrf: 'test', settings: defaults, cases: []};
+      let sessionReads = 0, changeLoaded = false;
+      const caseId = action === 'lookup' ? null : 'output-case';
+      const task = activeTask('ready-output-job', caseId, {action, live: true});
+      const transaction = {txid, outputs: [{vout: 0, selectable: true,
+        address: 'ready-output-address', value_text: '125000', asset: 'asset'}]};
+      const result = action === 'lookup' ? {transactions: [transaction]} : transaction;
+      const view = await harness(path => {
+        if (path === '/api/session') {
+          if (++sessionReads === 1) return session;
+          return sessionState === 'deferred' ? sessionWait : {error: 'Unrelated workspace refresh failed'};
+        }
+        if (path === '/api/lookup' || path === '/api/cases/output-case/actions') return task;
+        if (path === '/api/jobs/ready-output-job') return {...task, status: 'succeeded', result};
+      }, {changeOutputHandlers: {
+        // Component behavior is covered by change-outputs.test.mjs. This marker
+        // proves the real app rendered after applying the completion callback.
+        changeOutputsPanel() {return changeLoaded ? '<div>ready-change-output-address</div>' : '';},
+        changeOutputsLookupComplete(id, jobId, value) {
+          assert.equal(id, caseId); assert.equal(jobId, task.id);
+          assert.equal(value.outputs[0].address, 'ready-output-address');
+          changeLoaded = true; return true;
+        },
+      }});
+      if (action === 'lookup') {
+        view.navigate('new');
+        view.newForm({name: 'Keep investigation draft', txids: txid, seeds: `${txid}:2`});
+      } else {
+        view.state.activeCase = multiCase(caseId);
+        view.state.page = 'case-settings'; view.render();
+      }
+      await view.startJob(action === 'lookup' ? '/api/lookup' : '/api/cases/output-case/actions',
+        {action, txids: txid}, action, true, caseId ?? undefined);
+      let settled = false;
+      const polling = view.pollJob(task.id).then(() => {settled = true;});
+      try {
+        await new Promise(setImmediate);
+        assert.match(view.app.innerHTML, action === 'lookup' ? /ready-output-address/ : /ready-change-output-address/,
+          'Ready output rows must render before any unrelated session request resolves');
+        assert.equal(settled, true, 'The completion poll must finish promptly');
+        assert.equal(sessionReads, 1, 'A read-only lookup must not refresh the global workspace');
+        assert.equal(view.state.jobs.get(task.id).status, 'succeeded');
+        assert.equal(view.state.jobs.get(task.id).outcomeError, undefined);
+        assert.equal(view.isBusy(), false);
+        if (action === 'lookup') {
+          assert.equal(view.state.draft.name, 'Keep investigation draft');
+          assert.equal(view.state.draft.seeds, `${txid}:2`);
+          assert.equal(view.state.draft.selected.size, 0);
+        } else assert.equal(view.state.draft.reports.length, 0);
+      } finally {
+        releaseSession(session);
+        await polling;
+      }
+    });
+  }
+}
