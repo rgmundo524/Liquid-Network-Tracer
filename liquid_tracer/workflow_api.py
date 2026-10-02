@@ -174,10 +174,10 @@ def case_workflow(case):
 
 def workflow_action(server, case, metadata, body):
     from .boards import board_options
-    from .cli import board_id, resolve_latest, run_path, verify_export
+    from .cli import board_id, resolve_latest
     from .investigation_boards import GOALS, list_boards
     from .plots import reviewed_plot
-    from .web import RequestError
+    from .web import RequestError, RUN_ID, safe_path
     from .investigations import effective_run_settings
 
     action = body["action"]
@@ -234,16 +234,22 @@ def workflow_action(server, case, metadata, body):
         if data_source not in ("investigation", "shared"):
             raise RequestError("Choose this investigation's collection or the shared collection.")
         if data_source == "shared":
-            from .shared_collection import resolve_shared_run
+            from .shared_collection import select_shared_run
             dataset_id = body.get("dataset_id")
             if not isinstance(dataset_id, str) or not re.fullmatch(r"[0-9a-f]{32}", dataset_id):
                 raise RequestError("Choose a compatible shared collection dataset.")
-            selected, _ = resolve_shared_run(case, body["run_id"], dataset_id=dataset_id)
+            selected, _ = select_shared_run(case, body["run_id"], dataset_id=dataset_id)
         else:
             if "dataset_id" in body:
                 raise RequestError("A shared dataset ID applies only to shared collection data.")
             selected = resolve_latest(case, body["run_id"])
-            verify_export(run_path(case, selected))
+            if not RUN_ID.fullmatch(selected):
+                raise RequestError("Choose a saved collection run.")
+            # Full checksum verification and graph loading belong to the
+            # visible, cancellable worker, not the global admission lock.
+            for filename in ("trace.json", "SHA256SUMS"):
+                if not safe_path(case, ["runs", selected, filename]).is_file():
+                    raise RequestError("Choose an intact saved collection run.")
         arguments = [action, "--case", str(case), "--goal", body["goal"], "--run", selected,
                      "--min-hops", str(lower), "--max-hops", str(upper)]
         if "connection_scope" in body:

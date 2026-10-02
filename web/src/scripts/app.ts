@@ -215,6 +215,7 @@ type MiroEditConflictReport = {
 };
 type JobResource = {resource_kind: "collection" | "shared_collection" | "plot" | "board" | "exclusive"; resource_key?: string | null};
 type Job = {
+  client_request_id?: string;
   resource_kind?: JobResource["resource_kind"];
   resource_key?: string | null;
   source_run_id?: string | null;
@@ -252,6 +253,8 @@ type AddressPage = { run_id: string; rows: AddressRow[]; total: number; offset: 
 type CaseView = "collect" | "plots" | "boards" | "history";
 type Page = "dashboard" | "new" | "case" | "settings" | "case-settings" | "addresses";
 type ActiveJob = {
+  submitting?: boolean;
+  serverJobId?: string;
   resource_kind?: JobResource["resource_kind"];
   resource_key?: string | null;
   source_run_id?: string | null;
@@ -340,6 +343,7 @@ let dialogMergeApproval = "";
 let dialogPreviewId = "";
 let dialogRebuild: { caseId: string; sourceBoard: string; runId: string; budgetLimitsEnabled: boolean } | null = null;
 let submitting = false;
+let submissionSequence = 0;
 let pageGeneration = 0;
 let viewRevision = 0;
 let workflowDraft = {caseId: "", dataSource: "investigation" as "investigation" | "shared", sharedRun: "", datasetId: "", goal: "full" as PlotGoal, minHops: "0", maxHops: "10", connectionScope: "hop_limited" as ConnectionScope, connectionMaxHops: "10", includeUnspent: false, includeUnspendable: false, layoutMode: "fresh" as PlotLayoutMode, layoutBoard: "", plot: "", board: "", boardPlot: "", boardGoal: "full" as PlotGoal, boardName: "", savedBoardName: "", linkedBoardName: "", boardUrl: ""};
@@ -500,9 +504,10 @@ const runningJobs = (): ActiveJob[] => [...state.jobs.values()].filter(job => jo
 const viewingCase = (caseId?: string): boolean => !!caseId && state.activeCase?.id === caseId && ["case", "case-settings", "addresses"].includes(state.page);
 const scopeBusy = (caseId?: string): boolean => runningJobs().some(job => job.caseId === caseId);
 const investigationEditorBusy = (): boolean => viewingCase(state.activeCase?.id) && (changeOutputsPending() || inputImportPending());
-const isBusy = (): boolean => submitting || investigationEditorBusy() ||
+const submissionBusy = (): boolean => runningJobs().some(job => job.submitting);
+const isBusy = (): boolean => submitting || submissionBusy() || investigationEditorBusy() ||
   (state.page === "new" ? scopeBusy() : viewingCase(state.activeCase?.id) ? scopeBusy(state.activeCase!.id) : false);
-const draftBusy = (): boolean => submitting || investigationEditorBusy();
+const draftBusy = (): boolean => submitting || submissionBusy() || investigationEditorBusy();
 function requestedResource(action: string, body: Record<string, unknown> = {}, caseId: string | null | undefined = state.activeCase?.id): JobResource {
   if (action === "shared-trace") return {resource_kind: "shared_collection", resource_key: "workspace-shared"};
   if (["trace", "address-counts"].includes(action)) return {resource_kind: "collection"};
@@ -869,6 +874,7 @@ function jobProgress(job: ActiveJob): string {
 
 function taskActivity(job: ActiveJob): {kind: "computing" | "api" | "waiting" | "working"; label: string} {
   const progress = job.progress;
+  if (job.submitting) return {kind: "waiting", label: "Submitting"};
   if (job.status === "cancelling") return {kind: "working", label: "Canceling"};
   if (progress?.stage === "resource_wait") {
     const labels = {memory: "Waiting for memory allowance", cpu: "Waiting for CPU capacity",
@@ -880,7 +886,7 @@ function taskActivity(job: ActiveJob): {kind: "computing" | "api" | "waiting" | 
   if (progress?.phase === "waiting") return {kind: "waiting", label: "Waiting for Miro API"};
   if (progress?.shared_api_wait_reason === "server_cooldown" && (progress.shared_api_wait_seconds || 0) > 0)
     return {kind: "waiting", label: "Waiting for Explorer API cooldown"};
-  if (progress && ["optimizing", "compacting", "layout", "building_plan", "pegout_paths"].includes(progress.phase))
+  if (progress && ["loading_collection", "preparing_plot", "optimizing", "compacting", "layout", "building_plan", "pegout_paths"].includes(progress.phase))
     return {kind: "computing", label: "Computing"};
   if (progress && (progress.phase === "collecting" || progress.phase.startsWith("address_counts") ||
       ["preflight", "updating", "removing", "framing", "recovery", "frame_recovery", "creating", "pegout_search"].includes(progress.phase)))
@@ -2178,6 +2184,17 @@ function pruneFinishedJobs(): void {
 }
 
 function rememberJob(job: Job, local?: {action: string; caseId?: string; live: boolean; generation: number; viewRevision: number; lookupTxids?: string; resource_kind: JobResource["resource_kind"]; resource_key?: string | null; source_run_id?: string}): ActiveJob {
+  // The job list may acknowledge our request before the POST response arrives.
+  // Correlation is exact: never guess from the case, action, or start time.
+  const pending = job.client_request_id ? state.jobs.get(job.client_request_id) : undefined;
+  if (pending && pending.submitting !== undefined) {
+    pending.serverJobId = job.id;
+    state.jobs.delete(pending.id);
+    local = {action: pending.action, caseId: pending.caseId, live: pending.live,
+      generation: pending.generation!, viewRevision: pending.viewRevision!, lookupTxids: pending.lookupTxids,
+      resource_kind: pending.resource_kind!, resource_key: pending.resource_key,
+      source_run_id: pending.source_run_id || undefined};
+  }
   const existing = state.jobs.get(job.id);
   if (existing) {
     // Discovery can observe a fast job before its initiating POST returns.
@@ -2193,12 +2210,12 @@ function rememberJob(job: Job, local?: {action: string; caseId?: string; live: b
     resource_kind: job.resource_kind || local?.resource_kind, resource_key: job.resource_key ?? local?.resource_key,
     source_run_id: job.source_run_id || local?.source_run_id, execution_state: job.execution_state, viewRevision: local?.viewRevision,
     id: job.id, action: local?.action || job.action || "recovered", caseId: local?.caseId ?? job.case_id ?? undefined,
-    started: Number.isFinite(job.started_at) ? job.started_at! * 1000 : Date.now(),
+    started: pending?.started ?? (Number.isFinite(job.started_at) ? job.started_at! * 1000 : Date.now()),
     finishedAt: Number.isFinite(job.finished_at) ? job.finished_at! * 1000 : undefined,
     message: job.message || "A local action is running…", live: local?.live ?? job.live ?? true,
     progress: job.progress, cancellable: job.cancellable === true, cancelling: job.status === "cancelling",
-    status: job.status || "running", generation: local?.generation, lookupTxids: local?.lookupTxids,
-    outcome: ["succeeded", "failed", "canceled"].includes(job.status) ? job : undefined,
+    status: local ? "running" : job.status || "running", generation: local?.generation, lookupTxids: local?.lookupTxids,
+    outcome: !local && ["succeeded", "failed", "canceled"].includes(job.status) ? job : undefined,
   };
   state.jobs.set(job.id, active);
   // Discovered terminal history stays silent because it is never polled. Do not
@@ -2346,7 +2363,17 @@ async function startJob(
   const generation = pageGeneration;
   const revision = ++viewRevision;
   const lookupTxids = action === "lookup" ? state.draft.txids : undefined;
-  submitting = true;
+  const submissionId = `request-${Date.now().toString(36)}-${(++submissionSequence).toString(36)}-${Math.random().toString(36).slice(2)}`;
+  const local = {action, caseId, live, generation, viewRevision: revision, lookupTxids, ...resource,
+    source_run_id: typeof request.run_id === "string" && request.run_id !== "latest" ? request.run_id : undefined};
+  const correlated = /^\/api\/cases\/[^/]+\/actions$/.test(path);
+  if (correlated) request.client_request_id = submissionId;
+  const message = "Submitting task to the local server…";
+  const pending: ActiveJob = {...local, id: submissionId, started: Date.now(), status: "running",
+    submitting: true, message, cancellable: false, cancelling: false, execution_state: "starting",
+    progress: {phase: "submitting", completed: 0, total: 0, message}};
+  state.jobs.set(submissionId, pending);
+  tasksOpen = true;
   render();
   try {
     const job = await api<Job>(path, request);
@@ -2359,14 +2386,30 @@ async function startJob(
       const settingsDraft = settingsDrafts.get(caseId);
       if (settingsDraft) settingsDraft.settings.hop_reference_name = hop_reference_name;
     }
-    rememberJob(job, {action, caseId, live, generation, viewRevision: revision, lookupTxids, ...resource,
-      source_run_id: typeof request.run_id === "string" && request.run_id !== "latest" ? request.run_id : undefined});
-    tasksOpen = true;
-    if (generation === pageGeneration) {state.error = ""; dialog.close();}
-    schedulePoll(job.id, 150);
+    // A discovered job already owns its progress and may even have completed.
+    // Do not replace that newer state with the older POST response.
+    if (!pending.serverJobId) {
+      state.jobs.delete(submissionId);
+      rememberJob(job, local).started = pending.started;
+    }
+    if (!pending.serverJobId && generation === pageGeneration && revision === viewRevision) {state.error = ""; dialog.close();}
+    if (state.jobs.get(job.id)?.status === "running") schedulePoll(job.id, 150);
     return job.id;
+  } catch (error) {
+    // An interrupted response can occur after the server accepted the task.
+    // Discover an acknowledged job before reporting a submission failure.
+    if (correlated && !(error instanceof ApiError)) await discoverJobs();
+    if (pending.serverJobId) return pending.serverJobId;
+    pending.submitting = false;
+    pending.status = "failed";
+    pending.finishedAt = Date.now();
+    pending.progress = undefined;
+    const reason = error instanceof Error ? error.message : "The local request could not be completed.";
+    pending.message = error instanceof ApiError ? reason : `Task submission was not confirmed. ${reason} Check active tasks before retrying.`;
+    pruneFinishedJobs();
+    if (generation !== pageGeneration) {toast(`${taskName(pending)}: ${pending.message}`, true); return null;}
+    throw error;
   } finally {
-    submitting = false;
     render();
   }
 }
@@ -2399,7 +2442,7 @@ async function cancelJob(identity: string): Promise<void> {
 
 async function pollJob(identity: string): Promise<void> {
   const active = state.jobs.get(identity);
-  if (!active || !["running", "cancelling"].includes(active.status) || pollingJobs.has(identity)) return;
+  if (!active || active.submitting || !["running", "cancelling"].includes(active.status) || pollingJobs.has(identity)) return;
   pollingJobs.add(identity);
   const wasBusy = isBusy();
   const refreshJobView = () => {
