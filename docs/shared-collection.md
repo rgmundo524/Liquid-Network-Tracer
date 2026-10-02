@@ -25,6 +25,14 @@ settings from the individual investigations. Generating another plot reuses
 saved blockchain evidence; it does not repeat transaction or address-count
 requests. Updating or publishing a Miro board still uses the Miro API.
 
+Address counts completed later with `address-counts --case cases/.shared-collection`
+are available to newly generated plots, including investigations that already
+have a saved projection of that shared snapshot. Plots use the newest saved
+count for each relevant address from the matching shared dataset or the
+investigation. Saved plots keep their captured counts; generate a new preview
+or board update to include newer counts. No additional count requests or
+changes to the sealed transaction snapshot are needed.
+
 ## Collection policy and continuation
 
 A fresh shared collection captures the union of configured seeds in the selected
