@@ -38,6 +38,7 @@ from .branch_boundaries import branch_order, boundary_metrics
 from .named_group_layout import (CORE_STRAIGHTNESS, center_order, center_metrics, group_structure)
 from .transaction_neighborhoods import neighborhood_order, neighborhood_metrics
 from .hub_layout import hub_plan, hub_layout_view
+from .trace_layout import trace_structure, trace_order, trace_priorities, trace_metrics
 
 
 ALGORITHM = "elk_layered_v1"
@@ -382,7 +383,7 @@ def _request_graph(graph):
     # Source-first layering keeps independent hub spenders in a vertical
     # column even when some output branches terminate earlier than others.
     hub_layering = ({"elk.layered.layering.strategy": "LONGEST_PATH_SOURCE"}
-                    if hub_plan(graph)["hubs"] else {})
+                    if hub_plan(graph)["hubs"] or graph.get("graph_options", {}).get("layout_style") == "trace" else {})
     nodes = {node["id"]: node for node in graph["nodes"]}
     fee_ids = {key for key, item in graph.get("fee_items", {}).items() if item["endpoint"] == "shapes"}
     main = {key: node for key, node in nodes.items() if key not in fee_ids}
@@ -399,9 +400,14 @@ def _request_graph(graph):
                                            "elk.portConstraints": "FIXED_SIDE"}}
     edge_values = []
     priorities = edge_priorities(graph)
+    trace = trace_structure(graph)
     centered = group_structure(graph)
-    for key in centered["edges"]:
-        priorities[key] = max(priorities[key], CORE_STRAIGHTNESS)
+    if trace["enabled"]:
+        for key, priority in trace_priorities(graph, trace).items():
+            priorities[key] = max(priorities.get(key, 1), priority)
+    else:
+        for key in centered["edges"]:
+            priorities[key] = max(priorities[key], CORE_STRAIGHTNESS)
     main_edges = sorted((edge for edge in graph["edges"] if edge["source"] in main and edge["target"] in main),
                         key=lambda edge: edge["id"])
     for index, edge in enumerate(main_edges):
@@ -430,8 +436,9 @@ def _request_graph(graph):
                                "layoutOptions": {"elk.edgeLabels.placement": "CENTER"}}]
         edge_values.append(item)
     ordered_nodes = neighborhood_order(graph, branch_order(graph))
-    centered_order = center_order(graph, ordered_nodes, centered)
-    center_metadata = {"centerNodeOrder": centered_order} if centered_order is not None else {}
+    centered_order = (trace_order(graph, ordered_nodes, trace) if trace["enabled"]
+                      else center_order(graph, ordered_nodes, centered))
+    center_metadata = {"centerNodeOrder": [key for key in centered_order if key in main]} if centered_order is not None else {}
     boundary_order = ({"branchNodeOrder": [key for key in ordered_nodes if key in main]}
                       if ordered_nodes is not None else {})
     request = {"id": "liquid-layout", "layoutOptions": {
@@ -600,7 +607,10 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style, *, va
                     and columns.get(parent["id"], parent["column"]) < columns.get(node["id"], node["column"])
                     and parent["x"] >= node["x"]):
                 raise TraceError("ELK could not preserve transaction order; no Miro changes were made")
-    for hub, children in hub_layout["roots"].items():
+    for hub, entry in hub_layout.get("entries", {}).items():
+        if hub in nodes and entry in nodes and nodes[entry]["x"] >= nodes[hub]["x"]:
+            raise TraceError("ELK could not preserve the forward entry into a hub; no Miro changes were made")
+    for hub, children in hub_layout.get("forward_roots", hub_layout["roots"]).items():
         if hub in nodes and any(nodes[hub]["x"] >= nodes[child]["x"] for child in children if child in nodes):
             raise TraceError("ELK could not preserve separate hub tree order; no Miro changes were made")
     main = [nodes[key] for key in main_ids]
@@ -617,7 +627,9 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style, *, va
                                                  "profile": candidate.get("branchProfile", "balanced"),
                                                  "boundary_ordering": boundary_ordering,
                                                  "hubs": sorted(hub_nodes(graph)),
-                                                 "hub_rule": "restart_tree_depth_with_return_connections",
+                                                 "hub_rule": ("anchor_hubs_after_trace_entry" if hub_layout.get("entries")
+                                                              else "restart_tree_depth_with_return_connections"),
+                                                 "hub_entries": hub_layout.get("entries", {}),
                                                  "hub_roots": hub_layout["roots"],
                                                  "hub_columns": hub_layout["columns"]},
                         "horizontal_spacing": copy.deepcopy(candidate.get("horizontal_spacing", {})),
@@ -768,6 +780,37 @@ def _validate_rejected_pairs(candidates):
             raise TraceError("ELK returned an unpaired rejected input ordering alternative")
 
 
+def _candidate_score(metrics, miro, ports, organization, neighborhoods, boundaries, centered,
+                     input_policy, *, trace=None):
+    """Keep collision gates strict, then balance readability in Trace layouts.
+
+    Standard retains its existing ordering. Trace costs use normalized mean
+    distances and crossings per edge, so adding unrelated evidence does not
+    overwhelm the selected path merely by increasing a raw count.
+    """
+    standard = (metrics["node_overlaps"], metrics["node_intersections"],
+                miro["node_intersections"], metrics["crossings"], miro["crossings"],
+                ports["endpoint_order_inversions"], ports["coincident_ports"],
+                metrics["connector_overlaps"], miro["connector_overlaps"],
+                centered["alignment_deviation"], centered["center_offset"],
+                boundaries["interleavings"], boundaries["boundary_depth"], boundaries["interbranch_travel"],
+                neighborhoods["flow_order_inversions"], neighborhoods["sibling_interleavings"],
+                neighborhoods["transaction_distance"], neighborhoods["transaction_center_drift"],
+                organization["weighted_vertical_travel"] + metrics["edge_length"], metrics["edge_length"],
+                input_policy != "traced_first")
+    if not trace or not trace["enabled"]:
+        return standard
+    edges = max(1, trace["edge_count"])
+    readability = (4 * trace["spine_alignment"] + 2 * trace["terminal_distance"]
+                   + 3 * trace["branch_interleaving"] + 4 * trace.get("terminal_column_drift", 0)
+                   + 2 * (metrics["crossings"] + miro["crossings"]) / edges
+                   + (metrics["connector_overlaps"] + miro["connector_overlaps"]) / edges)
+    return (bool(metrics["truncated"] or miro["truncated"]),
+            metrics["node_overlaps"], metrics["node_intersections"], miro["node_intersections"],
+            ports["coincident_ports"], ports["endpoint_order_inversions"],
+            round(readability, 8), *standard[3:])
+
+
 def optimize_graph(graph, connector_style="straight", progress=None, *, layout_attempts=None, validation_graph=None):
     """Compare bounded parallel ELK attempts without graph size or time ceilings.
 
@@ -850,16 +893,10 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
             # bends that Miro cannot receive. Branch separation follows every
             # collision gate. Local forks and transaction proximity matter even
             # within one seed lineage; historical date/port order is secondary.
-            score = (score_metrics["node_overlaps"], score_metrics["node_intersections"],
-                     miro_estimate["node_intersections"], score_metrics["crossings"], miro_estimate["crossings"],
-                     endpoint_metrics["endpoint_order_inversions"], endpoint_metrics["coincident_ports"],
-                     score_metrics["connector_overlaps"], miro_estimate["connector_overlaps"],
-                     centered["alignment_deviation"], centered["center_offset"],
-                     boundaries["interleavings"], boundaries["boundary_depth"], boundaries["interbranch_travel"],
-                     neighborhoods["flow_order_inversions"], neighborhoods["sibling_interleavings"],
-                     neighborhoods["transaction_distance"], neighborhoods["transaction_center_drift"],
-                     organization["weighted_vertical_travel"] + score_metrics["edge_length"], score_metrics["edge_length"],
-                     result["layout"]["input_order"]["policy"] != "traced_first")
+            trace = trace_metrics(result) if graph.get("graph_options", {}).get("layout_style") == "trace" else None
+            score = _candidate_score(score_metrics, miro_estimate, endpoint_metrics, organization,
+                                     neighborhoods, boundaries, centered,
+                                     result["layout"]["input_order"]["policy"], trace=trace)
             if best is None or score < best[0]:
                 best = (score, result, metrics, candidate["seed"])
             # Drop the current candidate and its graph views before requesting
@@ -928,6 +965,8 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
     result["layout"]["branch_organization"]["neighborhoods"] = neighborhood_metrics(result)
     if graph.get("graph_options", {}).get("center_name"):
         result["layout"]["named_group"] = center_metrics(result)
+    if graph.get("graph_options", {}).get("layout_style") == "trace":
+        result["layout"]["trace_layout"] = trace_metrics(result)
     after = layout_metrics(result)
     result["layout"]["metrics"] = {"before": before, "after": after, "estimated": True,
                                     "attempt_count": attempts, "candidate_count": candidate_count, "selected_seed": seed,

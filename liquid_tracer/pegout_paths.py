@@ -264,7 +264,7 @@ def _endpoint_matches(state, endpoints, distances):
 
 
 def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=None,
-                 group_context_inputs=False, include_fees=None):
+                 group_context_inputs=False, include_fees=None, hub_addresses=None):
     """Select qualifying transactions, then show their requested local context.
 
     Complete I/O is explicitly versioned in the query so archived path-only
@@ -272,7 +272,8 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
     Explicit fee visibility controls complete-I/O charts; omitting it retains
     the former complete-I/O fee policy for existing direct callers.
     Reachability, endpoint matches and tracked-output evidence never expand
-    when local context is displayed.
+    when local context is displayed. Manual hubs affect placement only after
+    selecting those paths; they neither add transactions nor change endpoints.
     """
     from .export import build_graph
     from .context_groups import group_context_inputs as group_inputs
@@ -352,7 +353,7 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
         edge_ids.update(context_edge_ids | hidden_fee_ids)
     graph = build_graph(reduced, merge_addresses=True, include_fees=include_fees,
                         resolve_saved_inputs=state.get("collection_source", {}).get("kind") == "shared",
-                        saved_transactions=state["transactions"],
+                        saved_transactions=state["transactions"], hub_addresses=hub_addresses,
                         color_attribution_arrows=color_attribution_arrows, center_name=center_name,
                         edge_ids=edge_ids,
                         respect_attribution_hops=query.get("attribution_hop_limits") != "ignore")

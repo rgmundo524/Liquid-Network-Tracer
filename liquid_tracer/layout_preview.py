@@ -48,6 +48,8 @@ def layout_title(graph):
         return "Miro board update layout"
     if layout.get("algorithm") == "dependency_layers_v1":
         return "Dependency layout fallback" if layout.get("fallback_reason") else "Dependency layout"
+    if graph.get("graph_options", {}).get("layout_style") == "trace":
+        return "Trace layout"
     return "ELK layout"
 
 
@@ -60,6 +62,8 @@ def layout_notice(graph, *, include_named_group=True):
         return (str(layout.get("fallback_notice") or "Dependency layout; ELK optimization was not applied.")
                 + " Miro routes may differ. Crossing counts are estimates.")
     notice = LAYOUT_NOTICE
+    if graph.get("graph_options", {}).get("layout_style") == "trace":
+        notice += " Trace layout favors a clear main path, separate branches, and nearby endpoints."
     input_order = layout.get("input_order", {})
     if (isinstance(input_order, dict) and input_order.get("policy") == "geometry"
             and input_order.get("fallback_reason") == "traced_first_order_not_preserved"):

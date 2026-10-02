@@ -1,4 +1,4 @@
-"""The pinned ELK simplex walks keep their results without native recursion."""
+"""The pinned ELK connectivity and simplex walks keep their results without recursion."""
 
 import json
 import os
@@ -62,6 +62,49 @@ module.exports.testHooks = {
     else throw new Error('Unknown test action');
     return this.snapshot(fixture, value);
   },
+  createComponents: function(spec) {
+    var graph = new LGraph, nodes = [];
+    for (var i = 0; i < spec.count; i++) {
+      var node = new LNode(graph);
+      node.testId = node.id_0 = i;
+      for (var p = 0; p < (spec.ports ? spec.ports[i] : 1); p++) {
+        $setNode(new LPort, node);
+      }
+      nodes.push(node);
+    }
+    var order = spec.order || nodes.map(function(_, i) { return i; });
+    order.forEach(function(i) { $add_3(graph.layerlessNodes, nodes[i]); });
+    spec.edges.forEach(function(definition) {
+      var edge = new LEdge;
+      $setSource_0(edge, nodes[definition[0]].ports.array[definition[2] || 0]);
+      $setTarget_0(edge, nodes[definition[1]].ports.array[definition[3] || 0]);
+    });
+    return {graph: graph, nodes: nodes, state: new NetworkSimplexLayerer};
+  },
+  components: function(spec, repeats) {
+    var fixture = this.createComponents(spec), snapshots = [];
+    // Exercise the wrapper's visited-array reuse/reset branch as well as its
+    // initial allocation, using the real compiled layerer state each time.
+    for (var n = 0; n < (repeats || 1); n++) {
+      var components = $connectedComponents(fixture.state, fixture.graph.layerlessNodes);
+      var lists = [], iterator = $listIterator_2(components, 0);
+      while (iterator.currentNode != iterator.this$01.tail) {
+        lists.push($next_9(iterator).array.map(function(node) { return node.testId; }));
+      }
+      snapshots.push({components: lists, visited: Array.from(fixture.state.nodeVisited)});
+    }
+    return snapshots;
+  },
+  componentWalk: function(spec) {
+    var fixture = this.createComponents(spec);
+    fixture.state.nodeVisited = fixture.nodes.map(function(_, i) {
+      return (spec.visited || []).includes(i);
+    });
+    fixture.state.componentNodes = new ArrayList;
+    $connectedComponentsDFS(fixture.state, fixture.nodes[spec.root || 0]);
+    return {component: fixture.state.componentNodes.array.map(function(node) { return node.testId; }),
+      visited: fixture.state.nodeVisited};
+  },
   dfs: $dfs, tight: $tightTreeDFS, post: $postorderTraversal
 };
 """
@@ -94,7 +137,7 @@ function compile(text) {
 
     def test_only_the_reviewed_engine_build_can_be_patched(self):
         result = self.node(r"""
-assert.equal(helper.ENGINE_BUILD, 'non_minified_iterative_network_simplex_v1');
+assert.equal(helper.ENGINE_BUILD, 'non_minified_iterative_network_simplex_v2');
 assert.throws(() => helper.patchEngineSource(source, '0.13.0'), /Unsupported ELK engine version/);
 assert.throws(() => helper.patchEngineSource(source, null), /Unsupported ELK engine version/);
 assert.throws(() => helper.patchEngineSource(source + '\n', '0.12.0'), /Unsupported ELK worker source/);
@@ -172,6 +215,87 @@ for (let trial = 0; trial < 120; trial++) {
 console.log(JSON.stringify({checks}));
 """)
         self.assertEqual(result["checks"], 375)
+
+    def test_layered_components_keep_original_membership_and_traversal_order(self):
+        result = self.node(r"""
+const original = compile(source), patched = compile(transformed);
+const fixed = [
+  {count: 0, edges: []},
+  {count: 1, ports: [0], edges: []},
+  // Isolated nodes and components of increasing/equal sizes check the wrapper's
+  // largest-component-first behavior, which is not a full size sort.
+  {count: 11, edges: [[1, 2], [3, 4], [4, 5], [6, 7], [7, 8], [9, 10]]},
+  // Ports 0 and 2 are empty at the root. Incoming edges must be traversed before
+  // outgoing edges within port 1, then port 3 must resume after its descendants.
+  {count: 7, ports: [4, 2, 2, 1, 1, 0, 1], edges: [
+    [0, 1, 1, 0], [2, 0, 0, 1], [0, 3, 3, 0], [1, 4, 1, 0],
+    [0, 1, 1, 0], [1, 2, 0, 1], [2, 2, 1, 1], [4, 0, 0, 1],
+  ]},
+  {count: 4, ports: [3, 1, 1, 1], order: [3, 1, 0, 2], edges: [
+    [0, 1, 1, 0], [1, 2], [2, 0, 0, 2], [3, 3],
+  ]},
+];
+let checks = 0;
+for (const spec of fixed) {
+  const expected = original.components(spec, 2), actual = patched.components(spec, 2);
+  assert.deepEqual(actual, expected);
+  assert.deepEqual(actual[0], actual[1], 'visited state must reset between calls');
+  checks++;
+}
+assert.deepEqual(patched.components(fixed[2])[0].components,
+  [[3, 4, 5], [1, 2], [0], [6, 7, 8], [9, 10]]);
+assert.deepEqual(patched.components(fixed[3])[0].components, [[0, 2, 1, 4, 3], [5], [6]]);
+assert.deepEqual(patched.components(fixed[4])[0].components, [[1, 0, 2], [3]]);
+let seed = 0x83e123;
+function random(max) { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed % max; }
+for (let trial = 0; trial < 100; trial++) {
+  const count = 2 + random(48), ports = Array.from({length: count}, () => 1 + random(4));
+  const edges = [], split = 1 + random(count), order = Array.from({length: count}, (_, i) => i);
+  for (let i = 0; i < count * 3; i++) {
+    const from = random(count), to = random(count);
+    if ((from < split) !== (to < split)) continue;
+    edges.push([from, to, random(ports[from]), random(ports[to])]);
+    if (random(7) === 0) edges.push(edges[edges.length - 1]);
+  }
+  for (let i = count - 1; i > 0; i--) {
+    const j = random(i + 1); [order[i], order[j]] = [order[j], order[i]];
+  }
+  const spec = {count, ports, edges, order};
+  assert.deepEqual(patched.components(spec, 2), original.components(spec, 2), `trial ${trial}`);
+  checks++;
+}
+console.log(JSON.stringify({checks}));
+""")
+        self.assertEqual(result["checks"], 105)
+
+    def test_layered_component_walk_preserves_previsited_node_behavior(self):
+        result = self.node(r"""
+const original = compile(source), patched = compile(transformed);
+const graph = {count: 4, edges: [[0, 1], [0, 2], [1, 3], [3, 0], [0, 0]]};
+for (const visited of [[], [0], [1], [0, 1, 3]]) {
+  const spec = {...graph, visited};
+  assert.deepEqual(patched.componentWalk(spec), original.componentWalk(spec));
+}
+assert.deepEqual(patched.componentWalk({...graph, visited: [0, 1, 3]}),
+  {component: [0, 2], visited: [true, true, true, true]});
+console.log(JSON.stringify({checks: 4}));
+""")
+        self.assertEqual(result["checks"], 4)
+
+    def test_deep_layered_components_avoid_the_reported_stack_failure(self):
+        result = self.node(r"""
+const original = compile(source), patched = compile(transformed);
+const count = 50000;
+const spec = {count, edges: Array.from({length: count - 1}, (_, i) => [i, i + 1])};
+assert.throws(() => original.components(spec), error =>
+  error instanceof RangeError && /call stack/i.test(error.message));
+const actual = patched.components(spec, 2);
+const expected = {components: [Array.from({length: count}, (_, i) => i)],
+  visited: Array(count).fill(true)};
+assert.deepEqual(actual, [expected, expected]);
+console.log(JSON.stringify({count, original: 'RangeError', patched: 'success'}));
+""")
+        self.assertEqual(result, {"count": 50000, "original": "RangeError", "patched": "success"})
 
     def test_deep_connectivity_walk_avoids_the_reported_stack_failure(self):
         self.deep_walk("dfs")

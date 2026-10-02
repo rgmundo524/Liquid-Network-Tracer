@@ -20,7 +20,7 @@ const source = stripTypeScriptTypes(
 const script = new vm.Script(source + '\n Object.defineProperty(state, "job", {get() {return runningJobs()[0] || null;}, set(job) {state.jobs.clear(); if (job && state.activeCase && state.page === "dashboard") state.page = "case"; if (job) state.jobs.set(job.id, {status: "running", generation: pageGeneration, caseId: state.activeCase?.id, ...job});}}); globalThis.appTest = {state, dispatch, pollJob: (id) => pollJob(id || runningJobs()[0]?.id), startJob, discoverJobs, runningJobs, jobBanner, jobProgress, cancelJob, openCase, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy, pegoutsGraph, pegoutInput, currentPegoutSearch, suggestCenterNames, suggestHopReferenceNames, render, navigate, workflowInput, currentWorkflow, actionBusy, taskActivity, refreshCaseDetail, refreshSharedCollection, loadCaseSection, loadVisibleSections, verifySelectedPlot};');
 const txid = 'a'.repeat(64);
 const defaults = {hops: 1, hop_reference_name: '', max_transactions: 20, max_outpoints: 100, max_requests: 30,
-  max_seconds: 60, max_new_items: 750, layout_attempts: 25, connector_style: 'straight'};
+  max_seconds: 60, max_new_items: 750, layout_attempts: 25, connector_style: 'straight', layout_style: 'standard'};
 
 async function harness(respond = () => undefined, {hash = '', storage = new Map(), importAction, importPending = () => false, systemNotification, changeOutputHandlers = {}} = {}) {
   frameRecovery.resetFrameRecovery();
@@ -121,6 +121,20 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
       const form = this.plotForm(values, valid);
       listeners.submit({target: form, preventDefault() {}});
       await new Promise(setImmediate);
+    },
+    changeLayoutStyle(value, values = {}, workspace = false) {
+      const form = workspace ? {id: 'settings-form', values: {...values, layout_style: value}} : this.plotForm({...values, layout_style: value});
+      form.querySelector = selector => selector === 'input[name="group_context_inputs"]' ? {
+        set checked(checked) {if (checked) form.values.group_context_inputs = 'on'; else delete form.values.group_context_inputs;},
+      } : null;
+      if (workspace) elements.set('#settings-form', form);
+      const target = {id: '', name: 'layout_style', value, form,
+        closest: selector => selector.includes('#' + form.id) ? form : null};
+      // Browsers fire input before change on a select; draft capture must not
+      // prevent the subsequent preset choice from applying grouping.
+      listeners.input({target});
+      listeners.change({target});
+      return form;
     },
     editPlotSettings(values) {
       const form = this.plotForm(values);
@@ -1565,8 +1579,8 @@ const boardEdit = (view, record, field, value, caseId = 'case1') => view.workflo
   id: `workflow-board-${field}-${record}`, value, dataset: {record, caseId, boardField: field},
 });
 const boardCardHtml = (view, record) => view.workspace().match(new RegExp(`<article[^>]*data-board-record="${record}"[\\s\\S]*?<\/article>`))?.[0];
-const layoutDefaults = {layout_attempts: 25, connector_style: 'straight', include_fees: false, color_attribution_arrows: false, group_context_inputs: false, center_name: '', hub_addresses: []};
-const layoutKeys = ['layout_attempts', 'connector_style', 'include_fees', 'color_attribution_arrows',
+const layoutDefaults = {layout_style: 'standard', layout_attempts: 25, connector_style: 'straight', include_fees: false, color_attribution_arrows: false, group_context_inputs: false, center_name: '', hub_addresses: []};
+const layoutKeys = ['layout_style', 'layout_attempts', 'connector_style', 'include_fees', 'color_attribution_arrows',
   'group_context_inputs', 'center_name', 'hub_addresses'];
 
 test('Plot Layouts owns every layout control and explains persistence without starting collection', async () => {
@@ -1602,7 +1616,7 @@ test('generating a plot captures changed layout settings without mutating invest
   await view.dispatch('workflow-plot');
   const writes = view.calls.filter(call => call.body);
   assert.deepEqual(writes.map(call => call.path), ['/api/cases/case1/actions']);
-  assert.deepEqual(writes[0].body, {action: 'plot', layout_mode: 'fresh', goal: 'full', run_id: 'saved1', min_hops: 0, max_hops: 0, layout_settings: {layout_attempts: 40, connector_style: 'curved', include_fees: true,
+  assert.deepEqual(writes[0].body, {action: 'plot', layout_mode: 'fresh', goal: 'full', run_id: 'saved1', min_hops: 0, max_hops: 0, layout_settings: {layout_style: 'standard', layout_attempts: 40, connector_style: 'curved', include_fees: true,
     group_context_inputs: true, color_attribution_arrows: true, center_name: 'Treasury', hub_addresses: [first, second]}});
   assert.equal(detail.run_defaults.layout_attempts, 25);
   assert.equal(view.state.job.live, false);
@@ -1619,8 +1633,9 @@ test('unchanged layout settings skip the save request when generating a plot', a
   assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 1);
 });
 
-test('saving a peg-out layout updates fees, preserves full-trace hubs and reloads saved preferences', async () => {
+test('saving a peg-out layout updates fees and hubs and reloads saved preferences', async () => {
   const hubs = ['G' + 'a'.repeat(33)];
+  const editedHub = 'H' + 'b'.repeat(33);
   const detail = workflowCase({runs: [], latest_run: undefined, run_defaults: {...defaults,
     include_fees: true, group_context_inputs: true, hub_addresses: hubs}});
   const respond = (path, body) => {
@@ -1635,25 +1650,53 @@ test('saving a peg-out layout updates fees, preserves full-trace hubs and reload
   await view.dispatch('view-plots');
   await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
   const disabledFields = view.workspace().match(/<fieldset[^>]*\bdisabled[^>]*>[\s\S]*?<\/fieldset>/g) || [];
-  assert.ok(disabledFields.some(fieldset => fieldset.includes('name="hub_addresses"')));
+  assert.ok(!disabledFields.some(fieldset => fieldset.includes('name="hub_addresses"')));
   assert.ok(!disabledFields.some(fieldset => fieldset.includes('name="include_fees"')));
   assert.doesNotMatch(contextGroupingFields(view), /disabled/);
   view.plotForm({layout_attempts: '61', connector_style: 'curved', center_name: 'Saved Treasury',
-    include_fees_present: '1', color_attribution_arrows_present: '1', color_attribution_arrows: 'on'});
+    include_fees_present: '1', color_attribution_arrows_present: '1', color_attribution_arrows: 'on',
+    hub_addresses: ` ${editedHub}\n${editedHub} `});
   await view.dispatch('plot-settings-save');
   const saved = view.calls.find(call => call.path.endsWith('/plot-settings')).body.settings;
   assert.deepEqual(Object.keys(saved).sort(), [...layoutKeys].sort());
   assert.equal(saved.include_fees, false);
   assert.equal(saved.group_context_inputs, true);
-  assert.deepEqual(saved.hub_addresses, hubs);
+  assert.deepEqual(saved.hub_addresses, [editedHub]);
   assert.equal(view.calls.some(call => call.path.endsWith('/actions')), false);
   const restarted = await harness(respond);
   await restarted.dispatch('open-case', {dataset: {id: 'case1'}});
   await restarted.dispatch('view-plots');
   assert.match(restarted.workspace(), /name="layout_attempts"[^>]*value="61"/);
   assert.match(restarted.workspace(), /value="Saved Treasury"/);
+  assert.ok(restarted.workspace().includes(editedHub));
   assert.doesNotMatch(restarted.workspace(), /name="include_fees"[^>]*checked/);
   assert.equal(restarted.state.settings.layout_attempts, 25, 'per-investigation saves do not overwrite workspace preferences');
+});
+
+
+test('branch hub controls are available for full and peg-out layouts and stay disabled for connections', async () => {
+  const editedHub = 'H' + 'b'.repeat(33);
+  for (const goal of ['full', 'pegouts', 'connections']) {
+    const view = await harness(path => path.endsWith('/actions') ? {id: 'hub-job', status: 'running'} : undefined);
+    view.state.activeCase = workflowCase();
+    await view.dispatch('view-plots');
+    await view.dispatch('plot-goal', {dataset: {goal}});
+    const fields = view.workspace().match(/<fieldset class="layout-fields full-trace-fields"[^>]*>[\s\S]*?<\/fieldset>/)?.[0];
+    assert.ok(fields);
+    assert.match(fields, /<legend>Branch hubs<\/legend>/);
+    assert.match(fields, /name="hub_addresses"/);
+    if (goal === 'connections') {
+      assert.match(fields, /disabled/);
+    } else {
+      assert.doesNotMatch(fields, /disabled/);
+      view.plotForm({hub_addresses: ` ${editedHub}\n${editedHub} `});
+      await view.dispatch('workflow-plot');
+      const request = view.calls.find(call => call.path.endsWith('/actions'));
+      assert.deepEqual(request.body.layout_settings.hub_addresses, [editedHub]);
+      assert.equal(request.body.goal, goal);
+      assert.deepEqual(view.state.activeCase.run_defaults.hub_addresses || [], []);
+    }
+  }
 });
 
 test('a failed explicit defaults save retains edits and does not submit generation', async () => {
@@ -1933,7 +1976,7 @@ test('peg-out fee checkbox is enabled and submits both states for preview and bo
     if (includeFees) assert.doesNotMatch(fees, /name="include_fees"[^>]*checked/);
     else assert.match(fees, /name="include_fees"[^>]*checked/);
     const fullOnly = html.match(/<fieldset class="layout-fields full-trace-fields"[^>]*>[\s\S]*?<\/fieldset>/)?.[0];
-    assert.match(fullOnly, /disabled/);
+    assert.doesNotMatch(fullOnly, /disabled/);
     assert.match(fullOnly, /name="hub_addresses"/);
     view.plotForm({include_fees_present: '1', ...(includeFees ? {include_fees: 'on'} : {})});
     await view.dispatch(action);
@@ -1966,7 +2009,7 @@ test('saved peg-out fee visibility follows each snapshot across plots, downloads
       if (page === 'plots') {
         const summary = html.match(/<details class="tool-details"><summary>Saved layout settings<\/summary>[\s\S]*?<\/details>/)?.[0];
         assert.match(summary, new RegExp(`Fee flows ${includeFees ? 'shown' : 'hidden'}\\.`));
-        assert.doesNotMatch(summary, /separate branch hubs/);
+        assert.match(summary, /0 separate branch hubs/);
       }
     }
     assert.equal(view.calls.length, 1, 'viewing saved settings does not regenerate or update a plot');
@@ -4697,4 +4740,324 @@ test('invalidated selected summary keeps its identity but stops presenting stale
   assert.equal(view.state.activeCase.runs[0].id, 'saved1');
   assert.equal(view.state.activeCase.runs[0].summary_pending, true);
   assert.match(view.app.innerHTML, /data-loading-section="collection"/);
+});
+
+test('shared collection appears immediately as an independent task during a slow read', async () => {
+  const pending = Promise.withResolvers();
+  const view = await harness(path => {
+    if (path.endsWith('/overview')) return stagedOverview({sections: stagedSections({collection: 'ready'})});
+    if (path.endsWith('/shared-collection')) return pending.promise;
+  });
+  await view.openCase('case1');
+  assert.match(view.app.innerHTML, /1 active task/);
+  assert.match(view.jobBanner(), /Loading shared collection information/);
+  assert.match(view.jobBanner(), /data-job-elapsed="shared-load-/);
+  assert.match(view.jobBanner(), /aria-label="Loading shared collection"/);
+  assert.doesNotMatch(view.jobBanner(), /cancel-job|Proton Pass/);
+  assert.equal(view.state.jobs.size, 0);
+  assert.equal(view.runningJobs().length, 0);
+  assert.equal(view.isBusy(), false);
+  assert.equal(view.actionBusy('shared-trace'), false);
+  assert.equal(view.actionBusy('plot', {layout_mode: 'fresh'}), false);
+  view.loadVisibleSections(); view.loadVisibleSections();
+  assert.equal(view.calls.filter(call => call.path.endsWith('/shared-collection')).length, 1);
+  pending.resolve(sectionResult('shared', {shared_collection: sharedCollection()})); await settled();
+  assert.doesNotMatch(view.jobBanner(), /active task/);
+  assert.match(view.jobBanner(), /Shared collection information loaded/);
+  const id = view.jobBanner().match(/data-task="([^"]+)"/)[1];
+  await view.dispatch('dismiss-job', {dataset: {id}});
+  assert.equal(view.jobBanner(), '<div id="job-tasks"></div>');
+});
+
+test('shared preparation stays in tasks between retries and finishes after navigating away', async () => {
+  let reads = 0;
+  const pending = Promise.withResolvers();
+  const view = await harness(path => {
+    if (path.endsWith('/overview')) return stagedOverview({sections: stagedSections({collection: 'ready'})});
+    if (path.endsWith('/shared-collection')) return ++reads === 1
+      ? sectionResult('shared', {shared_collection: sharedCollection()}, 'loading') : pending.promise;
+  });
+  await view.openCase('case1'); await settled();
+  const id = view.jobBanner().match(/data-task="([^"]+)"/)[1];
+  assert.match(view.jobBanner(), /1 active task/);
+  assert.match(view.jobBanner(), /Preparing saved shared collection summaries/);
+  view.navigate('dashboard');
+  const timer = [...view.timers.entries()].find(([, timer]) => timer.ms === 1000);
+  assert.ok(timer); view.timers.delete(timer[0]); timer[1].fn(); await settled();
+  assert.equal(reads, 2);
+  assert.match(view.jobBanner(), new RegExp(`data-task="${id}"`));
+  assert.match(view.jobBanner(), /1 active task/);
+  pending.resolve(sectionResult('shared', {shared_collection: sharedCollection()})); await settled();
+  assert.equal(view.state.page, 'dashboard');
+  assert.doesNotMatch(view.jobBanner(), /active task/);
+  assert.match(view.app.innerHTML, /Shared collection information loaded/);
+  assert.ok(!view.calls.some(call => call.path.startsWith('/api/jobs/shared-load-')));
+});
+
+test('shared task survives switching investigation views without duplicating the read', async () => {
+  const pending = Promise.withResolvers();
+  const view = await harness(path => {
+    if (path.endsWith('/overview')) return stagedOverview({sections: stagedSections({collection: 'ready', workflow: 'ready', boards: 'ready'})});
+    if (path.endsWith('/shared-collection')) return pending.promise;
+  });
+  await view.openCase('case1');
+  const id = view.jobBanner().match(/data-task="([^"]+)"/)[1];
+  await view.dispatch('view-plots');
+  assert.equal(view.calls.filter(call => call.path.endsWith('/shared-collection')).length, 1);
+  assert.equal((view.jobBanner().match(/data-task=/g) || []).length, 1);
+  pending.resolve(sectionResult('shared', {shared_collection: sharedCollection()})); await settled();
+  assert.equal(view.state.activeCase.sections.shared, 'ready');
+  assert.equal(view.state.caseView, 'plots');
+  assert.match(view.jobBanner(), new RegExp(`data-task="${id}"`));
+  assert.doesNotMatch(view.jobBanner(), /active task/);
+});
+
+test('shared loading failures stay local, stop the task and can be retried', async () => {
+  let fail = true;
+  const view = await harness(path => {
+    if (path.endsWith('/overview')) return stagedOverview({sections: stagedSections({collection: 'ready'})});
+    if (path.endsWith('/shared-collection')) return fail ? {error: 'Shared disk unavailable'}
+      : sectionResult('shared', {shared_collection: sharedCollection({compatible: false, reason: 'Different collection source'})});
+  });
+  await view.openCase('case1'); await settled();
+  assert.equal(view.state.activeCase.sections.shared, 'error');
+  assert.equal(view.state.error, '');
+  assert.match(view.jobBanner(), /task-failed/);
+  assert.match(view.jobBanner(), /Shared disk unavailable/);
+  assert.doesNotMatch(view.jobBanner(), /active task/);
+  fail = false; await view.dispatch('retry-case-section', {dataset: {section: 'shared'}}); await settled();
+  assert.equal(view.state.activeCase.sections.shared, 'ready');
+  assert.match(view.jobBanner(), /Shared collection information loaded/);
+  assert.doesNotMatch(view.jobBanner(), /task-failed|Shared disk unavailable/);
+  assert.equal((view.jobBanner().match(/data-task=/g) || []).length, 1);
+});
+
+test('shared preparation retry exhaustion ends the task instead of spinning forever', async () => {
+  let reads = 0;
+  const view = await harness(path => {
+    if (path.endsWith('/overview')) return stagedOverview({sections: stagedSections({collection: 'ready'})});
+    if (path.endsWith('/shared-collection')) {
+      reads++; return sectionResult('shared', {shared_collection: sharedCollection()}, 'loading');
+    }
+  });
+  await view.openCase('case1'); await settled();
+  for (let i = 0; i < 60; i++) {
+    const next = [...view.timers.entries()].find(([, timer]) => timer.ms === (i ? 5000 : 1000));
+    assert.ok(next, `retry ${i + 1} scheduled`);
+    view.timers.delete(next[0]); next[1].fn(); await settled();
+  }
+  assert.equal(reads, 61);
+  assert.equal(view.state.activeCase.sections.shared, 'error');
+  assert.match(view.jobBanner(), /still being prepared/);
+  assert.doesNotMatch(view.jobBanner(), /active task/);
+  assert.ok(![...view.timers.values()].some(timer => timer.ms === 1000 || timer.ms === 5000));
+});
+
+test('a superseded shared snapshot read cannot finish the newer task or overwrite its data', async () => {
+  const older = Promise.withResolvers(), newer = Promise.withResolvers();
+  const view = await harness(path => {
+    if (path.endsWith('/overview')) return stagedOverview({sections: stagedSections({collection: 'ready'})});
+    if (path.endsWith('/shared-collection')) return older.promise;
+    if (path.endsWith('/shared-collection/shared-old')) return newer.promise;
+  });
+  await view.openCase('case1');
+  view.currentWorkflow(view.state.activeCase).sharedRun = 'shared-old';
+  const loading = view.loadCaseSection('case1', 'shared', true);
+  const id = view.jobBanner().match(/data-task="([^"]+)"/)[1];
+  older.resolve(sectionResult('shared', {shared_collection: sharedCollection({name: 'Obsolete data'})})); await settled();
+  assert.match(view.jobBanner(), /1 active task/);
+  assert.equal((view.jobBanner().match(/data-task=/g) || []).length, 1);
+  assert.match(view.jobBanner(), new RegExp(`data-task="${id}"`));
+  assert.notEqual(view.state.activeCase.shared_collection?.name, 'Obsolete data');
+  newer.resolve(sectionResult('shared', {shared_collection: sharedCollection({name: 'Selected data'})})); await loading;
+  assert.equal(view.state.activeCase.shared_collection.name, 'Selected data');
+  assert.doesNotMatch(view.jobBanner(), /active task/);
+});
+
+test('shared loading and real graph jobs coexist without changing conflicts or cancellation', async () => {
+  const pending = Promise.withResolvers();
+  const view = await harness(path => {
+    if (path.endsWith('/overview')) return stagedOverview({sections: stagedSections({collection: 'ready'})});
+    if (path.endsWith('/shared-collection')) return pending.promise;
+  });
+  await view.openCase('case1');
+  view.state.jobs.set('board-task', {id: 'board-task', action: 'board-sync', caseId: 'case1', status: 'running',
+    resource_kind: 'board', resource_key: 'miro-one', started: Date.now(), message: 'Writing graph',
+    live: false, cancellable: true, cancelling: false});
+  assert.equal(view.runningJobs().length, 1);
+  assert.match(view.jobBanner(), /2 active tasks/);
+  assert.match(view.jobBanner(), /1 loading/);
+  assert.match(view.jobBanner(), /data-action="cancel-job" data-id="board-task"/);
+  assert.doesNotMatch(view.jobBanner(), /data-action="cancel-job" data-id="shared-load-/);
+  assert.equal(view.actionBusy('plot', {layout_mode: 'fresh'}), false);
+  assert.equal(view.actionBusy('shared-trace'), false);
+  assert.equal(view.actionBusy('lookup'), true, 'An existing exclusive conflict must still be enforced');
+  pending.resolve(sectionResult('shared', {shared_collection: sharedCollection()})); await settled();
+  assert.match(view.jobBanner(), /1 active task/);
+  assert.equal(view.state.jobs.get('board-task').status, 'running');
+});
+
+test('an overview refresh replaces shared loading without letting the older result erase it', async () => {
+  const older = Promise.withResolvers(), newer = Promise.withResolvers();
+  let reads = 0;
+  const view = await harness(path => {
+    if (path.endsWith('/overview')) return stagedOverview({sections: stagedSections({collection: 'ready'})});
+    if (path.endsWith('/shared-collection')) return ++reads === 1 ? older.promise : newer.promise;
+  });
+  await view.openCase('case1');
+  const refresh = view.refreshCaseDetail('case1'); await settled();
+  assert.equal(reads, 2);
+  assert.equal((view.jobBanner().match(/data-task=/g) || []).length, 1);
+  newer.resolve(sectionResult('shared', {shared_collection: sharedCollection({name: 'Refreshed collection'})})); await refresh;
+  older.resolve(sectionResult('shared', {shared_collection: sharedCollection({name: 'Stale collection'})}, 'loading')); await settled();
+  assert.equal(view.state.activeCase.shared_collection.name, 'Refreshed collection');
+  assert.equal(view.state.activeCase.sections.shared, 'ready');
+  assert.doesNotMatch(view.jobBanner(), /active task/);
+  assert.ok(![...view.timers.values()].some(timer => timer.ms === 1000));
+});
+
+test('separate investigations retain their loading tasks and open the correct investigation', async () => {
+  const one = Promise.withResolvers(), two = Promise.withResolvers();
+  let firstDone = false;
+  const view = await harness(path => {
+    if (path === '/api/session') return {csrf: 'test', settings: defaults, cases: [
+      stagedOverview({id: 'case1', name: 'First investigation'}), stagedOverview({id: 'case2', name: 'Second investigation'})]};
+    if (path === '/api/cases/case1/overview') return stagedOverview({name: 'First investigation', sections: stagedSections({collection: 'ready'})});
+    if (path === '/api/cases/case2/overview') return stagedOverview({id: 'case2', name: 'Second investigation', sections: stagedSections({collection: 'ready'})});
+    if (path === '/api/cases/case1/shared-collection') return firstDone ? sectionResult('shared', {shared_collection: sharedCollection()}) : one.promise;
+    if (path === '/api/cases/case2/shared-collection') return two.promise;
+  });
+  await view.openCase('case1');
+  const firstId = view.jobBanner().match(/data-task="([^"]+)"/)[1];
+  await view.openCase('case2');
+  assert.match(view.jobBanner(), /2 active tasks/);
+  assert.match(view.jobBanner(), /First investigation/);
+  assert.match(view.jobBanner(), /Second investigation/);
+  one.resolve(sectionResult('shared', {shared_collection: sharedCollection({name: 'Only first'})})); await settled();
+  assert.equal(view.state.activeCase.id, 'case2');
+  assert.notEqual(view.state.activeCase.shared_collection?.name, 'Only first');
+  assert.match(view.jobBanner(), /1 active task/);
+  firstDone = true;
+  await view.dispatch('open-job', {dataset: {id: firstId}}); await settled();
+  assert.equal(view.state.activeCase.id, 'case1');
+  two.resolve(sectionResult('shared', {shared_collection: sharedCollection({name: 'Only second'})})); await settled();
+  assert.notEqual(view.state.activeCase.shared_collection?.name, 'Only second');
+  assert.doesNotMatch(view.jobBanner(), /active task/);
+});
+
+
+test('Trace layout is opt-in and legacy settings keep the Standard layout', async () => {
+  const legacy = {...defaults};
+  delete legacy.layout_style;
+  const view = await harness();
+  view.state.activeCase = workflowCase({run_defaults: legacy});
+  await view.dispatch('view-plots');
+  assert.match(view.workspace(), /name="layout_style"><option value="standard" selected>Standard/);
+  assert.match(view.workspace(), /<option value="trace">Trace layout/);
+  assert.equal(view.readSettings({values: {}}, {...legacy, hub_addresses: []}).layout_style, 'standard');
+  assert.equal(view.readSettings({values: {}}, {...legacy, hub_addresses: [], layout_style: 'trace'}).layout_style, 'trace');
+  assert.equal(view.calls.length, 1);
+});
+
+test('choosing Trace layout groups context inputs once and preserves later choices in both plot requests', async () => {
+  for (const action of ['workflow-plot', 'workflow-plot-sync']) {
+    const view = await harness(path => path.endsWith('/actions') ? {id: 'trace-layout-job', status: 'running'} : undefined);
+    view.state.activeCase = workflowCase({run_defaults: {...defaults, include_fees: true, center_name: 'Treasury'}});
+    await view.dispatch('view-plots');
+    await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+    view.changeLayoutStyle('trace', {group_context_inputs_present: '1'});
+    assert.match(contextGroupingFields(view), /name="group_context_inputs"[^>]*checked/);
+    assert.match(view.workspace(), /name="center_name"[^>]*value="Treasury"/);
+    assert.match(view.workspace(), /name="include_fees"[^>]*checked/);
+    assert.equal(view.calls.length, 1, 'choosing a style does not submit work');
+    view.editPlotSettings({group_context_inputs_present: '1', layout_style: 'trace'});
+    view.elements.delete('#plot-layout-form');
+    assert.doesNotMatch(contextGroupingFields(view), /name="group_context_inputs"[^>]*checked/);
+    assert.match(view.workspace(), /value="trace" selected>Trace layout/);
+    await view.dispatch(action);
+    const request = view.calls.find(call => call.path.endsWith('/actions')).body;
+    assert.equal(request.layout_settings.layout_style, 'trace');
+    assert.equal(request.layout_settings.group_context_inputs, false);
+    assert.equal(request.layout_settings.include_fees, true);
+    assert.equal(request.layout_settings.center_name, 'Treasury');
+    assert.equal(view.state.activeCase.run_defaults.layout_style, 'standard');
+    assert.equal(view.calls.some(call => call.path.endsWith('/plot-settings')), false);
+  }
+});
+
+test('Trace layout and an explicit grouping override survive save and reload', async () => {
+  const detail = workflowCase();
+  const respond = (path, body) => {
+    if (path.endsWith('/plot-settings')) {detail.run_defaults = {...detail.run_defaults, ...body.settings}; return detail;}
+    if (path === '/api/cases/case1/overview') return detail;
+  };
+  const view = await harness(respond);
+  view.state.activeCase = detail;
+  await view.dispatch('view-plots');
+  view.changeLayoutStyle('trace', {group_context_inputs_present: '1'});
+  await view.submitPlotSettings({layout_style: 'trace', group_context_inputs_present: '1'});
+  const saved = view.calls.find(call => call.path.endsWith('/plot-settings')).body.settings;
+  assert.equal(saved.layout_style, 'trace');
+  assert.equal(saved.group_context_inputs, false);
+  const restarted = await harness(respond);
+  await restarted.openCase('case1');
+  await restarted.dispatch('view-plots');
+  assert.match(restarted.workspace(), /value="trace" selected>Trace layout/);
+  assert.doesNotMatch(contextGroupingFields(restarted), /name="group_context_inputs"[^>]*checked/);
+  restarted.editPlotSettings({center_name: 'Another group'});
+  restarted.elements.delete('#plot-layout-form');
+  assert.doesNotMatch(contextGroupingFields(restarted), /name="group_context_inputs"[^>]*checked/);
+  assert.match(restarted.workspace(), /value="trace" selected>Trace layout/);
+});
+
+test('workspace Trace preset saves defaults without changing existing investigation settings', async () => {
+  const detail = workflowCase();
+  const view = await harness((path, body) => path === '/api/settings' ? {settings: body.settings} : undefined);
+  view.state.activeCase = detail;
+  view.navigate('settings');
+  const form = view.changeLayoutStyle('trace', {group_context_inputs_present: '1'}, true);
+  assert.equal(form.values.group_context_inputs, 'on');
+  await view.submitSettings(form.values);
+  const saved = view.calls.find(call => call.path === '/api/settings').body.settings;
+  assert.equal(saved.layout_style, 'trace');
+  assert.equal(saved.group_context_inputs, true);
+  assert.equal(detail.run_defaults.layout_style, 'standard');
+});
+
+test('legacy board style stays Standard despite Trace defaults and destination drafts retain overrides', async () => {
+  const legacy = {...layoutDefaults};
+  delete legacy.layout_style;
+  const view = await harness();
+  view.state.activeCase = workflowCase({run_defaults: {...defaults, layout_style: 'trace'},
+    plots: [workflowPlot('pegouts', 'legacy', {layout_settings: legacy})],
+    boards: [workflowBoard('pegouts', 'oldboard', {preview_id: 'legacy'})]});
+  await view.dispatch('view-plots');
+  assert.match(view.workspace(), /value="trace" selected>Trace layout/);
+  await view.dispatch('workflow-board-prepare', boardControl('oldboard'));
+  assert.match(view.workspace(), /name="layout_style"><option value="standard" selected>Standard/);
+  view.changeLayoutStyle('trace', {group_context_inputs_present: '1'});
+  view.editPlotSettings({layout_style: 'trace', group_context_inputs_present: '1'});
+  view.elements.delete('#plot-layout-form');
+  workflowEdit(view, 'layout-mode', 'fresh');
+  workflowEdit(view, 'layout-mode', 'update');
+  assert.match(view.workspace(), /value="trace" selected>Trace layout/);
+  assert.doesNotMatch(contextGroupingFields(view), /name="group_context_inputs"[^>]*checked/);
+});
+
+test('Trace layout labels saved workflow settings without invalidating legacy renderer previews', async () => {
+  const view = await harness();
+  const settings = {...defaults, ...layoutDefaults};
+  const artifact = {...settings, preview_id: 'legacy-layout', downloads: [], preview_url: '/files/artifacts/graph.html', compaction: {unchanged: true}};
+  delete artifact.layout_style;
+  const detail = workflowCase({run_defaults: settings, miro_board: 'board', artifacts: {saved1: {compact: artifact}},
+    plots: [workflowPlot('pegouts', 'traceplot', {layout_settings: {...layoutDefaults, layout_style: 'trace'}})]});
+  view.state.activeCase = detail;
+  settings.layout_style = 'trace';
+  for (const html of [view.localGraph(artifact, true, settings), view.elkGraph(artifact, true, settings), view.compactGraph(artifact, true, detail)]) {
+    assert.match(html, /<iframe/);
+    assert.doesNotMatch(html, /different graph settings/);
+  }
+  assert.ok(view.currentCompaction());
+  await view.dispatch('view-plots');
+  assert.match(view.workspace(), /<summary>Saved layout settings<\/summary><p>Trace layout/);
 });

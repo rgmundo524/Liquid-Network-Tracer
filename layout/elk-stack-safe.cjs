@@ -16,13 +16,53 @@ const {dirname} = require('node:path');
 
 // ELK's network simplex auxiliary graph can contain many more vertices than
 // the displayed graph. Keep the same algorithm and traversal order, but put
-// its three depth-first traversal stacks on the heap instead of the JS stack.
+// its depth-first traversal stacks on the heap instead of the JS stack.
 // These generated internals are private: reject any unreviewed engine build.
-const ENGINE_BUILD = 'non_minified_iterative_network_simplex_v1';
+const ENGINE_BUILD = 'non_minified_iterative_network_simplex_v2';
 const ENGINE_VERSION = '0.12.0';
 const WORKER_SHA256 = 'f7617e622f565748e1c88a9f45d97b458bc9c3f4299c0fdc6ed778a92ef30683';
 
 const REPLACEMENTS = [
+  [
+`function $connectedComponentsDFS(this$static, node){
+  var edge, edge$iterator, opposite, port, port$iterator;
+  this$static.nodeVisited[node.id_0] = true;
+  $add_3(this$static.componentNodes, node);
+  for (port$iterator = new ArrayList$1(node.ports); port$iterator.i < port$iterator.this$01.array.length;) {
+    port = castTo($next_6(port$iterator), 12);
+    for (edge$iterator = new LPort$CombineIter$1(port.connectedEdges); $hasNext_3(edge$iterator.firstIterator) || $hasNext_3(edge$iterator.secondIterator);) {
+      edge = castTo($hasNext_3(edge$iterator.firstIterator)?$next_6(edge$iterator.firstIterator):$next_6(edge$iterator.secondIterator), 17);
+      opposite = $getOpposite(port, edge).owner;
+      this$static.nodeVisited[opposite.id_0] || $connectedComponentsDFS(this$static, opposite);
+    }
+  }
+}`,
+`function $connectedComponentsDFS(this$static, node){
+  var edge, frame, frames, opposite;
+  this$static.nodeVisited[node.id_0] = true;
+  $add_3(this$static.componentNodes, node);
+  frames = [{ports: new ArrayList$1(node.ports), port: null, edges: null}];
+  while (frames.length) {
+    frame = frames[frames.length - 1];
+    if (frame.edges && ($hasNext_3(frame.edges.firstIterator) || $hasNext_3(frame.edges.secondIterator))) {
+      edge = castTo($hasNext_3(frame.edges.firstIterator)?$next_6(frame.edges.firstIterator):$next_6(frame.edges.secondIterator), 17);
+      opposite = $getOpposite(frame.port, edge).owner;
+      if (!this$static.nodeVisited[opposite.id_0]) {
+        this$static.nodeVisited[opposite.id_0] = true;
+        $add_3(this$static.componentNodes, opposite);
+        frames.push({ports: new ArrayList$1(opposite.ports), port: null, edges: null});
+      }
+      continue;
+    }
+    if (frame.ports.i >= frame.ports.this$01.array.length) {
+      frames.pop();
+      continue;
+    }
+    frame.port = castTo($next_6(frame.ports), 12);
+    frame.edges = new LPort$CombineIter$1(frame.port.connectedEdges);
+  }
+}`,
+  ],
   [
 `function $dfs(this$static, node, mark){
   var edge, edge$iterator, other;

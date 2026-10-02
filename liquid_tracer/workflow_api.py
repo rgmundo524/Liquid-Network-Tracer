@@ -370,10 +370,10 @@ def workflow_action(server, case, metadata, body):
         if data_source == "shared":
             arguments.extend(["--data-source", "shared", "--dataset-id", dataset_id])
         if "layout_settings" in body:
-            from .plots import LAYOUT_SETTINGS, validate_layout_settings
+            from .plots import LEGACY_LAYOUT_SETTINGS, LAYOUT_SETTINGS, validate_layout_settings
             from .export import PRESENTATION_VERSION
             supplied = body["layout_settings"]
-            if not isinstance(supplied, dict) or set(supplied) != LAYOUT_SETTINGS:
+            if not isinstance(supplied, dict) or set(supplied) not in (LEGACY_LAYOUT_SETTINGS, LAYOUT_SETTINGS):
                 raise RequestError("Provide the complete layout settings for this plot.")
             snapshot = validate_layout_settings({**supplied, "presentation_version": PRESENTATION_VERSION})
             arguments.extend(["--layout-settings-json", json.dumps(snapshot, separators=(",", ":"))])

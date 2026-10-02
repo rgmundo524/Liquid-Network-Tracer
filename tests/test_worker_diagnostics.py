@@ -261,7 +261,7 @@ module.exports = class ELK {
         line = next(line for line in result.stderr.splitlines() if line.startswith("LIQUID_ELK_TRACE "))
         trace = json.loads(line.removeprefix("LIQUID_ELK_TRACE "))
         self.assertEqual(trace["engine_version"], "0.12.0")
-        self.assertEqual(trace["engine_build"], "non_minified_iterative_network_simplex_v1")
+        self.assertEqual(trace["engine_build"], "non_minified_iterative_network_simplex_v2")
         self.assertIn("$shapeById", trace["errors"][0]["stack"])
         self.assertIn("elk-worker.js", trace["errors"][0]["stack"])
 

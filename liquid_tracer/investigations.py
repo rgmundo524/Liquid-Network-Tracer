@@ -27,10 +27,11 @@ DEFAULTS = {
     "hub_addresses": [],
     "center_name": "",
     "connector_style": "straight",
+    "layout_style": "standard",
 }
 
 
-PLOT_SETTING_KEYS = frozenset({"layout_attempts", "connector_style", "include_fees",
+PLOT_SETTING_KEYS = frozenset({"layout_attempts", "connector_style", "layout_style", "include_fees",
                               "color_attribution_arrows", "group_context_inputs", "center_name", "hub_addresses"})
 
 RUN_BUDGET_KEYS = frozenset({"max_transactions", "max_outpoints", "max_requests", "max_seconds", "max_new_items"})
@@ -77,6 +78,10 @@ def validate_settings(settings):
             if len(value) > 120 or any(ord(char) < 32 or ord(char) == 127 for char in value):
                 raise TraceError("Center named group must contain at most 120 characters and no control characters")
             result[key] = value
+            continue
+        if key == "layout_style":
+            if not isinstance(value, str) or value not in ("standard", "trace"):
+                raise TraceError("layout_style must be standard or trace")
             continue
         if key == "connector_style":
             if not isinstance(value, str) or value not in ("straight", "curved", "elbowed"):
@@ -165,7 +170,7 @@ def update_case(case, updates):
 def save_plot_settings(case, settings):
     """Merge display settings into the latest investigation metadata atomically."""
     if not isinstance(settings, dict) or set(settings) - PLOT_SETTING_KEYS:
-        raise TraceError("Plot settings accept layout attempts, connectors, fees, attribution arrows, context grouping, center name, and branch hubs only")
+        raise TraceError("Plot settings accept layout style, layout attempts, connectors, fees, attribution arrows, context grouping, center name, and branch hubs only")
     validated = validate_settings(settings)
     changes = {key: validated[key] for key in settings}
     case = Path(case)

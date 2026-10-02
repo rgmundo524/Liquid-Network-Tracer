@@ -140,6 +140,11 @@ def public_graph_options(options):
     except TraceError:
         return None
     result = {key: settings[key] for key in ("group_context_inputs", "hub_addresses", "center_name", "color_attribution_arrows")}
+    if "layout_style" in options:
+        try:
+            result["layout_style"] = validate_settings({"layout_style": options["layout_style"]})["layout_style"]
+        except TraceError:
+            return None
     # Old artifacts did not record a search budget. Do not claim the current
     # default was used to calculate those saved coordinates.
     if "layout_attempts" in options:

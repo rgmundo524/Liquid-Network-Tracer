@@ -254,11 +254,48 @@ def _centered_output_positions(graph, nodes, aligned, fee_ids):
     return result
 
 
+def _retarget_channel(edge, start, end):
+    """Retain ELK's distinct channels when endpoints move vertically.
+
+    A monotone vertical mapping keeps every segment orthogonal and preserves
+    bends outside the endpoint span. Reversed rows or changed attachment sides
+    need the ordinary rerouting path instead. This is geometry, not evidence.
+    """
+    route = edge.get("route", [])
+    if (len(route) < 2 or any(a["x"] != b["x"] and a["y"] != b["y"]
+                              for a, b in zip(route, route[1:]))
+            or route[0]["x"] != start["x"]
+            or route[-1]["x"] != end["x"]):
+        return None
+    low, high = route[0]["y"], route[-1]["y"]
+    new_low, new_high = start["y"], end["y"]
+    if low > high:
+        low, high, new_low, new_high = high, low, new_high, new_low
+    if low == high or new_low >= new_high:
+        return None
+    old_span, new_span = high - low, new_high - new_low
+    if not math.isfinite(old_span) or not math.isfinite(new_span):
+        return None
+    def move(y):
+        if y < low:
+            return new_low + (y - low)
+        if y > high:
+            return new_high + (y - high)
+        return new_low + (y - low) / old_span * new_span
+    moved = [{"x": point["x"], "y": move(point["y"])} for point in route]
+    if not all(math.isfinite(point["y"]) for point in moved):
+        return None
+    moved[0], moved[-1] = start, end
+    return moved
+
+
 def _routes(graph, nodes, original, aligned):
     from .elk_layout import attachment_point, _default_attachments
     input_positions = centered_input_positions(graph, aligned)
     fee_ids = {key for key, value in graph.get("fee_items", {}).items() if value["endpoint"] == "shapes"}
     output_positions = _centered_output_positions(graph, nodes, aligned, fee_ids)
+    preserve_channels = (graph.get("graph_options", {}).get("layout_style") == "trace"
+                         and bool(graph.get("layout", {}).get("branch_organization", {}).get("hub_entries")))
     for edge in graph["edges"]:
         source, target = nodes[edge["source"]], nodes[edge["target"]]
         deltas = [(node["x"] - original[node["id"]][0], node["y"] - original[node["id"]][1])
@@ -300,6 +337,10 @@ def _routes(graph, nodes, original, aligned):
             # The replacement route has not undergone ELK's obstacle routing.
             # Keep the established exception contract used by Miro/compaction.
             reason = "unchecked"
+        if preserve_channels and not centered and edge["target"] not in fee_ids:
+            native = _retarget_channel(edge, a, b)
+            if native is not None:
+                route = native
         edge.update(attachment=attachment, route=route, routing_exception=reason,
                     connector_shape=routed_shape(graph.get("graph_options", {}).get("connector_style", "straight"), reason))
         # ELK's horizontal label clearance remains, but this new route needs a

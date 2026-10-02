@@ -18,8 +18,9 @@ from .common import TraceError, canonical, digest, now, read_json, save_json
 from .group_hops import reference_name
 
 GOALS = frozenset({"full", "connections", "pegouts"})
-LAYOUT_SETTINGS = frozenset({"include_fees", "group_context_inputs", "hub_addresses",
-                             "color_attribution_arrows", "center_name", "connector_style", "layout_attempts"})
+LEGACY_LAYOUT_SETTINGS = frozenset({"include_fees", "group_context_inputs", "hub_addresses",
+                                    "color_attribution_arrows", "center_name", "connector_style", "layout_attempts"})
+LAYOUT_SETTINGS = LEGACY_LAYOUT_SETTINGS | {"layout_style"}
 PREVIEW_ID = re.compile(r"[0-9a-f]{16}-plots-[0-9a-f]{8}\Z")
 FILES = frozenset({"graph.html", "graph.svg", "graph.json", "layout-report.json", "graph.mmd",
                    "transactions.csv", "plot.json", "miro-plan.json", "details.html", "details.json",
@@ -71,7 +72,7 @@ def _settings(metadata):
     from .cli import (attribution_arrow_coloring, branch_hubs, centered_name_group,
                       connector_appearance, context_input_grouping, include_fee_flows, layout_search_attempts)
     from .export import PRESENTATION_VERSION
-    return {"include_fees": include_fee_flows(metadata),
+    result = {"include_fees": include_fee_flows(metadata),
             "group_context_inputs": context_input_grouping(metadata),
             "hub_addresses": branch_hubs(metadata),
             "color_attribution_arrows": attribution_arrow_coloring(metadata),
@@ -79,17 +80,26 @@ def _settings(metadata):
             "connector_style": connector_appearance(metadata),
             "layout_attempts": layout_search_attempts(metadata),
             "presentation_version": PRESENTATION_VERSION}
+    # A missing style is the historical standard layout. Do not add a field to
+    # legacy fingerprints: immutable plots keep the exact settings they captured.
+    defaults = metadata.get("run_defaults", {})
+    if "layout_style" in defaults:
+        from .investigations import validate_settings
+        result["layout_style"] = validate_settings({"layout_style": defaults["layout_style"]})["layout_style"]
+    return result
 
 
 def validate_layout_settings(value):
     """Return a canonical settings snapshot; never accept extra or coerced fields."""
     from .investigations import validate_settings
 
-    if (not isinstance(value, dict) or set(value) != LAYOUT_SETTINGS | {"presentation_version"}
+    if (not isinstance(value, dict) or set(value) not in (LEGACY_LAYOUT_SETTINGS | {"presentation_version"},
+                                                        LAYOUT_SETTINGS | {"presentation_version"})
             or type(value.get("presentation_version")) is not int or value["presentation_version"] < 1):
         raise TraceError("Invalid saved layout settings; regenerate the plot")
-    normalized = validate_settings({key: value[key] for key in LAYOUT_SETTINGS})
-    result = {key: normalized[key] for key in LAYOUT_SETTINGS}
+    captured_keys = LAYOUT_SETTINGS.intersection(value)
+    normalized = validate_settings({key: value[key] for key in captured_keys})
+    result = {key: normalized[key] for key in captured_keys}
     result["presentation_version"] = value["presentation_version"]
     if canonical(result) != canonical(value):
         raise TraceError("Saved layout settings are not canonical; regenerate the plot")
@@ -102,7 +112,10 @@ def _effective_settings(settings, goal, query=None):
         # New focused plots select transactions, then display their complete
         # local I/O. Legacy snapshots retain their original optional context.
         complete = goal in ("pegouts", "connections") and (query or {}).get("transaction_io") == "complete"
-        result["hub_addresses"] = []
+        # Hubs only influence placement after peg-out path selection. Saved
+        # snapshots with an empty list keep their original layout settings.
+        if goal == "connections":
+            result["hub_addresses"] = []
         # Complete peg-out context honors the captured fee display setting.
         # Starter connections and legacy path-only snapshots keep their policy.
         if goal == "connections" or not complete:
@@ -123,7 +136,8 @@ def _snapshot_settings(graph):
         raise TraceError("Saved layout settings disagree with their snapshot; regenerate the plot")
     options = graph.get("graph_options", {})
     if (not isinstance(options, dict) or any(key not in options or canonical(options[key]) != canonical(settings[key])
-                                            for key in LAYOUT_SETTINGS)):
+                                            for key in LAYOUT_SETTINGS.intersection(settings))
+            or options.get("layout_style", "standard") != settings.get("layout_style", "standard")):
         raise TraceError("Saved layout settings disagree with the graph; regenerate the plot")
     layout = graph.get("layout", {})
     if not isinstance(layout, dict):
@@ -274,7 +288,7 @@ def _graph(state, goal, query, settings):
                                 group_context_inputs=settings["group_context_inputs"], **options)
     if goal == "pegouts":
         return pegout_graph(state, query, group_context_inputs=settings["group_context_inputs"],
-                            include_fees=settings["include_fees"], **options)
+                            include_fees=settings["include_fees"], hub_addresses=settings["hub_addresses"], **options)
     return build_graph(project_full_scope(state), merge_addresses=True, **options,
                        resolve_saved_inputs=state.get("collection_source", {}).get("kind") == "shared",
                        **{key: settings[key] for key in ("include_fees", "group_context_inputs", "hub_addresses")})
@@ -395,7 +409,7 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
                        connection_scope=connection_scope)
         settings = _effective_settings(settings, goal, query)
         graph = _graph(state, goal, query, settings)
-        graph["graph_options"].update({key: deepcopy(settings[key]) for key in LAYOUT_SETTINGS})
+        graph["graph_options"].update({key: deepcopy(settings[key]) for key in LAYOUT_SETTINGS.intersection(settings)})
         board_fields = {"layout_mode": layout_mode}
         if layout_mode == "update":
             from .board_layout import capture, prepare_graph

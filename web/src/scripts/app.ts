@@ -8,6 +8,7 @@ import {createTaskNotifications} from "./task-notifications";
 export {};
 
 type ConnectorStyle = "straight" | "curved" | "elbowed";
+type LayoutStyle = "standard" | "trace";
 type LayoutCounts = { crossings: number; node_overlaps: number; node_intersections: number; truncated?: boolean };
 type LayoutMetrics = {
   before: LayoutCounts; after: LayoutCounts; estimated: boolean;
@@ -37,6 +38,7 @@ type Settings = {
   max_seconds: number;
   max_new_items: number;
   layout_attempts: number;
+  layout_style: LayoutStyle;
   include_fees: boolean;
   color_attribution_arrows: boolean;
   group_context_inputs: boolean;
@@ -44,7 +46,7 @@ type Settings = {
   center_name: string;
   connector_style: ConnectorStyle;
 };
-const layoutSettingKeys = ["layout_attempts", "connector_style", "include_fees", "color_attribution_arrows", "group_context_inputs", "center_name", "hub_addresses"] as const;
+const layoutSettingKeys = ["layout_style", "layout_attempts", "connector_style", "include_fees", "color_attribution_arrows", "group_context_inputs", "center_name", "hub_addresses"] as const;
 type LayoutSettings = Pick<Settings, typeof layoutSettingKeys[number]>;
 type Run = {
   summary_pending?: boolean;
@@ -289,6 +291,7 @@ const defaults: Settings = {
   max_seconds: 60,
   max_new_items: 750,
   layout_attempts: 25,
+  layout_style: "standard",
   include_fees: false,
   color_attribution_arrows: false,
   group_context_inputs: false,
@@ -707,15 +710,15 @@ function budgetFields(settings: Settings): string {
 function graphFields(settings: Settings, suggest = false, goal: PlotGoal = "full"): string {
   const check = (key: "include_fees" | "color_attribution_arrows" | "group_context_inputs", label: string, hint: string): string =>
     `<input type="hidden" name="${key}_present" value="1"/><label class="check-line"><input name="${key}" type="checkbox"${settings[key] ? " checked" : ""}/><span><strong>${label}</strong><small>${hint}</small></span></label>`;
-  return `<div class="field-row"><label class="field"><span>Connector appearance</span><select name="connector_style">${connectorOptions(settings.connector_style)}</select></label>${numericField(settings, "layout_attempts", "Layout attempts", "More attempts compare more arrangements and take longer.")}</div>
+  return `<label class="field"><span>Layout style</span><select name="layout_style"><option value="standard"${settings.layout_style === "trace" ? "" : " selected"}>Standard</option><option value="trace"${settings.layout_style === "trace" ? " selected" : ""}>Trace layout</option></select><small>For new plot generations, Trace layout favors a straight central tracing path, nearby endpoints, and shorter branches. Choosing it also groups isolated context inputs; you can adjust that option below. Center named group chooses the path to emphasize. Board updates preserve existing positions.</small></label><div class="field-row"><label class="field"><span>Connector appearance</span><select name="connector_style">${connectorOptions(settings.connector_style)}</select></label>${numericField(settings, "layout_attempts", "Layout attempts", "More attempts compare more arrangements and take longer.")}</div>
     ${check("color_attribution_arrows", "Color arrows by attribution", "Use each named address's assigned color for its arrows.")}
     ${centerNameFields(settings, suggest)}
     <fieldset class="layout-fields context-grouping-fields"><legend>Context input grouping</legend>
     ${check("group_context_inputs", "Group isolated context inputs", "Combine isolated external input addresses used by one transaction. Shared or named addresses and context outputs stay separate. Changing this grouping replaces generated context objects; preserve any Miro comments on them first.")}</fieldset>
     <fieldset class="layout-fields fee-flow-fields"${disabled(goal === "connections")}><legend>Transaction fees</legend>
     ${check("include_fees", "Include transaction fee flows", "Show fees above the graph.")}</fieldset>
-    <fieldset class="layout-fields full-trace-fields"${disabled(goal !== "full")}><legend>Full trace options</legend>
-    ${hubAddressFields(settings)}</fieldset>${goal !== "full" ? `<p class="small muted">${goal === "pegouts" ? "Peg-out layouts show every transaction input and non-fee output. The fee option also includes transaction fee flows." : "Starter connection layouts always show every transaction input and output, including fees."} Separate branch hubs apply to Full trace.</p>` : ""}`;
+    <fieldset class="layout-fields full-trace-fields"${disabled(goal === "connections")}><legend>Branch hubs</legend>
+    ${hubAddressFields(settings)}</fieldset>${goal !== "full" ? `<p class="small muted">${goal === "pegouts" ? "Peg-out layouts show every transaction input and non-fee output. The fee option also includes transaction fee flows." : "Starter connection layouts always show every transaction input and output, including fees."} Separate branch hubs apply to Full trace and Paths to peg-outs.</p>` : ""}`;
 }
 
 function traceSummary(settings: Settings): string {
@@ -755,7 +758,7 @@ async function suggestHopReferenceNames(): Promise<void> {
 }
 
 function hubAddressFields(settings: Settings): string {
-  return `<div class="settings-divider"></div><label class="field"><span>Separate branch hubs</span><textarea name="hub_addresses" class="mono" rows="4" spellcheck="false" placeholder="One full Liquid address per line">${esc(settings.hub_addresses.join("\n"))}</textarea><small>Use high-activity or shared addresses as new tree roots for the layout. Spending transactions line up vertically when other inputs allow; their outputs branch to the right. Each address keeps one identity and all connections. Tracing stays the same.</small></label>`;
+  return `<div class="settings-divider"></div><label class="field"><span>Separate branch hubs</span><textarea name="hub_addresses" class="mono" rows="4" spellcheck="false" placeholder="One full Liquid address per line">${esc(settings.hub_addresses.join("\n"))}</textarea><small>Group branches at high-activity or shared addresses. Trace layout places a hub after its first entry from the starting flow, with later returns looping back. Spending transactions line up vertically when other inputs allow; their outputs branch to the right. Each address keeps one identity and all connections. Tracing stays the same.</small></label>`;
 }
 
 function centerNameFields(settings: Settings, suggest = false): string {
@@ -792,6 +795,7 @@ function readSettings(form: HTMLFormElement, previous: Settings = defaults): Set
     hop_reference_name: data.has("hop_reference_name") ? String(data.get("hop_reference_name") || "").trim() : (previous.hop_reference_name || ""),
     max_requests: number("max_requests"), max_seconds: number("max_seconds"), max_new_items: number("max_new_items"),
     layout_attempts: number("layout_attempts"), include_fees: flag("include_fees"),
+    layout_style: (data.get("layout_style") || previous.layout_style || "standard") as LayoutStyle,
     color_attribution_arrows: flag("color_attribution_arrows"), group_context_inputs: flag("group_context_inputs"),
     hub_addresses: data.has("hub_addresses") ? normalizedHubs(String(data.get("hub_addresses") || "").split(/\r?\n/)) : [...previous.hub_addresses],
     center_name: data.has("center_name") ? String(data.get("center_name") || "").trim() : (previous.center_name || ""),
@@ -852,7 +856,7 @@ function collectionHopLabel(progress: JobProgress): string | undefined {
 
 function jobProgress(job: ActiveJob): string {
   const progress = job.progress;
-  if (!progress) return '<progress class="job-progress-bar" aria-label="Calculation in progress"></progress>';
+  if (!progress) return `<progress class="job-progress-bar" aria-label="${job.action === "load-shared-collection" ? "Loading shared collection" : "Calculation in progress"}"></progress>`;
   const hopLabel = collectionHopLabel(progress);
   if (hopLabel) {
     const zeroHop = progress.total === 0;
@@ -872,7 +876,8 @@ function jobProgress(job: ActiveJob): string {
   return `<div class="job-progress-meta"><span>Current stage · ${esc(human(progress.phase))}</span>${measured ? `<span>${esc(completed)} / ${esc(total)}</span>` : ""}</div><progress class="job-progress-bar"${measured ? ` max="${total}" value="${completed}"` : ""} aria-label="${esc(human(progress.phase))}"></progress>${waiting ? `<p class="job-retry">Waiting ${esc(progress.retry_after)} seconds before retrying Miro.</p>` : ""}`;
 }
 
-function taskActivity(job: ActiveJob): {kind: "computing" | "api" | "waiting" | "working"; label: string} {
+function taskActivity(job: ActiveJob): {kind: "computing" | "api" | "waiting" | "working" | "loading"; label: string} {
+  if (job.action === "load-shared-collection") return {kind: "loading", label: "Loading saved data"};
   const progress = job.progress;
   if (job.status === "cancelling") return {kind: "working", label: "Canceling"};
   if (progress?.stage === "resource_wait") {
@@ -894,9 +899,9 @@ function taskActivity(job: ActiveJob): {kind: "computing" | "api" | "waiting" | 
 }
 
 function taskActivitySummary(jobs: ActiveJob[]): string {
-  const counts = {computing: 0, api: 0, working: 0, waiting: 0};
+  const counts = {computing: 0, api: 0, working: 0, waiting: 0, loading: 0};
   jobs.forEach(job => counts[taskActivity(job).kind]++);
-  return [[counts.computing, "computing"], [counts.api, "using APIs"], [counts.working, "working"], [counts.waiting, "waiting"]]
+  return [[counts.computing, "computing"], [counts.api, "using APIs"], [counts.working, "working"], [counts.waiting, "waiting"], [counts.loading, "loading"]]
     .filter(([count]) => count).map(([count, label]) => `${count} ${label}`).join(" · ");
 }
 
@@ -909,14 +914,20 @@ function taskMessage(job: ActiveJob): string {
   return job.outcomeError || (job.status === "running" ? job.progress?.message || job.message : job.message) || "Working on your request…";
 }
 
+// Display-only loads never enter the server job queue or its conflict checks.
+function activeTasks(): ActiveJob[] {
+  return [...runningJobs(), ...[...sharedCollectionLoads.values()].map(load => load.task).filter(task => task.status === "running")];
+}
+
 function jobBanner(): string {
-  const active = runningJobs();
-  const recent = finishedJobs().slice(0, 8);
+  const active = activeTasks();
+  const recent = [...finishedJobs(), ...[...sharedCollectionLoads.values()].map(load => load.task).filter(task => task.status !== "running")]
+    .sort((a, b) => (b.finishedAt ?? b.started) - (a.finishedAt ?? a.started)).slice(0, 8);
   const current = active.find(job => viewingCase(job.caseId)) || active[0];
   if (!active.length && !recent.length) return '<div id="job-tasks"></div>';
   return `<div id="job-tasks"><details class="task-list"${tasksOpen ? " open" : ""}><summary><span class="task-summary-count">${active.length ? `<span class="spinner" aria-hidden="true"></span>${active.length} active task${active.length === 1 ? "" : "s"}<small class="task-activity-summary">${esc(taskActivitySummary(active))}</small>` : "Recent tasks"}</span><div class="task-summary-message"><span role="status" aria-live="polite">${esc(current ? `${taskName(current)} · ${taskMessage(current)}` : `${recent.length} completed task${recent.length === 1 ? "" : "s"}`)}</span>${current ? jobProgress(current) : ""}</div><span class="task-summary-hint">View tasks</span></summary><div class="task-list-body">${[...active, ...recent].map(job => {
     const running = job.status === "running" || job.status === "cancelling";
-    return `<article class="job-banner task-row${job.status === "failed" ? " task-failed" : ""}" data-task="${esc(job.id)}"><div class="job-details"><div class="task-heading"><strong>${esc(taskName(job))}</strong><span>${esc(human(job.action))} · ${esc(running ? taskActivity(job).label : human(job.status))}</span></div><p data-job-message="${esc(job.id)}">${esc(taskMessage(job))}</p>${running ? `<div data-job-progress="${esc(job.id)}">${jobProgress(job)}</div>` : ""}${running && job.live && (!job.execution_state || job.execution_state === "credentials") ? '<p>Complete any Proton Pass prompt in the launching terminal.</p>' : ""}${job.source_run_id ? `<p class="small muted">Source run: ${esc(short(job.source_run_id, 8))}</p>` : ""}</div><div class="job-actions">${running ? `<span class="job-time" data-job-elapsed="${esc(job.id)}"></span>` : ""}${job.caseId ? `<button class="btn small" data-action="open-job" data-id="${esc(job.id)}">Open investigation</button>` : !running && job.action === "lookup" && job.outcome?.result ? `<button class="btn small" data-action="load-job-outputs" data-id="${esc(job.id)}">Review outputs</button>` : ""}${running && (job.cancellable || job.cancelling) ? `<button class="btn small" data-action="cancel-job" data-id="${esc(job.id)}"${disabled(job.cancelling)}>${job.cancelling ? "Canceling…" : "Cancel calculation"}</button>` : ""}${!running ? `<button class="btn ghost small" data-action="dismiss-job" data-id="${esc(job.id)}">Dismiss</button>` : ""}</div></article>`;
+    return `<article class="job-banner task-row${job.status === "failed" ? " task-failed" : ""}" data-task="${esc(job.id)}"><div class="job-details"><div class="task-heading"><strong>${esc(taskName(job))}</strong><span>${esc(job.action === "load-shared-collection" ? "Shared collection" : human(job.action))} · ${esc(running ? taskActivity(job).label : human(job.status))}</span></div><p data-job-message="${esc(job.id)}">${esc(taskMessage(job))}</p>${running ? `<div data-job-progress="${esc(job.id)}">${jobProgress(job)}</div>` : ""}${running && job.live && (!job.execution_state || job.execution_state === "credentials") ? '<p>Complete any Proton Pass prompt in the launching terminal.</p>' : ""}${job.source_run_id ? `<p class="small muted">Source run: ${esc(short(job.source_run_id, 8))}</p>` : ""}</div><div class="job-actions">${running ? `<span class="job-time" data-job-elapsed="${esc(job.id)}"></span>` : ""}${job.caseId ? `<button class="btn small" data-action="open-job" data-id="${esc(job.id)}">Open investigation</button>` : !running && job.action === "lookup" && job.outcome?.result ? `<button class="btn small" data-action="load-job-outputs" data-id="${esc(job.id)}">Review outputs</button>` : ""}${running && (job.cancellable || job.cancelling) ? `<button class="btn small" data-action="cancel-job" data-id="${esc(job.id)}"${disabled(job.cancelling)}>${job.cancelling ? "Canceling…" : "Cancel calculation"}</button>` : ""}${!running ? `<button class="btn ghost small" data-action="dismiss-job" data-id="${esc(job.id)}">Dismiss</button>` : ""}</div></article>`;
   }).join("")}</div></details></div>`;
 }
 
@@ -1443,7 +1454,7 @@ function selectLayoutDestination(detail: Case, mode: PlotLayoutMode, board?: Inv
     connectionScope: plot.goal === "connections" ? savedConnectionScope(plot) : draft.connectionScope,
     connectionMaxHops: plot.goal === "connections" ? String(plot.max_hops ?? 10) : draft.connectionMaxHops,
     includeUnspent: Boolean(plot.query?.include_unspent), includeUnspendable: Boolean(plot.query?.include_unspendable),
-    settings: selectLayoutSettings({...defaults, ...detail.run_defaults, ...plot.layout_settings})} : undefined);
+    settings: selectLayoutSettings({...defaults, ...detail.run_defaults, ...plot.layout_settings, layout_style: plot.layout_settings?.layout_style ?? "standard"})} : undefined);
   if (restored) {
     const {settings, ...query} = restored;
     Object.assign(draft, query);
@@ -1623,7 +1634,7 @@ function savedLayoutSummary(plot: Plot): string {
   const settings = plot.layout_settings;
   if (!settings) return "";
   const contextGrouping = plot.goal === "full" || plot.query?.transaction_io === "complete" || plot.goal === "pegouts" && plot.query?.include_context;
-  return `<details class="tool-details"><summary>Saved layout settings</summary><p>${esc(human(settings.connector_style))} connectors · ${esc(settings.layout_attempts)} layout attempts · Attribution arrow colors ${settings.color_attribution_arrows ? "on" : "off"}.</p><p>Centered group: ${esc(settings.center_name || "None")}.${contextGrouping ? ` Isolated context inputs ${settings.group_context_inputs ? "grouped" : "separate"}.` : ""}${plot.goal === "full" || plot.goal === "pegouts" ? ` Fee flows ${settings.include_fees ? "shown" : "hidden"}.` : ""}${plot.goal === "full" ? ` ${esc(settings.hub_addresses.length)} separate branch hubs.` : ""}</p></details>`;
+  return `<details class="tool-details"><summary>Saved layout settings</summary><p>${settings.layout_style === "trace" ? "Trace layout" : "Standard layout"} · ${esc(human(settings.connector_style))} connectors · ${esc(settings.layout_attempts)} layout attempts · Attribution arrow colors ${settings.color_attribution_arrows ? "on" : "off"}.</p><p>Centered group: ${esc(settings.center_name || "None")}.${contextGrouping ? ` Isolated context inputs ${settings.group_context_inputs ? "grouped" : "separate"}.` : ""}${plot.goal === "full" || plot.goal === "pegouts" ? ` Fee flows ${settings.include_fees ? "shown" : "hidden"}.` : ""}${plot.goal === "full" || plot.goal === "pegouts" ? ` ${esc(settings.hub_addresses.length)} separate branch hubs.` : ""}</p></details>`;
 }
 
 function sharedCollectionPanel(detail: Case): string {
@@ -2251,6 +2262,74 @@ const sectionVersions = new Map<string, number>();
 const plotChecks = new Map<string, Promise<void>>();
 const plotCheckErrors = new Map<string, string>();
 
+type SharedCollectionLoad = {
+  task: ActiveJob;
+  selected: string;
+  overviewSequence?: number;
+  request: Promise<void>;
+  response?: Partial<Case>;
+  timer?: ReturnType<typeof setTimeout>;
+  receive: (response?: Partial<Case>, error?: string) => void;
+};
+const sharedCollectionLoads = new Map<string, SharedCollectionLoad>();
+let sharedCollectionLoadId = 0;
+
+function loadSharedCollectionSection(caseId: string, selected: string, overviewSequence: number | undefined,
+    receive: SharedCollectionLoad["receive"]): Promise<void> {
+  const previous = sharedCollectionLoads.get(caseId);
+  if (previous?.task.status === "running" && previous.selected === selected && previous.overviewSequence === overviewSequence) {
+    // Navigation may replace the view while the same summary is still loading.
+    previous.receive = receive;
+    if (previous.response) receive(previous.response);
+    return previous.request;
+  }
+  if (previous?.timer) clearTimeout(previous.timer);
+  const load: SharedCollectionLoad = {
+    task: {id: `shared-load-${++sharedCollectionLoadId}`, action: "load-shared-collection", caseId,
+      status: "running", started: Date.now(), message: "Loading shared collection information…",
+      live: false, cancellable: false, cancelling: false,
+      source_run_id: selected && selected !== "latest" ? selected : undefined},
+    selected, overviewSequence, receive, request: Promise.resolve(),
+  };
+  sharedCollectionLoads.set(caseId, load);
+  updateJobProgress();
+  const current = () => sharedCollectionLoads.get(caseId) === load;
+  const finishError = (message: string) => {
+    load.task.status = "failed"; load.task.message = message; load.task.finishedAt = Date.now();
+    load.receive(undefined, message);
+  };
+  const poll = async (retry = 0): Promise<void> => {
+    try {
+      const suffix = selected && selected !== "latest" ? `/${encodeURIComponent(selected)}` : "";
+      const response = await api<Partial<Case>>(`/api/cases/${encodeURIComponent(caseId)}/shared-collection${suffix}`);
+      if (!current()) return;
+      const status = response.sections?.shared || "ready";
+      if (status === "error") {
+        finishError("Shared collection information could not be loaded. Try again.");
+      } else if (status === "loading" || status === "unloaded") {
+        if (retry >= 60) finishError("Shared collection information is still being prepared. Try again shortly.");
+        else {
+          load.response = response;
+          load.task.message = "Preparing saved shared collection summaries. You can keep using other investigations.";
+          // Continue observing preparation when its investigation is not visible.
+          load.timer = setTimeout(() => {
+            load.timer = undefined;
+            if (current()) load.request = poll(retry + 1);
+          }, retry ? 5000 : 1000);
+          load.receive(response);
+        }
+      } else {
+        load.task.status = "succeeded"; load.task.message = "Shared collection information loaded.";
+        load.task.finishedAt = Date.now(); load.receive(response);
+      }
+    } catch (error) {
+      if (current()) finishError(error instanceof Error ? error.message : "Shared collection information could not be loaded.");
+    } finally { if (current()) updateJobProgress(); }
+  };
+  load.request = poll();
+  return load.request;
+}
+
 function sectionReady(detail: Case, section: CaseSection): boolean {
   return !detail.sections || detail.sections[section] === "ready";
 }
@@ -2302,6 +2381,19 @@ async function loadCaseSection(caseId: string, section: CaseSection, force = fal
   sectionErrors.delete(key);
   if (owner.sections) owner.sections[section] = "loading";
   const applies = () => generation === pageGeneration && state.activeCase?.id === caseId && sectionVersions.get(key) === version && caseRefreshSequence.get(caseId) === overviewSequence;
+  if (section === "shared") return loadSharedCollectionSection(caseId, selected, overviewSequence, (response, error) => {
+    if (!applies()) return;
+    if (error) {
+      state.activeCase!.sections = {...state.activeCase!.sections, shared: "error"};
+      sectionErrors.set(key, error);
+    } else if (response) {
+      state.activeCase = mergeCase(state.activeCase!, {
+        ...(response.shared_collection ? {shared_collection: response.shared_collection} : {}),
+        sections: {shared: response.sections?.shared || "ready"},
+      });
+    }
+    render();
+  });
   let request!: Promise<void>;
   request = (async () => {
     try {
@@ -2851,7 +2943,7 @@ function applyLookupResult(result: Result): void {
 }
 
 function updateJobClock(): void {
-  for (const job of runningJobs()) {
+  for (const job of activeTasks()) {
     const element = document.querySelector(`[data-job-elapsed="${job.id}"]`);
     if (!element) continue;
     const elapsed = Math.max(0, Math.floor((Date.now() - job.started) / 1000),
@@ -2973,13 +3065,17 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
     return;
   }
   if (["open-job", "dismiss-job", "load-job-outputs"].includes(action)) {
-    const job = state.jobs.get(element?.dataset.id || "");
+    const id = element?.dataset.id || "";
+    const loading = [...sharedCollectionLoads.values()].find(load => load.task.id === id);
+    const job = state.jobs.get(id) || loading?.task;
     if (!job) return;
     if (action === "dismiss-job" && !["running", "cancelling"].includes(job.status)) {
-      state.jobs.delete(job.id); dismissedJobs.add(job.id); updateJobProgress();
+      if (loading) sharedCollectionLoads.delete(job.caseId!);
+      else {state.jobs.delete(job.id); dismissedJobs.add(job.id);}
+      updateJobProgress();
     } else if (action === "open-job" && job.caseId) {
       await openCase(job.caseId);
-      if (viewingCase(job.caseId) && job.status === "failed") {
+      if (!loading && viewingCase(job.caseId) && job.status === "failed") {
         state.error = job.outcomeError || job.message;
         state.editConflicts = job.outcome?.edit_conflicts ? {caseId: job.caseId, report: job.outcome.edit_conflicts} : null;
         render();
@@ -3198,6 +3294,17 @@ app.addEventListener("click", (event) => {
 
 app.addEventListener("change", (event) => {
   const element = event.target as HTMLInputElement | HTMLSelectElement;
+  if (element.name === "layout_style") {
+    const form = element.closest<HTMLFormElement>("#plot-layout-form, #settings-form");
+    if (!form || (form.id === "plot-layout-form" && draftBusy())) return;
+    if (element.value === "trace") {
+      const grouping = form.querySelector<HTMLInputElement>('input[name="group_context_inputs"]');
+      if (grouping) grouping.checked = true;
+    }
+    if (form.id === "plot-layout-form") {savePlotLayoutDraft(form); viewRevision++;}
+    else saveSettingsDraft();
+    return;
+  }
   if (element.name === "budget_limits_enabled" && element.closest("#settings-form")) {
     render();
     return;

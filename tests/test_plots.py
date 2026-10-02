@@ -13,7 +13,7 @@ from liquid_tracer.plots import FILES, INPUT_SNAPSHOT_FILES, PEGOUT_CSV_FILES, l
 from liquid_tracer.services import set_service
 from tests.test_attribution_convergence import graph_state, tx
 from tests.test_connections import saved_case
-from tests.test_pegout_paths import add_pegout
+from tests.test_pegout_paths import add_pegout, set_address
 
 
 class PlotTests(unittest.TestCase):
@@ -438,7 +438,7 @@ class PlotTests(unittest.TestCase):
         self.assertTrue(all(item["reviewable"] for item in listed))
         self.assertEqual({item["layout_settings"]["connector_style"] for item in listed}, {"straight", "elbowed"})
 
-    def test_filtered_layout_snapshot_masks_full_graph_options(self):
+    def test_filtered_layout_snapshot_applies_goal_specific_options(self):
         update_case(self.case, {"run_defaults": {"include_fees": True, "group_context_inputs": True,
                                                 "hub_addresses": ["H" * 34], "center_name": "Example",
                                                 "color_attribution_arrows": True, "layout_attempts": 3}})
@@ -449,7 +449,7 @@ class PlotTests(unittest.TestCase):
                 settings = result["layout_settings"]
                 self.assertTrue(settings["include_fees"])
                 self.assertTrue(settings["group_context_inputs"])
-                self.assertEqual(settings["hub_addresses"], [])
+                self.assertEqual(settings["hub_addresses"], ["H" * 34] if goal == "pegouts" else [])
                 self.assertEqual(settings["center_name"], "Example")
                 self.assertTrue(settings["color_attribution_arrows"])
                 self.assertTrue(graph["include_fees"])
@@ -470,7 +470,7 @@ class PlotTests(unittest.TestCase):
                     expected_grouping = goal == "full" or complete or (goal == "pegouts" and bool(query and query.get("include_context")))
                     self.assertEqual(settings["group_context_inputs"], expected_grouping)
                     self.assertEqual(settings["include_fees"], goal == "full" or complete)
-                    self.assertEqual(settings["hub_addresses"], ["H" * 34] if goal == "full" else [])
+                    self.assertEqual(settings["hub_addresses"], ["H" * 34] if goal in ("full", "pegouts") else [])
                     graph = {"plot": {"goal": goal, "query": query, "layout_settings": settings,
                                        "settings_sha256": digest(canonical(settings))},
                              "graph_options": deepcopy(settings), "presentation_version": settings["presentation_version"]}
@@ -478,6 +478,42 @@ class PlotTests(unittest.TestCase):
         self.assertTrue(preferences["include_fees"])
         self.assertTrue(preferences["group_context_inputs"])
         self.assertEqual(preferences["hub_addresses"], ["H" * 34])
+
+    def test_pegout_hub_setting_changes_only_presentation_and_keeps_old_snapshots(self):
+        address = "H" * 34
+        state = graph_state((("a:0", "c"), ("a:1", "b")), seeds=("a:0", "a:1"))
+        for key in (tx("a") + ":0", tx("a") + ":1"):
+            set_address(state, key, address)
+        add_pegout(state, tx("b"))
+        add_pegout(state, tx("c"))
+        self.state, self.archive = saved_case(self.case, state)
+        evidence = self.bytes(self.archive)
+        original = preview_plot(self.case, "pegouts")
+        old_graph, old_plan = reviewed_plot(self.case, original["preview_id"])
+        old_directory = Path(original["directory"])
+        old_bytes = self.bytes(old_directory)
+        old_hash = original["settings_sha256"]
+        update_case(self.case, {"run_defaults": {"hub_addresses": [address]}})
+        result = preview_plot(self.case, "pegouts")
+        graph, plan = reviewed_plot(self.case, result["preview_id"])
+        self.assertEqual(result["layout_settings"]["hub_addresses"], [address])
+        self.assertEqual(graph["graph_options"]["hub_addresses"], [address])
+        self.assertEqual(plan["graph_options"]["hub_addresses"], [address])
+        hubs = [node for node in graph["nodes"] if node.get("layout_hub")]
+        self.assertEqual([node["id"] for node in hubs], ["liquid:address:" + address])
+        # The hub designation preserves the one-address identity and all UTXOs.
+        for before, after in zip(old_graph["nodes"], graph["nodes"]):
+            self.assertEqual(before, {key: value for key, value in after.items() if key != "layout_hub"})
+        self.assertEqual(graph["edges"], old_graph["edges"])
+        self.assertEqual(graph["pegouts"], old_graph["pegouts"])
+        self.assertEqual(graph["branch_structure"], old_graph["branch_structure"])
+        for name in ("transactions.csv", "path-transactions.csv", "trace-endpoints.csv"):
+            self.assertEqual((old_directory / name).read_bytes(), (Path(result["directory"]) / name).read_bytes())
+        self.assertEqual(reviewed_plot(self.case, original["preview_id"]), (old_graph, old_plan))
+        self.assertEqual(old_graph["plot"]["layout_settings"]["hub_addresses"], [])
+        self.assertEqual(old_graph["plot"]["settings_sha256"], old_hash)
+        self.assertEqual(self.bytes(old_directory), old_bytes)
+        self.assertEqual(self.bytes(self.archive), evidence)
 
     def test_pegout_grouping_roundtrips_original_csv_and_preserves_older_context_layout(self):
         state = graph_state((("a:0", "c"),), seeds=("a:0",), raw_links=(("e:0", "c"), ("f:0", "c")))
@@ -500,7 +536,7 @@ class PlotTests(unittest.TestCase):
         self.assertTrue(result["layout_settings"]["group_context_inputs"])
         self.assertTrue(graph["graph_options"]["group_context_inputs"])
         self.assertTrue(result["layout_settings"]["include_fees"])
-        self.assertEqual(result["layout_settings"]["hub_addresses"], [])
+        self.assertEqual(result["layout_settings"]["hub_addresses"], ["H" * 34])
         self.assertEqual(graph["pegouts"], old_graph["pegouts"])
         self.assertEqual(plan["namespace"], old_plan["namespace"])
         self.assertEqual(len(plan["connectors"]), len(old_plan["connectors"]))

@@ -325,6 +325,11 @@ try {
       // large graph. Fixed indices override the first pass's port positions.
       Object.assign(diagnostic, {input_order_policy: 'traced_first', stage: 'traced_first_layout'});
       seedOutputColumns(result);
+      // ELK reuses supplied sections and does not remove old bendPoints when
+      // a formerly bent connection becomes straight. The first candidate is
+      // already snapshotted; discard only its computed routes in this rerun
+      // request so every connection receives fresh geometry.
+      for (const edge of result.edges) delete edge.sections;
       result = await elk.layout(result);
       diagnostic.stage = 'validate_input_order';
       const ordered = validateInputOrder(result, constraints);

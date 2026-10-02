@@ -160,6 +160,28 @@ class WorkflowWebTests(unittest.TestCase):
                 self.assertEqual(self.request(route + "/actions", {**body, "layout_settings": invalid})[0], 400)
             start.assert_not_called()
 
+    def test_layout_style_submission_accepts_trace_and_legacy_clients(self):
+        from liquid_tracer.plots import _settings, LAYOUT_SETTINGS
+        case, route, run = self.collected()
+        settings = {key: value for key, value in _settings(read_case(case)).items() if key in LAYOUT_SETTINGS}
+        before = (case / "case.json").read_bytes()
+        with patch.object(self.server, "start_job", return_value={"id": "style"}) as start:
+            for style in ("trace", "standard", None):
+                supplied = {**settings, "layout_style": style}
+                if style is None:
+                    supplied.pop("layout_style")
+                with self.subTest(style=style):
+                    self.success(route + "/actions", {"action": "plot", "goal": "pegouts", "run_id": run,
+                        "min_hops": 0, "max_hops": 10, "layout_settings": supplied}, 202)
+                    arguments = start.call_args.args[0]
+                    captured = json.loads(arguments[arguments.index("--layout-settings-json") + 1])
+                    self.assertEqual({key: value for key, value in captured.items() if key in LAYOUT_SETTINGS}, supplied)
+            start.reset_mock()
+            self.assertEqual(self.request(route + "/actions", {"action": "plot", "goal": "full", "run_id": run,
+                "min_hops": 0, "max_hops": 10, "layout_settings": {**settings, "layout_style": "invalid"}})[0], 400)
+            start.assert_not_called()
+        self.assertEqual((case / "case.json").read_bytes(), before)
+
     def test_saved_plot_submission_is_available_while_collection_runs(self):
         case, route, run = self.collected()
         job = {**test_web.synthetic_running_job(read_case(case)["case_id"]), "resource_kind": "collection"}
