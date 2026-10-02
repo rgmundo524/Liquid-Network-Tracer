@@ -24,7 +24,7 @@ const defaults = {hops: 1, hop_reference_name: '', max_transactions: 20, max_out
 
 async function harness(respond = () => undefined, {hash = '', storage = new Map(), importAction, importPending = () => false, systemNotification} = {}) {
   frameRecovery.resetFrameRecovery();
-  const calls = [], listeners = {}, windowListeners = {}, dialogListeners = {}, notifications = [], importActions = [];
+  const calls = [], requests = [], listeners = {}, windowListeners = {}, dialogListeners = {}, notifications = [], importActions = [];
   const editorResets = [], downloads = [], downloadBlobs = [], revokedDownloads = [];
   const toastElements = [];
   let focusCount = 0;
@@ -83,7 +83,11 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
     },
     async fetch(path, options) {
       const body = options.body === undefined ? undefined : JSON.parse(options.body);
-      calls.push({path, body});
+      requests.push({path, body});
+      // Existing assertions describe action payloads; retain correlation metadata
+      // separately so submission tests can assert the exact wire request too.
+      const {client_request_id: _requestId, ...actionBody} = body || {};
+      calls.push({path, body: body === undefined ? undefined : actionBody});
       const response = await Promise.resolve(respond(path, body, calls.length))
         ?? (path === '/api/session' ? {csrf: 'test', settings: defaults, cases: []} : {});
       return {ok: !response.error, status: response.error ? 400 : 200, async json() {return response;}};
@@ -92,7 +96,7 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
   script.runInContext(context);
   await context.startup;
   return {
-    ...context.appTest, app, dialog, calls, notifications, importActions, elements, storage, windowListeners, editorResets, downloads, downloadBlobs, revokedDownloads,
+    ...context.appTest, app, dialog, calls, requests, notifications, importActions, elements, storage, windowListeners, editorResets, downloads, downloadBlobs, revokedDownloads,
     toastElements, get focusCount() {return focusCount;},
     async submitDialog(values = {}) {
       dialogListeners.submit({target: {values, reportValidity: () => true}, preventDefault() {}});
@@ -4305,4 +4309,164 @@ test('empty Starter preview suggests broadening the search before collecting mor
   assert.match(view.workspace(), /No starter connections found within this scope/);
   assert.match(view.workspace(), /Increase the connection hop limit or choose All saved connections; collect more only if evidence is missing/);
   assert.doesNotMatch(view.workspace(), /No matching paths were found in this saved data/);
+});
+
+for (const action of ['workflow-plot', 'workflow-plot-sync']) {
+  test(`${action} shows a submitting task before its request finishes and prevents duplicate clicks`, async () => {
+    const response = Promise.withResolvers();
+    const view = await harness(path => path.endsWith('/actions') ? response.promise : undefined);
+    view.state.activeCase = workflowCase();
+    await view.dispatch('view-plots');
+    const submission = view.dispatch(action);
+    const pending = view.runningJobs()[0];
+    assert.equal(pending.submitting, true);
+    assert.equal(pending.source_run_id, 'saved1');
+    assert.match(view.app.innerHTML, /Submitting task to the local server/);
+    assert.match(view.app.innerHTML, /1 active task/);
+    assert.match(view.jobBanner(), /Current stage · submitting/);
+    assert.doesNotMatch(view.jobBanner(), /data-action="cancel-job"/);
+    const request = view.requests.find(call => call.path.endsWith('/actions'));
+    assert.match(request.body.client_request_id, /^[A-Za-z0-9_-]{1,64}$/);
+    assert.equal(request.body.client_request_id, pending.id);
+    await view.dispatch(action);
+    assert.equal(view.requests.filter(call => call.path.endsWith('/actions')).length, 1);
+    await view.pollJob(pending.id);
+    await view.cancelJob(pending.id);
+    assert.equal(view.requests.some(call => call.path.includes(`/api/jobs/${pending.id}`)), false);
+    response.resolve(activeTask('acknowledged', 'case1', {action: request.body.action,
+      client_request_id: pending.id, execution_state: 'working',
+      progress: {phase: 'loading_collection', completed: 0, total: 0, message: 'Loading saved collection data'}}));
+    await submission;
+    assert.equal(view.state.jobs.has(pending.id), false);
+    assert.equal(view.state.jobs.size, 1);
+    assert.equal(view.runningJobs()[0].id, 'acknowledged');
+    assert.equal(view.runningJobs()[0].started, pending.started);
+    assert.equal(view.taskActivity(view.runningJobs()[0]).kind, 'computing');
+    assert.doesNotMatch(view.jobBanner(), /Submitting task to the local server/);
+  });
+}
+
+test('job discovery adopts the exact submitting request and preserves progress before its POST returns', async () => {
+  const response = Promise.withResolvers();
+  let requestId;
+  const progress = {phase: 'preparing_plot', completed: 0, total: 0, message: 'Finding matching paths'};
+  const view = await harness((path, body) => {
+    if (path.endsWith('/actions')) {requestId = body.client_request_id; return response.promise;}
+    if (path === '/api/jobs') return {jobs: [activeTask('different', 'case1', {action: 'plot', client_request_id: 'different-request'}),
+      activeTask('matching', 'case1', {action: 'plot', client_request_id: requestId, progress})]};
+    if (path === '/api/cases/case1') return workflowCase();
+  });
+  view.state.activeCase = workflowCase();
+  await view.dispatch('view-plots');
+  const submission = view.dispatch('workflow-plot');
+  const start = view.runningJobs()[0].started;
+  await view.discoverJobs();
+  assert.equal(view.state.jobs.has(requestId), false);
+  assert.equal(view.state.jobs.size, 2, 'one separate job plus the acknowledged submission');
+  assert.equal(view.state.jobs.get('matching').started, start);
+  assert.equal(typeof view.state.jobs.get('matching').generation, 'number');
+  assert.equal(view.state.jobs.get('different').generation, undefined, 'unrelated jobs never inherit local ownership');
+  assert.equal(view.state.jobs.get('matching').progress.message, progress.message);
+  response.resolve(activeTask('matching', 'case1', {action: 'plot', client_request_id: requestId, message: 'Old starting state'}));
+  await submission;
+  assert.equal(view.state.jobs.size, 2);
+  assert.equal(view.state.jobs.get('matching').progress.message, progress.message);
+});
+
+test('a completed discovered submission does not return to running when its POST arrives later', async () => {
+  const response = Promise.withResolvers();
+  let requestId;
+  const view = await harness((path, body) => {
+    if (path.endsWith('/actions')) {requestId = body.client_request_id; return response.promise;}
+    if (path === '/api/jobs') return {jobs: [activeTask('fast-plot', 'case1', {action: 'plot',
+      client_request_id: requestId, status: 'succeeded', result: {preview_id: 'complete'}})]};
+    if (path === '/api/jobs/fast-plot') return activeTask('fast-plot', 'case1', {action: 'plot',
+      status: 'succeeded', result: {preview_id: 'complete'}});
+    if (path === '/api/cases/case1') return workflowCase();
+  });
+  view.state.activeCase = workflowCase();
+  await view.dispatch('view-plots');
+  const submission = view.dispatch('workflow-plot');
+  await view.discoverJobs();
+  await view.pollJob('fast-plot');
+  assert.equal(view.state.jobs.get('fast-plot').status, 'succeeded');
+  assert.equal(view.state.results.get('case1').result.preview_id, 'complete');
+  const notificationCount = view.notifications.length;
+  response.resolve(activeTask('fast-plot', 'case1', {action: 'plot', client_request_id: requestId}));
+  await submission;
+  assert.equal(view.runningJobs().length, 0);
+  assert.equal(view.state.jobs.size, 1);
+  assert.equal(view.notifications.length, notificationCount);
+});
+
+test('a rejected submission stays visible in its original investigation after navigation', async () => {
+  const response = Promise.withResolvers();
+  const view = await harness(path => path.endsWith('/actions') ? response.promise : undefined);
+  view.state.activeCase = workflowCase();
+  await view.dispatch('view-plots');
+  const submission = view.dispatch('workflow-plot-sync');
+  const pending = view.runningJobs()[0];
+  view.navigate('settings');
+  view.state.error = 'Keep the current settings error';
+  response.resolve({error: 'The shared snapshot is unavailable.'});
+  await submission;
+  assert.equal(view.state.page, 'settings');
+  assert.equal(view.state.error, 'Keep the current settings error');
+  assert.equal(view.state.jobs.get(pending.id).status, 'failed');
+  assert.equal(view.runningJobs().length, 0);
+  assert.equal(view.isBusy(), false);
+  assert.match(view.jobBanner(), /The shared snapshot is unavailable/);
+});
+
+test('a failed POST response discovers its accepted job without reporting a second failed task', async () => {
+  const response = Promise.withResolvers();
+  let requestId;
+  const view = await harness((path, body) => {
+    if (path.endsWith('/actions')) {requestId = body.client_request_id; return response.promise;}
+    if (path === '/api/jobs') return {jobs: [activeTask('accepted', 'case1', {
+      action: 'plot-sync', client_request_id: requestId})]};
+  });
+  view.state.activeCase = workflowCase();
+  await view.dispatch('view-plots');
+  const submission = view.dispatch('workflow-plot-sync');
+  response.reject(new Error('Connection interrupted'));
+  await submission;
+  assert.equal(view.state.jobs.size, 1);
+  assert.equal(view.state.jobs.get('accepted').status, 'running');
+  assert.equal(view.state.jobs.has(requestId), false);
+  assert.doesNotMatch(view.jobBanner(), /Connection interrupted/);
+});
+
+test('a rejected submission releases the controls and a retry has a fresh request identity', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {error: 'No matching saved snapshot'} : undefined);
+  view.state.activeCase = workflowCase();
+  await view.dispatch('view-plots');
+  await assert.rejects(view.dispatch('workflow-plot-sync'), /No matching saved snapshot/);
+  assert.equal(view.runningJobs().length, 0);
+  assert.equal(view.isBusy(), false);
+  assert.match(view.jobBanner(), /No matching saved snapshot/);
+  await assert.rejects(view.dispatch('workflow-plot-sync'), /No matching saved snapshot/);
+  const requests = view.requests.filter(call => call.path.endsWith('/actions'));
+  assert.equal(requests.length, 2);
+  assert.notEqual(requests[0].body.client_request_id, requests[1].body.client_request_id);
+});
+
+test('a delayed POST cannot clear an already discovered task failure', async () => {
+  const response = Promise.withResolvers();
+  let requestId;
+  const view = await harness((path, body) => {
+    if (path.endsWith('/actions')) {requestId = body.client_request_id; return response.promise;}
+    if (path === '/api/jobs') return {jobs: [activeTask('failed-plot', 'case1', {action: 'plot', client_request_id: requestId})]};
+    if (path === '/api/jobs/failed-plot') return {id: 'failed-plot', status: 'failed', message: 'Saved evidence could not be verified'};
+  });
+  view.state.activeCase = workflowCase();
+  await view.dispatch('view-plots');
+  const submission = view.dispatch('workflow-plot');
+  await view.discoverJobs();
+  await view.pollJob('failed-plot');
+  assert.match(view.state.error, /Saved evidence could not be verified/);
+  response.resolve(activeTask('failed-plot', 'case1', {action: 'plot', client_request_id: requestId}));
+  await submission;
+  assert.equal(view.state.jobs.get('failed-plot').status, 'failed');
+  assert.match(view.state.error, /Saved evidence could not be verified/);
 });

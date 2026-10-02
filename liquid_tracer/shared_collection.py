@@ -122,6 +122,32 @@ def resolve_shared_run(case, run_id="latest", dataset_id=None):
     return state["run_id"], path
 
 
+def select_shared_run(case, run_id="latest", dataset_id=None):
+    """Pin a selection for a queued job without loading its transaction graph.
+
+    This is admission validation only. The worker must use load_shared_run
+    before using any evidence, including its source-compatibility checks and
+    full checksum verification. Even verify=False on _source can parse a large
+    private run when its metadata cache is cold, so do not call it here.
+    """
+    from .cli import resolve_latest, run_path
+
+    path = dataset_path(case)
+    metadata = _dataset_metadata(path)
+    if dataset_id is not None and dataset_id != metadata["case_id"]:
+        raise TraceError("The shared dataset identity changed; select its current saved collection")
+    if read_case(_safe(case))["blockchain"] != metadata["blockchain"]:
+        raise TraceError("Shared collection requires the same blockchain")
+    selected = resolve_latest(path, run_id)
+    if not isinstance(selected, str) or not RUN_ID.fullmatch(selected):
+        raise TraceError("Choose a saved shared collection run")
+    archive = _safe(run_path(path, selected))
+    for name in ("trace.json", "SHA256SUMS"):
+        if not _safe(archive / name).is_file():
+            raise TraceError("Choose an intact saved shared collection run")
+    return selected, path
+
+
 def _create_dataset(root, focused, source):
     root = _safe(root)
     path = _safe(root / DIRECTORY)

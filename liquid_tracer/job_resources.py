@@ -57,6 +57,10 @@ def job_resources(arguments, action, case=None):
         resource["resource_kind"] = "collection"
     elif action == "plot" and option(arguments, "--layout-mode") != "update":
         resource["resource_kind"] = "plot"
+    elif action == "plot-sync" and option(arguments, "--layout-mode") != "update":
+        # A new board cannot target an existing mapping. Avoid parsing every
+        # saved board's item state just to reserve this known resource.
+        resource.update(resource_kind="board", resource_key="new-board")
     elif action in PARALLEL_ACTIONS:
         from .investigation_boards import list_boards
 

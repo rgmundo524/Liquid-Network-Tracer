@@ -345,6 +345,8 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
     case = _ordinary(case)
     if data_source not in ("investigation", "shared") or (data_source == "investigation" and dataset_id is not None):
         raise TraceError("Choose investigation data or a saved shared collection")
+    if progress:
+        progress({"phase": "loading_collection", "completed": 0, "total": 0})
     if data_source == "shared":
         from .shared_projection import materialize_shared_run
         run_id = materialize_shared_run(case, run_id, dataset_id=dataset_id)
@@ -355,6 +357,8 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
         state, settings, fingerprints = _source(case, run_id)
         if layout_settings is not None:
             settings = validate_layout_settings(layout_settings)
+        if progress:
+            progress({"phase": "preparing_plot", "completed": 0, "total": 0})
         inputs = {"schema_version": 1, "case_id": state["case_id"], "run_id": state["run_id"],
                   "captured_at": now(), "service_controls": deepcopy(state["service_controls"]),
                   "address_tx_counts": deepcopy(state["address_tx_counts"])}

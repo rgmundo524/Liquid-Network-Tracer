@@ -1794,7 +1794,21 @@ class Handler(BaseHTTPRequestHandler):
                            "run_defaults": body.get("settings", metadata.get("run_defaults", {}))}
                 return self.server.case_summary(case, update_case(case, updates), detail=True), 200
             if parts[3] == "actions":
-                return self.server.action(case, metadata, body), 202
+                # Correlate immediate browser feedback with the admitted job.
+                # This route runs under job_lock, so discovery cannot see a
+                # job before its request identity has been attached.
+                body = dict(body)
+                has_request_id = "client_request_id" in body
+                request_id = body.pop("client_request_id", None)
+                if has_request_id and (not isinstance(request_id, str)
+                        or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", request_id)):
+                    raise RequestError("Invalid task request identifier.")
+                job = self.server.action(case, metadata, body)
+                if request_id is not None:
+                    job["client_request_id"] = request_id
+                    if job["id"] in self.server.jobs:
+                        self.server.jobs[job["id"]]["client_request_id"] = request_id
+                return job, 202
         raise RequestError("Route not found", 404)
 
     def address_request(self, route, case, body):
