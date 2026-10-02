@@ -455,6 +455,16 @@ def _request_graph(graph):
     if output_alignment:
         from .output_alignment import constrain_request
         constrain_request(request, output_alignment)
+    else:
+        # Greedy cycle breaking can reverse an edge against its column order.
+        # ELK then adds partition constraints and creates a new cycle, corrupting
+        # layering and label dummy chains. Use the same order for both stages.
+        groups = {column: index for index, column in enumerate(sorted(set(columns.values())))}
+        request["layoutOptions"].update({
+            "elk.layered.cycleBreaking.strategy": "MODEL_ORDER",
+            "elk.layered.considerModelOrder.groupModelOrder.cbGroupOrderStrategy": "ENFORCED"})
+        for key, child in children.items():
+            child["layoutOptions"]["elk.layered.considerModelOrder.groupModelOrder.cycleBreakingId"] = str(groups[columns[key]])
     return request, port_map, fee_ids
 
 
