@@ -114,16 +114,39 @@ def _cache(case, state):
     return counts
 
 
+def _shared_cache(case, state, wanted):
+    """Read later count observations from this projection's original dataset."""
+    provenance = state.get('collection_source', {})
+    if not isinstance(provenance, dict) or provenance.get('kind') != 'shared':
+        return {}
+    from .shared_collection import _dataset_metadata, _safe, dataset_path
+    shared = dataset_path(case)
+    if not _safe(shared / 'case.json').exists():
+        return {}  # Archived projections remain usable without the shared pool.
+    metadata = _dataset_metadata(shared)
+    if (metadata['case_id'] != provenance.get('dataset_id')
+            or metadata['source'] != state['source']):
+        return {}  # A replacement pool must not supply another dataset's counts.
+    identity = {'case_id': metadata['case_id'], 'source': state['source']}
+    wanted = set(wanted)
+    return {address: record for address, record in _cache(shared, identity).items()
+            if address in wanted}
+
+
 def apply_saved_counts(case, state):
     """Overlay cached counts and verified address reviews, without any API call."""
     from .address_review import _index, _read_activity
     counts = {a: copy.deepcopy(r) for a, r in state.get('address_tx_counts', {}).items()
               if _valid(r, state['source'], a)}
+    wanted = addresses(state)
+    for address, record in _shared_cache(case, state, wanted).items():
+        if address not in counts or record['observed_at'] >= counts[address]['observed_at']:
+            counts[address] = copy.deepcopy(record)
     for address, record in _cache(case, state).items():
         if address not in counts or record['observed_at'] >= counts[address]['observed_at']:
             counts[address] = copy.deepcopy(record)
     index = _index(case)
-    for address in addresses(state):
+    for address in wanted:
         if address not in index['addresses']:
             continue
         record = _read_activity(case, address, index)
