@@ -76,6 +76,8 @@ def legend_notes(graph=None):
     arrows = (graph or {}).get("graph_options", {}).get("color_attribution_arrows", False)
     all_saved_connections = ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
                              and (graph or {}).get("connections", {}).get("connection_scope") == "all_saved")
+    limited_connections = ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
+                           and (graph or {}).get("connections", {}).get("connection_scope") == "hop_limited")
     notes = [
         "Squares = transactions; circles = addresses; diamonds = events.",
         "Selected seeds keep their seed color. Assigned name colors override other address colors.",
@@ -84,7 +86,7 @@ def legend_notes(graph=None):
         "Thick red borders mark branch convergence. Colors and links do not prove ownership or allocate value.",
         "L-BTC amounts use L-BTC units: 100,000,000 base units = 1 L-BTC. Other assets use base units.",
         ("?? = not publicly available. Collection stop labels remain visible but do not limit this saved-data view."
-         if all_saved_connections else "?? = not publicly available. STOP TRACING = an explicit address boundary."),
+         if all_saved_connections or limited_connections else "?? = not publicly available. STOP TRACING = an explicit address boundary."),
     ]
     from .group_hops import normalize_reference_name
     name = normalize_reference_name((graph or {}).get("hop_reference_name", ""))
@@ -92,7 +94,9 @@ def legend_notes(graph=None):
         notes.append(f"Hops count away from attribution group {name}. A reached output in that group resets "
                      "its own branch to 0; outside outputs continue independently. "
                      + ("These distances describe saved paths and do not limit starter connections."
-                        if all_saved_connections else "Attribution stop rules "
+                        if all_saved_connections else
+                        "These display distances do not reset the transaction-hop connection limit; attribution stops and hop limits are ignored."
+                        if limited_connections else "Attribution stop rules "
                         + ("still apply." if (graph or {}).get("pegouts", {}).get("query", {}).get("attribution_hop_limits") == "ignore"
                            else "and hop allowances still apply.")))
     if all_saved_connections:
@@ -100,6 +104,14 @@ def legend_notes(graph=None):
             "Starter connections use every verified saved spend path between selected starting transactions. "
             "Stop-tracing rules, attribution hop limits, and a plot hop cutoff do not restrict this view.",
             "Saved unconfirmed spends are included and may change. No additional transaction data is fetched; "
+            "branches absent from the saved collection cannot establish a connection.",
+        ])
+    if limited_connections:
+        maximum = graph["connections"]["max_hops"]
+        notes.extend([
+            f"Starter connections include paths of at most {maximum} ordinary transaction steps from each selected starter to another. "
+            "Named groups and intermediate starters do not reset this limit. Attribution stop rules and hop limits are ignored.",
+            "Saved unconfirmed spends remain eligible and may change. No additional transaction data is fetched; "
             "branches absent from the saved collection cannot establish a connection.",
         ])
     if ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"

@@ -244,7 +244,9 @@ def parser():
         plot.add_argument("--min-hops", type=int, default=0,
                           help="Minimum endpoint distance for peg-out plots; ignored by Starter connections")
         plot.add_argument("--max-hops", type=int, default=10,
-                          help="Maximum endpoint distance for peg-out plots; Starter connections uses all verified saved connections")
+                          help="Maximum endpoint distance for peg-outs, or starter path length with --connection-scope hop_limited")
+        plot.add_argument("--connection-scope", choices=("all_saved", "hop_limited"), default="all_saved",
+                          help="Starter connections: all saved paths, or paths within --max-hops transaction steps")
         plot.add_argument("--include-unspent", action="store_true",
                           help="Include paths to outputs recorded as unspent in peg-out plots")
         plot.add_argument("--include-unspendable", action="store_true",
@@ -283,7 +285,8 @@ def parser():
     connections.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     connections.add_argument("--run", default="latest")
     connections.add_argument("--hops", type=int, default=10,
-                             help="Compatibility flag; new connection graphs use all verified saved connections without a hop cutoff")
+                             help="Maximum starter path length when --connection-scope hop_limited is selected")
+    connections.add_argument("--connection-scope", choices=("all_saved", "hop_limited"), default="all_saved")
     connections.add_argument("--open", dest="open_browser", action="store_true")
     connection_publish = commands.add_parser("connections-publish", help="Publish a reviewed connection-only snapshot to a separate Miro board")
     connection_publish.add_argument("--case", type=Path, default=case_default, required=case_default is None)
@@ -1385,6 +1388,7 @@ def main(argv=None, *, progress=None, diagnostics=None):
             from .plots import preview_plot
             print(json.dumps(preview_plot(args.case, args.goal, args.run,
                 min_hops=args.min_hops, max_hops=args.max_hops,
+                connection_scope=args.connection_scope,
                 include_unspent=args.include_unspent, include_unspendable=args.include_unspendable,
                 include_context=args.include_context,
                 layout_mode=args.layout_mode, board_record_id=args.board_record_id,
@@ -1395,6 +1399,7 @@ def main(argv=None, *, progress=None, diagnostics=None):
             from .investigation_boards import generate_and_sync
             print(json.dumps(generate_and_sync(args.case, args.goal, args.run,
                 min_hops=args.min_hops, max_hops=args.max_hops,
+                connection_scope=args.connection_scope,
                 include_unspent=args.include_unspent, include_unspendable=args.include_unspendable,
                 include_context=args.include_context,
                 layout_mode=args.layout_mode, board_record_id=args.board_record_id,
@@ -1422,6 +1427,7 @@ def main(argv=None, *, progress=None, diagnostics=None):
         elif args.command == "connections":
             from .connections import preview_connections
             print(json.dumps(preview_connections(args.case, args.run, args.hops,
+                                                connection_scope=args.connection_scope,
                                                 open_browser=args.open_browser, progress=progress), indent=2))
         elif args.command == "connections-publish":
             from .connections import publish_connections

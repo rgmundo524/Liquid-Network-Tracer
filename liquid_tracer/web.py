@@ -654,8 +654,8 @@ class LocalServer(ThreadingHTTPServer):
                         product.update(display_options)
                     if kind == "connections":
                         report = info["connections"]
-                        if report.get("connection_scope") == "all_saved":
-                            product["connection_scope"] = "all_saved"
+                        if report.get("connection_scope") in ("all_saved", "hop_limited"):
+                            product["connection_scope"] = report["connection_scope"]
                         if report.get("transaction_io") == "complete":
                             product["transaction_io"] = "complete"
                             product["context_edge_count"] = report["context_edge_count"]
@@ -1104,8 +1104,8 @@ class LocalServer(ThreadingHTTPServer):
                 from .connections import reviewed_connections
                 graph, _ = reviewed_connections(case, directory.name)
                 report = graph["connections"]
-                if report.get("connection_scope") == "all_saved":
-                    value["connection_scope"] = "all_saved"
+                if report.get("connection_scope") in ("all_saved", "hop_limited"):
+                    value["connection_scope"] = report["connection_scope"]
                 if report.get("transaction_io") == "complete":
                     value["transaction_io"] = "complete"
                     value["context_edge_count"] = report["context_edge_count"]
