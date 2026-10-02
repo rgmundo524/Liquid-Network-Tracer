@@ -22,6 +22,9 @@
     LIQUID_CASE_DIR = "${config.devenv.root}/cases/current";
     LIQUID_SECRET_PROVIDER = "protonpass";
     LIQUID_SECRET_PROFILE = "development";
+    # Share the desktop Secret Service keyring across terminal sessions.
+    PROTON_PASS_KEY_PROVIDER = "keyring";
+    PROTON_PASS_LINUX_KEYRING = "dbus";
     # Discover throughput from successful responses and provider backoff,
     # shared across local workers and instances. A number selects a fixed rate.
     LIQUID_BLOCKSTREAM_ENTERPRISE_RPS = "auto";
