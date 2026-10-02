@@ -87,7 +87,7 @@ class CaseSummaryTests(unittest.TestCase):
             stack.enter_context(patch("liquid_tracer.board_rebuild.rebuild_status", return_value=None))
             yield artifacts
 
-    def test_session_reads_only_latest_and_skips_cases_without_a_selection(self):
+    def test_session_reads_cached_latest_and_skips_cases_without_a_selection(self):
         latest = self.archive()
         self.archive(OLDER)
         projected = self.archive(PROJECTED, collection_source={"kind": "shared"})
@@ -96,9 +96,11 @@ class CaseSummaryTests(unittest.TestCase):
         # A large unselected archive must not even reach the JSON reader.
         with (projected / "trace.json").open("r+b") as stream:
             stream.truncate(256 * 1024 * 1024)
-        with self.list_reads([latest / "trace.json"]) as reads:
+        from liquid_tracer.run_summaries import remember_run_summary
+        self.assertTrue(remember_run_summary(latest, read_json(latest / "trace.json")))
+        with self.list_reads() as reads:
             session = self.server.session()
-        self.assertEqual(reads, [latest / "trace.json"])
+        self.assertEqual(reads, [])
         cases = {case["id"]: case for case in session["cases"]}
         summary = cases[read_case(self.case)["case_id"]]
         self.assertEqual(summary["status"], "bounded_complete")

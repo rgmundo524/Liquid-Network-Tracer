@@ -44,8 +44,10 @@ hop range still bounds the search; optional resource budgets can stop it early.
 Address reuse and other inputs do not create traversal links.
 
 The plot selects transactions on paths reaching matching requests, then shows
-all inputs and outputs of each selected transaction, including fees. Outputs
-at the head of excluded branches remain visible as context without continuing
+inputs and outputs of each selected transaction. **Include transaction fee flows**
+controls whether fee outputs appear in the graph and its transaction CSV. The
+saved source evidence always retains those outputs. Outputs at the head of
+excluded branches remain visible as context without continuing
 those branches or adding endpoint matches. There is no optional context-display
 toggle for newly generated plots. Each full address has one circle per network.
 Each UTXO keeps its own input and output connectors;

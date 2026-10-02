@@ -182,6 +182,8 @@ def transaction_csv_rows(graph, state):
                 endpoint_outpoints[key].add(outpoint)
                 for label in item.get("labels", []):
                     occurrence_labels[key, outpoint][canonical(label)] = label
+        from .saved_inputs import input_evidence
+        input_transactions = input_evidence(state) if graph.get("graph_options", {}).get("resolve_saved_inputs") is True else {}
         rows, seen = [], set()
         for edge in graph["edges"]:
             direction, txid, raw_index = edge["id"].split(":")
@@ -210,7 +212,7 @@ def transaction_csv_rows(graph, state):
                 output = {} if coinbase else (vin.get("prevout") or {})
                 if not coinbase and graph.get("graph_options", {}).get("resolve_saved_inputs") is True:
                     from .saved_inputs import saved_input_output
-                    output = saved_input_output(state["transactions"], vin)
+                    output = saved_input_output(input_transactions, vin)
                 outpoint = f"{vin.get('txid', txid)}:{vin.get('vout', io_index)}"
                 if coinbase:
                     flags.append("COINBASE")

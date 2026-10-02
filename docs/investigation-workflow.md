@@ -14,10 +14,24 @@ outputs. **Liquid Network** is currently the only supported blockchain. The
 browser's creation form has no Miro board field or starting-preferences panel;
 create or link boards later in **Plots & Miro**.
 
-Opening an existing investigation displays its name with an **Opening** status
-in the header while the app loads its saved runs, plots, and board records. Larger
-investigations can take longer because saved files are checked before they are
-offered for reuse. Opening does not fetch blockchain data or contact Miro.
+Opening an existing investigation loads its name, settings, starting outputs,
+and selected-run summary first. Collection information, shared snapshots, saved
+plots, board status, and history load independently as their tabs need them.
+A section that is still loading does not block navigation or settings.
+
+New collection runs save small display summaries when they finish. Older runs
+build these summaries once in the background, using bounded memory; the cache
+survives service restarts. Only the selected run is scheduled when opening an
+investigation. Selecting another snapshot or opening History requests its older
+summaries. While a summary is being prepared, its counts show **Loading**, not
+zero or an empty investigation. Source changes invalidate cached summaries.
+
+Saved plot lists read their small reports. Selecting a plot checks its saved
+files before enabling its preview and publication controls. Downloads and Miro
+actions retain their full evidence validation; display summaries never authorize
+publication. Opening an investigation does not fetch blockchain data or contact
+Miro. A selected large plot can still take time to validate without blocking
+other investigation tabs.
 
 ## 1. Collect data
 
@@ -212,19 +226,21 @@ unchecked, stopped, or hop-limited outputs do not qualify merely because no
 spending transaction was collected. A saved spending input overrides an older
 unspent observation. This is the state observed in the selected run, not a live
 balance. Unspendable event diamonds remain separate by output. Fee outputs
-are excluded from endpoint selection, but displayed as transaction context.
+are excluded from endpoint selection. They appear as transaction context only
+when **Include transaction fee flows** is enabled.
 
 The saved plot records its endpoint choices and counts by type, so the ELK SVG
 and Miro sync use the same selection. These choices belong to the generated
 layout, like its hop range. To change them, generate another layout and select
 it for the managed board. Plotting does not fetch fresh spend observations.
 
-Every transaction selected for a new peg-out plot automatically shows **all
-inputs and outputs**, including fees and outputs on branches that are not
-followed. There is no context-display toggle. The endpoint and hop filters decide
-which transactions belong to the plot, not which objects of an included
-transaction are visible. An excluded branch retains its initial output/address
-without extending that branch or treating it as an endpoint match.
+Every transaction selected for a new peg-out plot automatically shows its
+**inputs and outputs**, including outputs on branches that are not followed.
+**Include transaction fee flows** controls fee visibility; hiding fees also omits
+their rows from the matching transaction CSV, while the source evidence retains
+them. There is no context-display toggle. The endpoint and hop filters decide
+which transactions belong to the plot. An excluded branch retains its initial
+output/address without extending that branch or treating it as an endpoint match.
 
 Context uses thinner arrows and is marked `CONTEXT` in the transaction CSV.
 Context does not create traced links, change hop counts or endpoint matches,
@@ -283,7 +299,8 @@ contain them; the peg-out interface presents only the two downloads above.
 
 Set layout attempts, connector appearance, attribution arrow coloring, and
 named-group centering here. **Full trace** also supports **Separate branch hubs**,
-**Group isolated context inputs**, and **Include transaction fee flows**.
+**Group isolated context inputs**, and **Include transaction fee flows**. The fee
+setting also applies to **Paths to peg-outs**.
 **Group isolated context inputs** is also available for **Paths to peg-outs**
 and **Starter connections**.
 It combines at least two eligible external input addresses used only by one
@@ -294,9 +311,10 @@ the full member addresses stay available in local details. Endpoint matches,
 hop limits, and trace evidence are unchanged.
 
 Grouping is saved as an investigation layout preference and captured with each
-generated layout. Separate branch hubs and the optional fee-flow toggle remain
-Full trace-only; new peg-out and Starter connections layouts always display
-their transaction fees.
+generated layout. Separate branch hubs remain Full trace-only. The optional
+fee-flow toggle applies to Full trace and Paths to peg-outs; Starter connections
+always displays transaction fees. Existing saved layouts keep their captured
+fee choice; generate another layout to apply a different choice.
 **Generate & update board** applies grouping changes. Replaced
 context objects join the newly arranged additions.
 

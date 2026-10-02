@@ -60,7 +60,7 @@ def validate_transaction_io(value):
     return value
 
 
-def _saved_connection_evidence(state):
+def _saved_connection_evidence(state, *, copy_state=True):
     """Add exact saved input references to an isolated display state.
 
     Collection may have stopped before requesting an outspend that another
@@ -69,7 +69,7 @@ def _saved_connection_evidence(state):
     """
     from .trace import validate_transaction
     from .saved_inputs import saved_input_output
-    result = deepcopy(state)
+    result = deepcopy(state) if copy_state else state
     transactions, outputs, links = result["transactions"], result["outputs"], result["links"]
     try:
         actual_spends = {}

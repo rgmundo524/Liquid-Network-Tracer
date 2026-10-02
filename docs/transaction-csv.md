@@ -50,13 +50,18 @@ hashes, normal CSV quoting and Unicode, and spreadsheet-formula protection.
 Import hash/address columns as text in spreadsheet applications to preserve IDs.
 The file never parses abbreviated captions or uses visual styling as evidence.
 
-## Full graph versus starter connections
+## Fee visibility and plotting goals
 
 Use the ordinary **Create CSV export** for the selected full-trace snapshot.
 Its current fee visibility applies: a hidden fee arrow has no exported row.
 Current local attribution settings apply. Manual edits made only in Miro are
 not imported, and a browser-only temporary visibility toggle is not a saved
 export selection. No API calls, ELK recalculation or retracing are needed.
+
+For **Paths to peg-outs**, the saved layout's **Include transaction fee flows**
+choice also controls fee rows. Hiding fees does not change peg-out matches,
+endpoint totals, or the raw transaction evidence. Previously saved CSVs retain
+their original selection.
 
 For **Starter connections**, generate a new plot and select its **Transaction
 CSV** download. The connection search selects relevant transactions; the CSV

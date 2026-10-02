@@ -491,7 +491,7 @@ class WorkflowWebTests(unittest.TestCase):
                 self.assertEqual(listed["query"]["transaction_io"], "complete")
                 self.assertNotIn("include_context", listed["query"])
                 self.assertEqual(listed["context_edge_count"], plot["context_edge_count"])
-                self.assertTrue(listed["layout_settings"]["include_fees"])
+                self.assertFalse(listed["layout_settings"]["include_fees"])
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             self.assertEqual(main(["plot", "--case", str(case), "--goal", "pegouts"]), 0)

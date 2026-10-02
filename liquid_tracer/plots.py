@@ -102,7 +102,11 @@ def _effective_settings(settings, goal, query=None):
         # New focused plots select transactions, then display their complete
         # local I/O. Legacy snapshots retain their original optional context.
         complete = goal in ("pegouts", "connections") and (query or {}).get("transaction_io") == "complete"
-        result.update(include_fees=complete, hub_addresses=[])
+        result["hub_addresses"] = []
+        # Complete peg-out context honors the captured fee display setting.
+        # Starter connections and legacy path-only snapshots keep their policy.
+        if goal == "connections" or not complete:
+            result["include_fees"] = complete
         if not complete and not (goal == "pegouts" and (query or {}).get("include_context")):
             result["group_context_inputs"] = False
     return result
@@ -180,7 +184,7 @@ def _archive_source(case, run_id, metadata=None, *, progress=None):
     return state, digest((archive / "SHA256SUMS").read_bytes())
 
 
-def _source(case, run_id, *, progress=None):
+def _source(case, run_id, *, progress=None, prepared=None):
     from .address_counts import apply_saved_counts
     from .cli import resolve_latest
     from .investigations import read_case
@@ -193,7 +197,8 @@ def _source(case, run_id, *, progress=None):
         run_id = resolve_latest(case, run_id)
         controls = {key: value for key, value in load_services(case).items() if key != "history"}
         settings = _settings(metadata)
-    state, archive_sha256 = _archive_source(case, run_id, metadata, progress=progress)
+    state, archive_sha256 = (prepared if prepared is not None else
+                             _archive_source(case, run_id, metadata, progress=progress))
     state["labels"] = apply_service_labels(state["labels"], controls)
     state["service_controls"] = controls
     counts = apply_saved_counts(case, state)
@@ -268,7 +273,8 @@ def _graph(state, goal, query, settings):
                                 transaction_io=query.get("transaction_io"),
                                 group_context_inputs=settings["group_context_inputs"], **options)
     if goal == "pegouts":
-        return pegout_graph(state, query, group_context_inputs=settings["group_context_inputs"], **options)
+        return pegout_graph(state, query, group_context_inputs=settings["group_context_inputs"],
+                            include_fees=settings["include_fees"], **options)
     return build_graph(project_full_scope(state), merge_addresses=True, **options,
                        resolve_saved_inputs=state.get("collection_source", {}).get("kind") == "shared",
                        **{key: settings[key] for key in ("include_fees", "group_context_inputs", "hub_addresses")})
@@ -298,6 +304,13 @@ def _coverage(state):
         text += f"Hops count away from attribution group {name}, resetting at each reached group output. "
     if reason:
         text += f"Stop reason: {reason}. "
+    selection = state.get("collection_source", {}).get("selection", {})
+    if selection.get("connection_scope") is not None:
+        text += "This saved projection contains starter-connection paths only. "
+    if selection.get("max_hops") is not None:
+        text += f"This saved projection was selected within {selection['max_hops']} transaction hops. "
+    if selection.get("connection_scope") is not None or selection.get("max_hops") is not None:
+        text += "Choose Shared collection again to search a different or wider scope. "
     return {"saved_data_only": True, "source_max_hops": maximum, "source_run_status": status,
             **({"hop_reference_name": name} if name else {}),
             "source_stop_reason": reason, "coverage_notice": text + SCOPE}
@@ -350,14 +363,27 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
     case = _ordinary(case)
     if data_source not in ("investigation", "shared") or (data_source == "investigation" and dataset_id is not None):
         raise TraceError("Choose investigation data or a saved shared collection")
+    prepared = None
     if data_source == "shared":
-        from .shared_projection import materialize_shared_run
-        run_id = materialize_shared_run(case, run_id, dataset_id=dataset_id, progress=progress)
+        from .investigations import read_case
+        from .shared_projection import materialize_shared_source
+        with _locked(case):
+            metadata = read_case(case)
+        preliminary = {"seeds": metadata.get("seeds", []),
+                       "hop_reference_name": metadata.get("run_defaults", {}).get("hop_reference_name", "")}
+        query = _query(goal, preliminary, min_hops, max_hops, include_unspent=include_unspent,
+                       include_unspendable=include_unspendable, include_context=include_context,
+                       connection_scope=connection_scope)
+        bound = query.get("max_hops") if goal in ("pegouts", "connections") else None
+        scope = query.get("connection_scope") if goal == "connections" else None
+        run_id, state, checksum = materialize_shared_source(
+            case, run_id, dataset_id=dataset_id, progress=progress, max_hops=bound, connection_scope=scope)
+        prepared = (state, checksum)
     with ExitStack() as operation:
         if layout_mode == "update" and not _board_lock_held:
             from .investigation_boards import _board_lock
             operation.enter_context(_board_lock(case, board_record_id))
-        state, settings, fingerprints = _source(case, run_id, progress=progress)
+        state, settings, fingerprints = _source(case, run_id, progress=progress, prepared=prepared)
         report_progress(progress, "layout", 0, 1)
         if layout_settings is not None:
             settings = validate_layout_settings(layout_settings)

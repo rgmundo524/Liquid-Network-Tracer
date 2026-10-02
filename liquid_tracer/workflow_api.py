@@ -1,8 +1,10 @@
 """Public HTTP representations for the collection, plot, and board workflow."""
 
 from urllib.parse import quote
+import heapq
 import json
 import re
+import stat
 
 from .common import TraceError
 from .investigations import read_case
@@ -12,7 +14,7 @@ PLOT_FIELDS = {"id", "preview_id", "run_id", "goal", "min_hops", "max_hops", "cr
                "connection_count", "source_max_hops", "source_run_status", "source_stop_reason",
                "notice", "coverage_notice", "publication_notice", "reviewable", "review_error", "empty", "saved_data_only",
                "layout_mode", "board_record_id", "board_id", "board_name", "hop_reference_name"}
-PLOT_FIELDS.update({"input_snapshot_version", "input_snapshot_at"})
+PLOT_FIELDS.update({"input_snapshot_version", "input_snapshot_at", "validation_pending"})
 BOARD_FIELDS = {"id", "record_id", "name", "goal", "board_id", "status", "preview_id", "run_id",
                 "legacy_snapshot", "can_sync", "notice", "pending_count", "created", "reused",
                 "creation_preview_id", "created_board", "reused_board"}
@@ -141,17 +143,133 @@ def plot_artifact(case, preview_id, *, verified=False):
     return result
 
 
-def case_workflow(case):
-    from .plots import list_plots
+# Listing a saved plot must not read its graph, Miro plan, or source archive.
+# Reports are small metadata; bound both the number and size of those reads.
+PLOT_SUMMARY_LIMIT = 100
+PLOT_SUMMARY_BYTES = 1024 * 1024
+
+
+def _plot_summary(case, directory, identity):
+    from .plots import GOALS, _ordinary, FILES, PEGOUT_CSV_FILES, INPUT_SNAPSHOT_FILES
+    from .plot_csv import csv_links
+
+    path = _ordinary(directory / "plot.json")
+    details = path.stat()
+    if not stat.S_ISREG(details.st_mode) or details.st_size > PLOT_SUMMARY_BYTES:
+        raise TraceError("Saved plot report is unavailable")
+    with path.open("rb") as stream:
+        raw = stream.read(PLOT_SUMMARY_BYTES + 1)
+    if len(raw) > PLOT_SUMMARY_BYTES:
+        raise TraceError("Saved plot report is too large")
+    report = json.loads(raw)
+    if (not isinstance(report, dict) or type(report.get("schema_version")) is not int
+            or report["schema_version"] != 1 or report.get("case_id") != identity
+            or report.get("run_id") != directory.name[:16]
+            or not isinstance(report.get("goal"), str) or report["goal"] not in GOALS
+            or not isinstance(report.get("query"), dict)
+            or not isinstance(report.get("created_at"), str) or not report["created_at"]
+            or any(type(report.get(key)) is not int or not 0 <= report[key] <= 2 ** 53 - 1
+                   for key in ("node_count", "edge_count", "transaction_count"))):
+        raise TraceError("Saved plot report does not match this investigation")
+    files = FILES
+    for key, names in (("input_snapshot_version", INPUT_SNAPSHOT_FILES), ("csv_export_version", PEGOUT_CSV_FILES)):
+        if key in report:
+            if (type(report[key]) is not int or report[key] != 1
+                    or (key == "csv_export_version" and report["goal"] != "pegouts")):
+                raise TraceError("Unsupported saved plot report")
+            files |= names
+    # A manifest is the completion marker, not evidence of integrity. Only the
+    # selected-plot and download endpoints perform the expensive verification.
+    manifest = _ordinary(directory / "SHA256SUMS")
+    if not manifest.is_file():
+        raise TraceError("Saved plot is not finished")
+    item = public_plot(report)
+    for key in ("id", "preview_id", "review_error", "reason", "reviewable", "validation_pending", "empty"):
+        item.pop(key, None)
+    for key in ("match_count", "connection_count", "source_max_hops", "min_hops", "max_hops"):
+        if key in item and item[key] is not None and (type(item[key]) is not int or not 0 <= item[key] <= 2 ** 53 - 1):
+            item.pop(key)
+    for key in ("saved_data_only",):
+        if key in item and type(item[key]) is not bool:
+            item.pop(key)
+    item.update(id=directory.name, preview_id=directory.name, reviewable=False,
+                validation_pending=True, empty=report["node_count"] == 0)
+    artifact = {"preview_id": directory.name, "downloads": []}
+    for name in sorted(files):
+        if not _ordinary(directory / name).is_file():
+            continue
+        url = "/files/" + identity + "/previews/" + quote(directory.name) + "/" + quote(name)
+        artifact["downloads"].append({"name": name, "url": url})
+        if name == "graph.html":
+            artifact["preview_url"] = url
+    if report["goal"] == "pegouts":
+        artifact["downloads"] = [value for value in artifact["downloads"] if not value["name"].endswith(".csv")]
+        artifact["downloads"].extend(csv_links(identity, directory.name))
+    item["artifact"] = artifact
+    return item
+
+
+def plot_summaries(case):
+    """Return bounded, unverified metadata for choosing a saved plot."""
+    from .plots import PREVIEW_ID, _ordinary
+
+    case = _ordinary(case)
+    identity = read_case(case)["case_id"]
+    previews = _ordinary(case / "previews")
+    candidates = []
+    for directory in previews.glob("*-plots-*"):
+        try:
+            details = directory.lstat()
+            if PREVIEW_ID.fullmatch(directory.name) and stat.S_ISDIR(details.st_mode):
+                candidates.append((details.st_mtime_ns, directory.name, directory))
+        except OSError:
+            continue
+    recent = heapq.nlargest(PLOT_SUMMARY_LIMIT, candidates)
+    result = []
+    for _, _, directory in recent:
+        try:
+            result.append(_plot_summary(case, directory, identity))
+        except (TraceError, OSError, ValueError, TypeError, KeyError):
+            continue
+    return sorted(result, key=lambda value: (value["created_at"], value["id"]), reverse=True)
+
+
+def selected_plot(case, preview_id):
+    """Verify only the selected saved plot before presenting it for review."""
+    from .plots import reviewed_plot, _summary
+
+    graph, _ = reviewed_plot(case, preview_id)
+    item = public_plot(_summary(graph, preview_id))
+    item["validation_pending"] = False
+    item["artifact"] = plot_artifact(case, preview_id, verified=True)
+    return item
+
+
+def case_boards(case):
+    """Read authoritative board mappings separately from plot summaries."""
     from .investigation_boards import list_boards
 
-    result = {"plots": [], "boards": []}
+    result = {"boards": []}
     try:
-        plots = list_plots(case)
+        result["boards"] = [public_board(value) for value in list_boards(case)]
+    except (TraceError, OSError, ValueError, TypeError, KeyError):
+        result["boards_notice"] = "The saved board registry is unavailable. Restore it before changing investigation boards."
+    return result
+
+
+def case_workflow(case, *, lightweight=False):
+    from .plots import list_plots
+
+    result = {"plots": []}
+    try:
+        plots = plot_summaries(case) if lightweight else list_plots(case)
     except (TraceError, OSError, ValueError, TypeError, KeyError):
         plots = []
         result["plots_notice"] = "Saved plots are temporarily unavailable. Wait for collection or settings updates to finish."
     for value in plots:
+        if lightweight:
+            result["plots"].append(value)
+            continue
         item = public_plot(value)
         if value.get("reviewable"):
             try:
@@ -165,10 +283,8 @@ def case_workflow(case):
             item["artifact"] = {"preview_id": value["preview_id"],
                                 "downloads": csv_links(read_case(case)["case_id"], value["preview_id"])}
         result["plots"].append(item)
-    try:
-        result["boards"] = [public_board(value) for value in list_boards(case)]
-    except (TraceError, OSError, ValueError, TypeError, KeyError):
-        result["boards_notice"] = "The saved board registry is unavailable. Restore it before changing investigation boards."
+    if not lightweight:
+        result.update(case_boards(case))
     return result
 
 

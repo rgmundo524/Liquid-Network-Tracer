@@ -170,8 +170,11 @@ def legend_notes(graph=None):
             notes.append("One circle per full address per network; each UTXO keeps its own arrows. "
                          "Sharing a circle does not establish a spend between unrelated outputs.")
         if complete_io:
-            notes.append("Every input and output of displayed transactions is included, including fees. "
-                         "Context branch outputs do not become endpoint matches or imply unspent status. "
+            io_notice = ("Every input and output of displayed transactions is included, including fees. "
+                         if graph.get("include_fees") is not False else
+                         "Every input and non-fee output of displayed transactions is included. "
+                         "Fee flows are hidden; their original transaction evidence is retained. ")
+            notes.append(io_notice + "Context branch outputs do not become endpoint matches or imply unspent status. "
                          "Earlier and later transactions are only included when they belong to a qualifying path.")
         elif query.get("include_context"):
             notes.append("Context includes other input addresses and spendable sibling outputs of displayed transactions. "

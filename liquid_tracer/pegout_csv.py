@@ -197,9 +197,14 @@ def pegout_csv_rows(graph, state, *, observations=None):
             raise TraceError("Endpoint CSV graph is missing qualifying transactions or path arrows")
         complete = query.get("transaction_io") == "complete"
         if complete:
+            include_fees = graph.get("include_fees")
+            if (type(include_fees) is not bool
+                    or graph.get("graph_options", {}).get("include_fees") is not include_fees):
+                raise TraceError("Endpoint CSV graph has inconsistent fee visibility")
             local_edges = {f"{direction}:{txid}:{index}"
                            for txid in transactions for direction, field in (("in", "vin"), ("out", "vout"))
-                           for index in range(len(state["transactions"][txid]["data"][field]))}
+                           for index, item in enumerate(state["transactions"][txid]["data"][field])
+                           if direction == "in" or include_fees or output_kind(item) != "fee"}
             if actual_edges != local_edges:
                 raise TraceError("Endpoint CSV graph is missing complete transaction inputs or outputs")
         if any(edge["id"] not in expected_edges and

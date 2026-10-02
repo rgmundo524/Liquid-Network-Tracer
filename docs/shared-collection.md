@@ -33,6 +33,38 @@ investigation. Saved plots keep their captured counts; generate a new preview
 or board update to include newer counts. No additional count requests or
 changes to the sealed transaction snapshot are needed.
 
+## Reusing large snapshots efficiently
+
+The first plot from a saved snapshot verifies the complete archive and builds
+an on-disk transaction index in that collection's `indexes/` directory. Progress
+shows verification, loading, and indexing. Other jobs using the same snapshot
+wait for that one builder; cancellation remains available. The first build can
+still take time and temporary memory proportional to the collection.
+
+Later plots reuse the index and follow exact transaction-output spends from the
+investigation's selected outputs. Ordinary hop limits are applied before loading
+transaction bodies and creating the case-scoped archive. Search stops when no
+saved child remains. Missing evidence remains unknown, and an output known to
+be spent beyond the selected range is not reported as unspent. Complete inputs
+and outputs, original observations, and necessary funding context stay in the
+saved plot evidence and CSVs.
+
+Starter connections use indexed forward and reverse spend links to select all
+qualifying paths. **All saved evidence** still searches beyond the displayed hop
+limit; **Transaction-hop limit** restricts paths to that limit. Named-group peg-out
+queries currently retain the full reachable evidence before applying group-hop
+rules, because a group can reset the distance far beyond the ordinary hop limit.
+These searches can still cost more than a short ordinary-hop query.
+
+Index reuse uses the validated working snapshot, not a fresh checksum audit of
+every original byte on every plot. Source manifest and file identity, size, and
+change-time metadata invalidate stale indexes; selected indexed records and
+copied observations are checksum-checked. A changed archive triggers full
+verification and rebuilding, and failed verification prevents publication.
+Indexes are disposable derived data; sealed archives remain authoritative.
+Existing saved plots keep their own sealed evidence and remain usable without
+the original shared archive. No redownload is required to build an index.
+
 ## Collection policy and continuation
 
 A fresh shared collection captures the union of configured seeds in the selected

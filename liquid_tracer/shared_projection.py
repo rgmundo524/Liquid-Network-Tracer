@@ -5,6 +5,7 @@ policy. Exact saved spend evidence selects descendants; complete transaction
 payloads and observation identities are preserved within this source revision.
 """
 from collections import deque
+from contextlib import contextmanager
 from copy import deepcopy
 import fcntl
 import json
@@ -93,9 +94,11 @@ def _project(state, seeds, case_id, hop_reference_name):
         result["hop_reference_name"] = hop_reference_name
     else:
         result.pop("hop_reference_name", None)
+    from .saved_inputs import input_evidence, saved_input_output
+    input_transactions = input_evidence(result)
     addresses = {output.get("scriptpubkey_address") for record in result["transactions"].values()
                  for output in [*record["data"]["vout"],
-                                *(vin.get("prevout") or {} for vin in record["data"]["vin"])]}
+                                *(saved_input_output(input_transactions, vin) for vin in record["data"]["vin"])]}
     result["address_tx_counts"] = {key: value for key, value in result.get("address_tx_counts", {}).items()
                                    if key in addresses}
     result["stats"] = {"requests_this_run": 0, "outpoints_examined_this_run": 0,
@@ -107,22 +110,26 @@ def _project(state, seeds, case_id, hop_reference_name):
     return result
 
 
-def _copy_observations(state, archive, destination, manifest_names):
+def _copy_observations(state, archive, destination, manifest_names, *, snapshot=None):
     """Copy only referenced observations, keeping IDs in their source namespace."""
     from .plots import _ordinary
 
     if "evidence-index.json" not in manifest_names:
         raise TraceError("Shared collection has no sealed observation index; collect shared data again")
-    rows = read_json(_ordinary(archive / "evidence-index.json"))
-    if (not isinstance(rows, list) or any(not isinstance(row, dict) or type(row.get("id")) is not int
-                                        or row["id"] <= 0 for row in rows)):
-        raise TraceError("Shared collection has an invalid observation index")
-    index = {row["id"]: row for row in rows}
-    if len(index) != len(rows):
-        raise TraceError("Shared collection has duplicate observation identities")
+    if snapshot is None:
+        rows = read_json(_ordinary(archive / "evidence-index.json"))
+        if (not isinstance(rows, list) or any(not isinstance(row, dict) or type(row.get("id")) is not int
+                                            or row["id"] <= 0 for row in rows)):
+            raise TraceError("Shared collection has an invalid observation index")
+        index = {row["id"]: row for row in rows}
+        if len(index) != len(rows):
+            raise TraceError("Shared collection has duplicate observation identities")
+    else:
+        index = {}
     referenced = set()
     expectations = {}
-    for txid, record in state["transactions"].items():
+    evidence = {**state.get("saved_transactions", {}), **state["transactions"]}
+    for txid, record in evidence.items():
         oid = record.get("observation_id")
         if type(oid) is not int or oid <= 0 or oid in expectations:
             raise TraceError("Shared transactions require distinct original observation identities")
@@ -135,7 +142,9 @@ def _copy_observations(state, archive, destination, manifest_names):
     for link in state["links"].values():
         referenced.update(link[name] for name in ("observation_id", "spending_tx_observation_id")
                           if link.get(name) is not None)
-    if any(type(oid) is not int or oid <= 0 or oid not in index for oid in referenced):
+    if snapshot is not None:
+        index = {oid: snapshot.observation(oid) for oid in referenced if type(oid) is int and oid > 0}
+    if any(type(oid) is not int or oid <= 0 or not index.get(oid) for oid in referenced):
         raise TraceError("Shared projection requires every referenced original observation")
     copied, payloads = [], {}
     for oid in sorted(referenced):
@@ -173,14 +182,50 @@ def _copy_observations(state, archive, destination, manifest_names):
     save_json(destination / "evidence-index.json", copied)
 
 
-def materialize_shared_run(case, run_id="latest", dataset_id=None, *, progress=None):
-    """Return a sealed local source run; never update private latest/history."""
-    from .cli import verify_export
-    from .export import build_graph
-    from .miro import make_plan
-    from .plots import _locked, _ordinary
-    from .shared_collection import load_shared_run
+@contextmanager
+def _shared_index(case, metadata, run_id, dataset_id, progress):
+    """Validate source compatibility without reloading a saved private trace."""
+    from .api import ENTERPRISE
+    from .cli import run_path
+    from .shared_collection import pin_shared_run, _dataset_metadata, _safe
+    from .snapshot_index import open_snapshot_index, verified_source_identity
 
+    selected, dataset = pin_shared_run(case, run_id, dataset_id)
+    shared = _dataset_metadata(dataset)
+    fixture = metadata.get("fixture")
+    configured = "fixture://" + digest(canonical(read_json(_safe(fixture)))) if fixture else None
+    source = configured or ENTERPRISE
+    if metadata.get("latest_run"):
+        private_run = metadata["latest_run"]
+        private = verified_source_identity(run_path(case, private_run), case_id=metadata["case_id"],
+                                           run_id=private_run, progress=progress)
+        source = private.get("source")
+        if not isinstance(source, str) or not source:
+            raise TraceError("Saved collection has no API source identity")
+        if configured and source != configured:
+            raise TraceError("The fixture no longer matches the investigation's saved API source")
+        if source.startswith("fixture://") and not configured:
+            raise TraceError("The investigation's original fixture is required for shared collection")
+    if metadata["blockchain"] != shared["blockchain"] or source != shared["source"]:
+        raise TraceError("Shared collection requires the same blockchain and API source or identical fixture")
+    with open_snapshot_index(run_path(dataset, selected), case_id=shared["case_id"],
+                             run_id=selected, source=shared["source"], progress=progress) as snapshot:
+        if snapshot.metadata.get("shared_collection", {}).get("dataset_id") != shared["case_id"]:
+            raise TraceError("Shared run does not match the dataset identity")
+        yield snapshot
+
+
+def materialize_shared_run(case, run_id="latest", dataset_id=None, *, progress=None,
+                           max_hops=None, connection_scope=None):
+    """Return a sealed local source run; never update private latest/history."""
+    return materialize_shared_source(case, run_id, dataset_id, progress=progress,
+                                     max_hops=max_hops, connection_scope=connection_scope)[0]
+
+
+def materialize_shared_source(case, run_id="latest", dataset_id=None, *, progress=None,
+                              max_hops=None, connection_scope=None):
+    """Return (run ID, verified state, manifest digest) for reuse within a job."""
+    from .plots import _locked, _ordinary
     case = _ordinary(Path(case))
     with _locked(case):
         metadata = read_case(case)
@@ -189,15 +234,26 @@ def materialize_shared_run(case, run_id="latest", dataset_id=None, *, progress=N
             raise TraceError("Choose this investigation's starting outputs before plotting shared data")
         seeds = sorted({f"{txid}:{index}" for txid, index in map(parse_outpoint, raw_seeds)})
         reference = normalize_reference_name(metadata.get("run_defaults", {}).get("hop_reference_name", ""))
-    _, source, archive = load_shared_run(case, run_id, dataset_id=dataset_id, progress=progress)
-    manifest = (archive / "SHA256SUMS").read_bytes()
-    names = {line.split("  ", 1)[1] for line in manifest.decode().splitlines()}
-    for name in names:
-        _ordinary(archive / name)
-    provenance = source["shared_collection"]
-    identity = {"schema_version": 1, "case_id": metadata["case_id"], "dataset_id": source["case_id"],
-                "run_id": source["run_id"], "archive_sha256": digest(manifest), "seeds": seeds,
-                "hop_reference_name": reference}
+    # Named-group distance can reset far beyond an ordinary seed-hop limit.
+    if reference and connection_scope is None:
+        max_hops = None
+    with _shared_index(case, metadata, run_id, dataset_id, progress) as snapshot:
+        return _materialize(case, metadata, seeds, reference, snapshot, max_hops, connection_scope, progress)
+
+
+def _materialize(case, metadata, seeds, reference, snapshot, max_hops, connection_scope, progress):
+    from .cli import verify_export
+    from .export import build_graph
+    from .miro import make_plan
+    from .plots import _ordinary
+    from .snapshot_query import select_snapshot
+
+    archive, names = snapshot.archive, snapshot.manifest_names
+    original = snapshot.metadata
+    provenance = original["shared_collection"]
+    identity = {"schema_version": 2, "case_id": metadata["case_id"], "dataset_id": original["case_id"],
+                "run_id": original["run_id"], "archive_sha256": snapshot.manifest_sha256, "seeds": seeds,
+                "hop_reference_name": reference, "max_hops": max_hops, "connection_scope": connection_scope}
     fingerprint = digest(canonical(identity))
     derived_id = fingerprint[:16]
     target = _ordinary(case / "runs" / derived_id)
@@ -220,19 +276,24 @@ def materialize_shared_run(case, run_id="latest", dataset_id=None, *, progress=N
                     or any(saved.get("collection_source", {}).get(key) != identity[key]
                            for key in ("dataset_id", "run_id", "archive_sha256"))):
                 raise TraceError("Shared projection identity conflicts with an existing saved run")
-            return derived_id
+            from .run_summaries import remember_run_summary
+            remember_run_summary(target, saved)
+            return derived_id, saved, digest((target / "SHA256SUMS").read_bytes())
+        source = select_snapshot(snapshot, seeds, max_hops=max_hops, connection_scope=connection_scope, progress=progress)
         report_progress(progress, "projecting_collection", 0, 1)
         state = _project(source, seeds, metadata["case_id"], reference)
+        state.pop("_snapshot_collected_depth", None)
         state.update(run_id=derived_id, root_run_id=derived_id, projection_sha256=fingerprint,
                      investigation={"case_id": metadata["case_id"], "name": metadata.get("name"), "miro_board": None})
         state["collection_source"] = {
             "schema_version": 1, "kind": "shared", "dataset_id": source["case_id"], "run_id": source["run_id"],
-            "archive_sha256": identity["archive_sha256"], "seeds": source["seeds"],
+            "archive_sha256": identity["archive_sha256"], "seeds": original["seeds"],
+            "selection": {"max_hops": max_hops, "connection_scope": connection_scope},
             "projection_seeds": seeds, "hop_reference_name": reference,
             "source_hop_reference_name": source.get("hop_reference_name", ""),
             "source_max_hops": source.get("limits", {}).get("max_hops"),
             "source_run_status": source.get("status"), "source_stop_reason": source.get("stop_reason"),
-            "source_collected_depth": max((item.get("depth", 0) for item in source["outputs"].values()), default=0),
+            "source_collected_depth": original["_snapshot_collected_depth"],
             "member_count": len(provenance.get("members", [])), "members": deepcopy(provenance.get("members", [])),
             "policy_case_id": provenance.get("policy_case_id"), "policy_case_name": provenance.get("policy_case_name"),
             "collection_policy": deepcopy(source.get("collection_policy", {})),
@@ -241,7 +302,7 @@ def materialize_shared_run(case, run_id="latest", dataset_id=None, *, progress=N
         target.parent.mkdir(exist_ok=True)
         temporary = Path(tempfile.mkdtemp(prefix=".shared-projection-", dir=target.parent))
         try:
-            _copy_observations(state, archive, temporary, names)
+            _copy_observations(state, archive, temporary, names, snapshot=snapshot)
             save_json(temporary / "trace.json", state)
             display = deepcopy(state)
             # The neutral evidence archive displays ordinary seed distances.
@@ -255,7 +316,9 @@ def materialize_shared_run(case, run_id="latest", dataset_id=None, *, progress=N
                 digest(path.read_bytes()) + "  " + str(path.relative_to(temporary)) + "\n" for path in files), encoding="utf-8")
             verify_export(temporary, progress=progress)
             temporary.rename(target)
+            from .run_summaries import remember_run_summary
+            remember_run_summary(target, state)
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
-    return derived_id
+    return derived_id, state, digest((target / "SHA256SUMS").read_bytes())

@@ -58,7 +58,9 @@ class PegoutSearchTests(unittest.TestCase):
         self.assertNotIn(B + ":2", state["outputs"])
         graph, _ = reviewed_pegouts(self.case, result["preview_id"])
         self.assertEqual(graph["pegouts"]["matches"][0]["hops"], [2])
-        self.assertTrue({B + ":1", B + ":2"} <= {edge["outpoint"] for edge in graph["edges"]})
+        displayed = {edge["outpoint"] for edge in graph["edges"]}
+        self.assertIn(B + ":1", displayed)
+        self.assertNotIn(B + ":2", displayed)  # Fees default to hidden; evidence retains this output.
         self.assertEqual(graph["pegouts"]["query"]["transaction_io"], "complete")
         self.assertTrue(all(edge["role"] == "context_output" for edge in graph["edges"]
                             if edge["id"] in {"out:" + B + ":1", "out:" + B + ":2"}))
@@ -237,7 +239,7 @@ class PegoutSearchTests(unittest.TestCase):
             regenerated = preview_pegouts(self.case, original["search_id"])
         new_graph, _ = reviewed_pegouts(self.case, regenerated["preview_id"])
         self.assertEqual(new_graph["pegouts"]["query"]["transaction_io"], "complete")
-        self.assertTrue(new_graph["include_fees"])
+        self.assertFalse(new_graph["include_fees"])
         self.assertEqual(old_graph["pegouts"]["matches"], new_graph["pegouts"]["matches"])
         self.assertEqual(reviewed_pegouts(self.case, original["preview_id"]), (old_graph, old_plan))
         self.assertEqual(build_plot_csv(self.case, regenerated["preview_id"], "endpoints.csv")["data"], old_csv)

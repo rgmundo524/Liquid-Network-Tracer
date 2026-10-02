@@ -271,7 +271,7 @@ def _summary(state, query):
 def preview_pegouts(case, search_id, *, open_browser=False, progress=None):
     from .address_counts import apply_saved_counts
     from .cli import (attribution_arrow_coloring, centered_name_group, connector_appearance,
-                      context_input_grouping, layout_search_attempts, open_preview)
+                      context_input_grouping, include_fee_flows, layout_search_attempts, open_preview)
     from .elk_layout import optimize_graph
     from .layout_preview import export_layout
     from .mermaid import mermaid_source
@@ -290,11 +290,12 @@ def preview_pegouts(case, search_id, *, open_browser=False, progress=None):
         plot_query = validate_query(**query, transaction_io="complete", attribution_hop_limits="ignore")
         graph = pegout_graph(state, plot_query, color_attribution_arrows=attribution_arrow_coloring(metadata),
                               group_context_inputs=context_input_grouping(metadata),
-                              center_name=centered_name_group(metadata))
+                              center_name=centered_name_group(metadata), include_fees=include_fee_flows(metadata))
         if graph["nodes"]:
             graph = optimize_graph(graph, connector_style=connector_appearance(metadata), progress=progress,
                                    layout_attempts=layout_search_attempts(metadata))
         report = graph["pegouts"]
+        report["include_fees"] = graph["include_fees"]
         report["archive_sha256"] = digest((_search_path(case, search_id) / "SHA256SUMS").read_bytes())
         report["service_sha256"] = digest(canonical(state["service_controls"]))
         destination = _ordinary(case / "previews" / (search_id + "-pegouts-" + uuid.uuid4().hex[:8]))
@@ -324,7 +325,7 @@ def preview_pegouts(case, search_id, *, open_browser=False, progress=None):
         return {**_summary(state, query), **result, "match_count": report["match_count"],
                 "transaction_count": report["transaction_count"], "notice": graph["notice"],
                 "preview_id": destination.name, "directory": str(destination.resolve()),
-                "center_name": graph["graph_options"]["center_name"],
+                "center_name": graph["graph_options"]["center_name"], "include_fees": graph["include_fees"],
                 "browser_opened": open_preview(result["html"]) if open_browser else False}
 
 
@@ -346,6 +347,11 @@ def saved_pegout_snapshot(case, preview_id):
     state, query, _ = _read_search(case, preview_id[:16])
     metadata = read_case(case)
     report = graph.get("pegouts", {})
+    # New previews freeze their fee choice. Older snapshots predate this field
+    # and retain their original graph/plan, irrespective of current preferences.
+    if "include_fees" in report and (type(report["include_fees"]) is not bool
+            or report["include_fees"] is not graph.get("include_fees")):
+        raise TraceError("Peg-out preview fee setting disagrees with its saved graph")
     plot_query = report.get("query")
     if not isinstance(plot_query, dict) or validate_query(**plot_query) != plot_query:
         raise TraceError("Peg-out preview has an invalid saved display query")

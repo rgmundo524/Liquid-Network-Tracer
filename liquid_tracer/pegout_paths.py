@@ -264,11 +264,13 @@ def _endpoint_matches(state, endpoints, distances):
 
 
 def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=None,
-                 group_context_inputs=False):
+                 group_context_inputs=False, include_fees=None):
     """Select qualifying transactions, then show their requested local context.
 
     Complete I/O is explicitly versioned in the query so archived path-only
     graphs can still be reviewed using their original display semantics.
+    Explicit fee visibility controls complete-I/O charts; omitting it retains
+    the former complete-I/O fee policy for existing direct callers.
     Reachability, endpoint matches and tracked-output evidence never expand
     when local context is displayed.
     """
@@ -279,6 +281,8 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
 
     if type(group_context_inputs) is not bool:
         raise TraceError("Context input grouping must be enabled or disabled")
+    if include_fees is not None and type(include_fees) is not bool:
+        raise TraceError("Fee flows must be enabled or disabled")
     if not isinstance(query, dict):
         raise TraceError("Choose selected seed outputs or a transaction and an inclusive peg-out hop range")
     name = reference_name(state)
@@ -291,6 +295,7 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
                            transaction_io=query.get("transaction_io"),
                            attribution_hop_limits=query.get("attribution_hop_limits"))
     complete_io = query.get("transaction_io") == "complete"
+    include_fees = complete_io and (include_fees if include_fees is not None else True)
     include_context = complete_io or query.get("include_context", False)
     outpoints, endpoint_matches, depths, output_depths = _paths(state, query)
     matches = [{key: value for key, value in match.items() if key != "kind"}
@@ -322,7 +327,7 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
         reduced["seeds"] = sorted(key for key in outpoints | endpoints if key.startswith(query["txid"] + ":"))
     edge_ids = {"out:" + key for key in outpoints | endpoints}
     edge_ids.update(f"in:{state['links'][key]['spending_txid']}:{state['links'][key]['vin']}" for key in outpoints)
-    context_edge_ids = set()
+    context_edge_ids, hidden_fee_ids = set(), set()
     if include_context:
         # Add local I/O context only after finding successful paths. Keeping
         # outputs, links and seeds pruned above preserves exact path evidence,
@@ -334,13 +339,20 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
                     raise TraceError("Context inputs require valid saved output metadata")
                 if complete_io or (not vin.get("is_coinbase") and output_kind(prevout) == "spendable"):
                     context_edge_ids.add(f"in:{txid}:{index}")
-            context_edge_ids.update(f"out:{txid}:{index}"
-                                    for index, output in enumerate(record["data"]["vout"])
-                                    if complete_io or output_kind(output) == "spendable")
+            for index, output in enumerate(record["data"]["vout"]):
+                kind = output_kind(output)
+                if complete_io or kind == "spendable":
+                    if kind == "fee" and not include_fees:
+                        hidden_fee_ids.add(f"out:{txid}:{index}")
+                    else:
+                        context_edge_ids.add(f"out:{txid}:{index}")
         context_edge_ids.difference_update(edge_ids)
-        edge_ids.update(context_edge_ids)
-    graph = build_graph(reduced, merge_addresses=True, include_fees=complete_io,
+        # Retain fee ownership proofs for removing previously drawn Miro fees,
+        # while hidden fee arrows contribute no visible context edge/count.
+        edge_ids.update(context_edge_ids | hidden_fee_ids)
+    graph = build_graph(reduced, merge_addresses=True, include_fees=include_fees,
                         resolve_saved_inputs=state.get("collection_source", {}).get("kind") == "shared",
+                        saved_transactions=state["transactions"],
                         color_attribution_arrows=color_attribution_arrows, center_name=center_name,
                         edge_ids=edge_ids,
                         respect_attribution_hops=query.get("attribution_hop_limits") != "ignore")
@@ -365,7 +377,9 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
                   + (" from endpoint selection." if complete_io else "."))
     if complete_io:
         scope += (" Every input and output of each qualifying transaction is displayed, including fees. "
-                  "Context arrows do not establish a qualifying path or add endpoint matches. "
+                  if include_fees else " Every input and non-fee output of each qualifying transaction is displayed. "
+                  "Fee flows are hidden; their original transaction evidence is retained. ")
+        scope += ("Context arrows do not establish a qualifying path or add endpoint matches. "
                   "Unfollowed branch outputs are shown without inferring unspent status or expanding their transactions.")
     elif include_context:
         scope += (" Context input and output arrows show other addresses on qualifying transactions; "

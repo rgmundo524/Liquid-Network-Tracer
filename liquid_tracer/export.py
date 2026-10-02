@@ -192,7 +192,8 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
     # A filtered view may need metadata from an excluded funding transaction.
     # Resolve its exact output without adding that transaction to the graph or
     # altering the original vin data retained for CSV evidence verification.
-    input_transactions = state["transactions"] if saved_transactions is None else saved_transactions
+    from .saved_inputs import input_evidence
+    input_transactions = input_evidence(state, saved_transactions) if resolve_saved_inputs else {}
     if edge_ids is not None:
         edge_ids = frozenset(edge_ids)
     if center_name is None:

@@ -97,8 +97,8 @@ def _compatible(case, dataset, *, verify=True, progress=None):
 def pin_shared_run(case, run_id="latest", dataset_id=None):
     """Select an immutable run for admission without loading or trusting evidence.
 
-    The worker must still call load_shared_run for full source compatibility,
-    path, checksum, and archive identity validation before using the selection.
+    The worker must still validate source compatibility and archive identity,
+    either through load_shared_run or the verified snapshot index, before use.
     """
     from .cli import resolve_latest, run_path
     path = dataset_path(case)

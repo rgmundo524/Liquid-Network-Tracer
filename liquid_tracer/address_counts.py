@@ -68,11 +68,15 @@ def _valid(record, source, address):
 
 
 def addresses(state):
+    from .saved_inputs import input_evidence, saved_input_output
+    resolve = "saved_transactions" in state or state.get("collection_source", {}).get("kind") == "shared"
+    evidence = input_evidence(state) if resolve else None
     result = set()
     for record in state['transactions'].values():
         transaction = record['data']
         outputs = list(transaction['vout'])
-        outputs.extend(vin.get('prevout') or {} for vin in transaction['vin']
+        outputs.extend((saved_input_output(evidence, vin) if resolve else vin.get('prevout') or {})
+                       for vin in transaction['vin']
                        if not vin.get('is_pegin') and not vin.get('is_coinbase'))
         for output in outputs:
             address = output.get('scriptpubkey_address')

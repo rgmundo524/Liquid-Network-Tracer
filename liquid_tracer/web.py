@@ -717,7 +717,8 @@ class LocalServer(ThreadingHTTPServer):
         cases = []
         for case in self.case_paths():
             try:
-                cases.append(self.case_summary(case, read_case(case)))
+                from .investigation_views import overview
+                cases.append(overview(case, read_case(case), detail=False))
             except (TraceError, OSError, ValueError, RequestError):
                 continue
         with self.job_lock:
@@ -1611,6 +1612,42 @@ class Handler(BaseHTTPRequestHandler):
         elif len(parts) == 3 and parts[:2] == ["api", "cases"]:
             case, metadata = self.server.case(parts[2])
             self.send(200, self.server.case_summary(case, metadata, detail=True))
+        elif len(parts) == 4 and parts[:2] == ["api", "cases"] and parts[3] in {
+                "overview", "collection", "workflow", "boards", "history", "shared-collection"}:
+            from . import investigation_views
+            case, metadata = self.server.case(parts[2])
+            section = parts[3]
+            if section == "overview":
+                result = investigation_views.overview(case, metadata)
+            elif section == "collection":
+                result = investigation_views.collection(case, metadata)
+            elif section == "shared-collection":
+                result = investigation_views.shared_collection(self.server.root, case, metadata)
+            elif section == "workflow":
+                from .workflow_api import case_workflow
+                result = {**case_workflow(case, lightweight=True), "sections": {"workflow": "ready"}}
+            elif section == "boards":
+                result = investigation_views.boards(case)
+            else:
+                # Legacy artifacts are only inspected when History is opened.
+                collection = investigation_views.collection(case, metadata, history=True)
+                runs = {run["id"] for run in collection["runs"] if not run.get("summary_pending")}
+                result = {"runs": collection["runs"], "artifacts": self.server.saved_artifacts(case, metadata, runs),
+                          "pegout_searches": self.server.pegout_searches(case),
+                          "sections": {"history": collection["sections"]["collection"]}}
+            self.send(200, result)
+        elif len(parts) == 5 and parts[:2] == ["api", "cases"] and parts[3] in {"collection", "shared-collection"}:
+            from . import investigation_views
+            case, metadata = self.server.case(parts[2])
+            if not RUN_ID.fullmatch(parts[4]):
+                raise RequestError("Choose a saved collection run")
+            result = (investigation_views.collection(case, metadata, parts[4]) if parts[3] == "collection" else
+                      investigation_views.shared_collection(self.server.root, case, metadata, parts[4]))
+            self.send(200, result)
+        elif len(parts) == 5 and parts[:2] == ["api", "cases"] and parts[3] == "plots":
+            from .workflow_api import selected_plot
+            case, _ = self.server.case(parts[2])
+            self.send(200, selected_plot(case, parts[4]))
         elif len(parts) == 3 and parts[:2] == ["api", "jobs"]:
             with self.server.job_lock:
                 job = self.server.jobs.get(parts[2])
@@ -1698,7 +1735,8 @@ class Handler(BaseHTTPRequestHandler):
             settings = validate_settings(body.get("settings", load_settings(self.server.root)))
             case = create_investigation(self.server.root, body.get("name"), seeds=normalized,
                 board=body.get("board") or None, run_defaults=settings, blockchain=blockchain)
-            return self.server.case_summary(case, read_case(case), detail=True), 201
+            from .investigation_views import overview
+            return overview(case, read_case(case)), 201
         if len(parts) == 4 and parts[:2] == ["api", "cases"]:
             case, metadata = self.server.case(parts[2])
             if parts[3] == "change-outputs":
@@ -1792,12 +1830,14 @@ class Handler(BaseHTTPRequestHandler):
                     updated = save_plot_settings(case, body["settings"])
                 except TraceError as error:
                     raise RequestError(str(error)) from None
-                return self.server.case_summary(case, updated, detail=True), 200
+                from .investigation_views import overview
+                return overview(case, updated), 200
             if parts[3] == "settings":
                 updates = {"name": body.get("name", metadata.get("name")),
                            "miro_board": body.get("board", metadata.get("miro_board")) or None,
                            "run_defaults": body.get("settings", metadata.get("run_defaults", {}))}
-                return self.server.case_summary(case, update_case(case, updates), detail=True), 200
+                from .investigation_views import overview
+                return overview(case, update_case(case, updates)), 200
             if parts[3] == "actions":
                 return self.server.action(case, metadata, body), 202
         raise RequestError("Route not found", 404)

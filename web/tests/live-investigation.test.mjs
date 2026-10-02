@@ -17,7 +17,7 @@ const source = stripTypeScriptTypes(
     .replace('void initialize().catch(', 'globalThis.startup = initialize().catch('),
   {mode: 'transform'},
 );
-const script = new vm.Script(source + '\n Object.defineProperty(state, "job", {get() {return runningJobs()[0] || null;}, set(job) {state.jobs.clear(); if (job && state.activeCase && state.page === "dashboard") state.page = "case"; if (job) state.jobs.set(job.id, {status: "running", generation: pageGeneration, caseId: state.activeCase?.id, ...job});}}); globalThis.appTest = {state, dispatch, pollJob: (id) => pollJob(id || runningJobs()[0]?.id), startJob, discoverJobs, runningJobs, jobBanner, jobProgress, cancelJob, openCase, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy, pegoutsGraph, pegoutInput, currentPegoutSearch, suggestCenterNames, suggestHopReferenceNames, render, navigate, workflowInput, currentWorkflow, actionBusy, taskActivity, refreshCaseDetail, refreshSharedCollection};');
+const script = new vm.Script(source + '\n Object.defineProperty(state, "job", {get() {return runningJobs()[0] || null;}, set(job) {state.jobs.clear(); if (job && state.activeCase && state.page === "dashboard") state.page = "case"; if (job) state.jobs.set(job.id, {status: "running", generation: pageGeneration, caseId: state.activeCase?.id, ...job});}}); globalThis.appTest = {state, dispatch, pollJob: (id) => pollJob(id || runningJobs()[0]?.id), startJob, discoverJobs, runningJobs, jobBanner, jobProgress, cancelJob, openCase, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy, pegoutsGraph, pegoutInput, currentPegoutSearch, suggestCenterNames, suggestHopReferenceNames, render, navigate, workflowInput, currentWorkflow, actionBusy, taskActivity, refreshCaseDetail, refreshSharedCollection, loadCaseSection, loadVisibleSections, verifySelectedPlot};');
 const txid = 'a'.repeat(64);
 const defaults = {hops: 1, hop_reference_name: '', max_transactions: 20, max_outpoints: 100, max_requests: 30,
   max_seconds: 60, max_new_items: 750, layout_attempts: 25, connector_style: 'straight'};
@@ -26,7 +26,8 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
   frameRecovery.resetFrameRecovery();
   const calls = [], listeners = {}, windowListeners = {}, dialogListeners = {}, notifications = [], importActions = [];
   const editorResets = [], downloads = [], downloadBlobs = [], revokedDownloads = [];
-  const toastElements = [];
+  const toastElements = [], timers = new Map();
+  let timerId = 0;
   let focusCount = 0;
   const elements = new Map();
   let currentForm = null;
@@ -38,6 +39,7 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
       static createObjectURL(blob) {downloadBlobs.push(blob); return `blob:export-${downloadBlobs.length}`;}
       static revokeObjectURL(url) {revokedDownloads.push(url);}
     }, console, ...frameRecovery, collectionPerformancePanel, createTaskNotifications,
+    inputImportInput() {return false;}, changeOutputsInput() {return false;}, nameColorsInput() {return false;}, addressImportInput() {return false;},
     resetNameColors(caseId) {editorResets.push({editor: 'colors', caseId});},
     resetAddressImport(caseId) {editorResets.push({editor: 'addresses', caseId});},
     resetChangeOutputs(caseId) {editorResets.push({editor: 'change-outputs', caseId});}, resetInputImport() {},
@@ -76,7 +78,7 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
       sessionStorage: {getItem(key) {return storage.get(key) ?? null;}, setItem(key, value) {storage.set(key, value);}}},
     history: {replaceState() {}},
     location: {hash, pathname: '/', reload() {}},
-    setInterval() {}, setTimeout() {return 1;}, clearTimeout() {},
+    setInterval() {}, setTimeout(fn, ms) {const id = ++timerId; timers.set(id, {fn, ms}); return id;}, clearTimeout(id) {timers.delete(id);},
     FormData: class {
       constructor(form) {this.values = form.values;}
       get(key) {return this.values[key] ?? null;}
@@ -94,7 +96,7 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
   await context.startup;
   return {
     ...context.appTest, app, dialog, calls, notifications, importActions, elements, storage, windowListeners, editorResets, downloads, downloadBlobs, revokedDownloads,
-    toastElements, get focusCount() {return focusCount;},
+    toastElements, timers, changeRun(value) {listeners.change({target: {id: "run-picker", value, closest() {return null;}}});}, get focusCount() {return focusCount;},
     async submitDialog(values = {}) {
       dialogListeners.submit({target: {values, reportValidity: () => true}, preventDefault() {}});
       await new Promise(setImmediate);
@@ -226,7 +228,7 @@ test('collected-data timings follow the selected snapshot and stay absent on old
 
 test('successful creation sends live source and resets the draft without sample seeds', async () => {
   const detail = {id: 'newcase', name: 'My investigation', run_defaults: defaults, runs: [], seeds: [`${txid}:0`]};
-  const view = await harness((path) => path === '/api/cases' || path === '/api/cases/newcase' ? detail : undefined);
+  const view = await harness((path) => path === '/api/cases' || path === '/api/cases/newcase/overview' ? detail : undefined);
   await view.submit({name: detail.name, blockchain: 'liquid', txids: txid, seeds: `${txid}:0`});
   const create = view.calls.find(call => call.path === '/api/cases');
   assert.equal(create.body.source, 'live');
@@ -412,7 +414,7 @@ test('ELK stays indeterminate and Miro item and retry indicators retain their ex
 test('opening a saved investigation shows header feedback immediately and suppresses duplicate opens', async () => {
   const request = Promise.withResolvers();
   const detail = {id: 'savedcase', name: 'Saved <investigation>', run_defaults: defaults, runs: []};
-  const view = await harness(path => path === '/api/cases/savedcase' ? request.promise : undefined);
+  const view = await harness(path => path === '/api/cases/savedcase/overview' ? request.promise : undefined);
   view.state.cases = [detail];
   view.state.job = {id: 'active', action: 'trace', message: 'Collecting transactions', live: false};
   const opening = view.dispatch('open-case', {dataset: {id: detail.id}});
@@ -421,13 +423,13 @@ test('opening a saved investigation shows header feedback immediately and suppre
   const header = view.app.innerHTML.match(/<header class="workspace-header">[\s\S]*?<\/header>/)[0];
   assert.match(header, /id="case-opening"[\s\S]*role="status" aria-live="polite"/);
   assert.match(header, /Opening Saved &lt;investigation&gt;/);
-  assert.match(header, /Loading saved runs, plots, and board records\./);
+  assert.match(header, /Loading investigation overview\./);
   assert.match(header, /Collecting transactions/);
   assert.match(view.app.innerHTML, /data-case="savedcase" disabled/);
   assert.match(view.app.innerHTML, /data-action="open-case" disabled/);
   assert.doesNotMatch(view.app.innerHTML.match(/<button[^>]*data-page="new"[^>]*>/)[0], /disabled/);
   await view.dispatch('open-case', {dataset: {id: detail.id}});
-  assert.equal(view.calls.filter(call => call.path === '/api/cases/savedcase').length, 1);
+  assert.equal(view.calls.filter(call => call.path === '/api/cases/savedcase/overview').length, 1);
   request.resolve(detail);
   await opening;
   assert.equal(view.state.activeCase.id, detail.id);
@@ -439,7 +441,7 @@ test('opening a saved investigation shows header feedback immediately and suppre
 for (const failed of [false, true]) {
   test(`navigation ignores a late investigation ${failed ? 'error' : 'response'}`, async () => {
     const request = Promise.withResolvers();
-    const view = await harness(path => path === '/api/cases/slowcase' ? request.promise : undefined);
+    const view = await harness(path => path === '/api/cases/slowcase/overview' ? request.promise : undefined);
     const opening = view.dispatch('open-case', {dataset: {id: 'slowcase'}});
     await new Promise(setImmediate);
     view.navigate('new');
@@ -456,8 +458,8 @@ for (const failed of [false, true]) {
   test(`a newer investigation stays selected after an earlier ${failed ? 'error' : 'response'}`, async () => {
     const first = Promise.withResolvers();
     const second = {id: 'second', name: 'Second case', runs: []};
-    const view = await harness(path => path === '/api/cases/first' ? first.promise
-      : path === '/api/cases/second' ? second : undefined);
+    const view = await harness(path => path === '/api/cases/first/overview' ? first.promise
+      : path === '/api/cases/second/overview' ? second : undefined);
     const opening = view.dispatch('open-case', {dataset: {id: 'first'}});
     await new Promise(setImmediate);
     await view.dispatch('open-case', {dataset: {id: 'second'}});
@@ -475,7 +477,7 @@ for (const failed of [false, true]) {
 test('a failed investigation open shows its error, clears loading, and permits retry', async () => {
   const detail = {id: 'savedcase', name: 'Saved investigation', runs: []};
   let failed = true;
-  const view = await harness(path => path === '/api/cases/savedcase'
+  const view = await harness(path => path === '/api/cases/savedcase/overview'
     ? failed ? {error: 'Saved records could not be read.'} : detail : undefined);
   view.state.cases = [detail];
   await view.dispatch('open-case', {dataset: {id: detail.id}});
@@ -493,7 +495,7 @@ test('a failed investigation open shows its error, clears loading, and permits r
 test('an unavailable investigation deep link keeps the available workspace and saved list open', async () => {
   const detail = {id: 'savedcase', name: 'Saved investigation', runs: []};
   const view = await harness(path => path === '/api/session' ? {csrf: 'test', settings: defaults, cases: [detail]}
-    : path === '/api/cases/savedcase' ? {error: 'Investigation not found'} : undefined,
+    : path === '/api/cases/savedcase/overview' ? {error: 'Investigation not found'} : undefined,
     {hash: '#case/savedcase'});
   assert.equal(view.state.page, 'dashboard');
   assert.match(view.app.innerHTML, /Saved investigations/);
@@ -510,7 +512,7 @@ test('a failed session request still reports that the local server is unavailabl
 
 test('opening feedback preserves unsaved new-investigation fields before rendering', async () => {
   const request = Promise.withResolvers();
-  const view = await harness(path => path === '/api/cases/savedcase' ? request.promise : undefined);
+  const view = await harness(path => path === '/api/cases/savedcase/overview' ? request.promise : undefined);
   view.navigate('new');
   view.newForm({name: 'Unsaved name', txids: txid, seeds: `${txid}:3`, blockchain: 'liquid'});
   const opening = view.dispatch('open-case', {dataset: {id: 'savedcase'}});
@@ -524,7 +526,7 @@ test('opening feedback preserves unsaved new-investigation fields before renderi
 
 test('opening feedback saves current investigation settings and address notes before rendering', async () => {
   const request = Promise.withResolvers();
-  const view = await harness(path => path === '/api/cases/othercase' ? request.promise : undefined);
+  const view = await harness(path => path === '/api/cases/othercase/overview' ? request.promise : undefined);
   view.state.activeCase = {id: 'current', name: 'Current case', run_defaults: defaults, runs: []};
   view.navigate('case-settings');
   view.elements.set('#settings-form', {values: {...defaults, name: 'Unsaved case name', max_transactions: 37, budget_limits_enabled: 'on'}});
@@ -548,7 +550,7 @@ test('opening feedback saves current investigation settings and address notes be
 test('returning to the current investigation tools abandons an in-flight case switch', async () => {
   for (const action of ['view-history', 'input-import-open', 'change-outputs-open', 'name-colors-open']) {
     const request = Promise.withResolvers();
-    const view = await harness(path => path === '/api/cases/othercase' ? request.promise : undefined);
+    const view = await harness(path => path === '/api/cases/othercase/overview' ? request.promise : undefined);
     view.state.activeCase = {id: 'current', name: 'Current case', runs: []};
     view.state.page = 'case';
     const opening = view.dispatch('open-case', {dataset: {id: 'othercase'}});
@@ -636,7 +638,7 @@ async function recoveryHarness(review = frameReview(), failure = null) {
       return {status: 'succeeded', result: {recovery: review.candidates.length ? 'adopted_frame' : 'confirmed_absent_frame',
         run_id: 'interrupted', resolved_count: 1, remaining_pending: 0, resume_action: review.resume_action || 'miro-frames'}};
     }
-    if (path === '/api/cases/case1') return detail();
+    if (path === '/api/cases/case1/overview') return detail();
   });
   view.state.activeCase = detail();
   view.state.page = 'case';
@@ -699,7 +701,7 @@ test('canceling or navigating away invalidates the frame review and ignores its 
 
 test('context input grouping defaults off and survives new-case and trace form submission', async () => {
   const detail = {id: 'groupcase', name: 'Grouped case', run_defaults: {...defaults, include_fees: false, group_context_inputs: true}, runs: [], seeds: [`${txid}:0`]};
-  const view = await harness(path => path === '/api/cases' || path === '/api/cases/groupcase' ? detail : undefined);
+  const view = await harness(path => path === '/api/cases' || path === '/api/cases/groupcase/overview' ? detail : undefined);
   assert.doesNotMatch(view.newCase(), /name="group_context_inputs"/);
   await view.submit({name: detail.name, txids: txid, seeds: `${txid}:0`, group_context_inputs: 'on'});
   assert.equal(view.calls.find(call => call.path === '/api/cases').body.settings.group_context_inputs, true);
@@ -768,7 +770,7 @@ test('detail pages are optional and their links accept only local artifact URLs'
 test('separate branch hubs are normalized at creation and preserved by the trace-only form', async () => {
   const first = 'G' + 'a'.repeat(33), second = 'H' + 'b'.repeat(33);
   const detail = {id: 'hubcase', name: 'Hub case', run_defaults: {...defaults, include_fees: false, group_context_inputs: false, hub_addresses: [first, second]}, runs: [], seeds: [`${txid}:0`]};
-  const view = await harness(path => path === '/api/cases' || path === '/api/cases/hubcase' ? detail
+  const view = await harness(path => path === '/api/cases' || path === '/api/cases/hubcase/overview' ? detail
     : path === '/api/cases/hubcase/actions' ? {id: 'trace1', status: 'running'} : undefined);
   assert.doesNotMatch(view.newCase(), /name="hub_addresses"/);
   await view.submit({name: detail.name, txids: txid, seeds: `${txid}:0`, hub_addresses: ` ${second}\n${first}\n\n${second} `});
@@ -803,7 +805,7 @@ test('hub selection changes invalidate previews while duplicate and reordered li
 
 test('inherited layout attempts are available in Plot Layouts after creating an investigation', async () => {
   const detail = {id: 'layoutcase', name: 'Layout case', run_defaults: {...defaults, layout_attempts: 80}, runs: [], seeds: [`${txid}:0`]};
-  const view = await harness(path => path === '/api/cases' || path === '/api/cases/layoutcase' ? detail : undefined);
+  const view = await harness(path => path === '/api/cases' || path === '/api/cases/layoutcase/overview' ? detail : undefined);
   assert.doesNotMatch(view.newCase(), /Starting preferences|Uses workspace defaults/);
   assert.doesNotMatch(view.newCase(), /name="layout_attempts"/);
   await view.submit({name: detail.name, txids: txid, seeds: `${txid}:0`, layout_attempts: '80'});
@@ -820,7 +822,7 @@ test('workspace saves layout defaults for future investigations while existing c
   const respond = (path, body) => {
     if (path === '/api/session') return {csrf: 'test', settings: savedDefaults, cases: [detail]};
     if (path === '/api/settings') {savedDefaults = body.settings; return {settings: savedDefaults};}
-    if (path === '/api/cases/layoutcase') return detail;
+    if (path === '/api/cases/layoutcase/overview') return detail;
   };
   const view = await harness(respond);
   view.state.page = 'settings';
@@ -1032,7 +1034,7 @@ test('failed rebuild refreshes receipt status and renders a resume action', asyn
     miro_rebuild: {status: 'syncing', previous_board_id: 'OLD=', board_id: 'NEW=', run_id: 'saved1', name: 'Saved copy'}};
   const view = await harness(path => path === '/api/jobs/rebuild1'
     ? {status: 'failed', message: 'Publication interrupted.'}
-    : path === '/api/cases/case1' ? refreshed : undefined);
+    : path === '/api/cases/case1/overview' ? refreshed : undefined);
   view.state.activeCase = {...refreshed, miro_board: 'OLD=', miro_rebuild: undefined};
   view.state.job = {id: 'rebuild1', action: 'miro-rebuild', caseId: 'case1', live: true};
   await view.pollJob();
@@ -1046,7 +1048,7 @@ test('completed rebuild displays both board links and selects the published snap
     run_defaults: defaults, runs: [{id: 'original'}, {id: 'later'}]};
   const result = {run_id: 'original', board_id: 'NEW=', previous_board_id: 'OLD=', rebuild_status: 'complete'};
   const view = await harness(path => path === '/api/jobs/rebuild1' ? {status: 'succeeded', result}
-    : path === '/api/cases/case1' ? detail : undefined);
+    : path === '/api/cases/case1/overview' ? detail : undefined);
   view.state.activeCase = {...detail, miro_board: 'OLD='};
   view.state.selectedRun = 'later';
   view.state.job = {id: 'rebuild1', action: 'miro-rebuild', caseId: 'case1', live: true};
@@ -1067,7 +1069,7 @@ test('attribution arrow colors can be enabled and disabled in Plot Layouts befor
       Object.assign(detail.run_defaults, body.settings);
       return detail;
     }
-    if (path === '/api/cases/arrowcase') return detail;
+    if (path === '/api/cases/arrowcase/overview') return detail;
   });
   assert.doesNotMatch(view.newCase(), /name="color_attribution_arrows"/);
   view.state.activeCase = detail;
@@ -1144,8 +1146,8 @@ test('real case-detail responses enable the saved-seed peg-out button and preser
     cwd: new URL('../../', import.meta.url), encoding: 'utf8', timeout: 15000,
   }));
   const seeded = details.seeded;
-  const view = await harness(path => path === `/api/cases/${seeded.id}` ? seeded
-    : path === `/api/cases/${details.empty.id}` ? details.empty
+  const view = await harness(path => path === `/api/cases/${seeded.id}/overview` ? seeded
+    : path === `/api/cases/${details.empty.id}/overview` ? details.empty
     : path.endsWith('/actions') ? {id: 'pegjob', status: 'running'} : undefined);
   await view.dispatch('open-case', {dataset: {id: seeded.id}});
   const html = view.pegoutsGraph(view.state.activeCase);
@@ -1301,7 +1303,7 @@ test('peg-out publication requires approval for the exact selected preview and b
 test('peg-out completion selects its search and preserves the full-trace run selection', async () => {
   const search = pegoutSearch();
   const view = await harness(path => path === '/api/jobs/pegjob' ? {status: 'succeeded', result: {search_id: search.id, status: 'paused'}}
-    : path === '/api/cases/case1' ? pegoutCase([search], {latest_run: 'main-run'}) : undefined);
+    : path === '/api/cases/case1/overview' ? pegoutCase([search], {latest_run: 'main-run'}) : undefined);
   view.state.activeCase = pegoutCase([], {latest_run: 'main-run'}); view.state.selectedRun = 'older-main-run';
   view.state.job = {id: 'pegjob', action: 'pegouts', caseId: 'case1', live: true};
   await view.pollJob();
@@ -1314,11 +1316,11 @@ for (const status of ['failed', 'canceled']) {
   test(`peg-out ${status} job reloads the saved checkpoint for recovery`, async () => {
     const search = pegoutSearch({recoverable: true});
     const view = await harness(path => path === '/api/jobs/pegjob' ? {status, message: 'Stopped'}
-      : path === '/api/cases/case1' ? pegoutCase([search]) : undefined);
+      : path === '/api/cases/case1/overview' ? pegoutCase([search]) : undefined);
     view.state.activeCase = pegoutCase(); view.state.job = {id: 'pegjob', action: 'pegouts', caseId: 'case1', live: true};
     await view.pollJob();
     assert.equal(view.currentPegoutSearch(view.state.activeCase).id, search.id);
-    assert.equal(view.calls.some(call => call.path === '/api/cases/case1'), true);
+    assert.equal(view.calls.some(call => call.path === '/api/cases/case1/overview'), true);
   });
 }
 
@@ -1337,7 +1339,7 @@ test('named-group layout is opt-in, saved in Plot Layouts, and retained by trace
       Object.assign(detail.run_defaults, body.settings);
       return detail;
     }
-    if (path === '/api/cases/centeredcase') return detail;
+    if (path === '/api/cases/centeredcase/overview') return detail;
   });
   assert.doesNotMatch(view.newCase(), /name="center_name"/);
   await view.dispatch('open-case', {dataset: {id: detail.id}});
@@ -1617,7 +1619,7 @@ test('unchanged layout settings skip the save request when generating a plot', a
   assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 1);
 });
 
-test('saving a filtered layout preserves full-trace options and reloads saved preferences in a new session', async () => {
+test('saving a peg-out layout updates fees, preserves full-trace hubs and reloads saved preferences', async () => {
   const hubs = ['G' + 'a'.repeat(33)];
   const detail = workflowCase({runs: [], latest_run: undefined, run_defaults: {...defaults,
     include_fees: true, group_context_inputs: true, hub_addresses: hubs}});
@@ -1626,23 +1628,22 @@ test('saving a filtered layout preserves full-trace options and reloads saved pr
       detail.run_defaults = {...detail.run_defaults, ...body.settings};
       return detail;
     }
-    if (path === '/api/cases/case1') return detail;
+    if (path === '/api/cases/case1/overview') return detail;
   };
   const view = await harness(respond);
   view.state.activeCase = detail;
   await view.dispatch('view-plots');
   await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
   const disabledFields = view.workspace().match(/<fieldset[^>]*\bdisabled[^>]*>[\s\S]*?<\/fieldset>/g) || [];
-  for (const key of ['include_fees', 'hub_addresses']) {
-    assert.ok(disabledFields.some(fieldset => fieldset.includes(`name="${key}"`)), key);
-  }
+  assert.ok(disabledFields.some(fieldset => fieldset.includes('name="hub_addresses"')));
+  assert.ok(!disabledFields.some(fieldset => fieldset.includes('name="include_fees"')));
   assert.doesNotMatch(contextGroupingFields(view), /disabled/);
   view.plotForm({layout_attempts: '61', connector_style: 'curved', center_name: 'Saved Treasury',
-    color_attribution_arrows_present: '1', color_attribution_arrows: 'on'});
+    include_fees_present: '1', color_attribution_arrows_present: '1', color_attribution_arrows: 'on'});
   await view.dispatch('plot-settings-save');
   const saved = view.calls.find(call => call.path.endsWith('/plot-settings')).body.settings;
   assert.deepEqual(Object.keys(saved).sort(), [...layoutKeys].sort());
-  assert.equal(saved.include_fees, true);
+  assert.equal(saved.include_fees, false);
   assert.equal(saved.group_context_inputs, true);
   assert.deepEqual(saved.hub_addresses, hubs);
   assert.equal(view.calls.some(call => call.path.endsWith('/actions')), false);
@@ -1651,6 +1652,7 @@ test('saving a filtered layout preserves full-trace options and reloads saved pr
   await restarted.dispatch('view-plots');
   assert.match(restarted.workspace(), /name="layout_attempts"[^>]*value="61"/);
   assert.match(restarted.workspace(), /value="Saved Treasury"/);
+  assert.doesNotMatch(restarted.workspace(), /name="include_fees"[^>]*checked/);
   assert.equal(restarted.state.settings.layout_attempts, 25, 'per-investigation saves do not overwrite workspace preferences');
 });
 
@@ -1680,7 +1682,7 @@ test('invalid layout controls prevent both saving and queuing a plot', async () 
 test('layout drafts survive tab navigation and remain isolated between investigations', async () => {
   const cases = {first: workflowCase({id: 'first', run_defaults: {...defaults, center_name: 'First saved'}}),
     second: workflowCase({id: 'second', run_defaults: {...defaults, center_name: 'Second saved'}})};
-  const view = await harness(path => Object.values(cases).find(detail => path === `/api/cases/${detail.id}`));
+  const view = await harness(path => Object.values(cases).find(detail => path === `/api/cases/${detail.id}/overview`));
   await view.dispatch('open-case', {dataset: {id: 'first'}});
   await view.dispatch('view-plots');
   view.editPlotSettings({center_name: 'First unsaved', layout_attempts: '33'});
@@ -1852,14 +1854,15 @@ test('endpoint drafts survive tab and goal changes without leaking into another 
   assert.equal(view.calls.length, 1);
 });
 
-test('peg-out layouts always describe complete I/O without an optional context toggle', async () => {
+test('peg-out layouts describe non-fee I/O and optional fees without an optional context toggle', async () => {
   for (const goal of ['full', 'connections', 'pegouts']) {
     const view = await harness(path => path.endsWith('/actions') ? {id: 'plotjob', status: 'running'} : undefined);
     view.state.activeCase = workflowCase();
     await view.dispatch('view-plots');
     await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
     const html = view.workspace();
-    assert.match(html, /Every included transaction shows all its inputs and outputs, including fees/);
+    assert.match(html, /Every included transaction shows all its inputs and non-fee outputs/);
+    assert.match(html, /Fee outputs follow the Include transaction fee flows setting/);
     assert.match(html, /Outputs on excluded branches remain visible without continuing those branches/);
     assert.match(html, /These extra objects do not add endpoint matches or change the peg-out total/);
     assert.doesNotMatch(html, /id="workflow-include-context"|Include context addresses/);
@@ -1913,6 +1916,63 @@ test('context grouping is available for every plot goal and preserves edits acro
   assert.equal(view.calls.length, 1, 'draft changes neither save nor queue work');
 });
 
+test('peg-out fee checkbox is enabled and submits both states for preview and board generation', async () => {
+  for (const includeFees of [false, true]) for (const action of ['workflow-plot', 'workflow-plot-sync']) {
+    const hubs = ['G' + 'a'.repeat(33)];
+    const detail = workflowCase({run_defaults: {...defaults, include_fees: !includeFees, hub_addresses: hubs}});
+    const view = await harness(path => path.endsWith('/actions') ? {id: 'fee-job', status: 'running'} : undefined);
+    view.state.activeCase = detail;
+    await view.dispatch('view-plots');
+    await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+    const html = view.workspace();
+    const fees = html.match(/<fieldset class="layout-fields fee-flow-fields"[^>]*>[\s\S]*?<\/fieldset>/)?.[0];
+    assert.ok(fees);
+    assert.doesNotMatch(fees, /disabled/);
+    assert.match(fees, /name="include_fees_present" value="1"/);
+    assert.match(fees, /name="include_fees" type="checkbox"/);
+    if (includeFees) assert.doesNotMatch(fees, /name="include_fees"[^>]*checked/);
+    else assert.match(fees, /name="include_fees"[^>]*checked/);
+    const fullOnly = html.match(/<fieldset class="layout-fields full-trace-fields"[^>]*>[\s\S]*?<\/fieldset>/)?.[0];
+    assert.match(fullOnly, /disabled/);
+    assert.match(fullOnly, /name="hub_addresses"/);
+    view.plotForm({include_fees_present: '1', ...(includeFees ? {include_fees: 'on'} : {})});
+    await view.dispatch(action);
+    const writes = view.calls.filter(call => call.body);
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].path, '/api/cases/case1/actions');
+    assert.equal(writes[0].body.action, action === 'workflow-plot' ? 'plot' : 'plot-sync');
+    assert.equal(writes[0].body.goal, 'pegouts');
+    assert.equal(writes[0].body.layout_settings.include_fees, includeFees);
+    assert.deepEqual(writes[0].body.layout_settings.hub_addresses, hubs);
+    assert.equal(detail.run_defaults.include_fees, !includeFees, 'generation keeps saved defaults intact');
+  }
+});
+
+test('saved peg-out fee visibility follows each snapshot across plots, downloads and boards', async () => {
+  for (const includeFees of [false, true]) {
+    const view = await harness();
+    const plot = workflowPlot('pegouts', 'fee-snapshot', {query: {transaction_io: 'complete'},
+      layout_settings: {...layoutDefaults, include_fees: includeFees}, match_count: 2});
+    view.state.activeCase = workflowCase({run_defaults: {...defaults, include_fees: !includeFees}, plots: [plot],
+      boards: [workflowBoard('pegouts', 'fee-board', {preview_id: plot.preview_id})]});
+    for (const page of ['plots', 'history', 'boards']) {
+      await view.dispatch('view-' + page);
+      const html = view.workspace();
+      const expected = `All transaction inputs and ${includeFees ? 'outputs' : 'non-fee outputs'} · isolated inputs separate`;
+      assert.ok(html.includes(`Saved layout: ${expected}.`));
+      const picker = html.match(/<select id="workflow-(?:plot-picker|board-plot-[^"\s]+)"[^>]*>[\s\S]*?<\/select>/)?.[0];
+      assert.ok(picker.includes(expected));
+      assert.match(html, /Results: 2 peg-out requests/);
+      if (page === 'plots') {
+        const summary = html.match(/<details class="tool-details"><summary>Saved layout settings<\/summary>[\s\S]*?<\/details>/)?.[0];
+        assert.match(summary, new RegExp(`Fee flows ${includeFees ? 'shown' : 'hidden'}\\.`));
+        assert.doesNotMatch(summary, /separate branch hubs/);
+      }
+    }
+    assert.equal(view.calls.length, 1, 'viewing saved settings does not regenerate or update a plot');
+  }
+});
+
 test('Starter connections includes complete accounting and captures context grouping without enabling fee or hub options', async () => {
   for (const grouped of [true, false]) {
     const view = await harness(path => path.endsWith('/actions') ? {id: 'plotjob', status: 'running'} : undefined);
@@ -1928,7 +1988,11 @@ test('Starter connections includes complete accounting and captures context grou
     assert.doesNotMatch(contextGroupingFields(view), /disabled/);
     const fullOnly = html.match(/<fieldset class="layout-fields full-trace-fields"[^>]*>[\s\S]*?<\/fieldset>/)?.[0];
     assert.match(fullOnly, /disabled/);
-    for (const key of ['include_fees', 'hub_addresses']) assert.match(fullOnly, new RegExp(`name="${key}"`));
+    assert.match(fullOnly, /name="hub_addresses"/);
+    assert.doesNotMatch(fullOnly, /name="include_fees"/);
+    const fees = html.match(/<fieldset class="layout-fields fee-flow-fields"[^>]*>[\s\S]*?<\/fieldset>/)?.[0];
+    assert.match(fees, /disabled/);
+    assert.match(fees, /name="include_fees"/);
     view.plotForm({group_context_inputs_present: '1', ...(grouped ? {group_context_inputs: 'on'} : {})});
     await view.dispatch('workflow-plot');
     assert.deepEqual(view.calls.at(-1).body, {action: 'plot', layout_mode: 'fresh', goal: 'connections', run_id: 'saved1',
@@ -2317,7 +2381,7 @@ test('job completion selects the generated plot or initialized board from the re
     const plot = workflowPlot('pegouts', 'newplot'), board = workflowBoard('pegouts', 'newboard');
     const detail = workflowCase({plots: [plot], boards: [board]});
     const view = await harness(path => path === '/api/jobs/job' ? {status: 'succeeded', result: action === 'plot' ? plot : board}
-      : path === '/api/cases/case1' ? detail : undefined);
+      : path === '/api/cases/case1/overview' ? detail : undefined);
     view.state.activeCase = workflowCase();
     view.state.job = {id: 'job', action, caseId: 'case1'};
     await view.pollJob();
@@ -2335,7 +2399,7 @@ test('real populated case-detail contract feeds fresh previews into create and s
   }
   const detail = details.workflow;
   assert.equal(detail.plots.length, 1); assert.equal(detail.boards.length, 1);
-  const view = await harness(path => path === `/api/cases/${detail.id}` ? detail
+  const view = await harness(path => path === `/api/cases/${detail.id}/overview` ? detail
     : path.endsWith('/actions') ? {id: 'syncjob', status: 'running'} : undefined);
   await view.dispatch('open-case', {dataset: {id: detail.id}});
   await view.dispatch('view-plots');
@@ -2382,7 +2446,7 @@ test('empty plots cannot sync and unavailable registries show the API notice', a
 
 test('settings direct board management to the central tab and preserve the original full-board binding', async () => {
   const detail = workflowCase({miro_board: 'original-full'});
-  const view = await harness(path => path === '/api/cases/case1' ? detail : undefined);
+  const view = await harness(path => path === '/api/cases/case1/overview' ? detail : undefined);
   view.state.activeCase = detail; view.state.page = 'case-settings';
   assert.match(view.settingsPage(), /Manage investigation boards/);
   assert.doesNotMatch(view.settingsPage(), /name="board"/);
@@ -2585,7 +2649,7 @@ test('failed and canceled managed-board jobs refresh persisted cards without los
       const pending = workflowBoard('pegouts', 'persisted', {board_id: action === 'board-sync' ? 'linked-board' : null,
         status: action === 'board-sync' ? 'interrupted' : 'pending_creation', can_sync: action === 'board-sync'});
       const updated = workflowCase({boards: [pending]});
-      const view = await harness(path => path === '/api/jobs/job' ? {status, message: 'Original operation message'} : path === '/api/cases/case1' ? updated : undefined);
+      const view = await harness(path => path === '/api/jobs/job' ? {status, message: 'Original operation message'} : path === '/api/cases/case1/overview' ? updated : undefined);
       view.state.activeCase = workflowCase(); view.state.caseView = 'boards';
       view.state.job = {id: 'job', action, caseId: 'case1'};
       await view.pollJob();
@@ -2593,7 +2657,7 @@ test('failed and canceled managed-board jobs refresh persisted cards without los
       if (status === 'failed') assert.equal(view.state.error, 'Original operation message');
     }
   }
-  const failedRefresh = await harness(path => path === '/api/jobs/job' ? {status: 'failed', message: 'Original sync failure'} : path === '/api/cases/case1' ? {error: 'Refresh failed'} : undefined);
+  const failedRefresh = await harness(path => path === '/api/jobs/job' ? {status: 'failed', message: 'Original sync failure'} : path === '/api/cases/case1/overview' ? {error: 'Refresh failed'} : undefined);
   failedRefresh.state.activeCase = workflowCase(); failedRefresh.state.job = {id: 'job', action: 'board-sync', caseId: 'case1'};
   await failedRefresh.pollJob();
   assert.equal(failedRefresh.state.error, 'Original sync failure');
@@ -2601,7 +2665,7 @@ test('failed and canceled managed-board jobs refresh persisted cards without los
   switched.state.activeCase = workflowCase({id: 'another-case'}); switched.state.job = {id: 'job', action: 'board-create', caseId: 'case1'};
   await switched.pollJob();
   assert.equal(switched.state.activeCase.id, 'another-case');
-  assert.equal(switched.calls.filter(call => call.path === '/api/cases/case1').length, 0);
+  assert.equal(switched.calls.filter(call => call.path === '/api/cases/case1/overview').length, 0);
 });
 
 function miroConflictReport(overrides = {}) {
@@ -2623,7 +2687,7 @@ test('Miro conflict failure keeps escaped saved/current differences through refr
     current: {present: true, value: '[Excerpt starting at character 100] edited text', truncated: true}});
   const view = await harness(path => path === '/api/jobs/job'
     ? {status: 'failed', message: 'Miro objects differ from the last sync.', edit_conflicts: report}
-    : path === '/api/cases/case1' ? workflowCase() : undefined);
+    : path === '/api/cases/case1/overview' ? workflowCase() : undefined);
   view.state.activeCase = workflowCase(); view.state.page = 'case';
   view.state.job = {id: 'job', action: 'plot-sync', caseId: 'case1', progress: {phase: 'syncing'}};
   await view.pollJob();
@@ -2641,7 +2705,7 @@ test('Miro conflict failure keeps escaped saved/current differences through refr
   assert.match(view.app.innerHTML, /href="https:\/\/miro\.com\/app\/board\/board%2Fwith%3Fspecial%26characters\/\?moveToWidget=item%2Fwith%3Fspecial%26characters" target="_blank" rel="noopener noreferrer"/);
   assert.doesNotMatch(view.app.innerHTML, /<img|javascript:|<group>|<p>Address/);
   assert.match(view.app.innerHTML, /regenerate the board update, and retry/);
-  assert.ok(view.calls.some(call => call.path === '/api/cases/case1'));
+  assert.ok(view.calls.some(call => call.path === '/api/cases/case1/overview'));
   view.render();
   assert.match(view.app.innerHTML, /Locate the Miro changes/);
   await view.dispatch('dismiss-error');
@@ -2653,7 +2717,7 @@ test('Miro conflict reports are isolated from other investigations and cleared b
   const report = miroConflictReport();
   const view = await harness(path => path === '/api/jobs/job'
     ? {status: 'failed', message: 'Old case conflict.', edit_conflicts: report}
-    : path === '/api/cases/case2' ? workflowCase({id: 'case2'})
+    : path === '/api/cases/case2/overview' ? workflowCase({id: 'case2'})
     : path === '/api/lookup' ? {id: 'new-job', status: 'running'} : undefined);
   view.state.activeCase = workflowCase({id: 'case2'}); view.state.page = 'case';
   view.state.job = {id: 'job', action: 'board-sync', caseId: 'case1'};
@@ -2677,7 +2741,7 @@ test('generic or malformed failed-job reports leave the existing error UI intact
   for (const edit_conflicts of [undefined, {}, {kind: 'miro_edit_conflicts', board_id: 'board', items: [null, {}]}]) {
     const view = await harness(path => path === '/api/jobs/job'
       ? {status: 'failed', message: 'Original action failure.', edit_conflicts}
-      : path === '/api/cases/case1' ? workflowCase() : undefined);
+      : path === '/api/cases/case1/overview' ? workflowCase() : undefined);
     view.state.activeCase = workflowCase(); view.state.page = 'case';
     view.state.job = {id: 'job', action: 'board-sync', caseId: 'case1'};
     await view.pollJob();
@@ -2706,7 +2770,7 @@ test('plot handoff names only a compatible card containing the requested layout'
   const original = workflowCase({plots: [pegout, full], boards: [workflowBoard('pegouts', 'cashouts')]});
   const created = workflowBoard('full', 'overview');
   const view = await harness(path => path === '/api/jobs/job' ? {status: 'succeeded', result: created}
-    : path === '/api/cases/case1' ? {...original, boards: [...original.boards, created]} : undefined);
+    : path === '/api/cases/case1/overview' ? {...original, boards: [...original.boards, created]} : undefined);
   view.state.activeCase = original;
   await view.dispatch('view-plots');
   await view.dispatch('plot-boards');
@@ -2850,7 +2914,7 @@ test('successful update layout generation selects its exact board plot after ref
   const update = workflowPlot('pegouts', 'update', {layout_mode: 'update', board_record_id: 'cashouts', board_id: 'miro-cashouts'});
   const detail = workflowCase({plots: [update], boards: [workflowBoard('pegouts', 'cashouts', {preview_id: 'previous'})]});
   const view = await harness(path => path === '/api/jobs/job' ? {status: 'succeeded', result: update}
-    : path === '/api/cases/case1' ? detail : undefined);
+    : path === '/api/cases/case1/overview' ? detail : undefined);
   view.state.activeCase = workflowCase(); view.state.job = {id: 'job', action: 'plot', caseId: 'case1', live: true};
   await view.pollJob(); await view.dispatch('view-boards');
   assert.match(boardCardHtml(view, 'cashouts'), /value="update" selected/);
@@ -2950,7 +3014,7 @@ test('successful combined creation selects the new board for future updates and 
   const detail = workflowCase({plots: [plot], boards: [board]});
   const view = await harness(path => path === '/api/jobs/job' ? {status: 'succeeded', result: {...plot,
     published: true, record_id: 'newboard', board_url: board.board_url}}
-    : path === '/api/cases/case1' ? detail : undefined);
+    : path === '/api/cases/case1/overview' ? detail : undefined);
   view.state.activeCase = workflowCase(); view.state.job = {id: 'job', action: 'plot-sync', caseId: 'case1', live: true};
   await view.pollJob();
   const draft = view.currentWorkflow(detail);
@@ -2965,7 +3029,7 @@ test('empty combined fresh result reports no board and preserves its saved previ
   const plot = workflowPlot('pegouts', 'empty', {layout_mode: 'fresh', empty: true, node_count: 0, edge_count: 0});
   const detail = workflowCase({plots: [plot]});
   const view = await harness(path => path === '/api/jobs/job' ? {status: 'succeeded', result: {...plot, published: false}}
-    : path === '/api/cases/case1' ? detail : undefined);
+    : path === '/api/cases/case1/overview' ? detail : undefined);
   view.state.activeCase = workflowCase(); view.state.job = {id: 'job', action: 'plot-sync', caseId: 'case1', live: true};
   await view.pollJob();
   assert.equal(view.currentWorkflow(detail).layoutMode, 'fresh');
@@ -2981,7 +3045,7 @@ test('failed combined fresh publication refreshes and selects exact saved recove
     preview_id: 'saved', creation_preview_id: 'saved'});
   const detail = workflowCase({plots: [plot], boards: [board]});
   const view = await harness(path => path === '/api/jobs/job' ? {status: 'failed', message: 'Sync interrupted.'}
-    : path === '/api/cases/case1' ? detail : path.endsWith('/actions') ? {id: 'resume', status: 'running'} : undefined);
+    : path === '/api/cases/case1/overview' ? detail : path.endsWith('/actions') ? {id: 'resume', status: 'running'} : undefined);
   view.state.activeCase = workflowCase(); view.state.job = {id: 'job', action: 'plot-sync', caseId: 'case1', live: true};
   await view.pollJob();
   assert.equal(view.currentWorkflow(detail).layoutMode, 'update');
@@ -3042,7 +3106,7 @@ test('session reconnect restores every investigation task and gates only its cur
   const jobs = [activeTask('a', 'alpha'), activeTask('b', 'beta')];
   const view = await harness(path => path === '/api/session'
     ? {csrf: 'test', settings: defaults, cases: [multiCase('alpha'), multiCase('beta')], active_jobs: jobs}
-    : path.startsWith('/api/cases/') ? multiCase(path.split('/').at(-1)) : undefined);
+    : path.startsWith('/api/cases/') ? multiCase(path.split('/')[3]) : undefined);
   assert.equal(view.runningJobs().length, 2);
   assert.match(view.jobBanner(), /2 active tasks/);
   assert.match(view.jobBanner(), /Investigation alpha/);
@@ -3107,7 +3171,7 @@ test('own job completion after switching tabs preserves the selected case view a
   const view = await harness(path => {
     if (path.endsWith('/actions')) return activeTask('a', 'alpha', {action: 'plot'});
     if (path === '/api/jobs/a') return {id: 'a', status: 'succeeded', result: {preview_id: 'ready'}};
-    if (path === '/api/cases/alpha') return {...detail, plots: []};
+    if (path === '/api/cases/alpha/overview') return {...detail, plots: []};
   });
   await view.openCase('alpha');
   await view.startJob('/api/cases/alpha/actions', {action: 'plot'}, 'plot', false, 'alpha');
@@ -3122,7 +3186,7 @@ test('discovery of another tab active and short completed jobs refreshes data wi
   let listed = [activeTask('a', 'alpha')];
   const view = await harness(path => {
     if (path === '/api/jobs') return {jobs: listed};
-    if (path === '/api/cases/beta') return multiCase('beta', {latest_run: 'new-run'});
+    if (path === '/api/cases/beta/overview') return multiCase('beta', {latest_run: 'new-run'});
   });
   view.state.activeCase = multiCase('beta'); view.state.page = 'case'; view.state.caseView = 'history';
   await view.discoverJobs(); assert.equal(view.runningJobs().length, 1);
@@ -3143,7 +3207,7 @@ for (const action of ['trace', 'address-counts', 'plot-sync']) {
     const lookup = activeTask('lookup', null, {action: 'lookup', live: true, resource_kind: 'exclusive'});
     const view = await harness(path => path === '/api/session'
       ? {csrf: 'test', settings: defaults, cases: [multiCase('alpha')], active_jobs: [collecting]}
-      : path === '/api/cases/alpha' ? multiCase('alpha')
+      : path === '/api/cases/alpha/overview' ? multiCase('alpha')
       : path === '/api/lookup' ? lookup
       : path === '/api/jobs/lookup' ? {...lookup, status: 'succeeded', result: {transactions: [{txid, outputs: []}]}}
       : undefined);
@@ -3220,7 +3284,7 @@ test('a long-running oldest task remains the newest outcome after many newer tas
     if (path === '/api/session') return {csrf: 'test', settings: defaults, cases: [], active_jobs: [old]};
     if (path === '/api/jobs') return {jobs: [old, ...finished]};
     if (path === '/api/jobs/oldest') return {...old, status: 'succeeded', finished_at: 100, message: 'Oldest just completed'};
-    if (path === '/api/cases/alpha') return multiCase('alpha');
+    if (path === '/api/cases/alpha/overview') return multiCase('alpha');
   });
   await view.discoverJobs();
   assert.equal(view.state.jobs.size, 33); // All active work plus the most recent 32 outcomes.
@@ -3292,7 +3356,7 @@ test('starting a second same-case plot and editing its draft prevents an earlier
   const view = await harness((path, body) => {
     if (path.endsWith('/actions')) return activeTask(`plot-${++next}`, 'case1', {action: body.action});
     if (path.startsWith('/api/jobs/')) return {id: path.split('/').at(-1), status: 'succeeded', result: {preview_id: 'old-result'}};
-    if (path === '/api/cases/case1') return detail;
+    if (path === '/api/cases/case1/overview') return detail;
   });
   view.state.activeCase = detail;
   await view.dispatch('view-plots');
@@ -3318,7 +3382,7 @@ test('collection completion preserves the concrete run selected by another activ
   const view = await harness((path, body) => {
     if (path.endsWith('/actions')) return activeTask(`job-${++next}`, 'case1', {action: body.action});
     if (path === '/api/jobs/job-1') return {id: 'job-1', status: 'succeeded', result: {run_id: 'newer'}};
-    if (path === '/api/cases/case1') return {...detail, latest_run: 'newer', runs: [{id: 'newer'}, ...detail.runs]};
+    if (path === '/api/cases/case1/overview') return {...detail, latest_run: 'newer', runs: [{id: 'newer'}, ...detail.runs]};
   });
   view.state.activeCase = detail;
   await view.dispatch('view-plots');
@@ -3388,7 +3452,7 @@ test('plot refresh arriving before trace completion preserves the selected sourc
     if (path.endsWith('/actions')) return activeTask(`ordered-${++next}`, 'case1', {action: body.action});
     if (path === '/api/jobs/ordered-1') return {id: 'ordered-1', status: 'succeeded', result: {run_id: 'newer'}};
     if (path === '/api/jobs/ordered-2') return {id: 'ordered-2', status: 'succeeded', result: {preview_id: 'layout', run_id: 'saved1'}};
-    if (path === '/api/cases/case1') return after;
+    if (path === '/api/cases/case1/overview') return after;
   });
   view.state.activeCase = before;
   await view.dispatch('view-plots');
@@ -3409,7 +3473,7 @@ test('discovery and failed or canceled board refreshes preserve displayed run se
       if (path === '/api/jobs') return {jobs: [activeTask('external', 'case1', {status: 'succeeded'})]};
       if (path.endsWith('/actions')) return activeTask('board', 'case1', {action: 'plot-sync'});
       if (path === '/api/jobs/board') return {id: 'board', status, message: 'Finished'};
-      if (path === '/api/cases/case1') return after;
+      if (path === '/api/cases/case1/overview') return after;
     });
     view.state.activeCase = before;
     await view.dispatch('view-plots');
@@ -3433,7 +3497,7 @@ test('a delayed older job refresh cannot replace newer board and run details', a
     if (path.endsWith('/actions')) return activeTask(`race-${++next}`, 'case1', {action: body.action});
     if (path.startsWith('/api/jobs/')) return {id: path.split('/').at(-1), status: 'succeeded',
       result: {preview_id: path.endsWith('1') ? 'old-layout' : 'new-layout', run_id: 'saved1'}};
-    if (path === '/api/cases/case1') return new Promise(resolve => refreshes.push(resolve));
+    if (path === '/api/cases/case1/overview') return new Promise(resolve => refreshes.push(resolve));
   });
   view.state.activeCase = before;
   await view.dispatch('view-plots');
@@ -3461,7 +3525,7 @@ const tabCases = [
     runs: [{id: 'b-new', status: 'bounded_complete'}]},
 ];
 const tabResponse = path => structuredClone(path === '/api/session' ? {csrf: 'test', settings: defaults, cases: tabCases}
-  : tabCases.find(item => path === `/api/cases/${item.id}`));
+  : tabCases.find(item => path === `/api/cases/${item.id}/overview`));
 
 test('investigation tabs restore views, snapshots, address edits and plot drafts independently', async () => {
   const view = await harness(tabResponse);
@@ -3553,7 +3617,7 @@ test('tab restoration tolerates removed cases, duplicates, corrupt storage and d
 test('a late tab opening cannot replace a more recently selected investigation', async () => {
   let release;
   const slow = new Promise(resolve => {release = resolve;});
-  const view = await harness(path => path === '/api/cases/a1' ? slow : tabResponse(path));
+  const view = await harness(path => path === '/api/cases/a1/overview' ? slow : tabResponse(path));
   const opening = view.openCase('a1');
   await view.openCase('b2');
   release(tabCases[0]);
@@ -3564,7 +3628,7 @@ test('a late tab opening cannot replace a more recently selected investigation',
 
 test('returning to a tab pins its displayed snapshot when another collection finishes', async () => {
   let completed = false;
-  const view = await harness(path => path === '/api/cases/a1' && completed
+  const view = await harness(path => path === '/api/cases/a1/overview' && completed
     ? {...tabCases[0], latest_run: 'a-newer', runs: [{id: 'a-newer', status: 'bounded_complete'}, ...tabCases[0].runs]}
     : tabResponse(path));
   await view.openCase('a1');
@@ -3840,7 +3904,7 @@ for (const terminal of ['succeeded', 'failed', 'canceled']) {
       if (path === '/api/session') return {csrf: 'test', settings: defaults, cases: [details]};
       if (path === '/api/jobs/background-job') return {id: 'background-job', status: terminal,
         message: 'Private backend error details must not be copied to the system notification.', result: {}};
-      if (path === '/api/cases/background') return details;
+      if (path === '/api/cases/background/overview') return details;
     }, {systemNotification: SystemNotification});
     assert.equal(permissionRequests, 0);
     assert.match(view.app.innerHTML, /Notifications off/);
@@ -3971,7 +4035,7 @@ test('shared collectors block each other across cases while private collection a
 
 test('shared source generates before private collection and pins the selected shared snapshot', async () => {
   const detail = workflowCase({runs: [], latest_run: undefined, shared_collection: sharedCollection()});
-  const view = await harness(path => path.endsWith('/actions') ? {id: 'shared-plot', status: 'running'} : path === '/api/cases/case1' ? detail : undefined);
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'shared-plot', status: 'running'} : path === '/api/cases/case1/overview' ? detail : undefined);
   view.state.activeCase = detail; await view.dispatch('view-plots');
   assert.match(view.workspace(), /data-action="workflow-plot"[^>]*disabled/);
   workflowEdit(view, 'data-source', 'shared'); workflowEdit(view, 'shared-run', 'shared-old');
@@ -3985,7 +4049,7 @@ test('shared source generates before private collection and pins the selected sh
 
 test('shared and private source drafts remain isolated across investigations', async () => {
   const alpha = workflowCase({shared_collection: sharedCollection()}), beta = workflowCase({id: 'case2', name: 'Beta', shared_collection: sharedCollection()});
-  const view = await harness(path => path === '/api/cases/case1' ? alpha : path === '/api/cases/case2' ? beta : undefined);
+  const view = await harness(path => path === '/api/cases/case1/overview' ? alpha : path === '/api/cases/case2/overview' ? beta : undefined);
   await view.openCase('case1'); view.state.selectedRun = 'saved1';
   workflowEdit(view, 'data-source', 'shared'); workflowEdit(view, 'shared-run', 'shared-old');
   await view.openCase('case2'); assert.equal(view.currentWorkflow(beta).dataSource, 'investigation');
@@ -4000,8 +4064,8 @@ test('shared completion refreshes another case pool without changing its source 
   const before = sharedCollection(), after = sharedCollection({latest_run: 'newest', runs: [{id: 'newest', status: 'bounded_complete'}, ...before.runs]});
   const detail = workflowCase({shared_collection: before});
   const view = await harness(path => path === '/api/jobs/shared-job' ? {id: 'shared-job', status: 'succeeded', result: {run_id: 'newest'}}
-    : path === '/api/cases/other' ? workflowCase({id: 'other', shared_collection: after})
-    : path === '/api/cases/case1' ? {...detail, shared_collection: after} : undefined);
+    : path === '/api/cases/other/overview' ? workflowCase({id: 'other', shared_collection: after})
+    : (path === '/api/cases/case1/overview' || path.startsWith('/api/cases/case1/shared-collection')) ? {...detail, shared_collection: after} : undefined);
   view.state.activeCase = detail; view.state.page = 'case'; view.state.caseView = 'plots'; view.state.selectedRun = 'saved1';
   workflowEdit(view, 'data-source', 'shared'); workflowEdit(view, 'shared-run', 'shared-old');
   view.state.jobs.set('shared-job', {id: 'shared-job', action: 'shared-trace', caseId: 'other', status: 'running', started: Date.now(), live: false});
@@ -4042,7 +4106,7 @@ test('shared endpoint totals and combined export match exact provenance rather t
     {...valuePlot('other-shared', 'another-projection', '2026-10-01T04:00:00Z', valueSummary('88')), collection_source: {...descriptor, run_id: 'shared-new'}},
   ]});
   const beta = workflowCase({id: 'case2', name: 'Beta', shared_collection: sharedCollection()});
-  const view = await harness(path => path === '/api/cases/case1' ? alpha : path === '/api/cases/case2' ? beta
+  const view = await harness(path => path === '/api/cases/case1/overview' ? alpha : path === '/api/cases/case2/overview' ? beta
     : path === '/api/endpoint-exports' ? combinedExport() : undefined);
   await view.openCase('case1'); workflowEdit(view, 'data-source', 'shared'); workflowEdit(view, 'shared-run', 'shared-old');
   assert.match(view.workspace(), /<strong>7 LBTC<\/strong>/); assert.doesNotMatch(view.workspace(), /<strong>(?:88|99) LBTC<\/strong>/);
@@ -4058,7 +4122,7 @@ for (const fullFirst of [true, false]) {
     const older = new Promise(resolve => {resolveOlder = resolve;});
     const newer = new Promise(resolve => {resolveNewer = resolve;});
     const detail = workflowCase({shared_collection: sharedCollection()});
-    const view = await harness(path => path === '/api/cases/case1' ? (++reads === 1 ? older : newer) : undefined);
+    const view = await harness(path => ['/api/cases/case1/overview', '/api/cases/case1/shared-collection'].includes(path) ? (++reads === 1 ? older : newer) : undefined);
     view.state.activeCase = detail; view.state.page = 'case'; view.state.selectedRun = 'saved1';
     const first = fullFirst ? view.refreshCaseDetail('case1') : view.refreshSharedCollection('case1');
     const second = fullFirst ? view.refreshSharedCollection('case1') : view.refreshCaseDetail('case1');
@@ -4106,7 +4170,7 @@ test('fresh defaults and legacy investigations have no automatic budgets despite
 for (const caseSettings of [false, true]) {
   test(`${caseSettings ? 'investigation' : 'workspace'} budgets toggle without losing numeric preferences or unrelated settings`, async () => {
     const detail = workflowCase({run_defaults: {...defaults, ...layoutDefaults, budget_limits_enabled: false, center_name: 'Treasury'}});
-    const view = await harness(path => path === '/api/cases/case1' ? detail : undefined);
+    const view = await harness(path => path === '/api/cases/case1/overview' ? detail : undefined);
     view.state.activeCase = detail;
     view.navigate(caseSettings ? 'case-settings' : 'settings');
     const base = {name: 'Preserved name', hops: '8', budget_limits_enabled_present: '1'};
@@ -4133,7 +4197,7 @@ for (const caseSettings of [false, true]) {
 test('enabled budgets permit per-cap zero and summarize unlimited values accurately', async () => {
   const limits = {...defaults, ...Object.fromEntries(budgetKeys.map(key => [key, 0])), budget_limits_enabled: true};
   const detail = workflowCase({run_defaults: limits, miro_board: 'board'});
-  const view = await harness(path => path === '/api/cases/case1' ? detail : undefined);
+  const view = await harness(path => path === '/api/cases/case1/overview' ? detail : undefined);
   view.state.activeCase = detail; view.state.page = 'case-settings';
   for (const key of budgetKeys) assert.match(view.settingsPage(), new RegExp(`name="${key}"[^>]*min="0"[^>]*value="0"`));
   assert.equal((view.settingsPage().match(/0 = unlimited/g) || []).length, 5);
@@ -4220,7 +4284,7 @@ test('All saved connections ignores hidden hop values and restores the bounded d
 
 test('Starter scope and limit survive source and case switches independently of peg-out bounds', async () => {
   const alpha = workflowCase({shared_collection: sharedCollection()}), beta = workflowCase({id: 'case2'});
-  const view = await harness(path => path === '/api/cases/case1' ? alpha : path === '/api/cases/case2' ? beta : undefined);
+  const view = await harness(path => path === '/api/cases/case1/overview' ? alpha : path === '/api/cases/case2/overview' ? beta : undefined);
   await view.openCase('case1');
   await view.dispatch('view-plots');
   await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
@@ -4370,3 +4434,267 @@ for (const action of ['lookup', 'change-output-lookup']) {
     });
   }
 }
+
+const stagedSections = (overrides = {}) => ({collection: 'unloaded', shared: 'unloaded', workflow: 'unloaded', boards: 'unloaded', history: 'unloaded', ...overrides});
+const stagedOverview = (overrides = {}) => ({id: 'case1', name: 'Staged investigation', run_defaults: {...defaults, include_fees: true, hub_addresses: []},
+  seeds: [`${txid}:0`], latest_run: 'saved1', runs: [{id: 'saved1', status: 'Summary loading', summary_pending: true}],
+  sections: stagedSections(), ...overrides});
+const sectionResult = (section, data = {}, status = 'ready') => ({...data, sections: {[section]: status}});
+const settled = () => new Promise(setImmediate);
+
+test('staged opening renders the overview while only collection and shared summaries load', async () => {
+  const collection = Promise.withResolvers(), shared = Promise.withResolvers();
+  const view = await harness(path => {
+    if (path.endsWith('/overview')) return stagedOverview();
+    if (path.endsWith('/collection')) return collection.promise;
+    if (path.endsWith('/shared-collection')) return shared.promise;
+    if (path !== '/api/session') throw Error(`Unexpected eager request: ${path}`);
+  });
+  await view.openCase('case1');
+  assert.equal(view.state.page, 'case');
+  assert.equal(view.state.activeCase.name, 'Staged investigation');
+  assert.equal(view.state.openingCase, null);
+  assert.match(view.app.innerHTML, /data-loading-section="collection"/);
+  assert.match(view.app.innerHTML, /data-loading-section="shared"/);
+  assert.doesNotMatch(view.app.innerHTML, /No shared collection yet|Your first completed or bounded run/);
+  view.loadVisibleSections(); view.loadVisibleSections();
+  assert.equal(view.calls.filter(call => call.path.endsWith('/collection')).length, 1);
+  assert.equal(view.calls.filter(call => call.path.endsWith('/shared-collection')).length, 1);
+  assert.ok(!view.calls.some(call => /\/(?:workflow|boards|history)$/.test(call.path)));
+  collection.resolve(sectionResult('collection', {runs: [{id: 'saved1', status: 'bounded_complete', transaction_count: 20}], latest_run: 'saved1'}));
+  shared.resolve(sectionResult('shared', {shared_collection: sharedCollection()}));
+  await settled();
+  assert.match(view.app.innerHTML, /20/);
+  assert.doesNotMatch(view.app.innerHTML, /data-loading-section="collection"|data-loading-section="shared"/);
+  assert.ok(!view.calls.some(call => /^\/api\/cases\/[^/]+$/.test(call.path)));
+});
+
+test('plots and board records load independently and legacy history waits for its tab', async () => {
+  const workflow = Promise.withResolvers(), boards = Promise.withResolvers(), history = Promise.withResolvers();
+  const view = await harness(path => {
+    if (path.endsWith('/overview')) return stagedOverview();
+    if (path.endsWith('/collection')) return sectionResult('collection', {latest_run: 'saved1', runs: [{id: 'saved1', status: 'complete'}]});
+    if (path.endsWith('/shared-collection')) return sectionResult('shared', {shared_collection: sharedCollection()});
+    if (path.endsWith('/workflow')) return workflow.promise;
+    if (path.endsWith('/boards')) return boards.promise;
+    if (path.endsWith('/history')) return history.promise;
+  });
+  await view.openCase('case1'); await settled();
+  await view.dispatch('view-plots');
+  assert.equal(view.state.caseView, 'plots');
+  assert.match(view.app.innerHTML, /data-loading-section="workflow"/);
+  assert.ok(!view.calls.some(call => call.path.endsWith('/history')));
+  workflow.resolve(sectionResult('workflow', {plots: []})); await settled();
+  assert.match(view.app.innerHTML, /id="saved-plots-panel"/);
+  assert.match(view.app.innerHTML, /data-loading-section="boards"/);
+  assert.match(view.app.innerHTML, /data-action="workflow-plot-sync"[^>]*disabled/);
+  assert.doesNotMatch(view.app.innerHTML, /No boards yet/);
+  boards.resolve(sectionResult('boards', {boards: []})); await settled();
+  assert.match(view.app.innerHTML, /No boards yet/);
+  await view.dispatch('view-history');
+  assert.match(view.app.innerHTML, /data-loading-section="history"/);
+  assert.equal(view.calls.filter(call => call.path.endsWith('/history')).length, 1);
+  history.resolve(sectionResult('history', {artifacts: {}, pegout_searches: []})); await settled();
+  assert.match(view.app.innerHTML, /Run history/);
+  await view.dispatch('view-plots'); await view.dispatch('view-history');
+  assert.equal(view.calls.filter(call => call.path.endsWith('/history')).length, 1);
+});
+
+test('summary retries preserve remembered runs and ignore responses after changing investigations', async () => {
+  const collection = Promise.withResolvers();
+  let collectionReads = 0;
+  const storage = new Map([['liquid-tracer:investigation-tabs:v1', JSON.stringify({ids: ['case1'], views: [{id: 'case1', selectedRun: 'older', caseView: 'collect'}]})]]);
+  const view = await harness(path => {
+    if (path === '/api/session') return {csrf: 'test', settings: defaults, cases: [stagedOverview()]};
+    if (path === '/api/cases/case1/overview') return stagedOverview();
+    if (path === '/api/cases/case1/collection/older') return ++collectionReads === 1
+      ? sectionResult('collection', {runs: [{id: 'older', status: 'Summary loading', summary_pending: true}]}, 'loading') : collection.promise;
+    if (path === '/api/cases/case2/overview') return stagedOverview({id: 'case2', name: 'Second investigation', sections: stagedSections({collection: 'ready', shared: 'ready'})});
+    if (path.endsWith('/shared-collection')) return sectionResult('shared', {shared_collection: sharedCollection()});
+  }, {storage});
+  await view.openCase('case1'); await settled();
+  assert.equal(view.state.selectedRun, 'older');
+  const retry = [...view.timers.values()].find(timer => timer.ms === 1000);
+  assert.ok(retry); retry.fn(); await settled();
+  assert.equal(collectionReads, 2);
+  await view.openCase('case2');
+  collection.resolve(sectionResult('collection', {latest_run: 'saved1', runs: [{id: 'older', status: 'complete'}]}));
+  await settled();
+  assert.equal(view.state.activeCase.id, 'case2');
+  assert.equal(view.state.activeCase.name, 'Second investigation');
+});
+
+test('section failure remains local and retry does not reopen the investigation', async () => {
+  let fail = true;
+  const view = await harness(path => {
+    if (path.endsWith('/overview')) return stagedOverview();
+    if (path.endsWith('/collection')) return fail ? {error: 'Summary unavailable'} : sectionResult('collection', {runs: [{id: 'saved1', status: 'complete'}]});
+    if (path.endsWith('/shared-collection')) return sectionResult('shared', {shared_collection: sharedCollection()});
+  });
+  await view.openCase('case1'); await settled();
+  assert.equal(view.state.page, 'case'); assert.equal(view.state.error, '');
+  assert.match(view.app.innerHTML, /Summary unavailable/);
+  assert.match(view.app.innerHTML, /data-action="retry-case-section"/);
+  fail = false; await view.dispatch('retry-case-section', {dataset: {section: 'collection'}}); await settled();
+  assert.doesNotMatch(view.app.innerHTML, /Summary unavailable|data-loading-section="collection"/);
+  assert.equal(view.calls.filter(call => call.path.endsWith('/overview')).length, 1);
+});
+
+test('only the selected saved layout is verified and pending artifacts cannot preview or publish', async () => {
+  const check = Promise.withResolvers();
+  const first = {...workflowPlot('full', 'first', {layout_mode: 'fresh'}), validation_pending: true, reviewable: false,
+    artifact: {downloads: [{name: 'graph.svg', url: '/files/unchecked.svg'}], preview_url: '/files/unchecked.html'}};
+  const second = {...workflowPlot('full', 'second', {layout_mode: 'fresh'}), validation_pending: true, reviewable: false};
+  const view = await harness(path => {
+    if (path.endsWith('/overview')) return stagedOverview();
+    if (path.endsWith('/collection')) return sectionResult('collection', {latest_run: 'saved1', runs: [{id: 'saved1', status: 'complete'}]});
+    if (path.endsWith('/shared-collection')) return sectionResult('shared', {shared_collection: sharedCollection()});
+    if (path.endsWith('/workflow')) return sectionResult('workflow', {plots: [first, second]});
+    if (path.endsWith('/boards')) return sectionResult('boards', {boards: []});
+    if (path.endsWith('/plots/first')) return check.promise;
+    if (path.endsWith('/plots/second')) return {...second, reviewable: true, validation_pending: false};
+  });
+  await view.openCase('case1'); await settled(); await view.dispatch('view-plots'); await settled();
+  assert.equal(view.calls.filter(call => call.path.includes('/plots/')).length, 1);
+  assert.match(view.app.innerHTML, /Checking this saved layout/);
+  assert.doesNotMatch(view.app.innerHTML, /src="\/files\/unchecked|href="\/files\/unchecked/);
+  assert.match(view.app.innerHTML, /data-action="workflow-board-create-sync"[^>]*disabled/);
+  await assert.rejects(() => view.dispatch('workflow-board-create-sync'), /reviewed New board layout/);
+  assert.ok(!view.calls.some(call => call.path.endsWith('/actions')));
+  workflowEdit(view, 'plot-picker', 'second'); await settled();
+  assert.equal(view.calls.filter(call => call.path.endsWith('/plots/second')).length, 1);
+  check.resolve({...first, validation_pending: false, reviewable: true}); await settled();
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'second');
+  workflowEdit(view, 'plot-picker', 'first');
+  assert.match(view.app.innerHTML, /src="\/files\/unchecked.html#chart"/);
+  assert.equal(view.calls.filter(call => call.path.endsWith('/plots/first')).length, 1);
+});
+
+test('partial saved layout preferences keep independently loaded sections and current selection', async () => {
+  const detail = workflowCase({sections: stagedSections({collection: 'ready', shared: 'ready', workflow: 'ready', boards: 'ready', history: 'ready'}),
+    plots: [workflowPlot('full', 'kept')], boards: [workflowBoard('full', 'kept-board')], shared_collection: sharedCollection()});
+  detail.run_defaults = {...detail.run_defaults, include_fees: true};
+  const view = await harness(path => path.endsWith('/plot-settings') ? stagedOverview({run_defaults: {...detail.run_defaults, include_fees: false}}) : undefined);
+  view.state.activeCase = detail; view.state.page = 'case'; view.state.caseView = 'plots'; view.state.selectedRun = 'saved1';
+  view.plotForm({include_fees_present: '1'});
+  await view.dispatch('plot-settings-save');
+  assert.equal(view.state.activeCase.run_defaults.include_fees, false);
+  assert.equal(view.state.activeCase.plots[0].preview_id, 'kept');
+  assert.equal(view.state.activeCase.boards[0].id, 'kept-board');
+  assert.equal(view.state.activeCase.shared_collection.dataset_id, detail.shared_collection.dataset_id);
+  assert.equal(view.state.activeCase.sections.workflow, 'ready');
+  assert.equal(view.state.selectedRun, 'saved1');
+});
+
+test('a ready current run stays usable while older history summaries remain pending', async () => {
+  const view = await harness(path => {
+    if (path.endsWith('/overview')) return stagedOverview({runs: [{id: 'saved1', status: 'complete', transaction_count: 8, collected_hops: 3}]});
+    if (path.endsWith('/collection')) return sectionResult('collection', {runs: [
+      {id: 'saved1', status: 'complete', transaction_count: 8, collected_hops: 3},
+      {id: 'older', status: 'Summary loading', summary_pending: true},
+    ]}, 'loading');
+    if (path.endsWith('/shared-collection')) return sectionResult('shared', {shared_collection: sharedCollection()});
+    if (path.endsWith('/workflow')) return sectionResult('workflow', {plots: []});
+    if (path.endsWith('/boards')) return sectionResult('boards', {boards: []});
+  });
+  await view.openCase('case1'); await settled();
+  assert.match(view.app.innerHTML, /id="collection-panel"/);
+  assert.doesNotMatch(view.app.innerHTML, /data-loading-section="collection"/);
+  await view.dispatch('view-plots'); await settled();
+  const button = view.app.innerHTML.match(/<button[^>]+data-action="workflow-plot"[^>]*>/)[0];
+  assert.doesNotMatch(button, /disabled/);
+});
+
+test('choosing an older private or shared snapshot requests only that summary', async () => {
+  const privateRun = Promise.withResolvers(), sharedRun = Promise.withResolvers();
+  const shared = sharedCollection({runs: [{id: 'shared-new', status: 'complete'}, {id: 'shared-old', status: 'Summary loading', summary_pending: true}]});
+  const view = await harness(path => {
+    if (path.endsWith('/overview')) return stagedOverview();
+    if (path.endsWith('/collection')) return sectionResult('collection', {runs: [{id: 'saved1', status: 'complete'}, {id: 'older', status: 'Summary loading', summary_pending: true}]});
+    if (path.endsWith('/collection/older')) return privateRun.promise;
+    if (path.endsWith('/shared-collection')) return sectionResult('shared', {shared_collection: shared});
+    if (path.endsWith('/shared-collection/shared-old')) return sharedRun.promise;
+    if (path.endsWith('/workflow')) return sectionResult('workflow', {plots: []});
+    if (path.endsWith('/boards')) return sectionResult('boards', {boards: []});
+  });
+  await view.openCase('case1'); await settled();
+  view.changeRun('older'); await settled();
+  assert.equal(view.state.selectedRun, 'older');
+  assert.equal(view.calls.filter(call => call.path.endsWith('/collection/older')).length, 1);
+  assert.match(view.app.innerHTML, /<strong[^>]*>Loading<\/strong>/);
+  privateRun.resolve(sectionResult('collection', {runs: [{id: 'saved1', status: 'complete'}, {id: 'older', status: 'complete', collected_hops: 2}]})); await settled();
+  assert.equal(view.state.selectedRun, 'older');
+  await view.dispatch('view-plots'); await settled();
+  workflowEdit(view, 'data-source', 'shared'); workflowEdit(view, 'shared-run', 'shared-old'); await settled();
+  assert.equal(view.calls.filter(call => call.path.endsWith('/shared-collection/shared-old')).length, 1);
+  assert.ok(!view.calls.some(call => call.path.endsWith('/history')));
+  sharedRun.resolve(sectionResult('shared', {shared_collection: {...shared, runs: [{id: 'shared-old', status: 'complete'}]}})); await settled();
+  assert.equal(view.currentWorkflow(view.state.activeCase).sharedRun, 'shared-old');
+});
+
+test('completed board task renders its result before overview, board and workspace refreshes finish', async () => {
+  const overview = Promise.withResolvers(), boards = Promise.withResolvers(), session = Promise.withResolvers();
+  let sessionReads = 0;
+  const detail = workflowCase({sections: stagedSections({collection: 'ready', workflow: 'ready', shared: 'ready', boards: 'ready'}),
+    boards: [workflowBoard('full', 'existing')]});
+  const view = await harness(path => {
+    if (path === '/api/session') return ++sessionReads === 1 ? {csrf: 'test', settings: defaults, cases: []} : session.promise;
+    if (path.endsWith('/actions')) return activeTask('staged-board', 'case1', {action: 'board-sync'});
+    if (path === '/api/jobs/staged-board') return {id: 'staged-board', status: 'succeeded', message: 'Board synced', result: {record_id: 'existing', board_id: 'miro-board'}};
+    if (path.endsWith('/overview')) return overview.promise;
+    if (path.endsWith('/boards')) return boards.promise;
+  });
+  view.state.activeCase = detail; view.state.page = 'case'; view.state.caseView = 'plots';
+  await view.startJob('/api/cases/case1/actions', {action: 'board-sync', record_id: 'existing'}, 'board-sync', false, 'case1');
+  const polling = view.pollJob('staged-board'); await settled();
+  assert.equal(view.state.jobs.get('staged-board').status, 'succeeded');
+  assert.equal(view.state.results.get('case1').action, 'board-sync');
+  assert.match(view.app.innerHTML, /Miro board synced|Board synced|board-sync/);
+  overview.resolve(stagedOverview()); await polling;
+  assert.equal(view.calls.filter(call => call.path.endsWith('/boards')).length, 1);
+  assert.equal(sessionReads, 2);
+  assert.ok(!view.calls.some(call => call.path.endsWith('/history')));
+  boards.resolve(sectionResult('boards', {boards: detail.boards}));
+  session.resolve({csrf: 'test', settings: defaults, cases: []}); await settled();
+});
+
+
+test('overview refresh replaces an obsolete in-flight section request', async () => {
+  const older = Promise.withResolvers(), newer = Promise.withResolvers();
+  let boardReads = 0;
+  const view = await harness(path => {
+    if (path.endsWith('/overview')) return stagedOverview();
+    if (path.endsWith('/collection')) return sectionResult('collection', {runs: [{id: 'saved1', status: 'complete'}]});
+    if (path.includes('/shared-collection')) return sectionResult('shared', {shared_collection: sharedCollection()});
+    if (path.endsWith('/workflow')) return sectionResult('workflow', {plots: []});
+    if (path.endsWith('/boards')) return ++boardReads === 1 ? older.promise : newer.promise;
+  });
+  await view.openCase('case1'); await settled();
+  await view.dispatch('view-plots'); await settled();
+  assert.equal(boardReads, 1);
+  await view.refreshCaseDetail('case1', () => false, 'plot'); await settled();
+  assert.equal(boardReads, 2, 'A new overview must not reuse a request whose response will be rejected');
+  newer.resolve(sectionResult('boards', {boards: [workflowBoard('full', 'new-board')]})); await settled();
+  assert.equal(view.state.activeCase.sections.boards, 'ready');
+  older.resolve(sectionResult('boards', {boards: [workflowBoard('full', 'old-board')]})); await settled();
+  assert.equal(view.state.activeCase.boards[0].id, 'new-board');
+  assert.doesNotMatch(view.app.innerHTML, /data-loading-section="boards"/);
+});
+
+
+test('invalidated selected summary keeps its identity but stops presenting stale counts as ready', async () => {
+  let invalidated = false;
+  const view = await harness(path => {
+    if (path.endsWith('/overview')) return stagedOverview();
+    if (path.endsWith('/collection')) return invalidated
+      ? sectionResult('collection', {runs: [{id: 'saved1', status: 'Summary loading', summary_pending: true}]}, 'loading')
+      : sectionResult('collection', {runs: [{id: 'saved1', status: 'complete', transaction_count: 8, collected_hops: 3}]});
+    if (path.includes('/shared-collection')) return sectionResult('shared', {shared_collection: sharedCollection()});
+  });
+  await view.openCase('case1'); await settled();
+  invalidated = true;
+  await view.loadCaseSection('case1', 'collection', true);
+  assert.equal(view.state.activeCase.runs[0].id, 'saved1');
+  assert.equal(view.state.activeCase.runs[0].summary_pending, true);
+  assert.match(view.app.innerHTML, /data-loading-section="collection"/);
+});

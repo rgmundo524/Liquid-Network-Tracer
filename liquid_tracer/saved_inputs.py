@@ -31,3 +31,15 @@ def saved_input_output(transactions, vin):
            for field in fields):
         raise TraceError("Input disagrees with its saved funding output")
     return {**output, **prevout}
+
+
+def input_evidence(state, transactions=None):
+    """Combine lookup-only funding context with graph transactions, never paths."""
+    transactions = state["transactions"] if transactions is None else transactions
+    context = state.get("saved_transactions", {})
+    if not isinstance(context, dict) or not isinstance(transactions, dict):
+        raise TraceError("Saved input evidence must be a transaction mapping")
+    for txid in context.keys() & transactions.keys():
+        if canonical(context[txid]["data"]) != canonical(transactions[txid]["data"]):
+            raise TraceError("Saved input evidence conflicts with its transaction")
+    return {**context, **transactions} if context else transactions

@@ -1048,6 +1048,8 @@ def run_trace(args, progress=None):
             if not preserve_trace_failure:
                 report_progress(progress, "exporting_collection", 0, 1)
             export_run(store, state, destination, merge_addresses, args.offline_preview)
+            from .run_summaries import remember_run_summary
+            remember_run_summary(destination, state)
             save_latest(args.case, state["run_id"])
             if not preserve_trace_failure:
                 report_progress(progress, "exporting_collection", 1, 1)

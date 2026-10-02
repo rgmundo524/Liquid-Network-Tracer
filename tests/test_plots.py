@@ -150,7 +150,7 @@ class PlotTests(unittest.TestCase):
         fresh = preview_plot(self.case, "pegouts", include_context=False)
         new_graph, _ = reviewed_plot(self.case, fresh["preview_id"])
         self.assertEqual(fresh["query"]["transaction_io"], "complete")
-        self.assertTrue(new_graph["include_fees"])
+        self.assertFalse(new_graph["include_fees"])
         self.assertTrue(new_graph["graph_options"]["group_context_inputs"])
         for result, graph, plan, snapshot, endpoints in old:
             self.assertEqual(reviewed_plot(self.case, result["preview_id"]), (graph, plan))
@@ -258,12 +258,12 @@ class PlotTests(unittest.TestCase):
         original, original_plan = reviewed_plot(self.case, default["preview_id"])
         self.assertNotIn("include_context", default["query"])
         self.assertEqual(default["query"]["transaction_io"], "complete")
-        self.assertEqual(default["context_edge_count"], 5)
+        self.assertEqual(default["context_edge_count"], 4)
         result = preview_plot(self.case, "pegouts", min_hops=1, max_hops=1, include_context=True)
         graph, plan = reviewed_plot(self.case, result["preview_id"])
         self.assertEqual(result["query"], {**default["query"], "include_context": True})
-        self.assertEqual(result["context_edge_count"], 5)
-        self.assertEqual(graph["pegouts"]["context_edge_count"], 5)
+        self.assertEqual(result["context_edge_count"], 4)
+        self.assertEqual(graph["pegouts"]["context_edge_count"], 4)
         self.assertEqual(graph["pegouts"]["matches"], original["pegouts"]["matches"])
         self.assertEqual(graph["pegouts"]["outpoints"], original["pegouts"]["outpoints"])
         self.assertEqual([item["outpoint"] for item in graph["pegouts"]["matches"]], [selected])
@@ -275,8 +275,7 @@ class PlotTests(unittest.TestCase):
         self.assertEqual(context, {"out:" + tx("a") + ":1": "context_output",
                                    "in:" + tx("c") + ":1": "context_input",
                                    "out:" + tx("c") + ":0": "context_output",
-                                   "out:" + tx("c") + ":2": "context_output",
-                                   "out:" + tx("c") + ":3": "context_output"})
+                                   "out:" + tx("c") + ":2": "context_output"})
         self.assertEqual({edge["id"] for edge in graph["edges"]},
                          {edge["id"] for edge in original["edges"]})
         directory = Path(result["directory"])
@@ -285,7 +284,7 @@ class PlotTests(unittest.TestCase):
         context_rows = {(row["Transaction Hash"], row["Direction"], row["Number of I/O"])
                         for row in rows if "CONTEXT" in row["Address Flags"]}
         self.assertEqual(context_rows, {(tx("a"), "OUT", "1"), (tx("c"), "IN", "1"),
-                                       (tx("c"), "OUT", "0"), (tx("c"), "OUT", "2"), (tx("c"), "OUT", "3")})
+                                       (tx("c"), "OUT", "0"), (tx("c"), "OUT", "2")})
         self.assertEqual(len(rows), len(graph["edges"]))
         svg = ET.fromstring((directory / "graph.svg").read_bytes())
         self.assertEqual({node.get("data-node-id") for node in svg.iter() if node.get("data-node-id")},
@@ -331,7 +330,7 @@ class PlotTests(unittest.TestCase):
         self.assertEqual([item["outpoint"] for item in graph["pegouts"]["matches"]], [pegout])
         self.assertEqual(plan["namespace"], default_plan["namespace"])
         expected = {"out:" + tx("a") + ":0", "in:" + tx("b") + ":0",
-                    *("out:" + tx("b") + ":" + str(index) for index in range(4))}
+                    *("out:" + tx("b") + ":" + str(index) for index in range(3))}
         self.assertEqual({edge["id"] for edge in graph["edges"]}, expected)
         directory = Path(result["directory"])
         self.assertEqual(read_json(directory / "plot.json"), graph["plot"])
@@ -485,6 +484,8 @@ class PlotTests(unittest.TestCase):
         add_pegout(state, tx("c"))
         self.state, self.archive = saved_case(self.case, state)
         before = self.bytes(self.archive)
+        # Keep fee visibility fixed while testing only grouping changes.
+        update_case(self.case, {"run_defaults": {"include_fees": True}})
         original = preview_plot(self.case, "pegouts", min_hops=1, max_hops=1, include_context=True)
         old_graph, old_plan = reviewed_plot(self.case, original["preview_id"])
         old_directory = Path(original["directory"])
