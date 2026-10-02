@@ -125,17 +125,21 @@ class ConnectionPathTests(unittest.TestCase):
         self.assertTrue(all(e["outpoint"] in graph["connections"]["outpoints"] for e in graph["edges"]))
         self.assertFalse(any(e["role"].startswith("context") for e in graph["edges"]))
         self.assertEqual({n["color"] for n in graph["nodes"] if n.get("role") == "seed"}, {"#112233"})
-        self.assertEqual(graph["address_mode"], "outpoint_occurrences")
+        self.assertEqual(graph["address_mode"], "merged")
 
-    def test_parallel_utxos_remain_separate_and_deterministic(self):
+    def test_parallel_utxos_share_one_address_and_keep_distinct_connectors(self):
         state = graph_state((("a:0", "b"), ("a:1", "b")), seeds=("a:0", "a:1", "b:0"))
         before = connecting_outpoints(state)
         state["links"] = dict(reversed(list(state["links"].items())))
         state["seeds"].reverse()
         self.assertEqual(connecting_outpoints(state), before)
         graph = connection_graph(state)
-        self.assertEqual(len([n for n in graph["nodes"] if n["kind"] == "address"]), 2)
-        self.assertEqual(len(graph["edges"]), 4)
+        address, = [n for n in graph["nodes"] if n["kind"] == "address"]
+        self.assertEqual({item["outpoint"] for item in address["details"]["occurrences"]},
+                         {tx("a") + ":0", tx("a") + ":1"})
+        self.assertEqual({edge["id"] for edge in graph["edges"]},
+                         {"out:" + tx("a") + ":0", "out:" + tx("a") + ":1",
+                          "in:" + tx("b") + ":0", "in:" + tx("b") + ":1"})
 
     def test_random_dags_match_exhaustive_path_union_oracle(self):
         rng = random.Random(842)

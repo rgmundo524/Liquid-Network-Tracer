@@ -354,15 +354,14 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
                             for txid, record in reduced["transactions"].items()
                             for side, field in (("in", "vin"), ("out", "vout"))
                             for index in range(len(record["data"][field]))} - edge_ids
-    # Keep one circle per UTXO so existing Starter Connections boards retain
-    # their identities when updated to complete transaction I/O.
-    graph = build_graph(reduced, merge_addresses=False, include_fees=complete_io,
+    # Merge display identities only after selecting exact UTXO edges. Hidden
+    # context must not contribute occurrences, labels, or roles to a circle.
+    graph = build_graph(reduced, merge_addresses=True, include_fees=complete_io,
+                        edge_ids=edge_ids | context_edge_ids,
                         color_attribution_arrows=color_attribution_arrows, center_name=center_name,
                         respect_attribution_hops=not saved_evidence, respect_stops=not saved_evidence,
                         resolve_saved_inputs=saved_evidence or complete_io,
                         saved_transactions=state["transactions"] if complete_io else None)
-    path_nodes = {edge[field] for edge in graph["edges"] if edge["id"] in edge_ids
-                  for field in ("source", "target")}
     edge_ids.update(context_edge_ids)
     graph["edges"] = [e for e in graph["edges"] if e["id"] in edge_ids]
     for edge in graph["edges"]:
@@ -377,8 +376,20 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
         branch = graph["branch_structure"]
         branch["edge_memberships"] = {key: value for key, value in branch["edge_memberships"].items()
                                        if key not in context_edge_ids}
+        # A context-only seed can share a circle with a connecting output.
+        # Derive that circle's lineage from exact path edges, not all of its
+        # displayed occurrences, so address reuse cannot add a traced origin.
+        path_memberships = defaultdict(set)
+        for edge in graph["edges"]:
+            members = branch["edge_memberships"].get(edge["id"], ())
+            for key in (edge["source"], edge["target"]):
+                if members and not key.startswith("tx:"):
+                    path_memberships[key].update(members)
+        root_order = {root["key"]: root["index"] for root in branch["roots"]}
         branch["node_memberships"] = {key: value for key, value in branch["node_memberships"].items()
-                                       if key in path_nodes or key.startswith("tx:")}
+                                       if key.startswith("tx:")}
+        branch["node_memberships"].update({key: sorted(members, key=root_order.__getitem__)
+                                           for key, members in path_memberships.items()})
     keep_nodes = {e[field] for e in graph["edges"] for field in ("source", "target")}
     graph["nodes"] = [n for n in graph["nodes"] if n["id"] in keep_nodes]
     if not complete_io:
@@ -405,11 +416,11 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
     context_notice = (" Every input and output of each qualifying transaction is displayed, including fees. "
                       "Context arrows do not establish a qualifying starter connection. Unfollowed branch outputs "
                       "are shown without inferring unspent status or expanding their transactions. "
-                      "One circle per UTXO; repeated addresses do not imply additional traced connections. "
                       "Every traced path edge belongs to a qualifying path; " if complete_io else
-                      " One circle per connecting UTXO, not address clustering. "
-                      "Every displayed edge belongs to a qualifying path; ")
-    graph["notice"] = (introduction + report["scope"] + context_notice + "their union may also form longer routes. "
+                      " Every displayed edge belongs to a qualifying path; ")
+    address_notice = (" One circle per full address per network; each UTXO retains its own connectors. "
+                      "Shared addresses do not establish additional traced connections. ")
+    graph["notice"] = (introduction + report["scope"] + address_notice + context_notice + "their union may also form longer routes. "
                         "UTXO reachability does not prove ownership or allocate confidential values.")
     if report.get("hop_reference_name"):
         distance_label = "Displayed group-relative hops" if connection_scope == "hop_limited" else "Hops"

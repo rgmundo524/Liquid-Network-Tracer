@@ -180,6 +180,37 @@ class InvestigationBoardTests(unittest.TestCase):
                     self.assertEqual(remote.items, before_remote)
                     self.assertEqual(len(remote.calls), before_calls)
 
+    def test_starter_address_modes_preserve_existing_boards_and_compatible_layouts(self):
+        for old, new, message in (
+                ("outpoint_occurrences", "merged", "select Starter connections and New board"),
+                ("merged", "outpoint_occurrences", "Select a regenerated Starter connections layout")):
+            with self.subTest(old=old, new=new):
+                board = link_board(self.case, "connections", old, "connections-" + old)
+                remote = AnnotationMiro()
+                with patch("liquid_tracer.plots.reviewed_plot",
+                           return_value=self.source(goal="connections", address_mode=old)):
+                    sync_board(self.case, board["id"], "saved-old", token="test", transport=remote, interval=0)
+                    writes = len(remote.writes)
+                    sync_board(self.case, board["id"], "saved-old", token="test", transport=remote, interval=0)
+                    self.assertEqual(len(remote.writes), writes)
+                state_path = self.case / board["state_file"]
+                before_state, before_registry = state_path.read_bytes(), self.registry.read_bytes()
+                before_remote, before_calls = copy.deepcopy(remote.items), len(remote.calls)
+                listed = next(item for item in list_boards(self.case) if item["id"] == board["id"])
+                self.assertTrue(listed["can_sync"])
+                if old == "outpoint_occurrences":
+                    self.assertIn("select Starter connections and New board", listed["notice"])
+                for reorganize in (False, True):
+                    with patch("liquid_tracer.plots.reviewed_plot",
+                               return_value=self.source(goal="connections", address_mode=new)):
+                        with self.assertRaisesRegex(TraceError, message):
+                            sync_board(self.case, board["id"], "saved-new", reorganize=reorganize,
+                                       token="test", transport=remote, interval=0)
+                    self.assertEqual(state_path.read_bytes(), before_state)
+                    self.assertEqual(self.registry.read_bytes(), before_registry)
+                    self.assertEqual(remote.items, before_remote)
+                    self.assertEqual(len(remote.calls), before_calls)
+
     def test_old_pegout_board_keeps_compatible_layout_and_new_board_uses_merged_mode(self):
         old_board = link_board(self.case, "pegouts", "Original paths", "old-pegout-board")
         old_remote = AnnotationMiro()

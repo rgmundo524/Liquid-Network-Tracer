@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from liquid_tracer.common import LBTC
+from liquid_tracer.common import LBTC, TraceError, save_json
 from liquid_tracer.connections import connection_graph, preview_connections, reviewed_connections
 from liquid_tracer.investigations import create_investigation, read_case, update_case
 from liquid_tracer.plots import _query, list_plots, preview_plot, reviewed_plot
@@ -85,6 +85,22 @@ class CompleteStarterWorkflowTests(unittest.TestCase):
                             and row["Direction"] == "OUT" for row in rows))
         self.assertEqual(len(plan["connectors"]), len(graph["edges"]))
         self.assertEqual(files(self.archive), before)
+
+    def test_old_outpoint_board_update_explains_new_board_before_remote_reads(self):
+        from liquid_tracer.investigation_boards import link_board
+        board = link_board(self.case, "connections", "Old starter plot", "old-starter-board")
+        state_path = self.case / board["state_file"]
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        save_json(state_path, {"schema_version": 2, "board_id": board["board_id"],
+            "namespace": {"case_id": self.state["case_id"] + ":" + board["id"],
+                          "source": self.state["source"], "address_mode": "outpoint_occurrences"},
+            "items": {}, "runs": {}, "pending": None, "pending_creations": {}})
+        registry = self.case / "miro" / "boards.json"
+        before = state_path.read_bytes(), registry.read_bytes()
+        with patch("liquid_tracer.board_layout.capture", side_effect=AssertionError("No remote reads")):
+            with self.assertRaisesRegex(TraceError, "select Starter connections and New board"):
+                preview_plot(self.case, "connections", layout_mode="update", board_record_id=board["id"])
+        self.assertEqual((state_path.read_bytes(), registry.read_bytes()), before)
 
     def test_public_metadata_admits_only_complete_marker_and_valid_context_count(self):
         result = preview_plot(self.case, "connections")

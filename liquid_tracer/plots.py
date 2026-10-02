@@ -367,10 +367,12 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
         board_fields = {"layout_mode": layout_mode}
         if layout_mode == "update":
             from .board_layout import capture, prepare_graph
-            from .investigation_boards import board_for_plot, _board_plan, _check_legacy_removals
+            from .investigation_boards import (board_for_plot, _board_plan, _check_legacy_removals,
+                                               _check_plot_address_mode)
             record = board_for_plot(case, board_record_id, goal)
             board_plan = _board_plan(plot_plan(graph), record)
             state_path = case / record["state_file"]
+            _check_plot_address_mode(board_plan, record, state_path)
             _check_legacy_removals(board_plan, record, state_path)
             if _preflight is not None:
                 _preflight(graph, record)

@@ -93,11 +93,20 @@ Starter connections hop chooser. The older **Starter connections** dialog uses
 the latest saved run. Its **Publish starter connections to Miro** dialog lets
 you select a reviewed snapshot and supply a separate Miro board.
 
-Starter connection charts use one address circle per **UTXO**, including when
-several UTXOs use the same address. This prevents address merging from
-visually inventing cross-spends between unrelated outputs. The ordinary graph's
-merged-address setting is unchanged. Configured role/name colors, starter
-transaction styling, and applicable border-only highlights are retained.
+New starter connection charts use **one circle per full address per network**,
+including when several UTXOs use that address. Each input and output keeps its
+own connector, exact outpoint, and CSV row. Shared addresses do not establish
+additional traced connections; path selection and branch lineage still use
+verified UTXO spends. Unknown addresses remain separate by outpoint. Configured
+role/name colors, starter transaction styling, and applicable border-only
+highlights are retained.
+
+Regenerate an older layout to combine repeated address circles. Saved layouts
+keep their original presentation. If a Miro board uses the older per-UTXO nodes,
+create or link a different Starter connections board for the regenerated layout;
+the original board and saved layouts remain available. No new collection is
+needed for this display change.
+
 **Group isolated context inputs** can combine eligible external input addresses
 into a summary while preserving each input's connector and CSV row. Transaction
 fee outputs are always included in newly generated connection plots.

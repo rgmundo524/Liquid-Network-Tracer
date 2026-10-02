@@ -46,7 +46,8 @@ class CompleteTransactionConnectionTests(unittest.TestCase):
                 self.assertTrue(edge["role"].startswith("context"))
                 self.assertNotIn(edge["id"], graph["branch_structure"]["edge_memberships"])
         for key in (tx("a") + ":1", tx("b") + ":0"):
-            node = next(node for node in graph["nodes"] if node["id"] == "liquid:outpoint:" + key)
+            node = next(node for node in graph["nodes"] if any(
+                item["outpoint"] == key for item in node.get("details", {}).get("occurrences", [])))
             self.assertTrue(all(item["trace"] is None for item in node["details"]["occurrences"]))
             self.assertNotIn("unspent_endpoints", node["details"])
             self.assertNotIn(node["id"], graph["branch_structure"]["node_memberships"])
@@ -94,7 +95,7 @@ class CompleteTransactionConnectionTests(unittest.TestCase):
         summary, = [node for node in grouped["nodes"] if node["kind"] == "context_group"]
         self.assertEqual({node["details"]["address"] for node in summary["details"]["members"]},
                          {"SYNTHETIC-c-address", "SYNTHETIC-d-address"})
-        named = next(node for node in grouped["nodes"] if node["id"] == "liquid:outpoint:" + tx("e") + ":0")
+        named = next(node for node in grouped["nodes"] if node["id"] == "liquid:address:SYNTHETIC-e-address")
         self.assertIn("Known service", named["label"])
         self.assertEqual({edge["id"] for edge in grouped["edges"]}, io_ids(state, "ab"))
         self.assertEqual(transaction_csv_rows(grouped, state), transaction_csv_rows(ordinary, state))
@@ -109,7 +110,7 @@ class CompleteTransactionConnectionTests(unittest.TestCase):
                 before = deepcopy(state)
                 graph = complete(state)
                 self.assertNotIn("tx:" + tx("c"), {node["id"] for node in graph["nodes"]})
-                context = next(node for node in graph["nodes"] if node["id"] == "liquid:outpoint:" + tx("c") + ":0")
+                context = next(node for node in graph["nodes"] if node["id"] == "liquid:address:SYNTHETIC-c-address")
                 self.assertEqual(context["details"]["address"], "SYNTHETIC-c-address")
                 rows = transaction_csv_rows(graph, state)
                 row = next(row for row in rows if row["Transaction Hash"] == tx("b")

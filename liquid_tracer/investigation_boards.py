@@ -25,10 +25,13 @@ GOALS = {"full": "Full trace", "connections": "Starter connections", "pegouts": 
 RECORD_ID = re.compile(r"board-[0-9a-f]{32}\Z")
 UNCERTAIN = ("Miro board creation outcome is uncertain. Inspect your Miro boards and link the created "
              "board to this pending board entry. No additional board will be created automatically.")
-PEGOUT_ADDRESS_NOTICE = (
-    "This board uses the older per-output address layout and can still sync compatible saved layouts. "
-    "For one node per address, select Paths to peg-outs and New board in Plot & Miro, then choose "
-    "Generate & create board. The existing board stays unchanged.")
+ADDRESS_LAYOUT_GOALS = {"pegouts": "Paths to peg-outs", "connections": "Starter connections"}
+
+
+def _address_mode_notice(goal):
+    return ("This board uses the older per-output address layout and can still sync compatible saved layouts. "
+            f"For one node per address, select {ADDRESS_LAYOUT_GOALS[goal]} and New board in Plot & Miro, then choose "
+            "Generate & create board. The existing board stays unchanged.")
 
 
 class _BoardBusy(TraceError):
@@ -161,11 +164,11 @@ def _display(case, record):
                 if record.get("status") not in ("syncing", "sync_error") or completed:
                     result["status"] = "archived_snapshot" if result["legacy_snapshot"] else "synced"
             namespace = state.get("namespace")
-            if (record["goal"] == "pegouts" and not record.get("legacy") and not result.get("notice")
+            if (record["goal"] in ADDRESS_LAYOUT_GOALS and not record.get("legacy") and not result.get("notice")
                     and isinstance(namespace, dict)
                     and str(namespace.get("case_id", "")).endswith(":" + record["id"])
                     and namespace.get("address_mode") == "outpoint_occurrences"):
-                result["notice"] = PEGOUT_ADDRESS_NOTICE
+                result["notice"] = _address_mode_notice(record["goal"])
         except (TraceError, OSError, ValueError, TypeError):
             result.update(status="mapping_error", can_sync=False, notice="Restore the saved Miro mapping before syncing this board.")
     if result["legacy_snapshot"]:
@@ -338,14 +341,14 @@ def _board_plan(plan, record):
     return result
 
 
-def _check_pegout_address_mode(plan, record, state_path):
+def _check_plot_address_mode(plan, record, state_path):
     """Keep incompatible saved address identities out of an existing board.
 
-    Old peg-out layouts are immutable snapshots. Their per-output nodes and
+    Saved path layouts are immutable snapshots. Their per-output nodes and
     connector endpoints cannot be replaced by the full-trace address migration,
     which proves a different graph. Keep both board modes usable independently.
     """
-    if record["goal"] != "pegouts" or record.get("legacy"):
+    if record["goal"] not in ADDRESS_LAYOUT_GOALS or record.get("legacy"):
         return
     if not state_path.exists() and not journal_path(state_path).exists():
         return
@@ -356,12 +359,13 @@ def _check_pegout_address_mode(plan, record, state_path):
             or {**previous, "address_mode": desired["address_mode"]} != desired):
         return  # Ordinary sync retains its stricter board/case/source validation.
     if previous.get("address_mode") == "outpoint_occurrences" and desired["address_mode"] == "merged":
-        raise TraceError(PEGOUT_ADDRESS_NOTICE)
+        raise TraceError(_address_mode_notice(record["goal"]))
     if previous.get("address_mode") == "merged" and desired["address_mode"] == "outpoint_occurrences":
-        raise TraceError("This board uses one node per address, but the selected saved peg-out layout uses "
-                         "older per-output nodes. Select a regenerated Paths to peg-outs layout for this "
+        name = ADDRESS_LAYOUT_GOALS[record["goal"]]
+        raise TraceError(f"This board uses one node per address, but the selected saved {name} layout uses "
+                         f"older per-output nodes. Select a regenerated {name} layout for this "
                          "board, or sync the old layout to its original compatible board or a different "
-    "Miro board. The existing board stays unchanged.")
+                         "Miro board. The existing board stays unchanged.")
 
 
 def board_for_plot(case, record_id, goal):
@@ -587,7 +591,7 @@ def sync_board(case, record_id, preview_id, *, reorganize=False, max_items=0, _b
             reorganize = not completed
         if layout_mode == "update":
             _check_legacy_removals(plan, record, state_path)
-        _check_pegout_address_mode(plan, record, state_path)
+        _check_plot_address_mode(plan, record, state_path)
         # Validate item budgets and lineage before changing the publication record.
         sync(plan, record["board_id"], state_path, max_items=max_items, dry_run=True, reorganize=reorganize)
         if not record.get("legacy"):

@@ -129,7 +129,7 @@ class BoardUpdateWorkflowTests(unittest.TestCase):
         self.assertEqual(self.mapping(), {})
         self.assertEqual(self.remote.items, {note["id"]: note})
 
-    def test_markerless_starter_board_update_adds_complete_io_preserving_ids_and_manual_positions(self):
+    def test_markerless_shared_address_starter_board_update_preserves_ids_and_manual_positions(self):
         from tests.test_connections_complete_workflow import complete_state, csv_rows, input_output_keys
 
         self.state, self.archive = saved_case(self.case, complete_state())
@@ -151,7 +151,7 @@ class BoardUpdateWorkflowTests(unittest.TestCase):
             preview = self.prepare("connections")
         self.assertEqual(self.remote.items, before)
         graph, _ = reviewed_plot(self.case, preview["preview_id"])
-        self.assertEqual(graph["address_mode"], "outpoint_occurrences")
+        self.assertEqual(graph["address_mode"], "merged")
         self.assertEqual(preview["query"]["transaction_io"], "complete")
         new_nodes = {node["id"] for node in graph["nodes"]} - old_mapping.keys()
         self.assertTrue(new_nodes)
