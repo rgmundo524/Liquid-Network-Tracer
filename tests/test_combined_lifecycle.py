@@ -99,17 +99,26 @@ class CombinedLifecycleTests(unittest.TestCase):
         self.assertEqual(self.remote.items[note["id"]], note)
         self.assertEqual(len(self.transport.creations), 1)
 
-    def test_csv_change_between_layout_and_publication_prevents_board_creation(self):
+    def test_csv_change_between_layout_and_publication_preserves_captured_snapshot(self):
+        captured = []
+
         def changed_after_layout(*args, **kwargs):
             result = preview_plot(*args, **kwargs)
+            captured.append((reviewed_plot(self.case, result["preview_id"]),
+                             {path.name: path.read_bytes() for path in Path(result["directory"]).iterdir() if path.is_file()}))
             set_service(self.case, "SYNTHETIC-b-address", name="Revised", stop_tracing=True)
             return result
 
         with patch("liquid_tracer.plots.preview_plot", side_effect=changed_after_layout):
-            with self.assertRaisesRegex(TraceError, "changed|regenerate"):
-                self.combined(name="Stale graph")
-        self.assertEqual(self.transport.creations, [])
-        self.assertEqual(list_boards(self.case), [])
+            result = self.combined(name="Captured graph")
+        self.assertTrue(result["published"])
+        self.assertEqual(len(self.transport.creations), 1)
+        (graph, plan), files = captured[0]
+        self.assertEqual(reviewed_plot(self.case, result["preview_id"]), (graph, plan))
+        self.assertEqual(files, {path.name: path.read_bytes() for path in Path(result["directory"]).iterdir() if path.is_file()})
+        self.select_board(result)
+        for shape in plan["shapes"]:
+            self.assertEqual(self.item(shape["key"])["data"]["content"], shape["body"]["data"]["content"])
 
     def test_live_movement_between_layout_and_update_prevents_all_remote_writes(self):
         self.upload(0)
@@ -165,14 +174,20 @@ class CombinedLifecycleTests(unittest.TestCase):
             self.combined(name="Earlier graph", transport=transport)
         previous, = list_boards(self.case)
         saved_items = deepcopy(self.transport.boards[previous["board_id"]].items)
+        previous_snapshot = reviewed_plot(self.case, previous["preview_id"])
+        directory = self.case / "previews" / previous["preview_id"]
+        saved_files = {path.name: path.read_bytes() for path in directory.iterdir() if path.is_file()}
         set_service(self.case, "SYNTHETIC-b-address", name="Changed scope", stop_tracing=True)
-        with self.assertRaisesRegex(TraceError, "changed|regenerate"):
-            reviewed_plot(self.case, previous["preview_id"])
+        self.assertEqual(reviewed_plot(self.case, previous["preview_id"]), previous_snapshot)
         result = self.combined(name="Revised graph")
         self.assertTrue(result["published"])
         self.assertNotEqual(result["board_id"], previous["board_id"])
         self.assertEqual(len(self.transport.creations), 2)
         self.assertEqual(self.transport.boards[previous["board_id"]].items, saved_items)
+        self.assertEqual(saved_files, {path.name: path.read_bytes() for path in directory.iterdir() if path.is_file()})
+        new_graph, _ = reviewed_plot(self.case, result["preview_id"])
+        self.assertNotEqual(new_graph["service_controls"], previous_snapshot[0]["service_controls"])
+        self.assertTrue(any("Changed scope" in node["label"] for node in new_graph["nodes"]))
 
 
 if __name__ == "__main__":

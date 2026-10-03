@@ -21,7 +21,7 @@ SEED_SCOPE = SCOPE.replace("from the chosen transaction", "from the selected see
 
 def validate_query(txid=None, min_hops=0, max_hops=10, *, seeds=None,
                    include_unspent=False, include_unspendable=False, include_context=False,
-                   hop_reference_name="", transaction_io=None, attribution_hop_limits=None):
+                   hop_reference_name="", transaction_io=None, attribution_hop_limits=None, pegout_lbtc_limit=None):
     if seeds is not None:
         if txid is not None:
             raise TraceError("Choose either selected seed outputs or one transaction for a peg-out search")
@@ -52,6 +52,10 @@ def validate_query(txid=None, min_hops=0, max_hops=10, *, seeds=None,
         raise TraceError("Peg-out attribution hop policy must ignore per-address hop limits")
     if attribution_hop_limits is not None:
         options["attribution_hop_limits"] = attribution_hop_limits
+    from .pegout_limit import normalize_pegout_lbtc_limit
+    amount_limit = normalize_pegout_lbtc_limit(pegout_lbtc_limit)
+    if amount_limit is not None:
+        options["pegout_lbtc_limit"] = amount_limit
     name = normalize_reference_name(hop_reference_name)
     if name:
         options["hop_reference_name"] = name
@@ -134,7 +138,7 @@ def _evidence(state, *, respect_attribution_hops=True):
     return forward, pegouts
 
 
-def _paths(state, query, *, seed_distances=None):
+def _paths(state, query, *, seed_distances=None, selected_endpoints=None, max_seed_hops=None, limit_summary=None):
     """Find qualifying paths and optionally report endpoint distance from seeds.
 
     Seed distances count ordinary transaction edges only along paths accepted
@@ -175,6 +179,11 @@ def _paths(state, query, *, seed_distances=None):
                 txid, index = parse_outpoint(key)
                 if txid in state["transactions"] and index >= len(state["transactions"][txid]["data"]["vout"]):
                     raise TraceError("Selected seed output does not exist in its saved transaction")
+        if "pegout_lbtc_limit" in query:
+            from .pegout_limit import limited_paths
+            return limited_paths(state, query, forward, endpoints, confirmed, seed_distances=seed_distances,
+                                 selected_endpoints=selected_endpoints, max_seed_hops=max_seed_hops,
+                                 limit_summary=limit_summary)
         if named:
             from .named_hop_paths import walk_outputs, retain_paths, transaction_depths
             starts = (seeds if seeds is not None else {
@@ -298,11 +307,13 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
                            include_unspendable=query.get("include_unspendable", False),
                            include_context=query.get("include_context", False), hop_reference_name=name,
                            transaction_io=query.get("transaction_io"),
-                           attribution_hop_limits=query.get("attribution_hop_limits"))
+                           attribution_hop_limits=query.get("attribution_hop_limits"),
+                           pegout_lbtc_limit=query.get("pegout_lbtc_limit"))
     complete_io = query.get("transaction_io") == "complete"
     include_fees = complete_io and (include_fees if include_fees is not None else True)
     include_context = complete_io or query.get("include_context", False)
-    outpoints, endpoint_matches, depths, output_depths = _paths(state, query)
+    limit_summary = {}
+    outpoints, endpoint_matches, depths, output_depths = _paths(state, query, limit_summary=limit_summary)
     matches = [{key: value for key, value in match.items() if key != "kind"}
                for match in endpoint_matches if match["kind"] == "pegout"]
     selected = set(depths)
@@ -389,6 +400,11 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
     elif include_context:
         scope += (" Context input and output arrows show other addresses on qualifying transactions; "
                   "they do not establish a qualifying path or extend the trace.")
+    if limit_summary:
+        scope += (" Cumulative peg-out selection counts each reachable L-BTC output once, ordered by ordinary "
+                  "seed distance, transaction ID and output index. The entire threshold-crossing output is included; "
+                  "no later frontier is expanded. Unknown assets/amounts and non-LBTC outputs do not count. "
+                  "Complete transaction context may show other outputs that are not selected or counted. ")
     origin_notice = ("each seed transaction is hop 0, with only its selected outputs starting a path. "
                      if "seeds" in query else "the chosen transaction is hop 0. ")
     if name:
@@ -401,6 +417,8 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
                         "transaction_count": len(selected), "scope": scope,
                         "source_run_status": state.get("status"), "source_stop_reason": state.get("stop_reason"),
                         "status": "pegouts_found" if matches else "no_pegout_found"}
+    if limit_summary:
+        graph["pegouts"]["pegout_limit_summary"] = limit_summary
     if include_context:
         graph["pegouts"]["context_edge_count"] = len(context_edge_ids)
     if extra_endpoints:

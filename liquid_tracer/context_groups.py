@@ -1,7 +1,8 @@
 """Optional presentation summaries for isolated external transaction inputs.
 
-Every input connector keeps its vin, outpoint, quantity and evidence. Only its
-displayed source changes; full original address nodes remain inside the summary.
+Every input connector keeps its vin, outpoint, quantity and evidence. Full
+original address nodes remain inside the summary; a validated display projection
+draws one connector per group while canonical input records remain unchanged.
 This operation never groups a displayed asset-flow continuation or infers common
 ownership. Rebuilding the graph with grouping disabled restores original nodes.
 """
@@ -144,4 +145,5 @@ addresses are required; all must connect only as external inputs to one tx.
     }
     if summaries:
         result["notice"] = (result.get("notice", "") + " " + NOTICE).strip()
-    return result
+    from .context_connectors import prepare
+    return prepare(result)

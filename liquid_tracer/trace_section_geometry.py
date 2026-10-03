@@ -1,12 +1,14 @@
 """Assemble independent layouts without copying shared graph objects.
 
-Local ELK positions supply ordering hints; the full request supplies identity,
-ports, dimensions, and captions.  Explicit row and column gutters keep routes
-outside object rectangles.  Interval-colored tracks are reused where their
-spans do not touch.  This is a bounded routing heuristic, not a global crossing
-minimum: dense joins can still cross and require wide gutters.
+Current Trace candidates preserve local geometry inside section envelopes.
+The gutter primitive below places both those envelopes and bounded local
+fallbacks; legacy callers use local positions as ordering hints. The complete
+request supplies identity, ports, dimensions and captions. Interval-colored
+tracks are reused where their spans do not touch. This is a bounded routing
+heuristic, not a global crossing minimum: dense joins can still cross.
 """
 
+from bisect import bisect_left
 from collections import Counter, defaultdict
 from copy import deepcopy
 from heapq import heappop, heappush
@@ -16,6 +18,10 @@ from .common import TraceError
 
 _GAP = 22.0
 _MARGIN = 24.0
+_PLACEMENT_DELTAS = (0, 1, -1, 2, -2, 4, -4, 8, -8)
+_PLACEMENT_PROBE_LIMIT = 16
+_ADDRESS_PROBE_LIMIT = 16
+_ADDRESS_ROW_DELTAS = (0, 1, -1, 2, -2, 4, -4)
 
 
 def _number(value, *, positive=False):
@@ -41,15 +47,29 @@ def _color(intervals):
     return lanes, count
 
 
-def _rows(children, groups, candidates, columns, backbone, order):
-    rows, occupied = {}, set()
+def _rows(children, groups, candidates, columns, backbone, order, *, neighbors=None, stats=None):
+    """Pack local ordering profiles with a fixed number of occupancy probes.
+
+    Each object owns one (column, row) cell; different columns may reuse rows.
+    Whole sections translate without changing their local ordering. Neighbor
+    attachments suggest offsets, and per-column bounds supply two guaranteed
+    clear fallbacks. No section scans all prior rows or all other objects.
+    Node/edge indexing plus heap ordering and a fixed number of profile probes
+    bound the work to O((N + E) log(N + E)); stored occupancy is O(N).
+
+    This packs objects, not connector corridors. Dense joins may still widen
+    the later global gutters; a short section is not guaranteed its optimum
+    position when all nearby candidates are occupied.
+    """
+    neighbors = neighbors or {}
+    rows, primary_columns = {}, set()
     # A shared primary row is safe only for one object in each dependency
     # column. Extra same-column backbone members remain in their own section.
     for key in sorted(backbone, key=lambda key: (order.get(key, len(order)), key)):
-        if columns[key] not in occupied:
+        if columns[key] not in primary_columns:
             rows[key] = 0
-            occupied.add(columns[key])
-    next_row = 1 if rows else 0
+            primary_columns.add(columns[key])
+    profiles, owners = [], {}
     for group, candidate in zip(groups, candidates):
         hints = {node["id"]: _number(node["y"]) + _number(node["height"], positive=True) / 2
                  for node in candidate.get("nodes", [])}
@@ -57,16 +77,101 @@ def _rows(children, groups, candidates, columns, backbone, order):
             raise TraceError("A section layout changed its objects")
         pending = [key for key in group if key not in rows]
         if not pending:
+            profiles.append({})
             continue
         count = max(Counter(columns[key] for key in pending).values())
         low, high = min(hints[key] for key in pending), max(hints[key] for key in pending)
-        last, highest = {}, 0
+        last, local_rows = {}, {}
         for key in sorted(pending, key=lambda key: (hints[key], order.get(key, len(order)), key)):
             desired = round((hints[key] - low) * (count - 1) / (high - low)) if high > low else 0
             local = max(desired, last.get(columns[key], -1) + 1)
-            rows[key], last[columns[key]] = next_row + local, local
-            highest = max(highest, local)
-        next_row += highest + 1
+            local_rows[key], last[columns[key]] = local, local
+            owners[key] = len(profiles)
+        profiles.append(local_rows)
+
+    occupied, column_low, column_high = defaultdict(set), {}, {}
+    for key, row in rows.items():
+        col = columns[key]
+        occupied[col].add(row)
+        column_low[col] = column_high[col] = row
+    low, high = (0, 0) if rows else (None, None)
+    remaining = {index for index, profile in enumerate(profiles) if profile}
+    contacts, priorities, queue = {}, {}, []
+    for index in sorted(remaining):
+        profile = profiles[index]
+        contacts[index] = sum(other in rows for key in profile for other in neighbors.get(key, ()))
+        priorities[index] = (min(columns[key] for key in profile),
+                             min(order.get(key, len(order)) for key in profile), index)
+        heappush(queue, (-contacts[index], *priorities[index]))
+    probes = maximum_probes = 0
+    while remaining:
+        previous_contacts, _, _, index = heappop(queue)
+        if index not in remaining or -previous_contacts != contacts[index]:
+            continue
+        profile = profiles[index]
+        anchors = sorted(rows[other] - local for key, local in profile.items()
+                         for other in neighbors.get(key, ()) if other in rows)
+        local_low, local_high = min(profile.values()), max(profile.values())
+        preferred = anchors[(len(anchors) - 1) // 2] if anchors else -(local_low + local_high) // 2
+        profile_low, profile_high = {}, {}
+        for key, local in profile.items():
+            col = columns[key]
+            profile_low[col] = min(profile_low.get(col, local), local)
+            profile_high[col] = max(profile_high.get(col, local), local)
+        above = min((column_low[col] - 1 - profile_high[col]
+                     for col in profile_low if col in column_low), default=preferred)
+        below = max((column_high[col] + 1 - profile_low[col]
+                     for col in profile_low if col in column_high), default=preferred)
+        offsets = {preferred + delta for delta in _PLACEMENT_DELTAS} | {0, above, below}
+        if anchors:
+            offsets.update(anchors[position] for position in (0, len(anchors) // 4,
+                                                             3 * len(anchors) // 4, len(anchors) - 1))
+        assert len(offsets) <= _PLACEMENT_PROBE_LIMIT
+        probes += len(offsets)
+        maximum_probes = max(maximum_probes, len(offsets))
+        prefix = [0]
+        for value in anchors:
+            prefix.append(prefix[-1] + value)
+        best = None
+        for offset in sorted(offsets):
+            if any(local + offset in occupied[columns[key]] for key, local in profile.items()):
+                continue
+            new_low = min(low, local_low + offset) if low is not None else local_low + offset
+            new_high = max(high, local_high + offset) if high is not None else local_high + offset
+            growth = new_high - new_low + 1 - (high - low + 1 if low is not None else 0)
+            split = bisect_left(anchors, offset)
+            distance = (offset * split - prefix[split] + prefix[-1] - prefix[split]
+                        - offset * (len(anchors) - split)) if anchors else abs(offset - preferred)
+            # A new row must justify its footprint through shorter attachments.
+            # Exact integer costs avoid dependence on edge iteration order.
+            cost = (2 * growth * max(1, len(anchors)) + distance, growth,
+                    abs(new_low + new_high), abs(offset - preferred), offset < preferred, offset)
+            if best is None or cost < best[0]:
+                best = cost, offset, new_low, new_high
+        # The per-column above/below bounds always provide a clear candidate.
+        _, offset, low, high = best
+        remaining.remove(index)
+        updates = defaultdict(int)
+        for key, local in profile.items():
+            col, row = columns[key], local + offset
+            rows[key] = row
+            occupied[col].add(row)
+            column_low[col] = min(column_low.get(col, row), row)
+            column_high[col] = max(column_high.get(col, row), row)
+            for other in neighbors.get(key, ()):
+                owner = owners.get(other)
+                if owner in remaining:
+                    updates[owner] += 1
+        for owner, count in updates.items():
+            contacts[owner] += count
+            heappush(queue, (-contacts[owner], *priorities[owner]))
+    # Empty global row numbers do not carry information or reserve geometry.
+    normalized = {row: index for index, row in enumerate(sorted(set(rows.values())))}
+    rows = {key: normalized[row] for key, row in rows.items()}
+    if stats is not None:
+        stats.update(packing="neighbor_anchored_occupancy", placement_probes=probes,
+                     max_section_probes=maximum_probes, placement_probe_limit=_PLACEMENT_PROBE_LIMIT,
+                     backbone_row=normalized[0] if primary_columns else None)
     return rows
 
 
@@ -85,7 +190,95 @@ def _simplify(points):
     return result if len(result) > 1 else result * 2
 
 
+def _address_hints(request, children, edges, ports, columns, backbone):
+    """Check nominated continuations against the complete routed topology."""
+    hints = request.get("addressNeighbors", {})
+    if not isinstance(hints, dict):
+        raise TraceError("Invalid address-neighbor layout hints")
+    if not hints:
+        return {}
+    incoming, outgoing = defaultdict(list), defaultdict(list)
+    for edge in edges:
+        source, target = ports[edge["source"]]["node"], ports[edge["target"]]["node"]
+        outgoing[source].append(target)
+        incoming[target].append(source)
+    kinds = request.get("nodeShapes", {})
+    for key, pair in hints.items():
+        if (not isinstance(key, str) or key not in children or key in backbone
+                or not isinstance(pair, list) or len(pair) != 2
+                or any(not isinstance(item, str) or item not in children for item in pair)
+                or kinds.get(key) != "address" or any(kinds.get(item) != "transaction" for item in pair)
+                or incoming[key] != pair[:1] or outgoing[key] != pair[1:]
+                or not columns[pair[0]] < columns[key] < columns[pair[1]]):
+            raise TraceError("Address-neighbor layout hints disagree with graph topology")
+    return hints
+
+
+def _refine_address_rows(rows, columns, hints, *, stats=None):
+    """Repair two-edge outliers with bounded probes before any routing exists.
+
+    Only nominated addresses change cells. Transactions and every other object
+    keep their assigned rows; no new row numbers are introduced or renumbered.
+    This is a local proximity improvement, not a global crossing guarantee.
+    """
+    result = dict(rows)
+    existing = set(rows.values())
+    occupied = defaultdict(set)
+    for key, row in rows.items():
+        occupied[columns[key]].add(row)
+    report = {"version": 1, "eligible": len(hints), "outliers": 0, "moved": 0,
+              "probes": 0, "max_address_probes": 0, "probe_limit": _ADDRESS_PROBE_LIMIT,
+              "row_distance_removed": 0}
+    for key in sorted(hints, key=lambda key: (columns[key], key)):
+        before, after = (result[other] for other in hints[key])
+        low, high = min(before, after), max(before, after)
+        current, col = result[key], columns[key]
+        if low <= current <= high:
+            continue
+        report["outliers"] += 1
+        middle = (low + high) // 2
+        candidates = ({middle + delta for delta in _ADDRESS_ROW_DELTAS}
+                      | {low - 1, low, low + 1, high - 1, high, high + 1, (low + high + 1) // 2})
+        assert len(candidates) <= _ADDRESS_PROBE_LIMIT
+        report["probes"] += len(candidates)
+        report["max_address_probes"] = max(report["max_address_probes"], len(candidates))
+        old_distance = abs(current - before) + abs(current - after)
+        best = None
+        for row in sorted(candidates):
+            if row not in existing or row in occupied[col]:
+                continue
+            distance = abs(row - before) + abs(row - after)
+            if distance >= old_distance:
+                continue
+            cost = (distance, max(abs(row - before), abs(row - after)), abs(row - current), row)
+            if best is None or cost < best[0]:
+                best = cost, row
+        if best is None:
+            continue
+        cost, row = best
+        occupied[col].remove(current)
+        occupied[col].add(row)
+        result[key] = row
+        report["moved"] += 1
+        report["row_distance_removed"] += old_distance - cost[0]
+    if stats is not None:
+        stats.update(report)
+    return result
+
+
 def assemble(request, groups, candidates, backbone_ids):
+    """Use compact local envelopes for current section jobs.
+
+    The gutter primitive remains useful for bounded local fallbacks and the
+    much smaller graph of section boundaries, and for historical callers.
+    """
+    if request.get("localSectionGeometry"):
+        from .trace_section_local import assemble_local
+        return assemble_local(request, groups, candidates, backbone_ids)
+    return assemble_gutters(request, groups, candidates, backbone_ids)
+
+
+def assemble_gutters(request, groups, candidates, backbone_ids):
     """Return a complete raw ELK candidate using canonical request identity.
 
     ``groups`` is an exact partition of request children; ``candidates`` has
@@ -112,20 +305,17 @@ def assemble(request, groups, candidates, backbone_ids):
     columns = {key: ranks[column] for key, column in original_columns.items()}
     backbone = set(backbone_ids) & children.keys()
     order = {key: index for index, key in enumerate(request.get("centerNodeOrder", []))}
-    rows = _rows(children, groups, candidates, columns, backbone, order)
-    row_count, column_count = max(rows.values()) + 1, len(ranks)
-    row_heights, column_widths = [0.0] * row_count, [0.0] * column_count
     ports = {}
     for key, node in children.items():
-        row_heights[rows[key]] = max(row_heights[rows[key]], _number(node["height"], positive=True))
-        column_widths[columns[key]] = max(column_widths[columns[key]], _number(node["width"], positive=True))
+        _number(node["height"], positive=True)
+        _number(node["width"], positive=True)
         for port in node.get("ports", []):
             port_id = port["id"]
             side = port.get("layoutOptions", {}).get("elk.port.side", "EAST")
             if port_id in ports or side not in {"WEST", "EAST", "NORTH", "SOUTH"}:
                 raise TraceError("Invalid or duplicate section connector port")
             ports[port_id] = {"node": key, "side": side, "raw": port, "neighbors": []}
-    edges, edge_ids = [], set()
+    edges, edge_ids, neighbors = [], set(), defaultdict(set)
     max_caption_width = 0.0
     for raw in request.get("edges", []):
         if (raw["id"] in edge_ids or len(raw.get("sources", [])) != 1 or len(raw.get("targets", [])) != 1
@@ -136,14 +326,30 @@ def assemble(request, groups, candidates, backbone_ids):
         a, b = ports[source]["node"], ports[target]["node"]
         ports[source]["neighbors"].append(b)
         ports[target]["neighbors"].append(a)
+        if a != b:
+            neighbors[a].add(b)
+            neighbors[b].add(a)
         labels = raw.get("labels", [])
         if len(labels) > 1:
             raise TraceError("Section layout requires at most one caption per connection")
         for label in labels:
             max_caption_width = max(max_caption_width, _number(label["width"], positive=True))
             _number(label["height"], positive=True)
-        edges.append({"raw": raw, "source": source, "target": target,
-                      "gap": min(row_count, (rows[a] + rows[b]) // 2 + 1)})
+        edges.append({"raw": raw, "source": source, "target": target})
+    packing = {}
+    rows = _rows(children, groups, candidates, columns, backbone, order, neighbors=neighbors, stats=packing)
+    address_hints = _address_hints(request, children, edges, ports, columns, backbone)
+    address_placement = {}
+    rows = _refine_address_rows(rows, columns, address_hints, stats=address_placement)
+    packing["address_placement"] = address_placement
+    row_count, column_count = max(rows.values()) + 1, len(ranks)
+    row_heights, column_widths = [0.0] * row_count, [0.0] * column_count
+    for key, node in children.items():
+        row_heights[rows[key]] = max(row_heights[rows[key]], node["height"])
+        column_widths[columns[key]] = max(column_widths[columns[key]], node["width"])
+    for edge in edges:
+        a, b = ports[edge["source"]]["node"], ports[edge["target"]]["node"]
+        edge["gap"] = min(row_count, (rows[a] + rows[b]) // 2 + 1)
     direct, direct_ports = {}, set()
     # Preserve the primary path as a straight lane across adjacent columns.
     # There is at most one selected primary object per column and one direct
@@ -151,7 +357,7 @@ def assemble(request, groups, candidates, backbone_ids):
     for index, edge in sorted(enumerate(edges), key=lambda pair: pair[1]["raw"]["id"]):
         source, target = ports[edge["source"]], ports[edge["target"]]
         a, b = source["node"], target["node"]
-        if (a in backbone and b in backbone and rows[a] == rows[b] == 0
+        if (a in backbone and b in backbone and rows[a] == rows[b] == packing["backbone_row"]
                 and ("backboneEdges" not in request or edge["raw"]["id"] in request["backboneEdges"])
                 and columns[b] == columns[a] + 1 and source["side"] == "EAST" and target["side"] == "WEST"
                 and columns[b] not in direct):
@@ -247,7 +453,10 @@ def assemble(request, groups, candidates, backbone_ids):
     if direct:
         direct_height = max((float(label["height"]) for index in direct_indices
                              for label in edges[index]["raw"].get("labels", [])), default=0.0)
-        gap_heights[0] = max(gap_heights[0], direct_height + 7 + _MARGIN)
+        primary_row = packing["backbone_row"]
+        # Branches may now sit above the primary path. Reserve a separate strip
+        # below that gap's ordinary tracks for captions extending above its row.
+        gap_heights[primary_row] += max(0.0, direct_height + 7 - row_heights[primary_row] / 2) + _MARGIN
     caption_margin = max_caption_width / 2 + _MARGIN
     for gutter in range(column_count + 1):
         assigned, count = _color(vertical[gutter])
@@ -323,9 +532,19 @@ def assemble(request, groups, candidates, backbone_ids):
         routed.append({"id": edge["raw"]["id"],
                        "sections": [{"startPoint": points[0], "bendPoints": points[1:-1], "endPoint": points[-1]}],
                        "labels": labels})
+    from .trace_route_cleanup import cleanup_routes
+    short_routes = {}
+    for edge in edges:
+        source, target = ports[edge["source"]], ports[edge["target"]]
+        a, b = source["node"], target["node"]
+        if (source["side"] == "EAST" and target["side"] == "WEST"
+                and columns[b] == columns[a] + 1):
+            short_routes[edge["raw"]["id"]] = (a, b)
+    routed, route_cleanup = cleanup_routes(nodes, routed, short_routes,
+        node_shapes=request.get("nodeShapes", {}), width=total_width, height=total_height)
     return {"seed": candidates[0].get("seed", 1) if candidates else 1,
             "branchProfile": "flow_weighted", "branchBoundary": bool(request.get("boundaryOrdering", False)),
             "inputOrderPolicy": "geometry", "nodes": nodes, "edges": routed,
             "width": total_width, "height": total_height,
             "sectionGeometry": {"rows": row_count, "columns": column_count,
-                                "routing": "interval_colored_gutters", "backbone_row": 0 if backbone else None}}
+                                "routing": "interval_colored_gutters", "route_cleanup": route_cleanup, **packing}}

@@ -64,7 +64,7 @@ def acknowledge(record, body, patch=None):
                 proof.setdefault("routing", {})[field] = copy.deepcopy(actual)
 
 
-def removals(plan, state):
+def removals(plan, state, *, replacements=()):
     projection = validate(plan)
     if projection is None:
         return {}
@@ -73,7 +73,7 @@ def removals(plan, state):
     # Group/ungroup transitions reuse logical connector keys with different
     # proven context endpoints. Let the existing context replacement machinery
     # retire those shapes and connectors together, using its membership proof.
-    replacements = set()
+    replacements = set(replacements)
     for key, record in state["items"].items():
         edge = desired_edges.get(key)
         if record["endpoint"] != "connectors" or edge is None:
@@ -92,7 +92,7 @@ def removals(plan, state):
             raise TraceError("An obsolete plot item has no matching creation proof; preserve its mapping before syncing")
         result[key] = {"kind": "board_projection", "version": 1, "key": key, **copy.deepcopy(proof)}
     for key, record in state["items"].items():
-        if (record["endpoint"] == "connectors" and key not in result
+        if (record["endpoint"] == "connectors" and key not in result and key not in replacements
                 and any(record.get(field) in result for field in ("source", "target"))):
             raise TraceError("A retained connector still uses a retiring plot object; regenerate the plot")
     return result
@@ -107,7 +107,7 @@ def check_remote(state, remote, removals, inventory, *, allow_moved=False, conte
     retiring_connectors = {state["items"][key]["id"] for key in removals
                            if state["items"][key]["endpoint"] == "connectors"}
     retiring_connectors.update(state["items"][key]["id"] for key, proof in (context_removals or {}).items()
-                               if proof.get("kind") == "context_group_replacement" and proof.get("endpoint") == "connectors"
+                               if proof.get("kind") in ("context_group_replacement", "context_parallel_replacement") and proof.get("endpoint") == "connectors"
                                and state["items"].get(key, {}).get("endpoint") == "connectors")
     for item in inventory.values():
         if (any((item.get(field) or {}).get("id") in retiring_shapes for field in ("startItem", "endItem"))

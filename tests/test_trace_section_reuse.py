@@ -13,6 +13,7 @@ from liquid_tracer.layout_preview import LAYOUT_NOTICE, layout_notice
 from liquid_tracer.layout_reuse import _complete_search, reusable_elk_preview
 from liquid_tracer.layout_search import LAYOUT_SEARCH_VERSION, layout_seeds
 from liquid_tracer.trace_layout import TRACE_LAYOUT_VERSION
+from liquid_tracer.trace_sections import SECTION_LAYOUT_VERSION
 from tests.test_elk_layout import synthetic_candidate
 from tests.test_layout import chain, state_from
 
@@ -22,7 +23,7 @@ def search_fixture(attempts=2):
             "successful_count": attempts, "failed_count": 0, "failed_attempts": [],
             "seeds": list(layout_seeds(attempts)), "selected_seed": layout_seeds(attempts)[0],
             "candidate_count": attempts, "execution": "parallel", "worker_count": 8,
-            "memory_retry_count": 12, "peak_rss_mb": 200, "section_layout_version": 1,
+            "memory_retry_count": 12, "peak_rss_mb": 200, "section_layout_version": SECTION_LAYOUT_VERSION,
             "section_count": 12, "section_worker_count": 8, "max_section_nodes": 128,
             "max_worker_ports": 1024}
 
@@ -34,7 +35,8 @@ class TraceSectionSearchTests(unittest.TestCase):
         search["memory_retry_count"] = 16
         self.assertTrue(_complete_search(search, search, 2))
         for changes in ({"worker_count": 9}, {"worker_count": True}, {"memory_retry_count": 17},
-                        {"section_layout_version": 2}, {"section_layout_version": True},
+                        {"section_layout_version": SECTION_LAYOUT_VERSION + 1},
+                        {"section_layout_version": SECTION_LAYOUT_VERSION - 1}, {"section_layout_version": True},
                         {"section_count": 0}, {"section_worker_count": 13}, {"section_worker_count": -1},
                         {"max_section_nodes": 0}, {"max_section_nodes": 129},
                         {"max_worker_ports": -1}, {"max_worker_ports": 1025}):
@@ -151,6 +153,12 @@ class TraceSectionPreviewTests(unittest.TestCase):
         self.assertIn("connections between sections are routed after placement", notice)
         self.assertIn("Miro routes may differ", notice)
         self.assertNotIn("ELK layout;", notice)
+        for version in range(1, SECTION_LAYOUT_VERSION + 1):
+            self.saved["layout"]["search"]["section_layout_version"] = version
+            self.assertEqual(layout_notice(self.saved), notice)
+        for version in (True, 0, SECTION_LAYOUT_VERSION + 1, "7"):
+            self.saved["layout"]["search"]["section_layout_version"] = version
+            self.assertNotIn("3 sections", layout_notice(self.saved))
         self.saved["graph_options"]["layout_style"] = "standard"
         self.assertEqual(layout_notice(self.saved), LAYOUT_NOTICE)
 

@@ -16,19 +16,23 @@ from .pegout_paths import _paths, validate_query
 from .transaction_csv import _amount, _asset, _block_time, _text, transaction_csv_rows
 
 
+PEGOUT_LIMIT_FIELDS = (
+    "Pegout L-BTC Limit", "Selected Pegout L-BTC", "Pegout Limit Excess L-BTC", "Pegout Limit Stop Reason",
+)
+
 PATH_FIELDS = (
     "Transaction Hash", "Roles", "Source Transactions", "Source Seed Outpoints",
     "Source Paths", "Traced Input Outpoints", "Traced Output Outpoints", "Endpoint Outpoints",
     "Hop Counts", "Hop Reference", "Seed Depth", "Block", "Time",
     "Transaction Observation ID", "Transaction Observed At", "Explorer URL",
-)
+) + PEGOUT_LIMIT_FIELDS
 ENDPOINT_FIELDS = (
     "Transaction Hash", "Vout", "Outpoint", "Source Transactions", "Source Seed Outpoints",
     "Source Paths", "Address", "Receiving Entity", "Status", "Asset", "Value Base Units",
     "Value LBTC", "Hop Counts", "Hop Reference", "Seed Depth", "Block", "Time",
     "Transaction Observation ID", "Transaction Observed At", "Spend Observation ID",
     "Spend Observed At", "Explorer URL", "Hops from Seed", "Source Seed Hops",
-)
+) + PEGOUT_LIMIT_FIELDS
 ENDPOINT_TABLE_FIELDS = (
     "Source", "Source Value", "Deposit/Peg-out Tx", "Address/Peg-out Address",
     "Receiving Entity", "Status", "Pegout LBTC", "Hops from Seed", "Source Seed Hops",
@@ -36,7 +40,7 @@ ENDPOINT_TABLE_FIELDS = (
     "Source Paths", "Hop Counts", "Hop Reference", "Value LBTC", "Asset", "Value Base Units",
     "Seed Depth", "Block", "Time", "Transaction Observation ID", "Transaction Observed At",
     "Spend Observation ID", "Spend Observed At", "Explorer URL",
-)
+) + PEGOUT_LIMIT_FIELDS
 
 
 def _joined(values):
@@ -169,10 +173,20 @@ def pegout_csv_rows(graph, state, *, observations=None):
                                include_context=raw_query.get("include_context", False),
                                transaction_io=raw_query.get("transaction_io"),
                                attribution_hop_limits=raw_query.get("attribution_hop_limits"),
-                               hop_reference_name=name)
+                               hop_reference_name=name, pegout_lbtc_limit=raw_query.get("pegout_lbtc_limit"))
         if canonical(query) != canonical(raw_query) or reference_name(graph) != name:
             raise TraceError("Endpoint CSV hop reference or query disagrees with the saved graph")
-        outpoints, matches, depths, output_depths = _paths(state, query)
+        limit_summary = {}
+        outpoints, matches, depths, output_depths = _paths(state, query, limit_summary=limit_summary)
+        if limit_summary:
+            from .pegout_limit import validate_pegout_limit_summary
+            saved_limit = validate_pegout_limit_summary(report.get("pegout_limit_summary"), query)
+            if canonical(saved_limit) != canonical(limit_summary):
+                raise TraceError("Endpoint CSV cumulative peg-out limit disagrees with saved spend evidence")
+        elif "pegout_limit_summary" in report:
+            raise TraceError("Endpoint CSV limit summary requires a cumulative peg-out query")
+        limit_provenance = dict(zip(PEGOUT_LIMIT_FIELDS, (
+            limit_summary.get(key, "") for key in ("target_lbtc", "total_lbtc", "excess_lbtc", "stop_reason"))))
         pegouts = [{key: value for key, value in match.items() if key != "kind"}
                    for match in matches if match["kind"] == "pegout"]
         if (report.get("outpoints") != sorted(outpoints)
@@ -229,8 +243,10 @@ def pegout_csv_rows(graph, state, *, observations=None):
             individual = {key: value for key, value in query.items() if key not in ("seeds", "txid")}
             individual["seeds"] = [seed]
             seed_distances = {}
+            selection = ({"selected_endpoints": endpoints, "max_seed_hops": limit_summary["cutoff_seed_hops"]}
+                         if limit_summary else {})
             _, source_matches, source_depths, source_output_depths = _paths(
-                state, individual, seed_distances=seed_distances)
+                state, individual, seed_distances=seed_distances, **selection)
             for txid, hops in _hops_by_transaction(source_depths, source_output_depths).items():
                 transaction_sources[txid][seed] = set(hops)
             for match in source_matches:
@@ -255,7 +271,7 @@ def pegout_csv_rows(graph, state, *, observations=None):
             if endpoint_keys[txid]:
                 roles.append("Endpoint")
             path_rows.append({
-                **_transaction_fields(txid, state, observations), **_source_fields(sources),
+                **_transaction_fields(txid, state, observations), **_source_fields(sources), **limit_provenance,
                 "Roles": "; ".join(roles), "Traced Input Outpoints": _joined(input_keys[txid]),
                 "Traced Output Outpoints": _joined(output_keys[txid]),
                 "Endpoint Outpoints": _joined(endpoint_keys[txid]),
@@ -274,7 +290,7 @@ def pegout_csv_rows(graph, state, *, observations=None):
             oid = match.get("spend_observation_id", "") if kind == "unspent" else ""
             endpoint_rows.append({
                 **_transaction_fields(txid, state, observations),
-                **_source_fields(endpoint_sources[key]), "Vout": index, "Outpoint": key,
+                **_source_fields(endpoint_sources[key]), **limit_provenance, "Vout": index, "Outpoint": key,
                 "Address": io["Address Hash"], "Receiving Entity": io["Address Label"],
                 "Status": status, "Asset": _asset(output), "Value Base Units": _amount(output),
                 "Value LBTC": _whole_lbtc(output), "Hop Counts": _joined(match["hops"]),

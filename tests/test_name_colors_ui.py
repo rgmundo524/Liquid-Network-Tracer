@@ -45,9 +45,14 @@ class WebNameColorTests(unittest.TestCase):
     def test_rejects_csrf_busy_stale_invalid_and_injected_requests(self):
         route, case = self.imported(); endpoint = route + '/name-colors'
         self.assertEqual(self.request(endpoint, {}, headers={'X-Liquid-CSRF': 'wrong'})[0], 403)
-        self.server.active_job = 'busy'
-        try: self.assertEqual(self.request(endpoint, {})[0], 409)
-        finally: self.server.active_job = None
+        job = test_web.synthetic_running_job(route.split('/')[3])
+        self.server.jobs[job['id']] = job
+        try:
+            catalog = self.success(endpoint, {})
+            self.assertEqual(self.request(endpoint, {'updates': [{'name': 'Perp', 'color': '#123456'}],
+                'expected_revision': catalog['revision']})[0], 409)
+        finally:
+            self.server.jobs.pop(job['id'])
         catalog = self.success(endpoint, {})
         before = (case / 'services.json').read_bytes()
         for body in ({'file': '/private'}, {'limit': 0}, {'offset': -1}, {'limit': True},
@@ -75,7 +80,7 @@ class MenuNameColorTests(unittest.IsolatedAsyncioTestCase):
         await pilot.press('enter'); await pilot.pause()
 
     async def test_post_import_button_palette_save_and_clear_offline(self):
-        from textual.widgets import Checkbox, DataTable, Input, Select, Static, TextArea
+        from textual.widgets import Button, DataTable, Input, Select, Static, TextArea
         app = create_app(self.root)
         with patch('liquid_tracer.menu.subprocess.run') as process:
             async with app.run_test(size=(115, 65)) as pilot:
@@ -84,8 +89,10 @@ class MenuNameColorTests(unittest.IsolatedAsyncioTestCase):
                 await self.click(app, pilot, '#input-import-advanced-attributions')
                 app.screen.query_one('#import-text', TextArea).text = 'Address,Name\nSYNTHETIC-one,BTSE\nSYNTHETIC-two,btse\n'
                 await pilot.pause(); await self.click(app, pilot, '#import-preview')
-                app.screen.query_one('#import-approved', Checkbox).value = True
-                await pilot.pause(); await self.click(app, pilot, '#import-apply')
+                self.assertTrue(app.screen.review['valid'])
+                self.assertTrue(app.screen.review['approval_sha256'])
+                self.assertFalse(app.screen.query_one('#import-apply', Button).disabled)
+                await self.click(app, pilot, '#import-apply')
                 await self.click(app, pilot, '#import-name-colors')
                 self.assertEqual(app.screen.query_one('#name-color-rows', DataTable).row_count, 1)
                 await self.select_row(app, pilot)

@@ -18,6 +18,25 @@ from tests.fixtures import CONFIRMED, output
 from tests.test_trace_concurrency import RecordingTransport, converging_fixture, evidence_topology
 
 
+class AdaptiveOverlapTransport(RecordingTransport):
+    """Let eight requests warm up, then require sixteen requests to overlap."""
+
+    def __init__(self, data, eligible):
+        super().__init__(data)
+        self.eligible = set(eligible)
+        self.eligible_started = 0
+        self.barrier = threading.Barrier(16)
+
+    def __call__(self, method, url, headers, body, timeout):
+        endpoint = url.removeprefix(ENTERPRISE)
+        with self.lock:
+            if endpoint in self.eligible:
+                self.eligible_started += 1
+                if 8 < self.eligible_started <= 24:
+                    self.barrier_endpoints.add(endpoint)
+        return super().__call__(method, url, headers, body, timeout)
+
+
 class TracePerformanceTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -53,7 +72,13 @@ class TracePerformanceTests(unittest.TestCase):
         seeds = [txid + ':0' for txid in roots]
         serial, serial_transport = self.collect(data, seeds, workers=1, adaptive=False,
                                                 transport=RecordingTransport(data))
-        concurrent, transport = self.collect(data, seeds)
+        # Eight responses warm up the real latency measurements. Hold the next
+        # 16 independent requests until growth admits them all; a short sleep
+        # makes overlap depend on disk speed instead of worker scheduling.
+        overlap = ['/tx/' + txid for txid in roots]
+        overlap += ['/tx/' + txid + '/outspends' for txid in roots]
+        concurrent, transport = self.collect(data, seeds,
+            transport=AdaptiveOverlapTransport(data, overlap))
         self.assertEqual(evidence_topology(concurrent), evidence_topology(serial))
         self.assertEqual(Counter(transport.calls), Counter(serial_transport.calls))
         self.assertGreater(transport.maximum_active, 8)
@@ -103,8 +128,12 @@ class TracePerformanceTests(unittest.TestCase):
             data['/tx/' + child] = {'txid': child, 'status': dict(CONFIRMED),
                                     'vin': [{'txid': root, 'vout': index, 'prevout': outputs[index]}],
                                     'vout': [output('child-' + str(index))]}
+        # Funding and its outspends must finish before any child is eligible.
+        # After eight child samples, require 16 distinct children to overlap.
+        overlap = ['/tx/' + child for child in children]
         result, transport = self.collect(data, [root + ':' + str(index) for index in range(40)],
-                                         limits=Limits(max_hops=1, max_requests=200, max_transactions=100))
+            limits=Limits(max_hops=1, max_requests=200, max_transactions=100),
+            transport=AdaptiveOverlapTransport(data, overlap))
         self.assertEqual(result['status'], 'bounded_complete')
         self.assertGreater(transport.maximum_active, 8)
         self.assertEqual(Counter(transport.calls)['/tx/' + root + '/outspends'], 1)

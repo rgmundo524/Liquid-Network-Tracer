@@ -105,7 +105,8 @@ class LayoutDetailsTests(unittest.TestCase):
         self.assertEqual(set(index["edge_pages"]), {edge["id"] for edge in graph["edges"]})
         self.assertIn("address:first", document)
         self.assertIn("Second address", document)
-        self.assertIn("Full member records are preserved in graph.json", document)
+        self.assertIn("Full member and input records are preserved in", document)
+        self.assertIn('<a href="graph.json">graph.json</a>', document)
 
     def test_complete_export_exposes_details_before_publishing_completion_marker(self):
         with tempfile.TemporaryDirectory() as temporary:

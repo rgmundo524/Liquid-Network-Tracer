@@ -168,7 +168,9 @@ def _svg_view(identity, bounds, *, markup="", overview=False):
 
 def render_details(graph, nodes, edges, overview_svg):
     """Return a complete offline HTML atlas and a machine-readable page index."""
+    from .context_connectors import evidence_graph, summaries
     from .layout_preview import _escape, _fmt, _svg, drawing_bounds, layout_notice
+    evidence_edges = {edge["id"]: edge for edge in evidence_graph(graph)["edges"]}
     descriptors = activity_frames(graph)["activities"]
     node_lookup = {node["id"]: node for node in nodes}
     edge_lookup = {edge["id"]: edge for edge in edges}
@@ -255,7 +257,10 @@ def render_details(graph, nodes, edges, overview_svg):
     rows = []
     for edge in edges:
         page_links = " ".join(f'<a href="#{page}">{page}</a>' for page in edge_pages.get(edge["id"], []))
-        rows.append('<tr><td>' + _escape(edge["id"]) + '</td><td>' + _escape(caption_text(edge))
+        identity = _escape(edge["id"])
+        if edge.get("details", {}).get("context_summary", {}).get("kind") == "parallel":
+            identity = '<a href="#' + identity + '">' + identity + '</a>'
+        rows.append('<tr><td>' + identity + '</td><td>' + _escape(caption_text(edge))
                     + '</td><td>' + _escape(edge["source"]) + '<br>→ ' + _escape(edge["target"])
                     + '</td><td>' + page_links + '</td></tr>')
     members_html = []
@@ -263,10 +268,37 @@ def render_details(graph, nodes, edges, overview_svg):
         if node["kind"] != "context_group":
             continue
         records = node.get("details", {}).get("members", [])
+        inputs = [evidence_edges[key] for key in node.get("details", {}).get("input_edge_ids", [])
+                  if key in evidence_edges]
+        input_rows = ''.join('<tr><td>' + _escape(edge["id"]) + '</td><td>'
+                             + _escape(edge.get("original_source", edge["source"])) + '</td><td>'
+                             + _escape(edge.get("outpoint", "")) + '</td><td>'
+                             + _escape(edge.get("quantity", "")) + '</td></tr>' for edge in inputs)
         members_html.append('<details><summary>' + _escape(node.get("label", "Context group")) + '</summary><ul>'
                             + ''.join('<li><strong>' + _escape(member.get("id", "")) + '</strong><pre>'
                                       + _escape(member.get("label", "")) + '</pre></li>' for member in records)
-                            + '</ul><p>Full member records are preserved in graph.json.</p></details>')
+                            + '</ul><table><thead><tr><th>Original input</th><th>Address object</th>'
+                            '<th>Outpoint</th><th>Value / asset</th></tr></thead><tbody>' + input_rows
+                            + '</tbody></table><p>Full member and input records are preserved in '
+                            '<a href="graph.json">graph.json</a> and the transaction CSV.</p></details>')
+    for summary in summaries(graph):
+        proof = summary["details"]["context_summary"]
+        if proof.get("kind") != "parallel":
+            continue
+        inputs = [evidence_edges[key] for key in proof["member_edge_ids"]]
+        input_rows = ''.join('<tr><td>' + _escape(edge["id"]) + '</td><td>'
+                             + _escape(edge.get("label", "")) + '</td><td>'
+                             + _escape(edge.get("outpoint", "")) + '</td><td>'
+                             + _escape(edge.get("quantity", "")) + '</td></tr>' for edge in inputs)
+        members_html.append('<details id="' + _escape(summary["id"]) + '"><summary>'
+                            + _escape(summary["label"]) + '</summary><p>'
+                            + _escape(summary["source"]) + ' → ' + _escape(summary["target"])
+                            + '</p><p>Only context inputs between these two objects are bundled. '
+                            'Traced inputs remain separate; no combined amount is inferred.</p>'
+                            '<table><thead><tr><th>Original input</th><th>Input label</th>'
+                            '<th>Outpoint</th><th>Value / asset</th></tr></thead><tbody>' + input_rows
+                            + '</tbody></table><p>Every original input record remains in '
+                            '<a href="graph.json">graph.json</a> and the transaction CSV.</p></details>')
     page = '''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
 <title>Liquid trace · Overview and detail pages</title><style>
@@ -288,7 +320,9 @@ including connections to other branches. Empty tiles are omitted; tiles containi
     page += '<p>' + _escape(layout_notice(graph)) + '</p><nav>' + links + '</nav></header>'
     page += '<svg xmlns="http://www.w3.org/2000/svg" class="drawing-definitions" aria-hidden="true"><defs>' + definitions + '</defs></svg>'
     page += ''.join(contents)
-    page += '<section class="index" id="connection-index"><h2>Connection index</h2><p>Each original connection remains separate. '
+    page += '<section class="index" id="connection-index"><h2>Connection index</h2><p>'
+    page += ('Context summaries use counted connections. Original input records are listed below. '
+             if graph.get("context_connectors") else 'Each original connection remains separate. ')
     page += 'Page links include its route and caption. Shared boundary connections are repeated across overlapping pages.</p>'
     page += '<table><thead><tr><th>Connection</th><th>Caption</th><th>From → To</th><th>Detail pages</th></tr></thead><tbody>'
     page += ''.join(rows) + '</tbody></table>' + ''.join(members_html) + '</section></body></html>\n'

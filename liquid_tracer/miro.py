@@ -19,7 +19,7 @@ from . import legend_miro, miro_legend_updates
 from .edge_labels import FONT_SIZE as CAPTION_FONT_SIZE, caption_text
 from .connector_styles import stroke_width
 from .name_colors import color_text
-from . import presentation_items, context_group_miro, plot_miro, board_layout
+from . import presentation_items, context_group_miro, context_parallel_miro, plot_miro, board_layout
 from .address_counts import caption as count_caption
 from .graph_markers import node_border
 from .miro_http import MiroHTTP
@@ -35,6 +35,9 @@ from .miro_creation_parents import (normalize_created_shapes, validate_creation_
 
 
 def make_plan(graph):
+    from .context_connectors import display_graph
+
+    graph = display_graph(graph)
     legend_shapes, legend_catalog = legend_miro.make_items(graph)
     shapes, connectors = [legend_shapes[0]], []
     incremental = "namespace" in graph
@@ -78,7 +81,12 @@ def make_plan(graph):
             # Preserve ELK's return-link exceptions for compact-plan geometry
             # checks. This metadata is never sent to the Miro connector API.
             connector["routing_exception"] = edge.get("routing_exception")
-        connector["context_evidence"] = context_group_miro.evidence(edge)
+        if edge["id"].startswith(context_parallel_miro.PREFIX):
+            connector["context_parallel_evidence"] = context_parallel_miro.display_evidence(edge)
+        elif edge["id"].startswith(context_group_miro.DISPLAY_PREFIX):
+            connector["context_display_evidence"] = context_group_miro.display_evidence(edge)
+        else:
+            connector["context_evidence"] = context_group_miro.evidence(edge)
         connectors.append(connector)
     plan = {"schema_version": 2 if incremental else 1, "run_id": graph["run_id"], "shapes": shapes, "connectors": connectors}
     for key in ("layout", "fee_items", "include_fees", "connector_attachment", "graph_options", "address_convergences", "board_layout"):
@@ -97,6 +105,7 @@ def make_plan(graph):
     shapes.extend(legend_shapes[1:])
     plan["presentation_items"] = {**annotation_catalog, **legend_catalog}
     plan["context_group_items"] = context_group_miro.catalog(graph)
+    plan["context_parallel_items"] = context_parallel_miro.catalog(graph)
     board_layout.finalize_plan(plan)
     if "activity_frames" in graph:
         plan["activity_frames"] = copy.deepcopy(graph["activity_frames"])
@@ -151,6 +160,7 @@ def validate_plan(plan):
     _validate_attachments(plan)
     _fee_catalog(plan)
     context_group_miro.validate(plan)
+    context_parallel_miro.validate(plan)
     plot_miro.validate(plan)
     board_layout.validate(plan)
     if "activity_frames" in plan:
@@ -648,7 +658,9 @@ def _run_note_removals(state):
 
 def _fee_removals(plan, state):
     catalog = _fee_catalog(plan)
-    removals = plot_miro.removals(plan, state)
+    parallel_removals = context_parallel_miro.removals(plan, state)
+    removals = plot_miro.removals(plan, state, replacements=parallel_removals)
+    removals.update(parallel_removals)
     retained_state = {**state, "items": {key: record for key, record in state["items"].items()
                                        if key not in removals}}
     if catalog and not plan["include_fees"]:
@@ -949,6 +961,46 @@ def _placements(plan, state, remote, removed, reorganize):
     return presentation_items.place_badges(plan, state, remote, removed, reorganize, _ordinary_placements)
 
 
+def _cyclic_connector_keys(plan, excluded=()):
+    """Find genuine directed cycles without recursion or layout assumptions."""
+    children = {item["key"]: set() for item in plan["shapes"] if item["key"] not in excluded}
+    parents = {key: set() for key in children}
+    for edge in plan["connectors"]:
+        source, target = edge["source"], edge["target"]
+        if source in children and target in children:
+            children[source].add(target)
+            parents[target].add(source)
+    seen, finished = set(), []
+    for root in sorted(children):
+        if root in seen:
+            continue
+        seen.add(root)
+        stack = [(root, iter(sorted(children[root])))]
+        while stack:
+            key, following = stack[-1]
+            child = next(following, None)
+            if child is None:
+                finished.append(key)
+                stack.pop()
+            elif child not in seen:
+                seen.add(child)
+                stack.append((child, iter(sorted(children[child]))))
+    membership = {}
+    for root in reversed(finished):
+        if root in membership:
+            continue
+        membership[root] = root
+        stack = [root]
+        while stack:
+            for parent in parents[stack.pop()]:
+                if parent not in membership:
+                    membership[parent] = root
+                    stack.append(parent)
+    return {edge["key"] for edge in plan["connectors"]
+            if edge["source"] in membership and edge["target"] in membership
+            and membership[edge["source"]] == membership[edge["target"]]}
+
+
 def _ordinary_placements(plan, state, remote, removed, reorganize):
     """Place new connected groups near their existing anchors, preserving old items.
 
@@ -1070,6 +1122,24 @@ def _ordinary_placements(plan, state, remote, removed, reorganize):
 
     graph_targets = {key for key in targets if key != "legend" and not key.startswith(("run:", presentation_items.PREFIX)) and key not in fee_keys}
     remaining = set(graph_targets)
+    cyclic_edges = None
+
+    def horizontal_range(group, ignored=()):
+        lower, upper = -math.inf, math.inf
+        for edge in plan["connectors"]:
+            source, target = edge["source"], edge["target"]
+            if source in fee_keys or target in fee_keys or edge["key"] in ignored:
+                continue
+            if planned[source][0] >= planned[target][0]:
+                continue  # Reused-address cycles are intentionally return links.
+            if source in existing and target in group:
+                lower = max(lower, existing[source][0] + existing[source][2] / 2 + 80
+                            - (planned[target][0] - planned[target][2] / 2))
+            if source in group and target in existing:
+                upper = min(upper, existing[target][0] - existing[target][2] / 2 - 80
+                            - (planned[source][0] + planned[source][2] / 2))
+        return lower, upper
+
     while remaining:
         seed = min(remaining, key=lambda key: (planned[key][0], planned[key][1], key))
         group, stack = set(), [seed]
@@ -1083,19 +1153,15 @@ def _ordinary_placements(plan, state, remote, removed, reorganize):
         anchors = {neighbor for key in group for neighbor in adjacency[key] if neighbor in existing and neighbor not in fee_keys}
         dx = statistics.median(existing[key][0] - planned[key][0] for key in anchors) if anchors else 0
         dy = statistics.median(existing[key][1] - planned[key][1] for key in anchors) if anchors else 0
-        lower, upper = -math.inf, math.inf
-        for edge in plan["connectors"]:
-            source, target = edge["source"], edge["target"]
-            if source in fee_keys or target in fee_keys:
-                continue
-            if planned[source][0] >= planned[target][0]:
-                continue  # Reused-address cycles are intentionally return links.
-            if source in existing and target in group:
-                lower = max(lower, existing[source][0] + existing[source][2] / 2 + 80
-                            - (planned[target][0] - planned[target][2] / 2))
-            if source in group and target in existing:
-                upper = min(upper, existing[target][0] - existing[target][2] / 2 - 80
-                            - (planned[source][0] + planned[source][2] / 2))
+        lower, upper = horizontal_range(group)
+        if lower > upper:
+            # A fresh layout can choose the opposite visual return edge in a
+            # reused-address cycle. Existing board positions stay fixed, so
+            # only edges inside a proven directed cycle may become returns.
+            # All acyclic forward constraints remain binding.
+            if cyclic_edges is None:
+                cyclic_edges = _cyclic_connector_keys(plan, fee_keys)
+            lower, upper = horizontal_range(group, cyclic_edges)
         if lower > upper:
             raise TraceError("Existing Miro positions leave no left-to-right space for this continuation; choose Reorganize graph or move its connected shapes before syncing. No board writes made.")
         dx = max(lower, min(dx, upper))
@@ -1196,7 +1262,11 @@ def _create_items(plan, state, journal, requests, base, headers, positions, mapp
             pending["fee_proof"] = copy.deepcopy(plan["fee_items"][key])
         if key in plan.get("context_group_items", {}):
             pending["context_group_proof"] = copy.deepcopy(plan["context_group_items"][key])
+        if key in plan.get("context_parallel_items", {}):
+            pending["context_parallel_proof"] = copy.deepcopy(plan["context_parallel_items"][key])
         if endpoint == "connectors":
+            if "context_evidence" in item:
+                pending["context_evidence"] = copy.deepcopy(item["context_evidence"])
             pending.update({"source": item["source"], "target": item["target"]})
             if item.get("attachment"):
                 pending["attachments"] = copy.deepcopy(item["attachment"])
@@ -1459,16 +1529,16 @@ def _sync(plan, board_id, state_path, max_items=0, token=None, transport=http, i
         _check_frame_operation(plan, current, frames_only)
         removals = {} if frames_only else _fee_removals(plan, current)
         frame_removals = _frame_removals(plan, current) if frames_only else {}
-        if not reorganize and not plan.get("board_layout") and any(proof.get("kind") == "context_group_replacement" for proof in removals.values()):
+        if not reorganize and not plan.get("board_layout") and any(proof.get("kind") in ("context_group_replacement", context_parallel_miro.KIND) for proof in removals.values()):
             raise TraceError("Changing context grouping on an existing board replaces generated objects; "
                              "choose Sync and reorganize to apply this layout change. Ordinary sync preserves manual positions and ports.")
         report = {"dry_run": dry_run, "board_url": "https://miro.com/app/board/" + urllib.parse.quote(board_id, safe="") + "/",
                   "run_id": plan["run_id"], "namespace": namespace, "state_path": str(state_path), "max_items": max_items,
-                  "reorganize": reorganize, "frames_only": frames_only, "fee_items_to_remove": sum(not key.startswith((presentation_items.PREFIX, "run:")) and proof.get("kind") != "context_group_replacement" for key, proof in removals.items()),
+                  "reorganize": reorganize, "frames_only": frames_only, "fee_items_to_remove": sum(not key.startswith((presentation_items.PREFIX, "run:")) and proof.get("kind") not in ("context_group_replacement", context_parallel_miro.KIND) for key, proof in removals.items()),
                   "annotations_to_remove": sum(key.startswith(presentation_items.PREFIX) for key in removals),
                   "run_notes_to_remove": sum(proof.get("kind") == "run_note" for proof in removals.values()),
                   "frames_to_remove": len(frame_removals),
-                  "context_items_to_replace": sum(proof.get("kind") == "context_group_replacement" for proof in removals.values())}
+                  "context_items_to_replace": sum(proof.get("kind") in ("context_group_replacement", context_parallel_miro.KIND) for proof in removals.values())}
         layout = plan.get("layout", {})
         if not frames_only and layout.get("algorithm"):
             report["layout_algorithm"] = layout["algorithm"]
@@ -1556,7 +1626,7 @@ def _sync(plan, board_id, state_path, max_items=0, token=None, transport=http, i
                               for key in state.get("pending_updates", {})}
         _recover_updates(state, remote)
         context_removals = {key: proof for key, proof in removals.items()
-                            if proof.get("kind") == "context_group_replacement"}
+                            if proof.get("kind") in ("context_group_replacement", context_parallel_miro.KIND)}
         projection_removals = {key: proof for key, proof in removals.items()
                                if proof.get("kind") == "board_projection"}
         _check_fee_removals(state, remote, {key: proof for key, proof in removals.items()
@@ -1887,6 +1957,9 @@ def _record_pending(pending, item_id, response=None):
         record["frame_proof"] = copy.deepcopy(pending["frame_proof"])
     if "context_group_proof" in pending:
         record["context_group_proof"] = copy.deepcopy(pending["context_group_proof"])
+    for field in ("context_parallel_proof", "context_evidence"):
+        if field in pending:
+            record[field] = copy.deepcopy(pending[field])
     if "projection_proof" in pending:
         record["projection_proof"] = copy.deepcopy(pending["projection_proof"])
         plot_miro.acknowledge(record, response or pending["body"])

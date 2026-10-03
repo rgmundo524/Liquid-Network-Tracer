@@ -52,6 +52,39 @@ class PlotTests(unittest.TestCase):
             graph["plot"].pop(key, None)
         (directory / "inputs.json").unlink()
 
+    def test_cumulative_limit_survives_preview_review_and_rejects_changed_summary(self):
+        from liquid_tracer.workflow_api import public_plot
+        from liquid_tracer.plot_csv import build_plot_csv
+        from tests.test_pegout_csv import set_value
+        state = deepcopy(self.state)
+        set_value(state, self.endpoint, 125_000_001)
+        self.rewrite_archive(state)
+        result = preview_plot(self.case, "pegouts", pegout_lbtc_limit="01.00000000")
+        graph, _ = reviewed_plot(self.case, result["preview_id"])
+        self.assertEqual(result["query"]["pegout_lbtc_limit"], "1")
+        summary = result["pegout_limit_summary"]
+        self.assertEqual(summary["total_lbtc"], "1.25000001")
+        self.assertEqual(summary["excess_lbtc"], "0.25000001")
+        self.assertEqual(graph["pegouts"]["pegout_limit_summary"], summary)
+        self.assertEqual(public_plot(result)["pegout_limit_summary"], summary)
+        self.assertIn(self.endpoint.encode(), build_plot_csv(self.case, result["id"], "endpoints.csv")["data"])
+        self.assertIn("Cumulative peg-out target: 1 L-BTC", (Path(result["directory"]) / "graph.html").read_text())
+        directory = Path(result["directory"])
+        graph["plot"]["pegout_limit_summary"]["total_lbtc"] = "99"
+        save_json(directory / "graph.json", graph)
+        save_json(directory / "plot.json", graph["plot"])
+        self.rehash_preview(directory)
+        with self.assertRaisesRegex(TraceError, "endpoint options"):
+            reviewed_plot(self.case, result["preview_id"])
+
+    def test_cumulative_limit_is_pegout_only_and_default_does_not_change_query(self):
+        for goal in ("full", "connections"):
+            with self.subTest(goal=goal), self.assertRaisesRegex(TraceError, "only to peg-out"):
+                preview_plot(self.case, goal, pegout_lbtc_limit="60")
+        result = preview_plot(self.case, "pegouts")
+        self.assertNotIn("pegout_lbtc_limit", result["query"])
+        self.assertNotIn("pegout_limit_summary", result)
+
     def test_three_goals_share_saved_evidence_without_fetching_or_archive_mutation(self):
         before = self.bytes(self.archive)
         case_before = (self.case / "case.json").read_bytes()
@@ -539,7 +572,11 @@ class PlotTests(unittest.TestCase):
         self.assertEqual(result["layout_settings"]["hub_addresses"], ["H" * 34])
         self.assertEqual(graph["pegouts"], old_graph["pegouts"])
         self.assertEqual(plan["namespace"], old_plan["namespace"])
-        self.assertEqual(len(plan["connectors"]), len(old_plan["connectors"]))
+        from liquid_tracer.context_parallel_miro import input_evidence
+        # Display grouping removes redundant lines, never canonical inputs.
+        self.assertEqual(input_evidence(plan), input_evidence(old_plan))
+        self.assertEqual(len(graph["edges"]), len(old_graph["edges"]))
+        self.assertEqual(len(plan["connectors"]), len(old_plan["connectors"]) - 1)
         with (Path(result["directory"]) / "transactions.csv").open(newline="") as stream:
             rows = list(csv.DictReader(stream))
         with (old_directory / "transactions.csv").open(newline="") as stream:

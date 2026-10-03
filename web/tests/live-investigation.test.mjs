@@ -1933,7 +1933,8 @@ test('context grouping is available for every plot goal and preserves edits acro
   view.elements.delete('#plot-layout-form');
   assert.doesNotMatch(contextGroupingFields(view), /disabled/);
   assert.match(contextGroupingFields(view), /name="group_context_inputs"[^>]*checked/);
-  assert.match(contextGroupingFields(view), /Shared or named addresses and context outputs stay separate/);
+  assert.match(contextGroupingFields(view), /bundle repeated context inputs from the same address to the same transaction/);
+  assert.match(contextGroupingFields(view), /Shared or named addresses stay visible, and traced inputs keep their own arrows/);
   view.plotForm({layout_attempts: '47', connector_style: 'curved', center_name: 'Draft treasury',
     group_context_inputs_present: '1'});
   await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
@@ -2446,7 +2447,8 @@ test('real populated case-detail contract feeds fresh previews into create and s
     : path.endsWith('/actions') ? {id: 'syncjob', status: 'running'} : undefined);
   await view.dispatch('open-case', {dataset: {id: detail.id}});
   await view.dispatch('view-plots');
-  assert.match(view.workspace(), /<iframe/);
+  assert.doesNotMatch(savedPreviewPanel(view), /<iframe/);
+  assert.match(savedPreviewPanel(view), /Open preview/);
   assert.match(view.workspace(), /Paths to peg-outs/);
   assert.match(view.workspace(), /Collection hop limit: 10/);
   await view.dispatch('view-boards');
@@ -2981,7 +2983,8 @@ test('Plots and Miro show preview first with unique controls and a primary previ
   assert.match(html, /<details class="tool-details"><summary>Advanced: generate and publish in one step<\/summary>/);
   assert.ok(html.indexOf('id="saved-plots-panel"') < html.indexOf('data-action="workflow-plot-sync"'));
   assert.ok(html.indexOf('id="saved-plots-panel"') < html.indexOf('id="miro-boards-panel"'));
-  assert.ok(html.indexOf('title="Full trace saved plot"') < html.indexOf('data-action="workflow-write-miro"'));
+  assert.doesNotMatch(savedPreviewPanel(view), /<iframe|<img/);
+  assert.match(savedPreviewPanel(view), /Open preview/);
   assert.match(html, /<details class="panel" id="create-sync-board-panel"><summary/);
 });
 
@@ -4586,7 +4589,7 @@ test('section failure remains local and retry does not reopen the investigation'
   assert.equal(view.calls.filter(call => call.path.endsWith('/overview')).length, 1);
 });
 
-test('only the selected saved layout is verified and pending artifacts cannot preview or publish', async () => {
+test('saved preview browsing and selection stay lightweight; preparing for Miro explicitly verifies only the chosen layout', async () => {
   const check = Promise.withResolvers();
   const first = {...workflowPlot('full', 'first', {layout_mode: 'fresh'}), validation_pending: true, reviewable: false,
     artifact: {downloads: [{name: 'graph.svg', url: '/files/unchecked.svg'}], preview_url: '/files/unchecked.html'}};
@@ -4601,18 +4604,23 @@ test('only the selected saved layout is verified and pending artifacts cannot pr
     if (path.endsWith('/plots/second')) return {...second, reviewable: true, validation_pending: false};
   });
   await view.openCase('case1'); await settled(); await view.dispatch('view-plots'); await settled();
-  assert.equal(view.calls.filter(call => call.path.includes('/plots/')).length, 1);
-  assert.match(view.app.innerHTML, /Checking this saved layout/);
-  assert.doesNotMatch(view.app.innerHTML, /src="\/files\/unchecked|href="\/files\/unchecked/);
+  assert.equal(view.calls.filter(call => call.path.includes('/plots/')).length, 0);
+  assert.match(view.app.innerHTML, /Prepare for Miro/);
+  assert.match(view.app.innerHTML, /href="\/files\/unchecked.html" target="_blank" rel="noopener noreferrer"/);
+  assert.doesNotMatch(savedPreviewPanel(view), /<iframe|<img|src="\/files\//);
   assert.match(view.app.innerHTML, /data-action="workflow-board-create-sync"[^>]*disabled/);
   await assert.rejects(() => view.dispatch('workflow-board-create-sync'), /reviewed New board layout/);
   assert.ok(!view.calls.some(call => call.path.endsWith('/actions')));
+  await view.dispatch('verify-saved-plot', {dataset: {preview: 'first', caseId: 'case1'}}); await settled();
+  assert.match(view.app.innerHTML, /Preparing this saved preview for Miro/);
   workflowEdit(view, 'plot-picker', 'second'); await settled();
-  assert.equal(view.calls.filter(call => call.path.endsWith('/plots/second')).length, 1);
+  assert.equal(view.calls.filter(call => call.path.endsWith('/plots/second')).length, 0);
   check.resolve({...first, validation_pending: false, reviewable: true}); await settled();
   assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'second');
+  assert.match(previewWriteButton(view), /disabled/);
+  await view.dispatch('verify-saved-plot', {dataset: {preview: 'second', caseId: 'case1'}}); await settled();
+  assert.equal(view.calls.filter(call => call.path.endsWith('/plots/second')).length, 1);
   workflowEdit(view, 'plot-picker', 'first');
-  assert.match(view.app.innerHTML, /src="\/files\/unchecked.html#chart"/);
   assert.equal(view.calls.filter(call => call.path.endsWith('/plots/first')).length, 1);
 });
 
@@ -5079,7 +5087,7 @@ test('Write to Miro publishes the selected saved preview without rerunning gener
   workflowEdit(view, 'preview-board-name', 'Reviewed result');
   workflowEdit(view, 'max-hops', '99');
   view.plotForm({connector_style: 'curved'});
-  assert.match(savedPreviewPanel(view), /Later changes in the form above do not change this saved preview/);
+  assert.match(savedPreviewPanel(view), /Later changes in the generation form do not change this saved preview/);
   await view.dispatch('workflow-write-miro', previewWriteControl());
   assert.deepEqual(view.calls.filter(call => call.body), [{path: '/api/cases/case1/actions',
     body: {action: 'board-create-sync', preview_id: 'reviewed', name: 'Reviewed result'}}]);
@@ -5251,5 +5259,462 @@ test('publishing a saved new-board preview prepares subsequent previews to updat
   assert.equal(draft.goal, 'pegouts');
   assert.equal(draft.plot, 'reviewed');
   assert.match(savedPreviewPanel(view), /Open synced Miro board/);
-  assert.match(savedPreviewPanel(view), /src="\/files\/case1\/previews\/reviewed\/graph.html#chart"/);
+  assert.match(savedPreviewPanel(view), /href="\/files\/case1\/previews\/reviewed\/graph.html"[^>]*target="_blank"/);
+  assert.doesNotMatch(savedPreviewPanel(view), /<iframe/);
+});
+
+test('peg-out cumulative selection is opt-in and other plotting goals never show its controls', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'normal', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase(); await view.dispatch('view-plots');
+  assert.doesNotMatch(view.workspace(), /id="workflow-pegout-mode"|id="workflow-pegout-lbtc-limit"/);
+  await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+  assert.match(view.workspace(), /id="workflow-pegout-mode"><option value="all" selected/);
+  assert.match(view.workspace(), /Stop at cumulative L-BTC amount/);
+  assert.doesNotMatch(view.workspace(), /id="workflow-pegout-lbtc-limit"/);
+  await view.dispatch('workflow-plot');
+  assert.equal(Object.hasOwn(view.calls.at(-1).body, 'pegout_lbtc_limit'), false);
+});
+
+for (const action of ['workflow-plot', 'workflow-plot-sync']) {
+  test(`cumulative peg-out ${action} sends an exact decimal string with shared provenance and endpoint options`, async () => {
+    const view = await harness(path => path.endsWith('/actions') ? {id: 'amount-plot', status: 'running'} : undefined);
+    view.state.activeCase = workflowCase({shared_collection: sharedCollection()});
+    await view.dispatch('view-plots');
+    await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+    workflowEdit(view, 'data-source', 'shared'); workflowEdit(view, 'shared-run', 'shared-old');
+    workflowEdit(view, 'pegout-mode', 'cumulative'); workflowEdit(view, 'pegout-lbtc-limit', ' 60.00000001 ');
+    view.workflowInput({id: 'workflow-include-unspent', checked: true});
+    assert.match(view.workspace(), /id="workflow-pegout-lbtc-limit"[^>]*inputmode="decimal"/);
+    assert.match(view.workspace(), /Include the endpoint that reaches or exceeds the target, report any overshoot, then stop/);
+    assert.match(view.workspace(), /path reachability does not establish how much stolen value/);
+    await view.dispatch(action);
+    const body = view.calls.at(-1).body;
+    assert.equal(body.action, action === 'workflow-plot' ? 'plot' : 'plot-sync');
+    assert.equal(body.pegout_lbtc_limit, '60.00000001');
+    assert.equal(typeof body.pegout_lbtc_limit, 'string');
+    assert.equal(body.include_unspent, true);
+    assert.equal(body.data_source, 'shared'); assert.equal(body.dataset_id, 'pool'); assert.equal(body.run_id, 'shared-old');
+    assert.equal(body.min_hops, 0); assert.equal(body.max_hops, 10);
+  });
+}
+
+test('switching peg-out selection off omits its retained amount and ignores invalid hidden input', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'normal', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase(); await view.dispatch('view-plots');
+  await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+  workflowEdit(view, 'pegout-mode', 'cumulative'); workflowEdit(view, 'pegout-lbtc-limit', 'invalid');
+  workflowEdit(view, 'pegout-mode', 'all');
+  assert.doesNotMatch(view.workspace(), /id="workflow-pegout-lbtc-limit"/);
+  await view.dispatch('workflow-plot');
+  assert.equal(Object.hasOwn(view.calls.at(-1).body, 'pegout_lbtc_limit'), false);
+  view.state.jobs.clear();
+  workflowEdit(view, 'pegout-mode', 'cumulative');
+  assert.equal(view.currentWorkflow(view.state.activeCase).pegoutLbtcLimit, 'invalid');
+  assert.match(view.workspace(), /id="workflow-pegout-lbtc-limit"[^>]*value="invalid"/);
+});
+
+for (const goal of ['full', 'connections']) {
+  test(`changing from cumulative peg-outs to ${goal} omits its amount but retains the peg-out draft`, async () => {
+    const view = await harness(path => path.endsWith('/actions') ? {id: 'different-goal', status: 'running'} : undefined);
+    view.state.activeCase = workflowCase(); await view.dispatch('view-plots');
+    await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+    workflowEdit(view, 'pegout-mode', 'cumulative'); workflowEdit(view, 'pegout-lbtc-limit', '60');
+    await view.dispatch('plot-goal', {dataset: {goal}});
+    assert.doesNotMatch(view.workspace(), /id="workflow-pegout-mode"|id="workflow-pegout-lbtc-limit"/);
+    await view.dispatch('workflow-plot');
+    assert.equal(Object.hasOwn(view.calls.at(-1).body, 'pegout_lbtc_limit'), false);
+    view.state.jobs.clear(); await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+    assert.match(view.workspace(), /value="cumulative" selected/);
+    assert.match(view.workspace(), /id="workflow-pegout-lbtc-limit"[^>]*value="60"/);
+  });
+}
+
+test('cumulative peg-out amounts reject zero, negative, imprecise, formatted and nonnumeric values before submission', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase(); await view.dispatch('view-plots');
+  await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}}); workflowEdit(view, 'pegout-mode', 'cumulative');
+  for (const amount of ['', ' ', '0', '0.00000000', '-1', '1.000000001', '1e2', '1,000', '+60', '60.', '.1', 'NaN', 'Infinity']) {
+    workflowEdit(view, 'pegout-lbtc-limit', amount);
+    await assert.rejects(view.dispatch('workflow-plot'), /positive L-BTC target with up to 8 decimal places/, amount);
+  }
+  assert.ok(!view.calls.some(call => call.path.endsWith('/actions')));
+});
+
+test('cumulative peg-out validation preserves small units and integers beyond floating point precision', async () => {
+  for (const amount of ['0.00000001', '60', '00060.00000000', '9007199254740993.12345678']) {
+    const view = await harness(path => path.endsWith('/actions') ? {id: 'precise', status: 'running'} : undefined);
+    view.state.activeCase = workflowCase(); await view.dispatch('view-plots');
+    await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}}); workflowEdit(view, 'pegout-mode', 'cumulative');
+    workflowEdit(view, 'pegout-lbtc-limit', amount);
+    await view.dispatch('workflow-plot');
+    assert.equal(view.calls.at(-1).body.pegout_lbtc_limit, amount);
+  }
+});
+
+test('cumulative peg-out draft is isolated per investigation and survives returning to its tab', async () => {
+  const view = await harness(), alpha = workflowCase(), beta = workflowCase({id: 'case2'});
+  view.state.activeCase = alpha; await view.dispatch('view-plots');
+  await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+  workflowEdit(view, 'pegout-mode', 'cumulative'); workflowEdit(view, 'pegout-lbtc-limit', '60.5');
+  await view.dispatch('view-collect'); await view.dispatch('view-plots');
+  assert.equal(view.currentWorkflow(alpha).pegoutLbtcLimit, '60.5');
+  view.state.activeCase = beta; await view.dispatch('view-plots');
+  await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+  assert.equal(view.currentWorkflow(beta).pegoutLimitEnabled, false);
+  assert.equal(view.currentWorkflow(beta).pegoutLbtcLimit, '');
+  workflowEdit(view, 'pegout-mode', 'cumulative'); workflowEdit(view, 'pegout-lbtc-limit', '20');
+  view.state.activeCase = alpha; await view.dispatch('view-plots');
+  assert.equal(view.currentWorkflow(alpha).pegoutLimitEnabled, true);
+  assert.equal(view.currentWorkflow(alpha).pegoutLbtcLimit, '60.5');
+});
+
+test('board update preparation restores saved cumulative selection and keeps independent destination drafts', async () => {
+  const capped = workflowPlot('pegouts', 'capped', {query: {pegout_lbtc_limit: '60', include_unspent: true}});
+  const normal = workflowPlot('pegouts', 'normal');
+  const detail = workflowCase({plots: [capped, normal], boards: [workflowBoard('pegouts', 'capped', {preview_id: 'capped'}),
+    workflowBoard('pegouts', 'normal', {preview_id: 'normal'})]});
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'updated', status: 'running'} : undefined);
+  view.state.activeCase = detail; await view.dispatch('view-plots');
+  await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+  workflowEdit(view, 'pegout-mode', 'cumulative'); workflowEdit(view, 'pegout-lbtc-limit', '30');
+  await view.dispatch('workflow-board-prepare', boardControl('capped'));
+  assert.equal(view.currentWorkflow(detail).pegoutLimitEnabled, true);
+  assert.equal(view.currentWorkflow(detail).pegoutLbtcLimit, '60');
+  workflowEdit(view, 'pegout-lbtc-limit', '61');
+  workflowEdit(view, 'layout-board', 'normal');
+  assert.equal(view.currentWorkflow(detail).pegoutLimitEnabled, false);
+  assert.equal(view.currentWorkflow(detail).pegoutLbtcLimit, '');
+  workflowEdit(view, 'layout-board', 'capped');
+  assert.equal(view.currentWorkflow(detail).pegoutLbtcLimit, '61');
+  await view.dispatch('workflow-plot');
+  assert.equal(view.calls.at(-1).body.pegout_lbtc_limit, '61');
+  assert.equal(view.calls.at(-1).body.board_record_id, 'capped');
+  view.state.jobs.clear(); workflowEdit(view, 'layout-mode', 'fresh');
+  assert.equal(view.currentWorkflow(detail).pegoutLimitEnabled, true);
+  assert.equal(view.currentWorkflow(detail).pegoutLbtcLimit, '30');
+});
+
+const cumulativeSummary = extra => ({schema_version: 1, target_lbtc: '60', target_base_units: '6000000000',
+  total_lbtc: '62.00000001', total_base_units: '6200000001', excess_lbtc: '2.00000001', excess_base_units: '200000001',
+  limit_reached: true, stop_reason: 'limit_reached', ordering: 'ordinary_seed_hops_then_txid_vout',
+  cutoff_seed_hops: 3, stopping_outpoint: `${txid}:1`, counted_pegout_count: 3, unknown_amount_count: 2,
+  unknown_asset_count: 1, non_lbtc_count: 4, context_outputs_counted: false, ...extra});
+
+test('saved cumulative peg-out variants identify target and explain actual total, overshoot and excluded values', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'capped', {query: {pegout_lbtc_limit: '60'},
+    pegout_limit_summary: cumulativeSummary()}), workflowPlot('pegouts', 'normal')]});
+  for (const page of ['plots', 'history']) {
+    await view.dispatch('view-' + page);
+    const html = view.workspace();
+    const picker = html.match(/<select id="workflow-plot-picker"[\s\S]*?<\/select>/)[0];
+    assert.match(picker, /value="capped"[^>]*>[^<]*Cumulative target 60 L-BTC/);
+    assert.doesNotMatch(picker.match(/<option value="normal"[^>]*>[^<]*<\/option>/)[0], /Cumulative target/);
+    assert.match(html, /<strong>Target:<\/strong> 60 L-BTC/);
+    assert.match(html, /<strong>Counted:<\/strong> 62\.00000001 L-BTC/);
+    assert.match(html, /<strong>Overshoot:<\/strong> 2\.00000001 L-BTC/);
+    assert.match(html, /Stopped after including the endpoint that reached or exceeded the target/);
+    assert.match(html, /3 unique peg-outs counted/);
+    assert.match(html, /2 hidden or unavailable amounts · 1 unidentified asset · 4 non-L-BTC outputs/);
+    assert.match(html, /Context outputs are excluded from this total/);
+  }
+});
+
+test('unreached cumulative peg-out target reports selected path exhaustion without claiming complete evidence', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'shortfall', {query: {pegout_lbtc_limit: '60'},
+    pegout_limit_summary: cumulativeSummary({limit_reached: false, stop_reason: 'paths_exhausted',
+      total_lbtc: '50', total_base_units: '5000000000', excess_lbtc: '0', excess_base_units: '0',
+      cutoff_seed_hops: null, stopping_outpoint: null})})]});
+  await view.dispatch('view-plots');
+  assert.match(savedPreviewPanel(view), /Target not reached: selected paths were exhausted within this snapshot, hop range, and stop rules/);
+  assert.doesNotMatch(savedPreviewPanel(view), /Stopped after including/);
+  assert.match(savedPreviewPanel(view), /Path reachability does not establish how much stolen value reached an endpoint/);
+});
+
+test('missing cumulative summary remains explicit and saved amount text is escaped', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'missing-summary',
+    {query: {pegout_lbtc_limit: '<script>60</script>'}})]});
+  await view.dispatch('view-plots');
+  assert.match(savedPreviewPanel(view), /Generate a new preview to see the counted total and stopping result/);
+  assert.match(savedPreviewPanel(view), /&lt;script&gt;60&lt;\/script&gt;/);
+  assert.doesNotMatch(savedPreviewPanel(view), /<script>/);
+});
+
+
+const pendingPreview = (id, extra = {}) => workflowPlot('pegouts', id, {layout_mode: 'fresh', validation_pending: true,
+  reviewable: false, input_snapshot_version: 1, ...extra});
+const librarySelect = (view, preview, caseId = 'case1') => view.dispatch('preview-select', {dataset: {preview, caseId}});
+
+test('saved library cards display newest-first metadata, exact cumulative target and safe separate-tab preview links', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [pendingPreview('older', {created_at: '2026-01-01T00:00:00Z'}),
+    pendingPreview('newer', {created_at: '2026-10-01T00:00:00Z', layout_settings: {...layoutDefaults, layout_style: 'trace'},
+      query: {pegout_lbtc_limit: '60'}, collection_source: {kind: 'shared', dataset_id: 'pool', run_id: 'shared-old'}})]});
+  await view.dispatch('view-plots');
+  const html = savedPreviewPanel(view);
+  assert.match(html, /<h2>Saved previews<\/h2>/);
+  assert.ok(html.indexOf('data-preview-card="newer"') < html.indexOf('data-preview-card="older"'));
+  assert.match(html, /Trace layout · 3 objects · 2 connections/);
+  assert.match(html, /Cumulative target 60 L-BTC/);
+  assert.match(html, /Shared snapshot shared-old/);
+  assert.match(html, /Hops 0–10/);
+  assert.match(html, /href="\/files\/case1\/previews\/newer\/graph.html" target="_blank" rel="noopener noreferrer"/);
+  assert.doesNotMatch(html, /<iframe|<img/);
+  assert.ok(!view.calls.some(call => call.path.includes('/plots/') || call.path.startsWith('/files/') || call.path.endsWith('/actions')));
+  assert.ok(view.workspace().indexOf('id="saved-plots-panel"') < view.workspace().indexOf('id="plot-layouts-panel"'));
+});
+
+test('library selection prepares and publishes the exact chosen saved ID without generation', async () => {
+  const older = pendingPreview('older'), newer = pendingPreview('newer');
+  const view = await harness(path => path.endsWith('/plots/older') ? {...older, validation_pending: false, reviewable: true}
+    : path.endsWith('/actions') ? {id: 'write', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase({plots: [newer, older]}); await view.dispatch('view-plots');
+  await librarySelect(view, 'older');
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'older');
+  assert.ok(!view.calls.some(call => call.path.includes('/plots/')));
+  await view.dispatch('verify-saved-plot', {dataset: {preview: 'older', caseId: 'case1'}}); await settled();
+  await view.dispatch('workflow-write-miro', previewWriteControl('older'));
+  assert.deepEqual(view.calls.filter(call => call.body).map(call => call.body), [
+    {action: 'board-create-sync', preview_id: 'older', name: 'Shared evidence · Paths to peg-outs'}]);
+});
+
+test('completed preview metadata is immediately selected and openable while overview refresh is still pending', async () => {
+  const overview = Promise.withResolvers(), newest = pendingPreview('completed', {created_at: '2026-10-03T00:00:00Z'});
+  const view = await harness(path => path === '/api/jobs/render' ? {status: 'succeeded', result: newest}
+    : path.endsWith('/overview') ? overview.promise : undefined);
+  view.state.activeCase = workflowCase({plots: [pendingPreview('older')]}); view.state.caseView = 'plots';
+  view.currentWorkflow(view.state.activeCase).plot = 'older';
+  view.state.job = {id: 'render', action: 'plot', caseId: 'case1'};
+  const completion = view.pollJob(); await settled();
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'completed');
+  assert.match(savedPreviewPanel(view), /data-preview-card="completed"/);
+  assert.match(savedPreviewPanel(view), /href="\/files\/case1\/previews\/completed\/graph.html"/);
+  assert.doesNotMatch(savedPreviewPanel(view), /<iframe/);
+  assert.ok(!view.calls.some(call => call.path.includes('/plots/')));
+  overview.resolve(workflowCase({plots: [newest, pendingPreview('older')]})); await completion;
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'completed');
+  assert.ok(!view.calls.some(call => call.path.includes('/plots/')));
+});
+
+test('completed layout does not override a manual library selection made while its task ran', async () => {
+  const newest = pendingPreview('completed');
+  const detail = workflowCase({plots: [pendingPreview('older'), pendingPreview('manual')]});
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'render', status: 'running'}
+    : path === '/api/jobs/render' ? {status: 'succeeded', result: newest}
+    : path.endsWith('/overview') ? {...detail, plots: [newest, ...detail.plots]} : undefined);
+  view.state.activeCase = detail; await view.dispatch('view-plots'); await view.dispatch('workflow-plot');
+  await librarySelect(view, 'manual');
+  await view.pollJob();
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'manual');
+  assert.match(savedPreviewPanel(view), /data-preview-card="completed"/);
+  assert.ok(!view.calls.some(call => call.path.includes('/plots/')));
+});
+
+test('older metadata pages merge without losing selection, handle empty pages and never verify previews', async () => {
+  const page = Promise.withResolvers();
+  const view = await harness(path => path.includes('/plots?cursor=page-2') ? page.promise
+    : path.includes('/plots?cursor=page-3') ? {plots: [pendingPreview('oldest')], next_cursor: null} : undefined);
+  view.state.activeCase = workflowCase({plots: [pendingPreview('current')], plots_next_cursor: 'page-2'});
+  await view.dispatch('view-plots'); await librarySelect(view, 'current');
+  await view.dispatch('preview-load-more', {dataset: {caseId: 'case1'}});
+  await view.dispatch('preview-load-more', {dataset: {caseId: 'case1'}});
+  assert.equal(view.calls.filter(call => call.path.includes('/plots?')).length, 1);
+  page.resolve({plots: [], next_cursor: 'page-3'}); await settled();
+  assert.match(savedPreviewPanel(view), /Load older previews/);
+  await view.dispatch('preview-load-more', {dataset: {caseId: 'case1'}}); await settled();
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'current');
+  assert.match(savedPreviewPanel(view), /data-preview-card="oldest"/);
+  assert.doesNotMatch(savedPreviewPanel(view), /data-action="preview-load-more"/);
+  assert.ok(!view.calls.some(call => /\/plots\//.test(call.path)));
+});
+
+test('older page responses after switching investigations cannot populate the other library', async () => {
+  const page = Promise.withResolvers();
+  const view = await harness(path => path.includes('/plots?') ? page.promise : undefined);
+  view.state.activeCase = workflowCase({plots: [pendingPreview('first')], plots_next_cursor: 'page-2'});
+  await view.dispatch('view-plots'); await view.dispatch('preview-load-more', {dataset: {caseId: 'case1'}});
+  view.state.activeCase = workflowCase({id: 'case2', plots: [pendingPreview('second')]}); await view.dispatch('view-plots');
+  page.resolve({plots: [pendingPreview('wrong-case')], next_cursor: null}); await settled();
+  assert.equal(view.state.activeCase.id, 'case2');
+  assert.doesNotMatch(savedPreviewPanel(view), /wrong-case/);
+});
+
+test('remembered older selection restores through metadata only and survives a reload', async () => {
+  const storage = new Map([['liquid-tracer:investigation-tabs:v1', JSON.stringify({ids: ['case1'],
+    views: [{id: 'case1', caseView: 'plots', selectedRun: 'saved1', selectedPreview: 'older'}]})]]);
+  const detail = workflowCase({plots: [pendingPreview('newest')]});
+  const respond = path => path === '/api/session' ? {csrf: 'test', settings: defaults, cases: [detail]}
+    : path.endsWith('/overview') ? detail
+    : path.endsWith('/plots/older/summary') ? pendingPreview('older') : undefined;
+  const view = await harness(respond, {storage}); await view.openCase('case1'); await settled();
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'older');
+  assert.match(savedPreviewPanel(view), /data-preview-card="older"/);
+  assert.equal(view.calls.filter(call => call.path.endsWith('/plots/older/summary')).length, 1);
+  assert.ok(!view.calls.some(call => /\/plots\/[^/]+$/.test(call.path)));
+  await librarySelect(view, 'newest');
+  const saved = JSON.parse(storage.get('liquid-tracer:investigation-tabs:v1'));
+  assert.equal(saved.views[0].selectedPreview, 'newest');
+  const reloaded = await harness(respond, {storage}); await reloaded.openCase('case1'); await settled();
+  assert.equal(reloaded.currentWorkflow(reloaded.state.activeCase).plot, 'newest');
+});
+
+test('missing remembered preview reports an error without substituting a different publication target', async () => {
+  const storage = new Map([['liquid-tracer:investigation-tabs:v1', JSON.stringify({ids: ['case1'],
+    views: [{id: 'case1', caseView: 'plots', selectedPreview: 'missing'}]})]]);
+  const detail = workflowCase({plots: [pendingPreview('newest')]});
+  const view = await harness(path => path === '/api/session' ? {csrf: 'test', settings: defaults, cases: [detail]}
+    : path.endsWith('/overview') ? detail
+    : path.endsWith('/plots/missing/summary') ? {error: 'Saved preview is unavailable.'} : undefined, {storage});
+  await view.openCase('case1'); await settled();
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'missing');
+  assert.match(savedPreviewPanel(view), /Saved preview is unavailable/);
+  assert.equal(previewWriteButton(view), undefined);
+  await assert.rejects(view.dispatch('workflow-write-miro', previewWriteControl('missing')), /selected preview changed/);
+  await librarySelect(view, 'newest');
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'newest');
+});
+
+test('explicit preparation errors remain retryable and a replaced workflow cannot be approved by a stale response', async () => {
+  const check = Promise.withResolvers();
+  const pending = pendingPreview('selected');
+  const view = await harness(path => path.endsWith('/plots/selected') ? check.promise
+    : path.endsWith('/workflow') ? sectionResult('workflow', {plots: [pending]}) : undefined);
+  view.state.activeCase = workflowCase({plots: [pending], sections: stagedSections({workflow: 'ready', collection: 'ready', boards: 'ready', shared: 'ready'})});
+  await view.dispatch('view-plots');
+  await view.dispatch('verify-saved-plot', {dataset: {preview: 'selected', caseId: 'case1'}});
+  await view.loadCaseSection('case1', 'workflow', true);
+  check.resolve({...pending, validation_pending: false, reviewable: true}); await settled();
+  assert.match(previewWriteButton(view), /disabled/);
+  assert.match(savedPreviewPanel(view), /Saved preview information changed/);
+  assert.equal(view.calls.filter(call => call.path.endsWith('/plots/selected')).length, 1, 'refresh must not silently repeat expensive verification');
+});
+
+test('explicit board recovery selection still verifies its selected saved preview', async () => {
+  const plot = pendingPreview('recover', {layout_mode: 'update', board_record_id: 'target', board_id: 'miro-target'});
+  const view = await harness(path => path.endsWith('/plots/recover') ? {...plot, validation_pending: false, reviewable: true} : undefined);
+  view.state.activeCase = workflowCase({plots: [plot], boards: [workflowBoard('pegouts', 'target')]});
+  await view.dispatch('view-plots');
+  assert.ok(!view.calls.some(call => call.path.includes('/plots/')));
+  boardEdit(view, 'target', 'plot', 'recover'); await settled();
+  assert.equal(view.calls.filter(call => call.path.endsWith('/plots/recover')).length, 1);
+});
+
+
+test('loading older metadata preserves an explicitly prepared preview with the same immutable ID', async () => {
+  const prepared = {...pendingPreview('prepared'), reviewable: true, validation_pending: false};
+  const view = await harness(path => path.includes('/plots?') ? {plots: [pendingPreview('prepared'), pendingPreview('older')], next_cursor: null} : undefined);
+  view.state.activeCase = workflowCase({plots: [prepared], plots_next_cursor: 'older'});
+  await view.dispatch('view-plots'); await librarySelect(view, 'prepared');
+  await view.dispatch('preview-load-more', {dataset: {caseId: 'case1'}}); await settled();
+  assert.equal(view.state.activeCase.plots.find(plot => plot.preview_id === 'prepared').validation_pending, false);
+  assert.equal(view.state.activeCase.plots.filter(plot => plot.preview_id === 'prepared').length, 1);
+  assert.doesNotMatch(previewWriteButton(view), /disabled/);
+  assert.ok(!view.calls.some(call => /\/plots\//.test(call.path)));
+});
+
+
+test('stable preview numbers label cards and choices independently of sorting and pagination', async () => {
+  const view = await harness(path => path.includes('/plots?') ? {plots: [pendingPreview('earlier', {
+    preview_number: 1, created_at: '2026-01-01T00:00:00Z'})], next_cursor: null} : undefined);
+  view.state.activeCase = workflowCase({plots: [pendingPreview('recent', {preview_number: 12,
+    created_at: '2026-10-03T00:00:00Z'}), pendingPreview('middle', {preview_number: 5,
+    created_at: '2026-02-01T00:00:00Z'})], plots_next_cursor: 'older'});
+  await view.dispatch('view-plots'); await librarySelect(view, 'middle');
+  assert.match(savedPreviewPanel(view), /<h3>Preview 12 · Paths to peg-outs/);
+  assert.match(savedPreviewPanel(view), /<h3>Preview 5 · Selected for Miro/);
+  assert.match(savedPreviewPanel(view), /value="middle" selected>Preview 5 ·/);
+  await view.dispatch('preview-load-more', {dataset: {caseId: 'case1'}}); await settled();
+  assert.match(savedPreviewPanel(view), /<h3>Preview 1 · Paths to peg-outs/);
+  assert.match(savedPreviewPanel(view), /<h3>Preview 5 · Selected for Miro/);
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'middle');
+});
+
+test('numbered preview prepares and publishes by its immutable ID and retains its number', async () => {
+  const plot = pendingPreview('immutable-hash', {preview_number: 7});
+  const view = await harness(path => path.endsWith('/plots/immutable-hash') ? {...plot, validation_pending: false, reviewable: true}
+    : path.endsWith('/actions') ? {id: 'write', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase({plots: [plot]}); await view.dispatch('view-plots');
+  await librarySelect(view, plot.preview_id);
+  await view.dispatch('verify-saved-plot', {dataset: {preview: plot.preview_id, caseId: 'case1'}}); await settled();
+  assert.match(savedPreviewPanel(view), /Preview 7 · Selected for Miro/);
+  await view.dispatch('workflow-write-miro', previewWriteControl(plot.preview_id));
+  assert.deepEqual(view.calls.filter(call => call.body).map(call => call.body), [{action: 'board-create-sync',
+    preview_id: 'immutable-hash', name: 'Shared evidence · Paths to peg-outs'}]);
+});
+
+test('missing or invalid preview numbers never become page-relative labels', async () => {
+  for (const number of [undefined, 0, -1, 1.5, '9', Number.MAX_SAFE_INTEGER + 1]) {
+    const view = await harness();
+    view.state.activeCase = workflowCase({plots: [pendingPreview('legacy', {preview_number: number,
+      preview_number_notice: 'Saved preview numbering is unavailable. <retry>'})]});
+    await view.dispatch('view-plots');
+    assert.match(savedPreviewPanel(view), /<h3>Saved preview · Paths to peg-outs/);
+    assert.match(savedPreviewPanel(view), /unavailable\. &lt;retry&gt;/);
+    assert.doesNotMatch(savedPreviewPanel(view), /<h3>Preview \d/);
+  }
+});
+
+test('completed preview announces its assigned number without loading its graph', async () => {
+  const plot = pendingPreview('newly-completed', {preview_number: 13});
+  const detail = workflowCase({plots: [plot]});
+  const view = await harness(path => path === '/api/jobs/render' ? {status: 'succeeded', result: plot}
+    : path.endsWith('/overview') ? detail : undefined);
+  view.state.activeCase = workflowCase(); view.state.caseView = 'plots';
+  view.state.job = {id: 'render', action: 'plot', caseId: 'case1'};
+  await view.pollJob();
+  assert.match(view.workspace(), /Preview 13 saved/);
+  assert.match(savedPreviewPanel(view), /Preview 13 · Selected for Miro/);
+  assert.ok(!view.calls.some(call => call.path.includes('/plots/') || call.path.startsWith('/files/')));
+});
+
+test('saved preview cards and selection show displayed connections with legacy count fallback', async () => {
+  for (const [extra, expected] of [[{display_edge_count: 1}, 1], [{}, 2], [{display_edge_count: 0}, 0]]) {
+    const view = await harness();
+    view.state.activeCase = workflowCase({plots: [pendingPreview('context-count', extra)]});
+    await view.dispatch('view-plots');
+    await librarySelect(view, 'context-count');
+    const html = savedPreviewPanel(view);
+    assert.match(html, new RegExp(`Standard layout · 3 objects · ${expected} connections`));
+    assert.match(html, new RegExp(`3 objects · ${expected} connections\\.`));
+    assert.equal(view.state.activeCase.plots[0].edge_count, 2);
+    assert.ok(!view.calls.some(call => call.path.includes('/plots/')));
+  }
+});
+
+
+test('saved preview library retains its scroll during paging, selection and investigation switches', async () => {
+  const page = Promise.withResolvers();
+  const view = await harness(path => path.includes('/plots?') ? page.promise : undefined);
+  const first = workflowCase({plots: [pendingPreview('current'), pendingPreview('older')], plots_next_cursor: 'page-2'});
+  const second = workflowCase({id: 'case2', plots: [pendingPreview('other')]});
+  view.state.activeCase = first;
+  // Model browser DOM replacement: each render creates a fresh scroll element.
+  let html = view.app.innerHTML;
+  Object.defineProperty(view.app, 'innerHTML', {
+    get() {return html;},
+    set(value) {
+      html = value;
+      const caseId = value.match(/class="preview-library" data-case-id="([^"]+)"/)?.[1];
+      if (caseId) view.elements.set('.preview-library', {dataset: {caseId}, scrollTop: 0});
+      else view.elements.delete('.preview-library');
+    },
+  });
+  await view.dispatch('view-plots');
+  view.elements.get('.preview-library').scrollTop = 680;
+  await view.dispatch('preview-load-more', {dataset: {caseId: 'case1'}});
+  assert.equal(view.elements.get('.preview-library').scrollTop, 680);
+  page.resolve({plots: [pendingPreview('oldest')], next_cursor: null});
+  await settled();
+  assert.equal(view.elements.get('.preview-library').scrollTop, 680);
+  await librarySelect(view, 'older');
+  assert.equal(view.elements.get('.preview-library').scrollTop, 680);
+  view.state.activeCase = second;
+  await view.dispatch('view-plots');
+  assert.equal(view.elements.get('.preview-library').scrollTop, 0);
+  view.elements.get('.preview-library').scrollTop = 120;
+  view.state.activeCase = first;
+  await view.dispatch('view-plots');
+  assert.equal(view.elements.get('.preview-library').scrollTop, 680);
 });

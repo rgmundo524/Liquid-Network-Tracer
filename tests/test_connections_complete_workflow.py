@@ -5,10 +5,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from liquid_tracer.common import LBTC, TraceError, save_json
+from liquid_tracer.common import LBTC, TraceError, digest, read_json, save_json
+from liquid_tracer.context_connectors import display_graph
 from liquid_tracer.connections import connection_graph, preview_connections, reviewed_connections
 from liquid_tracer.investigations import create_investigation, read_case, update_case
-from liquid_tracer.plots import _query, list_plots, preview_plot, reviewed_plot
+from liquid_tracer.plots import _query, list_plots, plot_files, preview_plot, reviewed_plot
 from liquid_tracer.workflow_api import public_plot
 from tests.test_attribution_convergence import graph_state, tx
 from tests.test_connections import saved_case
@@ -83,8 +84,44 @@ class CompleteStarterWorkflowTests(unittest.TestCase):
         self.assertTrue(all("CONTEXT" in row["Address Flags"] for row in context))
         self.assertTrue(any(row["Transaction Hash"] == tx("a") and row["Number of I/O"] == "1"
                             and row["Direction"] == "OUT" for row in rows))
-        self.assertEqual(len(plan["connectors"]), len(graph["edges"]))
+        self.assertEqual(len(plan["connectors"]), len(display_graph(graph)["edges"]))
+        self.assertLess(len(plan["connectors"]), len(graph["edges"]))
+        self.assertEqual(result["edge_count"], len(graph["edges"]))
+        self.assertEqual(result["display_edge_count"], len(plan["connectors"]))
+        self.assertEqual(graph["plot"]["display_edge_count"], len(plan["connectors"]))
+        self.assertEqual(public_plot(result)["display_edge_count"], len(plan["connectors"]))
         self.assertEqual(files(self.archive), before)
+
+    def test_saved_display_count_is_verified_without_replacing_canonical_count(self):
+        result = preview_plot(self.case, "connections")
+        directory = Path(result["directory"])
+        graph = read_json(directory / "graph.json")
+        expected = graph["plot"]["display_edge_count"]
+
+        def rewrite():
+            save_json(directory / "graph.json", graph)
+            save_json(directory / "plot.json", graph["plot"])
+            (directory / "SHA256SUMS").write_text("".join(
+                digest((directory / name).read_bytes()) + "  " + name + "\n"
+                for name in sorted(plot_files(directory) - {"SHA256SUMS"})))
+
+        for count in (True, -1, float(expected), expected + 1):
+            with self.subTest(display_edge_count=count):
+                graph["plot"]["display_edge_count"] = count
+                rewrite()
+                with self.assertRaisesRegex(TraceError, "displayed connection count"):
+                    reviewed_plot(self.case, result["preview_id"])
+        graph["plot"]["display_edge_count"] = expected
+        graph["plot"]["edge_count"] = expected
+        rewrite()
+        with self.assertRaisesRegex(TraceError, "does not match"):
+            reviewed_plot(self.case, result["preview_id"])
+        graph["plot"]["edge_count"] = len(graph["edges"])
+        del graph["plot"]["display_edge_count"]
+        rewrite()
+        reviewed, plan = reviewed_plot(self.case, result["preview_id"])
+        self.assertEqual(reviewed["edges"], graph["edges"])
+        self.assertEqual(len(plan["connectors"]), expected)
 
     def test_old_outpoint_board_update_explains_new_board_before_remote_reads(self):
         from liquid_tracer.investigation_boards import link_board

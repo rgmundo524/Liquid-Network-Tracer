@@ -28,16 +28,17 @@ class ObservedMiro(FakeMiro):
         self.reads_before_write = []
 
     def __call__(self, method, url, headers, body, timeout):
+        operation = "connector POST" if method == "POST" and url.endswith("/connectors") else method
         with self.lock:
             self.active[method] = self.active.get(method, 0) + 1
             self.peak[method] = max(self.peak.get(method, 0), self.active[method])
-            self.started[method] = self.started.get(method, 0) + 1
-            ordinal = self.started[method]
+            self.started[operation] = self.started.get(operation, 0) + 1
+            ordinal = self.started[operation]
             if method != "GET":
                 self.reads_before_write.append(self.completed_reads)
         try:
-            if self.overlap and method in self.gates and ordinal <= 2:
-                self.gates[method].wait(timeout=3)
+            if self.overlap and operation in self.gates and ordinal <= 2:
+                self.gates[operation].wait(timeout=3)
             if self.overlap:
                 time.sleep(.005)
             with self.lock:
@@ -96,6 +97,11 @@ class MiroConcurrencyTests(unittest.TestCase):
         serial = sync(plan, "board=", serial_path, token="test-token",
                       transport=serial_remote, interval=0, workers=1, reorganize=True)
         self.remote.overlap = True
+        # Every POST intent is durably journaled before dispatch. Disk latency
+        # can exceed a short fake request sleep, so require genuine overlap via
+        # a gate instead of assuming two requests will overlap within 5 ms.
+        # Shape bulk POSTs are intentionally serial and must not use this gate.
+        self.remote.gates["connector POST"] = threading.Barrier(2)
         callback_threads = []
         caller = threading.get_ident()
         parallel = self.call(plan, workers=4, reorganize=True,

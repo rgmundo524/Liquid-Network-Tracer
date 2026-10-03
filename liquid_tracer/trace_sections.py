@@ -1,8 +1,8 @@
 """Bounded, path-guided Trace layout requests; no changes to evidence.
 
 The preferred spine stays a placement guide. Every other object has one owner,
-including shared addresses. Only internal connections are sent to a section's
-ELK worker; the complete original port/edge inventory is assembled afterwards.
+including shared addresses. Internal connections and temporary boundary
+anchors are sent to a section's ELK worker; helpers are removed afterwards.
 No seed-to-endpoint paths are enumerated and no section failure falls back to a
 whole-graph solve.
 """
@@ -16,11 +16,76 @@ from .elk_sections_parallel import iter_sections
 from .trace_layout import trace_structure
 from .trace_section_geometry import assemble
 
-SECTION_LAYOUT_VERSION = 1
+SECTION_LAYOUT_VERSION = 7
 MIN_SECTION_NODES = 600
 MIN_SECTION_EDGES = 2400
 MAX_SECTION_NODES = 128
 MAX_SECTION_PORTS = 1024
+
+
+def address_neighbors(graph, request, structure):
+    """Nominate unpinned, exact two-edge address continuations for row repair.
+
+    This is a layout preference derived from already loaded graph evidence.
+    Reused addresses, inferred address-level paths and designated placements
+    are excluded. No records are read or changed by this analysis.
+    """
+    from .named_group_layout import selected_members
+
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    children = {node["id"]: node for node in request["children"]}
+    protected = set(selected_members(graph))
+    for field in ("core", "members", "spine", "excluded_hubs", "shared_hubs"):
+        protected.update(structure.get(field, ()))
+    layout = graph.get("layout", {})
+    protected.update(layout.get("change_outputs", {}).get("locked_nodes", ()))
+    protected.update(layout.get("output_alignment", {}).get("outputs", ()))
+    hubs = set(graph.get("graph_options", {}).get("hub_addresses", ()))
+    designated = {f"{txid}:{item['vout']}"
+                  for txid, item in graph.get("service_controls", {}).get("change_outputs", {}).items()
+                  if isinstance(item, dict) and type(item.get("vout")) is int}
+    incoming, outgoing = defaultdict(list), defaultdict(list)
+    for edge in graph["edges"]:
+        incoming[edge["target"]].append(edge)
+        outgoing[edge["source"]].append(edge)
+    result = {}
+    for key, node in sorted(nodes.items()):
+        details = node.get("details", {})
+        if (key not in children or node["kind"] != "address" or key in protected
+                or node.get("role") == "seed"
+                or details.get("network", "liquid") != "liquid"
+                or details.get("address") in hubs
+                or any(node.get(field) for field in ("layout_hub", "change_output", "name", "name_colors",
+                                                    "attribution_reference", "is_starting"))
+                or node.get("starting_transaction_index") is not None
+                or details.get("address_attributions")
+                or len(incoming[key]) != 1 or len(outgoing[key]) != 1):
+            continue
+        before, after = incoming[key][0], outgoing[key][0]
+        parent, child = before["source"], after["target"]
+        if (parent == child or parent not in children or child not in children
+                or nodes.get(parent, {}).get("kind") != "transaction"
+                or nodes.get(child, {}).get("kind") != "transaction"
+                or before.get("change_output") or after.get("change_output")
+                or before.get("role") == "seed_output"):
+            continue
+        outpoint = before.get("outpoint")
+        vin = after.get("details", {}).get("vin", {})
+        if (not isinstance(outpoint, str) or not outpoint or outpoint != after.get("outpoint")
+                or outpoint in designated or before["id"] != "out:" + outpoint
+                or not after["id"].startswith("in:" + child.removeprefix("tx:") + ":")
+                or not isinstance(vin.get("txid"), str) or type(vin.get("vout")) is not int
+                or vin["vout"] < 0 or vin.get("is_pegin") or vin.get("is_coinbase")
+                or "tx:" + vin["txid"] != parent or f"{vin['txid']}:{vin['vout']}" != outpoint):
+            continue
+        try:
+            ranks = [float(children[item].get("layoutOptions", {}).get("elk.partitioning.partition", 0))
+                     for item in (parent, key, child)]
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if all(math.isfinite(value) for value in ranks) and ranks[0] < ranks[1] < ranks[2]:
+            result[key] = [parent, child]
+    return result
 
 
 def enabled(graph, request):
@@ -43,7 +108,10 @@ def plan(graph, request, *, structure=None):
         for key in sorted((set(keys) & children.keys()) - assigned,
                           key=lambda key: (rank.get(key, len(rank)), key)):
             count = len(children[key].get("ports", []))
-            if current and (len(current) >= MAX_SECTION_NODES or ports + count > MAX_SECTION_PORTS):
+            # Reserve two boundary anchors and one matching helper port for
+            # every external port; actual worker requests retain these caps.
+            if current and (len(current) >= max(1, MAX_SECTION_NODES - 2)
+                            or ports + count > MAX_SECTION_PORTS // 2):
                 groups.append(current)
                 current, ports = [], 0
             current.append(key)
@@ -62,6 +130,11 @@ def plan(graph, request, *, structure=None):
             partition([key])
     for key in sorted(children.keys() - assigned):
         partition([key])
+    if request.get("outputAlignmentPositions"):
+        # A board addition explicitly requires equal output ranks across
+        # unrelated branches. Singleton envelopes retain that hard constraint;
+        # their canonical connections still use the same boundary pipeline.
+        groups = [[key] for key in order if key in children]
     owner = {key: index for index, group in enumerate(groups) for key in group}
     port_owner = {port["id"]: node["id"] for node in children.values() for port in node.get("ports", [])}
     internal = defaultdict(list)
@@ -78,7 +151,8 @@ def plan(graph, request, *, structure=None):
                 "centerNodeOrder": group,
                 "inputPortOrders": {key: input_orders[key] for key in group if key in input_orders}}
         requests.append(item)
-    return groups, requests, backbone
+    from .trace_section_local import boundary_requests
+    return groups, boundary_requests(request, groups, requests), backbone
 
 
 def _validate_local(request, candidate):
@@ -137,16 +211,18 @@ def iter_candidates(graph, request, seeds, worker, progress_for_attempt, metadat
                 request[field] = [key for key in request[field] if key not in spacers]
     structure = trace_structure(graph) if structure is None else structure
     groups, requests, backbone = plan(graph, request, structure=structure)
+    address_hints = address_neighbors(graph, request, structure)
     # Largest bounded job supplies conservative initial memory telemetry. A
     # high-degree singleton needs no ELK solve; all its ports are placed once
-    # by the global assembler, without an oversized worker request.
-    jobs = sorted((i for i, item in enumerate(requests) if len(item["children"]) > 1 and item["edges"]
+    # by the local fallback, without an oversized worker request.
+    jobs = sorted((i for i, item in enumerate(requests) if len(groups[i]) > 1 and item["localSection"]["internal_edge_ids"]
                    and not set(groups[i]) <= backbone),
                   key=lambda i: (-sum(len(node.get("ports", [])) for node in requests[i]["children"]),
                                  -len(requests[i]["children"]), i))
     metadata.update(execution="sequential", worker_count=1, memory_retry_count=0,
                     section_layout_version=SECTION_LAYOUT_VERSION, section_count=len(groups),
-                    section_worker_count=len(jobs), max_section_nodes=max(map(len, groups), default=0),
+                    section_worker_count=len(jobs),
+                    max_section_nodes=max((len(item["children"]) for item in requests), default=0),
                     max_worker_ports=max((sum(len(n.get("ports", [])) for n in requests[i]["children"])
                                           for i in jobs), default=0))
     for attempt, seed in enumerate(seeds, 1):
@@ -186,13 +262,14 @@ def iter_candidates(graph, request, seeds, worker, progress_for_attempt, metadat
             continue
         report({"phase": "optimizing", "stage": "section_assembling", "completed": 0, "total": 0,
                 "message": "Joining Trace sections and routing shared-address connections"})
-        for index, candidate in enumerate(candidates):
-            if candidate is None:
-                candidates[index] = {"seed": seed, "nodes": [
-                    {"id": node["id"], "width": node["width"], "height": node["height"],
-                     "x": 0, "y": offset * 240, "ports": []}
-                    for offset, node in enumerate(requests[index]["children"])], "edges": []}
-        candidate = assemble({**request, "backboneEdges": structure["edges"], "nodeShapes": {node["id"]: node["kind"] for node in graph["nodes"]}},
+        from .trace_section_local import local_candidates
+        candidates = local_candidates({**request, "addressNeighbors": address_hints}, requests, candidates, backbone, seed,
+                                      {node["id"]: node["kind"] for node in graph["nodes"]},
+                                      structure["edges"])
+        candidate = assemble({**request, "backboneEdges": structure["edges"],
+                              "nodeShapes": {node["id"]: node["kind"] for node in graph["nodes"]},
+                              "addressNeighbors": address_hints, "localSectionGeometry": True,
+                              "sectionRequests": requests},
                              groups, candidates, backbone)
         candidate.update(seed=seed, inputOrderPolicy="geometry", branchProfile="flow_weighted", branchBoundary=False)
         yield attempt, seed, [candidate]

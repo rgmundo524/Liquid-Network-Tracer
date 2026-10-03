@@ -62,6 +62,9 @@ def mapped_record(record):
     if record.get("context_group_proof"):
         from .context_group_miro import _identity
         result["context_identity_sha256"] = _hash(_identity(record["context_group_proof"]))
+    if record.get("context_parallel_proof"):
+        from .context_parallel_miro import _valid
+        result["context_parallel_sha256"] = _hash(_valid(record["context_parallel_proof"]))
     return result
 
 
@@ -255,10 +258,15 @@ def capture(board_id, state_path, namespace, *, token=None, transport=http, inte
 def prepare_graph(graph, snapshot, *, connector_style="straight", progress=None, layout_attempts=None):
     from .elk_layout import optimize_graph, _default_attachments
     from .edge_labels import route_signature
+    from .context_connectors import display_graph, restore_graph
+    canonical_graph = graph
+    graph = display_graph(graph)
     result = copy.deepcopy(graph)
     mapped = snapshot["mapped"]
     from .context_group_miro import catalog, _identity
     groups = catalog(graph)
+    from .context_parallel_miro import catalog as parallel_catalog
+    parallel = parallel_catalog(graph)
     replaced = {key for key, proof in groups.items() if key in mapped
                 and mapped[key].get("context_identity_sha256") != _hash(_identity(proof))}
     new_ids = {node["id"] for node in graph["nodes"] if node["id"] not in mapped or node["id"] in replaced}
@@ -295,6 +303,8 @@ def prepare_graph(graph, snapshot, *, connector_style="straight", progress=None,
                 label["y"] += dy
                 label["route_signature"] = route_signature([(point["x"], point["y"]) for point in edge.get("route", [])])
             new_edges[edge["id"]] = edge
+        from .trace_section_local import refresh_section_bounds
+        refresh_section_bounds(addition)
         result["nodes"] = [new_nodes.get(node["id"], node) for node in result["nodes"]]
         result["layout"] = {"algorithm": "board_incremental_v1", "additions_layout": copy.deepcopy(addition.get("layout", {}))}
     else:
@@ -330,6 +340,7 @@ def prepare_graph(graph, snapshot, *, connector_style="straight", progress=None,
     desired_edges = {edge["id"] for edge in result["edges"]}
     replaced_edges = {edge["id"] for edge in result["edges"] if edge["id"] in mapped and
                       (edge["source"] in replaced or edge["target"] in replaced or
+                       (edge["id"] in parallel and mapped[edge["id"]].get("context_parallel_sha256") != _hash(parallel[edge["id"]])) or
                        any(mapped[edge["id"]].get(field) != edge[field] for field in ("source", "target")))}
     result["board_layout"]["counts"] = {
         "new_nodes": len(new_ids), "retained_nodes": len(desired_nodes) - len(new_ids),
@@ -338,7 +349,7 @@ def prepare_graph(graph, snapshot, *, connector_style="straight", progress=None,
         "new_connectors": len(desired_edges - mapped.keys()) + len(replaced_edges),
         "removed_connectors": sum(record["endpoint"] == "connectors" and (key not in desired_edges or key in replaced_edges)
                                   for key, record in mapped.items())}
-    return result
+    return restore_graph(result, canonical_graph)
 
 
 def finalize_plan(plan):

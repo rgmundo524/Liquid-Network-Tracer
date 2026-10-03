@@ -30,6 +30,7 @@ class WebBoardRebuildTests(unittest.TestCase):
 
     def test_rebuild_uses_explicit_snapshot_source_and_one_time_budget_despite_old_recovery(self):
         route, path, run = self.traced()
+        update_case(path, {"run_defaults": {**read_case(path)["run_defaults"], "budget_limits_enabled": True}})
         before = read_case(path)
         with patch.object(self.server, "start_job", return_value={"id": "fresh"}) as start, \
                 patch("liquid_tracer.cli.miro_recovery_status", return_value={"pending_count": 3}):

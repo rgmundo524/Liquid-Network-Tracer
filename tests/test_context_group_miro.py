@@ -6,11 +6,18 @@ import unittest
 from pathlib import Path
 
 from liquid_tracer.common import TraceError, canonical, digest, read_json
-from liquid_tracer.context_groups import group_context_inputs
+from liquid_tracer.context_groups import group_context_inputs as _group_context_inputs
 from liquid_tracer.export import build_graph
 from liquid_tracer.miro import make_plan, sync, validate_plan
 from tests.test_input_order import input_order_state, child_input
 from tests.test_presentation_annotations import AnnotationMiro
+
+
+def group_context_inputs(graph, **options):
+    """Retain regression coverage for already saved individual-line previews."""
+    result = _group_context_inputs(graph, **options)
+    result.pop("context_connectors", None)
+    return result
 
 
 class ContextGroupMiroTests(unittest.TestCase):

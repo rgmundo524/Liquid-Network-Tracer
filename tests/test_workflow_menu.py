@@ -104,6 +104,26 @@ class PlotCommandTests(unittest.TestCase):
             "query": {"transaction_io": "complete"}, "layout_settings": {"group_context_inputs": True}}),
             "1 peg-outs, all transaction inputs and outputs included (isolated inputs grouped)")
 
+    def test_saved_plot_summary_identifies_cumulative_target_and_exact_outcome(self):
+        from liquid_tracer.pegout_limit import _Total
+        from liquid_tracer.common import LBTC
+
+        total = _Total("0.00000001")
+        plot = {"goal": "pegouts", "match_count": 0,
+                "query": {"pegout_lbtc_limit": "0.00000001"},
+                "pegout_limit_summary": total.summary()}
+        self.assertEqual(_endpoint_summary(plot),
+            "0 peg-outs, L-BTC target 0.00000001, 0 public L-BTC counted (target not reached)")
+        total.include("a" * 64 + ":0", {"value": 3, "asset": LBTC,
+                      "pegout": {"scriptpubkey": "51"}}, 2)
+        plot.update(match_count=1, pegout_limit_summary=total.summary())
+        self.assertEqual(_endpoint_summary(plot),
+            "1 peg-outs, L-BTC target 0.00000001, 0.00000003 public L-BTC counted (target reached)")
+        for summary in (None, {**total.summary(), "limit_reached": False}):
+            with self.subTest(summary=summary):
+                plot["pegout_limit_summary"] = summary
+                self.assertEqual(_endpoint_summary(plot), "1 peg-outs, L-BTC target 0.00000001")
+
 
 @unittest.skipUnless(HAS_TEXTUAL, "Install the optional tui extra")
 class WorkflowMenuTests(unittest.IsolatedAsyncioTestCase):

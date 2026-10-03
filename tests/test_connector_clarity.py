@@ -9,6 +9,7 @@ from pathlib import Path
 from liquid_tracer.change_layout import _routes
 from liquid_tracer.common import canonical, digest, read_json
 from liquid_tracer.connector_styles import stroke_width
+from liquid_tracer.context_connectors import display_graph
 from liquid_tracer.elk_layout import attachment_point, fallback_graph
 from liquid_tracer.export import build_graph, svg_graph
 from liquid_tracer.legend import legend_notes, legend_rows
@@ -79,6 +80,7 @@ class ConnectorHierarchyTests(unittest.TestCase):
         value = build_graph(input_order_state(), group_context_inputs=True)
         summary = next(node for node in value["nodes"] if node["kind"] == "context_group")
         summary["height"] = 240
+        before = copy.deepcopy(value)
         svg = ET.fromstring(svg_graph(value))
         namespace = "{http://www.w3.org/2000/svg}"
         group = next(node for node in svg.iter(namespace + "g") if node.get("data-key") == summary["id"])
@@ -86,12 +88,16 @@ class ConnectorHierarchyTests(unittest.TestCase):
         self.assertEqual(float(rectangle.get("width")), summary["width"])
         self.assertEqual(float(rectangle.get("height")), summary["height"])
         self.assertIn("context addresses", " ".join(text.text or "" for text in group.findall(namespace + "text")))
-        edges = {edge["id"]: edge for edge in value["edges"]}
+        edges = {edge["id"]: edge for edge in display_graph(value)["edges"]}
+        drawn = set()
         for group in svg.iter(namespace + "g"):
             key = group.get("data-edge-key")
             if key:
+                drawn.add(key)
                 self.assertEqual(float(group.find(namespace + "path").get("stroke-width")),
                                  stroke_width(edges[key]["role"]))
+        self.assertEqual(drawn, set(edges))
+        self.assertEqual(value, before)  # Every canonical input remains intact.
 
     def test_basic_svg_places_swatch_legend_above_the_graph(self):
         value = build_graph(input_order_state())
@@ -114,6 +120,9 @@ class ConnectorHierarchyTests(unittest.TestCase):
 class ChangeMergePortTests(unittest.TestCase):
     def test_multiple_change_inputs_and_intervening_inputs_get_distinct_ports(self):
         value = fallback_graph(build_graph(input_order_state(4, continuing=(1, 2, 3))))
+        # Exercise semantic ordering explicitly; fallback layouts otherwise
+        # use physical source-row order under the geometry policy.
+        value["layout"]["input_order"]["policy"] = "traced_first"
         before = copy.deepcopy(value)
         order = next(iter(input_orders(value).values()))
         positions = centered_input_positions(value, {child_input(1), child_input(3)})

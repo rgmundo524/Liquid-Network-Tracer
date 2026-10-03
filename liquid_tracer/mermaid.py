@@ -70,6 +70,9 @@ def _label(value):
 
 
 def _items(graph):
+    from .context_connectors import display_graph
+
+    graph = display_graph(graph)
     nodes = sorted(graph["nodes"], key=lambda node: node["id"])
     edges = sorted(graph["edges"], key=lambda edge: edge["id"])
     if not nodes:
@@ -83,7 +86,7 @@ def _items(graph):
 
 
 def mermaid_source(graph):
-    """Return deterministic, standalone Mermaid text, including every edge."""
+    """Return deterministic Mermaid text, including every displayed edge."""
     nodes, edges, ids = _items(graph)
     lines = ["flowchart LR", "  %% Local Liquid Network trace; IDs map to mermaid-node-map.json."]
     shapes = {"transaction": ("[", "]"), "context_group": ("[", "]"),
@@ -116,6 +119,9 @@ def mermaid_source(graph):
 
 
 def _preview_html(graph, svg):
+    from .context_connectors import display_graph
+
+    displayed_count = len(display_graph(graph)["edges"])
     # An SVG image cannot execute embedded scripts. Embedding the image also
     # makes this page portable and keeps viewing independent of a web server.
     encoded = base64.b64encode(svg).decode("ascii")
@@ -154,7 +160,7 @@ summary {{ cursor:pointer; }} li {{ margin:6px 0; }}
 {LEGEND_CSS}
 </style></head><body>
 <header><h1>Liquid trace · {title}</h1>
-<p>Run {run_id} · {len(graph['nodes'])} nodes · {len(graph['edges'])} links · Fees {fees}{simulated}</p>
+<p>Run {run_id} · {len(graph['nodes'])} nodes · {displayed_count} links · Fees {fees}{simulated}</p>
 <p>{notice}</p>
 <p>{layout_note}</p>
 <p>Scroll to explore; use your browser zoom to adjust the scale.</p>

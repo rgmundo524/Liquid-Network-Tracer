@@ -336,17 +336,27 @@ class AddressCountConcurrencyTests(unittest.TestCase):
         wanted = self.wanted(48)
         lock = threading.Lock()
         active = maximum = 0
+        started = 0
+        initial_window = threading.Barrier(8)
+        expanded_window = threading.Barrier(16)
         events = []
 
         def transport(method, url, headers, body, timeout):
-            nonlocal active, maximum
+            nonlocal active, maximum, started
             with lock:
                 active += 1
                 maximum = max(maximum, active)
+                started += 1
+                request_number = started
             try:
-                # Fake network latency feeds the actual Esplora EWMA. Assertions
-                # use observed overlap, not a wall-clock speed threshold.
-                time.sleep(.015)
+                # The first window supplies real transport-latency samples.
+                # Hold the next window until automatic growth admits all 16:
+                # a fixed sleep instead assumes durable evidence writes are
+                # fast enough for nine network calls to overlap by chance.
+                if request_number <= 8:
+                    initial_window.wait(timeout=5)
+                elif request_number <= 24:
+                    expanded_window.wait(timeout=5)
                 return 200, {}, canonical(statistics(url.rsplit("/", 1)[1]))
             finally:
                 with lock:

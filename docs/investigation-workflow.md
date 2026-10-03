@@ -26,12 +26,14 @@ investigation. Selecting another snapshot or opening History requests its older
 summaries. While a summary is being prepared, its counts show **Loading**, not
 zero or an empty investigation. Source changes invalidate cached summaries.
 
-Saved plot lists read their small reports. Selecting a plot checks its saved
-files before enabling its preview and publication controls. Downloads and Miro
-actions retain their full evidence validation; display summaries never authorize
-publication. Opening an investigation does not fetch blockchain data or contact
-Miro. A selected large plot can still take time to validate without blocking
-other investigation tabs.
+The **Saved previews** library reads small reports in bounded pages. Browsing or
+selecting a preview does not load its graph or perform evidence verification.
+**Open preview** opens it in another tab; **Prepare for Miro** checks the selected
+preview before enabling publication. Previews, downloads, and Miro actions retain
+their full evidence validation; display summaries never authorize publication.
+Opening an investigation does not fetch blockchain data or contact Miro. Opening
+or preparing a large preview can still take time without blocking other
+investigation tabs.
 
 ## 1. Collect data
 
@@ -168,15 +170,16 @@ destination. The available goals are shown together:
 Choose **New board** and enter a name for a fresh arrangement, or choose
 **Update existing board** and a destination with the same plotting goal.
 Set the appearance and, for peg-out paths, the hop range, then choose **Generate
-preview**. The saved preview appears above the publication controls. Inspect it,
-then use **Write to Miro** beside that preview to create its first private board
-or sync its captured existing-board destination. Publication uses the saved
-layout without running ELK again. After first publication, the destination
-switches to that board for future update previews.
+preview**. The result appears in **Saved previews**. Use **Open preview** to
+inspect it in another tab. Select the saved version you want, choose **Prepare
+for Miro**, then **Write to Miro** to create its first private board or sync its
+captured existing-board destination. Publication uses that saved layout without
+running ELK again. After first publication, the destination switches to that
+board for future update previews.
 
 The optional **Advanced: generate and publish in one step** section retains the
 combined generation/publication actions. Those actions generate a new layout;
-use **Write to Miro** to publish the preview already on screen.
+use **Write to Miro** to publish the selected saved preview.
 
 Both modes use the selected collection run and current attribution, colors,
 and change-output rules. Neither fetches transactions or address statistics.
@@ -242,6 +245,68 @@ and Miro sync use the same selection. These choices belong to the generated
 layout, like its hop range. To change them, generate another layout and select
 it for the managed board. Plotting does not fetch fresh spend observations.
 
+### Stop at a cumulative peg-out amount
+
+Under **Paths to peg-outs → Peg-out selection**, the default **All matching
+peg-outs** searches the selected hop range as before. Choose **Stop at cumulative
+L-BTC amount** and enter a positive **Cumulative L-BTC target** to stop after a
+specified total of disclosed L-BTC peg-out output values. Decimal amounts support
+up to eight places; zero does not mean unlimited here. Return to **All matching
+peg-outs** to remove the amount limit.
+
+Selection follows verified paths from the selected seed outputs. It visits
+endpoints nearest ordinary transaction distance from any selected seed first,
+then orders equal-distance endpoints by transaction ID and numeric output index.
+An output counts only once even when several seeds or paths reach it. The selected
+minimum and maximum hops, named-group hop rules, confirmation policy, and explicit
+stop-tracing rules still determine which endpoints qualify. Named-group resets
+do not change the ordinary seed-distance ordering used for the amount limit.
+
+The entire endpoint that reaches or crosses the target is selected; it is never
+split or partially valued. The result records the target, counted total, excess,
+stopping output, and ordinary stopping distance. For example, endpoints of 40
+and 35 L-BTC meet a 60 L-BTC target with 75 L-BTC counted and 15 L-BTC excess.
+The traversal completes the predecessor relationships at that distance so joins
+retain their qualifying paths, then stops without expanding a later frontier.
+Later paths to an already selected endpoint are not added after the cutoff.
+If the target is not reached, the result says the qualifying saved paths were
+exhausted; this is limited by the current evidence, filters, and stopping rules.
+
+Only peg-outs with a known L-BTC asset and an explicit integer value contribute
+to the total. Encountered peg-outs with unknown amounts or unknown assets remain
+selected before the cutoff, but their values are not treated as zero or inferred;
+the report counts them separately. Non-LBTC outputs and transaction fees do not
+contribute. Optional unspent and unspendable endpoints can still be selected
+before the cutoff, but they also do not increase the peg-out total.
+
+The **Endpoints only CSV** contains the same selected endings as the plot's
+endpoint report. Seed provenance is calculated within that single global
+selection and cutoff, without giving each seed a separate amount allowance.
+The path and endpoint tables append **Pegout L-BTC Limit**, **Selected Pegout
+L-BTC**, **Pegout Limit Excess L-BTC**, and **Pegout Limit Stop Reason**. These
+are whole-selection values repeated for provenance on each row; do not sum
+these columns across rows. They are blank for layouts without an amount limit.
+The complete transaction view and **All trace transactions CSV** can include
+other outputs of selected transactions, including additional peg-outs after the
+amount cutoff. Those context outputs are not counted in the selected total.
+
+The target sums full disclosed endpoint values. It does not allocate value from
+the starting outputs, establish ownership, or confirm a Bitcoin payout. It can
+reduce path exploration and the resulting layout, while source checksums and
+saved-evidence validation still run. No additional blockchain data is fetched,
+and the amount setting does not alter collection or any existing archive. The
+query and result are captured in the saved layout; generate a new preview to
+change the target.
+
+For a local preview using an existing collection:
+
+```sh
+liquid-trace plot --case CASE_DIRECTORY --goal pegouts --run latest --min-hops 0 --max-hops 10 --pegout-lbtc-limit 60 --open
+```
+
+`plot-sync --goal pegouts` accepts the same `--pegout-lbtc-limit` option. Omit the
+flag to select all matching peg-outs within the hop range.
+
 Every transaction selected for a new peg-out plot automatically shows its
 **inputs and outputs**, including outputs on branches that are not followed.
 **Include transaction fee flows** controls fee visibility; hiding fees also omits
@@ -253,7 +318,8 @@ output/address without extending that branch or treating it as an endpoint match
 Context uses thinner arrows and is marked `CONTEXT` in the transaction CSV.
 Context does not create traced links, change hop counts or endpoint matches,
 or cause earlier/later transactions to be added. A shared address keeps one
-circle, with each traced or context UTXO retaining its own arrow. SVG export
+circle, with traced UTXOs retaining their own arrows. Eligible isolated context
+inputs can share a counted connector when grouping is enabled. SVG export
 and Miro sync use the same saved graph. Older saved layouts retain their
 original context choices; regenerate a layout to show complete transactions.
 
@@ -314,9 +380,20 @@ and **Starter connections**.
 It combines at least two eligible external input addresses used only by one
 transaction into a context summary.
 Traced, shared, attributed, and otherwise protected addresses remain separate,
-as do sibling outputs. Every input retains its exact UTXO connector and CSV row;
-the full member addresses stay available in local details. Endpoint matches,
-hop limits, and trace evidence are unchanged.
+as do sibling outputs. New layouts use one counted connector from each context
+summary to its transaction, reducing the ports and routes that ELK must arrange.
+It also bundles multiple context inputs from the same visible address to the same
+transaction into one counted arrow. The address remains visible, including its
+name and hub designation. Traced inputs and exact displayed UTXO continuations
+keep separate arrows, even when they share that address. A bundle's original
+inputs are listed in `details.html`; no total amount is inferred.
+Every original input retains its exact UTXO record in `graph.json` and its own
+CSV row; full member addresses and inputs stay available in local details.
+Seed, traced, candidate, and endpoint connections remain separate. Endpoint
+matches, hop limits, and trace evidence are unchanged. Summary connectors do
+not imply common ownership or a known total for confidential inputs. Older
+saved previews keep their original connectors; generate a new preview to use
+the reduced display.
 
 Grouping is saved as an investigation layout preference and captured with each
 generated layout. Separate branch hubs remain Full trace-only. The optional
@@ -349,10 +426,30 @@ plots without captured settings may need to be regenerated once.
 
 ## Saved plots and board management
 
-The generated plot remains available under saved layouts with **Download ELK
-SVG**, its local preview, and supporting files. Saved-layout publication controls
-remain available for preview-only plots and recovery; using them does not run
-ELK again.
+Every generated plot remains in the **Saved previews** library under **Plots &
+Miro**, with its local preview, **Download ELK SVG**, and supporting files. Files
+are stored under `cases/<investigation>/previews/<preview-id>/`; reopening an
+investigation does not regenerate or remove them. The library shows scope,
+source, destination, layout style, creation date, and counts. Load older entries
+to find earlier versions. Your selection is remembered in this browser, even
+when the selected preview is older than the first page.
+
+The library labels plots **Preview 1**, **Preview 2**, and so on within each
+investigation. These numbers stay attached to their original preview IDs across
+sorting, pagination, and service restarts. On first use, existing completed
+previews receive numbers in report-file timestamp order; later completed plots
+receive increasing numbers. Deleted numbers are not reused. A separate numbering
+record preserves these labels without changing the checksummed preview files.
+
+**Open preview** opens a separate tab. Large previews use the section browser
+described below; opening its pages verifies their saved checksums without
+rereading the complete graph. Publishing still validates the complete evidence. The investigation
+page does not embed the graph, which avoids automatically loading huge SVGs.
+Choose **Select for Miro**, then **Prepare for Miro** to verify the desired
+version. Its publication controls use that exact saved preview, including its
+captured board destination. Changing the generation form does not change what
+will be published. Existing recovery controls remain available; publishing a
+saved preview does not run ELK again.
 
 Miro publication uses the saved graph and layout. **Write to Miro** publishes a
 fresh layout to its private board or applies the preview bound to an existing
@@ -489,6 +586,49 @@ Add a positive `--max-transactions`, `--max-outpoints`, `--max-requests`,
 `--max-seconds`, or `--max-items` to explicitly cap the corresponding CLI
 action. These flags use `0` for unlimited. API rate pacing, per-request
 timeouts, retries, cancellation, and layout resource coordination remain active.
+
+Large Trace previews preserve usable local section geometry, pack section envelopes
+near their connected splits and joins, and route connections between sections
+through outer corridors. The backbone stays aligned, terminal objects remain
+distinct, and a shared address is still one object. Unsafe local arrangements use
+a bounded fallback. Sections whose joins cannot preserve forward transaction
+order can be split without another ELK calculation; existing-board alignment
+uses conservative placement. This does not prune paths, change amounts, or infer
+ownership. Section membership and fallback counts appear under
+`layout.section_geometry` in the layout report.
+
+Routing cleanup checks unnecessary detours and sideways steps against nearby
+shapes, routes, and captions. Large graphs use bounded regional checks, so the
+whole cleanup pass is no longer skipped just because the total obstacle index is
+too large. A dense region or exhausted budget leaves its route unchanged. Inspect
+`layout.section_geometry.route_cleanup` for accepted shortcuts, skipped regions,
+and verification limits. Genuine return paths remain; not all bends or crossings
+can be removed.
+
+At 2,000 display objects or 5,000 display connections, a new saved preview opens
+**Trace section overview** instead of putting the entire drawing into the browser.
+Open a numbered section and follow its connection links into neighboring sections.
+Each drawing has at most 128 objects; exact input/output records are paginated at
+200 per page, including individual inputs behind bundled connectors. Sections
+are navigation aids, not ownership labels. The complete SVG and graph data remain
+downloadable, and **Write to Miro** still uses the complete preview. The section
+pages live in the saved preview directory and are checksummed with its other
+artifacts. Opening a section verifies only that page and the navigation index;
+publication still verifies the entire saved evidence. Small previews and the
+separate before/after compaction comparison keep their existing views.
+
+Generate a fresh Trace preview after restarting the service to use the new
+packing and routing. Existing previews remain available; older Trace geometry is not reused
+for a newly requested layout. Updating an existing Miro board still preserves
+its existing object positions. Use the explicit reorganization workflow if the
+existing board itself needs a new arrangement.
+
+The downloaded `layout-report.json` contains `layout.compactness` measurements for the
+final layout and candidate measurements under `layout.search.compactness_candidates`.
+Area includes nodes, routed lines, and captions. Connector detour is excess
+polyline length over the straight distance between its attached endpoints.
+Footprint is a tie-break after safety and path-order checks, not a reason to
+accept overlapping objects or ambiguous shared connector segments.
 
 Generate previews without publication when needed:
 

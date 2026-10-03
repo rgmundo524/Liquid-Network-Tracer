@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from liquid_tracer.compaction import _caption
+from liquid_tracer.context_connectors import display_graph, summaries
 from liquid_tracer.edge_labels import caption_text
 from liquid_tracer.elk_layout import fallback_graph
 from liquid_tracer.export import build_graph, svg_graph, write_csv
@@ -21,10 +22,29 @@ SVG = "{http://www.w3.org/2000/svg}"
 
 class DenseContextCaptionTests(unittest.TestCase):
     def setUp(self):
-        self.graph = fallback_graph(build_graph(input_order_state(10, continuing=(9,)),
-                                                group_context_inputs=True), "elbowed")
+        legacy = build_graph(input_order_state(10, continuing=(9,)), group_context_inputs=True)
+        legacy.pop("context_connectors")
+        self.graph = fallback_graph(legacy, "elbowed")
         self.edge = next(edge for edge in self.graph["edges"] if edge["id"] == child_input(0))
         self.edge["quantity"] = "0.0211651 L-BTC"
+
+    def test_new_summary_draws_one_caption_but_keeps_full_input_evidence(self):
+        graph = fallback_graph(build_graph(input_order_state(10, continuing=(9,)),
+                                          group_context_inputs=True), "elbowed")
+        before = copy.deepcopy(graph)
+        summary, = summaries(graph)
+        ids = summary["details"]["context_summary"]["member_edge_ids"]
+        for renderer, identity in ((svg_graph, "data-edge-key"), (render_svg, "data-edge-id")):
+            with self.subTest(renderer=renderer.__name__):
+                tree = ET.fromstring(renderer(graph))
+                drawn = {item.get(identity) for item in tree.iter() if item.get(identity) is not None}
+                self.assertIn(summary["id"], drawn)
+                self.assertFalse(drawn.intersection(ids))
+                self.assertEqual(len(drawn), len(display_graph(graph)["edges"]))
+                visible = " ".join(item.text or "" for item in tree.iter(SVG + "text"))
+                self.assertIn("9 context inputs · 9 addresses", visible)
+        self.assertEqual(graph, before)
+        self.assertTrue(set(ids) <= {edge["id"] for edge in graph["edges"]})
 
     def test_both_svg_renderers_retain_full_hover_text_without_visible_dense_captions(self):
         original = copy.deepcopy(self.graph)

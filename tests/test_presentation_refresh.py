@@ -36,6 +36,12 @@ class PresentationRefreshTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         root = Path(self.directory.name)
+        isolated = {"XDG_CACHE_HOME": str(root / "cache"), "XDG_STATE_HOME": str(root / "state")}
+        # Clearing credentials must retain the same layout execution policy.
+        isolated.update({name: os.environ[name] for name in ("LIQUID_RENDER_HEAP_MB", "LIQUID_ELK_WORKERS")
+                         if name in os.environ})
+        self.enterContext(patch.dict(os.environ, isolated))
+        self.enterContext(patch.dict(NODE_ENV, isolated))
         self.case = root / "case"
         fixture_path = root / "synthetic.json"
         save_json(fixture_path, fixture())

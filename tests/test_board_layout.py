@@ -211,6 +211,35 @@ class BoardLayoutTests(unittest.TestCase):
         self.assertIn(b"Miro board update layout", render_svg(result))
         self.sync(projected(make_plan(result)))
 
+    def test_addition_section_bounds_follow_translated_board_geometry(self):
+        source = graph("two", True)
+        snapshot = board_layout.capture("test-board", self.path, self.first["namespace"],
+                                          token="test", transport=self.remote, interval=0)
+
+        def layout(addition, **kwargs):
+            addition["layout"] = {"section_geometry": {"sections": [{"id": "synthetic-section",
+                "node_ids": [node["id"] for node in addition["nodes"]],
+                "x": -999, "y": -999, "width": 1, "height": 1}]}}
+            # Keep this check about the coordinate frame of the node boxes;
+            # route/caption footprints have dedicated geometry regressions.
+            for edge in addition["edges"]:
+                edge["label"] = edge["quantity"] = ""
+            return addition
+
+        with patch("liquid_tracer.elk_layout.optimize_graph", side_effect=layout):
+            result = board_layout.prepare_graph(source, snapshot)
+        geometry = result["layout"]["additions_layout"]["section_geometry"]
+        section, = geometry["sections"]
+        nodes = [node for node in result["nodes"] if node["id"] in section["node_ids"]]
+        left = min(node["x"] - node["width"] / 2 for node in nodes)
+        top = min(node["y"] - node["height"] / 2 for node in nodes)
+        right = max(node["x"] + node["width"] / 2 for node in nodes)
+        bottom = max(node["y"] + node["height"] / 2 for node in nodes)
+        self.assertEqual([section[key] for key in ("x", "y", "width", "height")],
+                         [left, top, right - left, bottom - top])
+        self.assertEqual(geometry["bounds_source"], "final_geometry")
+        self.assertGreater(left, snapshot["bounds"][2])
+
     def test_reviewed_resize_rotation_and_frame_parent_do_not_block_retirement(self):
         self.remote.items["frame"] = {"id": "frame", "type": "frame", "position": {"x": 1000, "y": 1000},
                                       "geometry": {"width": 2000, "height": 2000}}

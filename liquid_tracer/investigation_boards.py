@@ -504,7 +504,8 @@ def generate_and_sync(case, goal, run_id="latest", min_hops=0, max_hops=10, *, i
                       include_unspendable=False, include_context=False, layout_mode="fresh",
                       board_record_id=None, name=None, team_id=None, max_items=0, token=None,
                       transport=http, interval=.02, progress=None, workers=4, layout_settings=None,
-                      data_source="investigation", dataset_id=None, connection_scope="all_saved"):
+                      data_source="investigation", dataset_id=None, connection_scope="all_saved",
+                      pegout_lbtc_limit=None):
     """Save one plot, then create its board or apply its bound board update.
 
     This is one live action over already collected evidence. On publication
@@ -551,7 +552,7 @@ def generate_and_sync(case, goal, run_id="latest", min_hops=0, max_hops=10, *, i
                             layout_mode=layout_mode, board_record_id=board_record_id, token=token,
                             transport=transport, interval=interval, progress=progress, workers=workers,
                             data_source=data_source, dataset_id=dataset_id,
-                            connection_scope=connection_scope,
+                            connection_scope=connection_scope, pegout_lbtc_limit=pegout_lbtc_limit,
                             layout_settings=layout_settings, _board_lock_held=layout_mode == "update",
                             _preflight=lambda graph, record: _publication_budget(case, graph, record, max_items))
         if plot["empty"] and layout_mode == "fresh":

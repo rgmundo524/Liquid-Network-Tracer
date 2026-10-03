@@ -22,9 +22,10 @@ OPTIONAL_FILES = frozenset({"details.html", "details.json"})
 
 def preview_files(directory):
     """Historical connection snapshots remain readable without being rewritten."""
+    from .layout_overview import navigation_files
     directory = Path(directory)
     required = FILES if (directory / "transactions.csv").exists() else LEGACY_FILES
-    return required | {name for name in OPTIONAL_FILES if (directory / name).exists() or (directory / name).is_symlink()}
+    return required | navigation_files(directory) | {name for name in OPTIONAL_FILES if (directory / name).exists() or (directory / name).is_symlink()}
 SCOPE = ("Search scope: verified spends in the selected saved run, from the selected starting outputs. "
          "This view does not fetch additional transactions. Unsearched, paused, stopped or hop-limited "
          "branches may contain undiscovered connections; no result is not proof of no connection.")

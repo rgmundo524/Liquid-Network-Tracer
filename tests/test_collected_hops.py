@@ -41,19 +41,23 @@ class CollectedDepthWebTests(unittest.TestCase):
         _, case = self.create()
         route = "/api/cases/" + case["id"]
         first = self.wait(self.success(route + "/actions", {
-            "action": "trace", "settings": {"hops": 10, "max_transactions": 2}}, 202))
+            "action": "trace", "settings": {"hops": 10, "budget_limits_enabled": True,
+                                                "max_transactions": 2}}, 202))
         self.assertEqual((first["status"], first["stop_reason"]), ("paused", "transaction_limit"))
         partial = self.success(route)
         self.assertEqual(partial["latest"]["max_hops"], 10)
         self.assertEqual(partial["latest"]["collected_hops"], 1)
         path, _ = self.server.case(case["id"])
         archive = path / "runs" / first["run_id"]
+        self.assertEqual(read_json(archive / "trace.json")["limits"]["max_transactions"], 2)
         before = {str(file.relative_to(archive)): file.read_bytes()
                   for file in archive.rglob("*") if file.is_file()}
 
         second = self.wait(self.success(route + "/actions", {
-            "action": "trace", "settings": {"hops": 10, "max_transactions": 20}}, 202))
+            "action": "trace", "settings": {"hops": 10, "budget_limits_enabled": True,
+                                                "max_transactions": 20}}, 202))
         self.assertEqual(second["status"], "bounded_complete")
+        self.assertEqual(read_json(path / "runs" / second["run_id"] / "trace.json")["limits"]["max_transactions"], 20)
         detail = self.success(route)
         runs = {run["id"]: run for run in detail["runs"]}
         self.assertEqual(runs[first["run_id"]]["collected_hops"], 1)

@@ -22,7 +22,11 @@ def dense_graphs(count):
     plain = build_graph(input_order_state(count + 1, continuing=(count,)))
     plain.pop("activity_frames", None)
     plain["run"]["ancestor_runs"] = []
-    compact = fallback_graph(group_context_inputs(plain, enabled=True), connector_style="elbowed")
+    compact = group_context_inputs(plain, enabled=True)
+    # These fixtures cover immutable previews from before aggregate connectors.
+    # Fresh aggregate publication/migration has separate tests.
+    compact.pop("context_connectors", None)
+    compact = fallback_graph(compact, connector_style="elbowed")
     legacy = copy.deepcopy(compact)
     summary = next(node for node in legacy["nodes"] if node["kind"] == "context_group")
     summary["height"] = max(160, 18 * (count + 1))

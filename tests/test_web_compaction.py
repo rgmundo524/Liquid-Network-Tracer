@@ -117,7 +117,8 @@ class WebCompactionTests(unittest.TestCase):
         route, path, run_id = self.traced()
         result = self.compact(route, run_id)
         update_case(path, {"miro_board": "SYNTHETIC=", "run_defaults": {
-            "connector_style": "curved", "include_fees": True, "max_new_items": 123}})
+            "connector_style": "curved", "include_fees": True, "budget_limits_enabled": True,
+            "max_new_items": 123}})
         with patch.object(self.server, "start_job", return_value={"id": "synthetic"}) as start:
             self.success(route + "/actions", {"action": "miro-compact", "run_id": run_id,
                 "preview_id": result["preview_id"], "plan": "/private/sentinel", "arguments": ["--shell"]}, 202)

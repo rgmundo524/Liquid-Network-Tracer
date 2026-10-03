@@ -6,9 +6,11 @@ a concurrent reader miss committed observations. WAL and FULL synchronization
 retain committed batches across interruption without rewriting all prior counts.
 """
 import contextlib
+import fcntl
 import json
 import os
 import sqlite3
+import stat
 import tempfile
 from pathlib import Path
 
@@ -68,35 +70,65 @@ def _initialize(path, case_id):
 
 
 @contextlib.contextmanager
+def _snapshot_uri(case, path):
+    """Avoid WAL sidecar writes only while the collector cannot change the DB.
+
+    SQLite mode=ro may create WAL/SHM files even on a checkpointed database.
+    Immutable mode avoids that, but must never ignore a live or stranded WAL.
+    The collector holds address-counts.lock across all cache writes, including
+    its final JSON replacement and journal close. Keep a shared lock throughout
+    the read; active writers and older caches without that lock use normal WAL
+    snapshots instead of treating mutable evidence as immutable.
+    """
+    uri = path.as_uri() + "?mode=ro"
+    try:
+        descriptor = os.open(Path(case) / "address-counts.lock",
+                             os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        yield uri
+        return
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise TraceError("Address count lock must be an ordinary file")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield uri
+            return
+        if not any(path.with_name(path.name + suffix).exists() for suffix in ("-wal", "-journal")):
+            uri += "&immutable=1"
+        yield uri
+    finally:
+        os.close(descriptor)
+
+
+@contextlib.contextmanager
 def read_snapshot(case, case_id, source, valid):
     """Yield verified rows, holding a read snapshot while the caller reads JSON."""
     path = _path(case)
     if not path.exists():
         yield iter(())
         return
-    connection = None
     try:
-        connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)
-        connection.execute("BEGIN")
-        # This read establishes the snapshot before the caller opens JSON.
-        _verify_header(connection, case_id)
+        with _snapshot_uri(case, path) as uri:
+            with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=5)) as connection:
+                connection.execute("BEGIN")
+                # This read establishes the snapshot before the caller opens JSON.
+                _verify_header(connection, case_id)
 
-        def rows():
-            for address, payload, checksum in connection.execute(
-                    "SELECT address, payload, sha256 FROM observations WHERE source = ?", (source,)):
-                if _checksum(case_id, source, address, payload) != checksum:
-                    raise TraceError("Invalid address count cache; restore its last intact version")
-                record = json.loads(payload)
-                if not valid(record, source, address):
-                    raise TraceError("Invalid address transaction count observation")
-                yield address, record
+                def rows():
+                    for address, payload, checksum in connection.execute(
+                            "SELECT address, payload, sha256 FROM observations WHERE source = ?", (source,)):
+                        if _checksum(case_id, source, address, payload) != checksum:
+                            raise TraceError("Invalid address count cache; restore its last intact version")
+                        record = json.loads(payload)
+                        if not valid(record, source, address):
+                            raise TraceError("Invalid address transaction count observation")
+                        yield address, record
 
-        yield rows()
+                yield rows()
     except (sqlite3.Error, ValueError, TypeError) as error:
         raise TraceError("Invalid address count cache; restore its last intact version") from error
-    finally:
-        if connection is not None:
-            connection.close()
 
 
 class CountCacheJournal:

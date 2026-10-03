@@ -40,6 +40,16 @@ def _endpoint_summary(plot):
         labels.append(f"{counts.get('unspent', 0)} unspent UTXOs")
     if query.get("include_unspendable"):
         labels.append(f"{counts.get('unspendable', 0)} unspendable outputs")
+    if query.get("pegout_lbtc_limit"):
+        labels.append(f"L-BTC target {query['pegout_lbtc_limit']}")
+        from .pegout_limit import validate_pegout_limit_summary
+        try:
+            cutoff = validate_pegout_limit_summary(plot.get("pegout_limit_summary"), query)
+        except TraceError:
+            pass  # Missing/invalid saved metadata must not imply the target was reached.
+        else:
+            outcome = "target reached" if cutoff["limit_reached"] else "target not reached"
+            labels.append(f"{cutoff['total_lbtc']} public L-BTC counted ({outcome})")
     if query.get("transaction_io") == "complete" or query.get("include_context"):
         labels.append(("all transaction inputs and outputs included" if query.get("transaction_io") == "complete"
                        else "context addresses included") +

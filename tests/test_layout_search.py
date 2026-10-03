@@ -169,15 +169,19 @@ class LayoutSearchTests(unittest.TestCase):
             process.poll.return_value = 0
             processes.append(process)
         events = []
+        # Keep resource coordination on its real clock; replacing the shared
+        # time.monotonic function also changes other modules.
         with patch.dict(os.environ, {"LIQUID_TRACER_ROOT": str(ROOT), "LIQUID_NODE_BIN": "/synthetic/node"}), \
                 patch("pathlib.Path.is_file", return_value=True), \
-                patch("liquid_tracer.elk_layout.time.monotonic", side_effect=[0, 5, 10, 15]), \
+                patch("liquid_tracer.elk_layout.time", monotonic=Mock(side_effect=[0, 5, 10, 15])), \
                 patch("liquid_tracer.elk_layout.subprocess.Popen", side_effect=processes):
             optimize_graph(graph, progress=events.append, layout_attempts=2)
         self.assertTrue(all(event["attempt_total"] == 2 for event in events))
         self.assertTrue(all(event["seed"] == layout_seeds(2)[event["attempt_index"] - 1] for event in events))
-        heartbeat = [event for event in events if "elapsed_seconds" in event]
+        heartbeat = [event for event in events
+                     if event.get("stage") == "calculating" and "elapsed_seconds" in event]
         self.assertEqual([event["attempt_index"] for event in heartbeat], [1, 2])
+        self.assertEqual([event["elapsed_seconds"] for event in heartbeat], [5, 5])
         self.assertEqual(events[-1]["stage"], "ready")
 
 

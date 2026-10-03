@@ -226,7 +226,8 @@ def _inline(svg, prefix):
 
 
 def export_compaction(before, after, directory, *, archive_sha256, service_sha256):
-    result = export_layout(after, directory)
+    # This product supplies its own before/after page and fixed manifest.
+    result = export_layout(after, directory, section_overview=False)
     directory = Path(result["directory"])
     try:
         report = after["layout"]["compaction"]

@@ -63,9 +63,11 @@ def layout_notice(graph, *, include_named_group=True):
                 + " Miro routes may differ. Crossing counts are estimates.")
     notice = LAYOUT_NOTICE
     if graph.get("graph_options", {}).get("layout_style") == "trace":
+        from .trace_sections import SECTION_LAYOUT_VERSION
         search = layout.get("search", {})
         sections = search.get("section_count") if isinstance(search, dict) else None
-        if (isinstance(search, dict) and search.get("section_layout_version") == 1
+        version = search.get("section_layout_version") if isinstance(search, dict) else None
+        if (type(version) is int and 1 <= version <= SECTION_LAYOUT_VERSION
                 and type(sections) is int and sections > 0):
             notice = (f"Trace layout arranged in {sections:,} sections around the preferred backbone; "
                       "connections between sections are routed after placement. "
@@ -169,6 +171,8 @@ def _attachment(edge, key, node, other, source):
 
 
 def _geometry(graph):
+    from .context_connectors import display_graph
+    graph = display_graph(graph)
     if not isinstance(graph, dict) or not isinstance(graph.get("nodes"), list) or not isinstance(graph.get("edges"), list):
         raise TraceError("ELK preview requires graph nodes and edges")
     if not graph["nodes"]:
@@ -392,6 +396,8 @@ def _svg(graph, nodes, edges, *, banner=True):
 
 def render_svg(graph):
     """Render validated geometry directly, without Node, Chromium, or layout work."""
+    from .context_connectors import display_graph
+    graph = display_graph(graph)
     return _svg(graph, *_geometry(graph))
 
 
@@ -456,17 +462,22 @@ Counts prefixed with ≥ are lower bounds because the comparison limit was reach
 </body></html>\n'''
 
 
-def export_layout(graph, directory):
+def export_layout(graph, directory, *, section_overview=True):
     """Write a new preview, publishing graph.html only after every file succeeds."""
-    nodes, edges = _geometry(graph)
-    svg = _svg(graph, nodes, edges)
+    from .context_connectors import display_graph
+    displayed = display_graph(graph)
+    nodes, edges = _geometry(displayed)
+    svg = _svg(displayed, nodes, edges)
     layout = graph.get("layout", {})
     if not isinstance(layout, dict) or not isinstance(layout.get("metrics", {}), dict):
         raise TraceError("ELK preview contains invalid layout metadata")
     metrics = layout.get("metrics", {})
-    from .layout_details import render_details
-    details_document, details_index = render_details(graph, nodes, edges, svg)
-    document = _preview_html(graph, svg, metrics, detail_pages=True)
+    from .layout_overview import enabled, export_overview
+    overview = section_overview and enabled(nodes, edges)
+    if not overview:
+        from .layout_details import render_details
+        details_document, details_index = render_details(displayed, nodes, edges, svg)
+        document = _preview_html(displayed, svg, metrics, detail_pages=True)
     directory = Path(os.path.abspath(directory))
     # A preview must never silently replace an archived run or follow a link
     # into another investigation. The caller normally supplies a unique path.
@@ -483,10 +494,13 @@ def export_layout(graph, directory):
              "details": directory / "details.html", "details_index": directory / "details.json"}
     temporary = paths["html"].with_name("graph.html.tmp")
     try:
+        if overview:
+            document, details_document, details_index = export_overview(displayed, nodes, edges, directory)
         save_json(paths["graph"], graph)
         save_json(paths["report"], {"run_id": graph.get("run_id"), "layout": layout,
                                   "metrics": metrics, "notice": layout_notice(graph),
-                                  "node_count": len(nodes), "edge_count": len(edges)})
+                                  "node_count": len(nodes), "edge_count": len(graph["edges"]),
+                                  "display_edge_count": len(edges)})
         paths["svg"].write_bytes(svg)
         save_json(paths["details_index"], details_index)
         paths["details"].write_text(details_document, encoding="utf-8")

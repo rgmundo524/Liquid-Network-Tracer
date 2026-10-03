@@ -111,6 +111,11 @@ def _plan(case, state, target, metadata):
             edge = old_edges.get(key)
             if not edge or any(record.get(f) != edge[f] for f in ("source", "target")):
                 raise TraceError("A mapped connector is not proven by the archived UTXO graph")
+            if "context_evidence" in record:
+                evidence = record["context_evidence"]
+                if (not isinstance(evidence, dict) or set(evidence) != {"source", "target", "outpoint", "role"}
+                        or any(evidence[field] != edge[field] for field in ("source", "target", "outpoint"))):
+                    raise TraceError("Saved connector evidence disagrees with the archived UTXO graph")
         elif key.startswith("annotation:"):
             from .presentation_items import proof
             saved = record.get("presentation_proof") or {}
@@ -280,7 +285,8 @@ def apply_merge(case, approval, board=None, *, token=None, transport=http, inter
         # durably journaled a DELETE attempt for that exact mapped shape.
         read_state = {**state, "pending_deletions": {
             key: {"attempted": True} for key in pending.get("deletions", {})}}
-        remote = preflight(requests, base, headers, read_state, {k: True for k in plan["removed"]}, status_progress)
+        remote = preflight(requests, base, headers, read_state,
+                           {key: {"kind": "address_merge"} for key in plan["removed"]}, status_progress)
         inventory = _inventory(requests, base, headers)
         _check_inventory(inventory, plan, state)
         for key in plan["removed"]:
@@ -376,6 +382,10 @@ def apply_merge(case, approval, board=None, *, token=None, transport=http, inter
             record = copy.deepcopy(record)
             if key in plan["rewires"]:
                 record.update(plan["rewires"][key]["logical"])
+                if "context_evidence" in record:
+                    # Conversion changes only the displayed address identity.
+                    # Keep its exact UTXO and historical presentation role.
+                    record["context_evidence"].update(plan["rewires"][key]["logical"])
             items[plan["aliases"].get(key, key)] = record
         history = [*state.get("address_migration_history", []), {
             "plan_sha256": approval, "backup": str(backup.relative_to(case)),

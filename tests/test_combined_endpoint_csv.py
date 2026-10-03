@@ -60,6 +60,18 @@ class CombinedEndpointCSVTests(unittest.TestCase):
     def rows(product):
         return list(csv.DictReader(io.StringIO(product["csv"])))
 
+    def test_cumulative_limit_provenance_is_exported_without_affecting_unlimited_plot(self):
+        _, limited, _ = self.case("Limited", pegout_lbtc_limit="1")
+        _, unlimited, _ = self.case("Unlimited")
+        rows = self.rows(self.build([limited, unlimited]))
+        first, second = rows
+        self.assertEqual(first["Pegout L-BTC Limit"], "1")
+        self.assertEqual(first["Selected Pegout L-BTC"], "1.25000001")
+        self.assertEqual(first["Pegout Limit Excess L-BTC"], "0.25000001")
+        self.assertEqual(first["Pegout Limit Stop Reason"], "limit_reached")
+        self.assertEqual(second["Pegout L-BTC Limit"], "")
+        self.assertEqual(second["Pegout Limit Stop Reason"], "")
+
     def test_combines_only_selected_cases_and_preserves_shared_endpoints_per_case(self):
         first, a, plot_a = self.case("First", include_unspent=True, include_unspendable=True)
         second, b, plot_b = self.case("Second")

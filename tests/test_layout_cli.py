@@ -26,6 +26,11 @@ class LayoutCliTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        isolated = {"XDG_CACHE_HOME": str(self.root / "cache"), "XDG_STATE_HOME": str(self.root / "state")}
+        isolated.update({name: os.environ[name] for name in ("LIQUID_RENDER_HEAP_MB", "LIQUID_ELK_WORKERS")
+                         if name in os.environ})
+        self.enterContext(patch.dict(os.environ, isolated))
+        self.enterContext(patch.dict(NODE_ENV, isolated))
         self.case = self.root / "case"
         self.fixture = self.root / "synthetic.json"
         save_json(self.fixture, fixture())

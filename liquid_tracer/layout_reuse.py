@@ -36,6 +36,10 @@ def _fingerprint(graph):
                 if key not in {"nodes", "edges", "layout", "connector_attachment", "graph_options"}}
     metadata["graph_options"] = {key: value for key, value in graph.get("graph_options", {}).items()
                                  if key not in {"connector_style", "layout_attempts"}}
+    if "context_connectors" in metadata:
+        metadata["context_connectors"] = {**metadata["context_connectors"], "summaries": [
+            {key: value for key, value in edge.items() if key not in _EDGE_GEOMETRY}
+            for edge in metadata["context_connectors"].get("summaries", [])]}
     result.update(canonical(metadata))
     for field, excluded in (("nodes", _NODE_GEOMETRY), ("edges", _EDGE_GEOMETRY)):
         result.update(b"\0" + field.encode() + b"\0")
@@ -78,12 +82,13 @@ def _complete_search(search, metrics, attempts):
     retries = search.get("memory_retry_count", 0)
     sectioned = bool(_SECTION_SEARCH_FIELDS & search.keys())
     if sectioned:
+        from .trace_sections import SECTION_LAYOUT_VERSION
         # A seed is a full assembled layout. Its independent section jobs can
         # outnumber seeds, and each section may retry once after memory pressure.
         # Validate these fields as a unit: partial/newer metadata is not proof
         # that a completed bounded search can be reused by this implementation.
         if (any(type(search.get(key)) is not int for key in _SECTION_SEARCH_FIELDS)
-                or search["section_layout_version"] != 1
+                or search["section_layout_version"] != SECTION_LAYOUT_VERSION
                 or not 1 <= search["section_count"]
                 or not 0 <= search["section_worker_count"] <= search["section_count"]
                 or not 1 <= search["max_section_nodes"] <= 128
@@ -139,6 +144,7 @@ def reusable_elk_preview(graph, directory, connector_style="straight", progress=
     Invalid/incomplete optional previews are ignored, not used as a fallback
     layout. The caller runs the selected ELK engine normally when none matches.
     """
+    from .context_connectors import display_graph
     attempts = normalize_layout_attempts(
         graph.get("graph_options", {}).get("layout_attempts") if layout_attempts is None else layout_attempts)
     expected_search = {"version": LAYOUT_SEARCH_VERSION, "attempt_count": attempts,
@@ -192,13 +198,16 @@ def reusable_elk_preview(graph, directory, connector_style="straight", progress=
                 continue
             # Older curved previews forced routing exceptions to elbowed pipes.
             # Recalculate those layouts without invalidating other appearances.
+            displayed = display_graph(saved)
             if connector_style == "curved" and any(edge.get("connector_shape") != "curved"
-                                                   for edge in saved["edges"]):
+                                                   for edge in displayed["edges"]):
                 continue
             report = read_json(path / "layout-report.json")
             if (report.get("run_id") != run_id or report.get("layout") != layout
                     or report.get("node_count") != len(saved["nodes"])
-                    or report.get("edge_count") != len(saved["edges"])):
+                    or report.get("edge_count") != len(saved["edges"])
+                    or (saved.get("context_connectors")
+                        and report.get("display_edge_count") != len(displayed["edges"]))):
                 continue
             _validate_graph(saved, connector_style)
             _geometry(saved)

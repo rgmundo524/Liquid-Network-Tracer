@@ -136,7 +136,18 @@ def legend_notes(graph=None):
                                include_context=query.get("include_context", False),
                                hop_reference_name=query.get("hop_reference_name", ""),
                                transaction_io=query.get("transaction_io"),
-                               attribution_hop_limits=query.get("attribution_hop_limits"))
+                               attribution_hop_limits=query.get("attribution_hop_limits"),
+                               pegout_lbtc_limit=query.get("pegout_lbtc_limit"))
+        if query.get("pegout_lbtc_limit") is not None:
+            from .pegout_limit import validate_pegout_limit_summary
+            limit = validate_pegout_limit_summary(report.get("pegout_limit_summary"), query)
+            notes.append(f"Cumulative peg-out target: {limit['target_lbtc']} L-BTC; "
+                         f"selected total: {limit['total_lbtc']} L-BTC; excess: {limit['excess_lbtc']} L-BTC. "
+                         + ("The target was reached; the whole crossing output is included. "
+                            if limit["limit_reached"] else "The target was not reached in the qualifying saved paths. ")
+                         + "Endpoints are visited by ordinary distance from the selected seeds, then transaction ID and output index. "
+                         "Unknown amounts or assets do not count toward the target. Other context outputs are not counted. "
+                         "This is an exploration cutoff, not an allocation of stolen funds.")
         complete_io = query.get("transaction_io") == "complete"
         if "seeds" in query:
             count = len({seed.split(":")[0] for seed in query["seeds"]})
@@ -167,8 +178,10 @@ def legend_notes(graph=None):
             notes.append("Attribution CSV hop limits are ignored for these paths. Explicit stop-tracing rules "
                          "and the selected plot hop range still apply. Only saved transactions are available.")
         if graph.get("address_mode") == "merged":
-            notes.append("One circle per full address per network; each UTXO keeps its own arrows. "
-                         "Sharing a circle does not establish a spend between unrelated outputs.")
+            notes.append(("One circle per full address per network; traced UTXOs keep their own arrows. "
+                          if graph.get("context_connectors", {}).get("summaries") else
+                          "One circle per full address per network; each UTXO keeps its own arrows. ")
+                         + "Sharing a circle does not establish a spend between unrelated outputs.")
         if complete_io:
             io_notice = ("Every input and output of displayed transactions is included, including fees. "
                          if graph.get("include_fees") is not False else
@@ -192,6 +205,14 @@ def legend_notes(graph=None):
             if query.get("include_unspendable"):
                 notes.append("Unspendable diamonds identify outputs whose scripts cannot be spent. Fee outputs are excluded"
                              + (" from endpoint selection." if complete_io else "."))
+    if (graph or {}).get("context_connectors", {}).get("summaries"):
+        notes.append("Each isolated context group uses one counted connector. Original input records remain "
+                     "in local details and CSV exports; grouping does not imply common ownership or a known total.")
+        if any(edge.get("details", {}).get("context_summary", {}).get("kind") == "parallel"
+               for edge in graph["context_connectors"]["summaries"]):
+            notes.append("Repeated context inputs from one address to the same transaction share a counted arrow. "
+                         "The address stays visible and traced inputs retain their own arrows. "
+                         "Bundled input labels, outpoints and amounts are listed in local details and CSV exports.")
     return notes
 
 

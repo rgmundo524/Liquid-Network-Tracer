@@ -65,7 +65,8 @@ class GroupHopWorkflowTests(unittest.TestCase):
 
     def test_reference_updates_preserve_other_preferences_and_reject_plot_setting(self):
         case, metadata, route = self.named_case()
-        current = {**metadata['run_defaults'], 'max_requests': 79, 'center_name': 'Different group'}
+        current = {**metadata['run_defaults'], 'budget_limits_enabled': True,
+                   'max_requests': 79, 'center_name': 'Different group'}
         update_case(case, {'run_defaults': current})
         saved = save_collection_reference(case, ' Perp ')
         self.assertEqual(saved['run_defaults'], {**current, 'hop_reference_name': 'Perp'})

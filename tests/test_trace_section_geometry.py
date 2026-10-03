@@ -1,8 +1,9 @@
 import copy
 import unittest
+from unittest.mock import patch
 
 from liquid_tracer.common import TraceError
-from liquid_tracer.trace_section_geometry import _color, assemble
+from liquid_tracer.trace_section_geometry import _PLACEMENT_PROBE_LIMIT, _color, assemble
 
 
 def request_for(columns, links, *, sizes=None):
@@ -46,7 +47,43 @@ def boxes_overlap(a, b):
             and max(a["y"], b["y"]) < min(a["y"] + a["height"], b["y"] + b["height"]))
 
 
+def staggered_branches(count):
+    columns = {f"s{index}": index for index in range(2 * count + 1)}
+    links = [(f"s{index}", f"s{index + 1}", "EAST", "WEST") for index in range(2 * count)]
+    backbone, groups = list(columns), [list(columns)]
+    for index in range(count):
+        a, b = f"a{index}", f"b{index}"
+        columns[a], columns[b] = 2 * index + 1, 2 * index + 2
+        groups.append([a, b])
+        links.extend([(f"s{2 * index}", a, "EAST", "WEST"), (a, b, "EAST", "WEST"),
+                      (b, f"s{2 * index + 2}", "EAST", "WEST")])
+    request = request_for(columns, links)
+    request["backboneEdges"] = {f"e{index}" for index in range(2 * count)}
+    return request, groups, backbone
+
+
 class SectionGeometryTests(unittest.TestCase):
+    def test_adjacent_column_route_across_rows_loses_step_without_moving_objects(self):
+        request = request_for({"source": 0, "main": 0, "target": 1}, [
+            ("main", "target", "EAST", "WEST"), ("source", "target", "EAST", "WEST")])
+        request["backboneEdges"] = {"e0"}
+        groups = [["source"], ["main"], ["target"]]
+        candidates = candidates_for(request, groups)
+        with patch("liquid_tracer.trace_route_cleanup.cleanup_routes",
+                   side_effect=lambda nodes, edges, eligible, **kwargs: (edges, {})):
+            original = assemble(request, groups, candidates, ["main", "target"])
+        result = assemble(request, groups, candidates, ["main", "target"])
+        objects = {node["id"]: node for node in result["nodes"]}
+        self.assertNotEqual(objects["source"]["y"], objects["target"]["y"])
+        self.assertEqual(result["nodes"], original["nodes"])
+        self.assertEqual(result["edges"][0], original["edges"][0])
+        self.assertEqual(len(points(original["edges"][1])), 6)
+        self.assertEqual(len(points(result["edges"][1])), 4)
+        self.assertEqual(points(result["edges"][1])[::3], points(original["edges"][1])[::5])
+        self.assertEqual(result["sectionGeometry"]["route_cleanup"]["steps_applied"], 1)
+        self.assert_safe(request, result)
+        self.assert_no_connector_overlap(result)
+
     def assert_safe(self, request, result):
         node_ids = [node["id"] for node in result["nodes"]]
         self.assertEqual(set(node_ids), {node["id"] for node in request["children"]})
@@ -81,6 +118,19 @@ class SectionGeometryTests(unittest.TestCase):
             for b in labels[index + 1:]:
                 self.assertFalse(boxes_overlap(a, b), (a["id"], b["id"]))
 
+    def assert_no_connector_overlap(self, result):
+        segments = [(edge["id"], a, b) for edge in result["edges"]
+                    for a, b in zip(points(edge), points(edge)[1:])]
+        for index, (edge, a, b) in enumerate(segments):
+            for other, c, d in segments[index + 1:]:
+                if edge == other:
+                    continue
+                for fixed, varying in (("x", "y"), ("y", "x")):
+                    if a[fixed] == b[fixed] == c[fixed] == d[fixed]:
+                        overlap = (min(max(a[varying], b[varying]), max(c[varying], d[varying]))
+                                   - max(min(a[varying], b[varying]), min(c[varying], d[varying])))
+                        self.assertLessEqual(overlap, 0, (edge, other, fixed))
+
     def test_shared_join_return_and_terminal_ports_keep_exact_identity_and_clear_routes(self):
         request = request_for({"seed": -2, "hub": -1, "a": 0, "b": 0, "join": 1, "end": 2}, [
             ("seed", "hub", "EAST", "WEST"), ("hub", "a", "EAST", "WEST"),
@@ -108,17 +158,90 @@ class SectionGeometryTests(unittest.TestCase):
         groups = [["a", "b", "obstacle"]]
         result = assemble(request, groups, candidates_for(request, groups), [])
         self.assert_safe(request, result)
-        segments = [(edge["id"], a, b) for edge in result["edges"]
-                    for a, b in zip(points(edge), points(edge)[1:])]
-        for index, (edge, a, b) in enumerate(segments):
-            for other, c, d in segments[index + 1:]:
-                if edge == other:
-                    continue
-                for fixed, varying in (("x", "y"), ("y", "x")):
-                    if a[fixed] == b[fixed] == c[fixed] == d[fixed]:
-                        overlap = (min(max(a[varying], b[varying]), max(c[varying], d[varying]))
-                                   - max(min(a[varying], b[varying]), min(c[varying], d[varying])))
-                        self.assertLessEqual(overlap, 0, (edge, other, fixed))
+        self.assert_no_connector_overlap(result)
+
+    def test_staggered_branches_reuse_rows_instead_of_stacking_every_section(self):
+        request, groups, backbone = staggered_branches(12)
+        candidates = candidates_for(request, groups)
+        before = copy.deepcopy((request, groups, candidates))
+        result = assemble(request, groups, candidates, backbone)
+        self.assert_safe(request, result)
+        self.assert_no_connector_overlap(result)
+        self.assertEqual(result["sectionGeometry"]["rows"], 2)
+        self.assertEqual(result, assemble(request, groups, candidates, backbone))
+        self.assertEqual(before, (request, groups, candidates))
+        # The former serial packer used 13 rows, area 48,609,984 and route
+        # length 82,988 on this fixture. Gate the gain without exact pixels.
+        self.assertLess(result["width"] * result["height"], 12_000_000)
+        route_length = sum(abs(a["x"] - b["x"]) + abs(a["y"] - b["y"])
+                           for edge in result["edges"] for a, b in zip(points(edge), points(edge)[1:]))
+        self.assertLess(route_length, 60_000)
+
+    def test_shared_hub_stays_by_neighbors_and_shifted_backbone_captions_stay_clear(self):
+        request = request_for({"seed": 0, "main": 1, "a": 1, "b": 1, "c": 1, "hub": 2}, [
+            ("seed", "main", "EAST", "WEST"), ("seed", "a", "EAST", "WEST"),
+            ("seed", "b", "EAST", "WEST"), ("seed", "c", "EAST", "WEST"),
+            ("a", "hub", "EAST", "WEST"), ("b", "hub", "SOUTH", "NORTH"),
+            ("c", "hub", "EAST", "WEST")], sizes={"seed": (80, 10), "main": (80, 10)})
+        request["backboneEdges"] = {"e0"}
+        request["edges"][0]["labels"][0]["height"] = 150
+        groups = [[node["id"]] for node in request["children"]]
+        result = assemble(request, groups, candidates_for(request, groups), ["seed", "main"])
+        self.assert_safe(request, result)
+        self.assert_no_connector_overlap(result)
+        centers = {node["id"]: node["y"] + node["height"] / 2 for node in result["nodes"]}
+        self.assertGreater(result["sectionGeometry"]["backbone_row"], 0)
+        self.assertEqual(centers["seed"], centers["main"])
+        self.assertLess(min(centers[key] for key in ("a", "b", "c")), centers["main"])
+        self.assertGreater(max(centers[key] for key in ("a", "b", "c")), centers["main"])
+        self.assertGreaterEqual(centers["hub"], min(centers[key] for key in ("a", "b", "c")))
+        self.assertLessEqual(centers["hub"], max(centers[key] for key in ("a", "b", "c")))
+        self.assertEqual(len(points(result["edges"][0])), 2)
+        for label in result["edges"][0]["labels"]:
+            for edge in result["edges"]:
+                for a, b in zip(points(edge), points(edge)[1:]):
+                    self.assertFalse(hits_interior(a, b, label), edge["id"])
+
+    def test_disjoint_sections_without_backbone_share_rows_with_different_dimensions(self):
+        request = request_for({"a": 0, "b": 0, "c": 1, "d": 1}, [
+            ("a", "b", "NORTH", "SOUTH"), ("c", "d", "SOUTH", "NORTH")],
+            sizes={"a": (90, 500), "b": (180, 20), "c": (250, 80), "d": (60, 300)})
+        groups = [["a", "b"], ["c", "d"]]
+        result = assemble(request, groups, candidates_for(request, groups), [])
+        self.assert_safe(request, result)
+        self.assert_no_connector_overlap(result)
+        self.assertEqual(result["sectionGeometry"]["rows"], 2)
+        self.assertIsNone(result["sectionGeometry"]["backbone_row"])
+        originals = {node["id"]: node for node in request["children"]}
+        for node in result["nodes"]:
+            self.assertEqual((node["width"], node["height"]),
+                             (originals[node["id"]]["width"], originals[node["id"]]["height"]))
+
+    def test_packed_sections_with_every_port_side_keep_separate_tracks(self):
+        sides = ("NORTH", "SOUTH", "EAST", "WEST")
+        request = request_for({"s": 0, "main": 1, "a": 1, "b": 1, "end": 2}, [
+            ("s", "main", "EAST", "WEST"),
+            *(("s", "a", source, target) for source in sides for target in sides),
+            *(("b", "end", source, target) for source in sides for target in sides),
+            ("a", "b", "SOUTH", "NORTH"), ("end", "s", "NORTH", "SOUTH")])
+        groups = [[node["id"]] for node in request["children"]]
+        result = assemble(request, groups, candidates_for(request, groups), ["s", "main", "end"])
+        self.assert_safe(request, result)
+        self.assert_no_connector_overlap(result)
+
+    def test_crowded_column_has_bounded_probes_and_no_empty_row_growth(self):
+        count = 1500
+        request = request_for({str(index): 0 for index in range(count)}, [],
+                              sizes={str(index): (80, 10 + index % 17 * 10) for index in range(count)})
+        groups = [[str(index)] for index in range(count)]
+        result = assemble(request, groups, candidates_for(request, groups), ["0"])
+        geometry = result["sectionGeometry"]
+        self.assertEqual(geometry["rows"], count)
+        self.assertLessEqual(geometry["placement_probes"], _PLACEMENT_PROBE_LIMIT * (count - 1))
+        self.assertLessEqual(geometry["max_section_probes"], _PLACEMENT_PROBE_LIMIT)
+        nodes = sorted(result["nodes"], key=lambda node: node["y"])
+        for a, b in zip(nodes, nodes[1:]):
+            self.assertLessEqual(a["y"] + a["height"], b["y"])
 
     def test_same_column_backbone_members_cannot_overlap(self):
         request = request_for({"a": 0, "b": 0, "c": 1}, [("a", "c", "EAST", "WEST"),

@@ -12,7 +12,7 @@ from unittest.mock import patch
 from liquid_tracer.common import TraceError, save_json
 from liquid_tracer.investigations import create_investigation, read_case
 from liquid_tracer.plots import preview_plot, reviewed_plot
-from liquid_tracer.workflow_api import case_boards, case_workflow, plot_artifact, selected_plot
+from liquid_tracer.workflow_api import case_boards, case_workflow, plot_artifact, public_plot, selected_plot
 from tests.test_attribution_convergence import graph_state, tx
 from tests.test_connections import saved_case
 from tests.test_pegout_paths import add_pegout
@@ -49,7 +49,7 @@ class WorkflowSummaryTests(unittest.TestCase):
             return preview_plot(self.case, goal)
 
     def test_lightweight_reads_only_small_reports_and_never_maps_or_evidence(self):
-        directory = self.report(reviewable=True, validation_pending=False, empty=True)
+        directory = self.report(reviewable=True, validation_pending=False, empty=True, display_edge_count=1)
         (directory / "graph.json").write_text("not a graph")
         (directory / "miro-plan.json").write_text("not a plan")
         opened = []
@@ -57,7 +57,7 @@ class WorkflowSummaryTests(unittest.TestCase):
 
         def metadata_only(path, *args, **kwargs):
             opened.append(path)
-            self.assertIn(path.name, {"case.json", "plot.json"})
+            self.assertIn(path.name, {"case.json", "plot.json", "preview-numbers.json", "preview-numbers.lock", "preview-numbers.json.tmp"})
             return original(path, *args, **kwargs)
 
         with ExitStack() as stack:
@@ -67,7 +67,8 @@ class WorkflowSummaryTests(unittest.TestCase):
                 stack.enter_context(patch(name, side_effect=AssertionError("unexpected expensive read")))
             stack.enter_context(patch.object(Path, "open", metadata_only))
             result = case_workflow(self.case, lightweight=True)
-        self.assertEqual(set(result), {"plots"})
+        self.assertEqual(set(result), {"plots", "plots_next_cursor"})
+        self.assertIsNone(result["plots_next_cursor"])
         self.assertEqual(len(result["plots"]), 1)
         item = result["plots"][0]
         self.assertFalse(item["reviewable"])
@@ -75,6 +76,8 @@ class WorkflowSummaryTests(unittest.TestCase):
         self.assertFalse(item["empty"])
         self.assertEqual(item["preview_id"], directory.name)
         self.assertEqual(item["node_count"], 3)
+        self.assertEqual(item["edge_count"], 2)
+        self.assertEqual(item["display_edge_count"], 1)
         self.assertTrue(item["artifact"]["preview_url"].endswith("/graph.html"))
         self.assertNotIn(str(self.case), json.dumps(result))
         self.assertNotIn("archive_sha256", json.dumps(result))
@@ -83,9 +86,9 @@ class WorkflowSummaryTests(unittest.TestCase):
     def test_reports_are_bounded_by_recency_and_size_before_open(self):
         directories = [self.report(number) for number in range(1, 5)]
         for number, directory in enumerate(directories, 1):
-            os.utime(directory, ns=(number, number))
+            os.utime(directory / "plot.json", ns=(number, number))
         (directories[-1] / "plot.json").write_bytes(b"x" * 1025)
-        os.utime(directories[-1], ns=(4, 4))
+        os.utime(directories[-1] / "plot.json", ns=(4, 4))
         opened = []
         original = Path.open
 
@@ -106,13 +109,42 @@ class WorkflowSummaryTests(unittest.TestCase):
         invalid = ({"case_id": "b" * 32}, {"run_id": "b" * 16}, {"goal": "unknown"},
                    {"schema_version": True}, {"schema_version": 2}, {"query": []},
                    {"node_count": True}, {"edge_count": -1}, {"transaction_count": "1"},
-                   {"created_at": None}, {"input_snapshot_version": True}, {"csv_export_version": 1})
+                   {"created_at": None}, {"input_snapshot_version": True}, {"csv_export_version": 1},
+                   {"display_edge_count": True}, {"display_edge_count": -1},
+                   {"display_edge_count": 3}, {"display_edge_count": "1"},
+                   {"display_edge_count": 1.0}, {"display_edge_count": None})
         for number, changes in enumerate(invalid, 2):
             self.report(number, **changes)
-        unfinished = self.report(20)
+        unfinished = self.report(99)
         (unfinished / "SHA256SUMS").unlink()
         result = case_workflow(self.case, lightweight=True)
         self.assertEqual([item["id"] for item in result["plots"]], [good.name])
+        self.assertNotIn("display_edge_count", result["plots"][0])
+
+    def test_public_plot_exposes_only_valid_optional_display_counts(self):
+        value = {"edge_count": 3}
+        self.assertEqual(public_plot(value), value)
+        for count in (0, 1, 3):
+            with self.subTest(count=count):
+                self.assertEqual(public_plot({**value, "display_edge_count": count}),
+                                 {**value, "display_edge_count": count})
+        for count in (None, True, -1, 4, 1.0, "1", {}, []):
+            with self.subTest(count=count):
+                self.assertEqual(public_plot({**value, "display_edge_count": count}), value)
+
+    def test_unverified_optional_text_cannot_break_preview_library_rendering(self):
+        # The UI compares notice.includes(coverage_notice), and uses the hop
+        # reference and board name as text. JSON scalar types must not escape
+        # metadata projection merely because they pass the public field list.
+        self.report(notice=1, coverage_notice="Saved coverage", hop_reference_name=True,
+                    board_name=1.5, publication_notice=False, input_snapshot_at=7)
+        item, = case_workflow(self.case, lightweight=True)["plots"]
+        self.assertEqual(item["coverage_notice"], "Saved coverage")
+        for key in ("notice", "hop_reference_name", "board_name", "publication_notice", "input_snapshot_at"):
+            self.assertNotIn(key, item)
+        self.assertTrue(item["validation_pending"])
+        self.assertFalse(item["reviewable"])
+        self.assertTrue(item["artifact"]["preview_url"].endswith("/graph.html"))
 
     def test_symlink_reports_directories_and_artifacts_are_not_exposed(self):
         good = self.report()

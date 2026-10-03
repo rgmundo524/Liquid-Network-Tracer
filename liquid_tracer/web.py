@@ -21,7 +21,7 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from .common import TraceError, parse_outpoint, read_json
 from .inspection import parse_transaction_hashes
@@ -545,12 +545,15 @@ class LocalServer(ThreadingHTTPServer):
     def pegout_artifact(self, case, preview_id):
         from .pegouts import reviewed_pegouts, preview_files as pegout_files
         from .plot_csv import csv_links
+        from .layout_overview import NAVIGATION_NAME
 
         graph, _ = reviewed_pegouts(case, preview_id)
         directory = safe_path(case, ["previews", preview_id])
         identity = read_case(case)["case_id"]
         product = {"preview_id": preview_id, "downloads": []}
         for name in sorted(pegout_files(directory)):
+            if NAVIGATION_NAME.fullmatch(name):
+                continue
             path = safe_path(case, ["previews", preview_id, name])
             if not path.is_file():
                 continue
@@ -707,9 +710,12 @@ class LocalServer(ThreadingHTTPServer):
         return artifacts
 
     def artifact_links(self, case, relative, names):
+        from .layout_overview import NAVIGATION_NAME
         product = {"downloads": []}
         case_id = read_case(case)["case_id"]
         for name in sorted(names):
+            if NAVIGATION_NAME.fullmatch(name):
+                continue
             parts = [*relative, name]
             if self.artifact(case, parts).is_file():
                 url = "/files/" + case_id + "/" + "/".join(map(quote, parts))
@@ -1144,6 +1150,7 @@ class LocalServer(ThreadingHTTPServer):
         if (parts[0] == "exports") != (kind == "csv"):
             raise RequestError("File not found", 404)
         if kind in ("pegouts", "plots"):
+            from .layout_overview import verified_navigation_file
             if kind == "plots":
                 from .plots import reviewed_plot as review, plot_files as files
             else:
@@ -1152,12 +1159,21 @@ class LocalServer(ThreadingHTTPServer):
             directory = safe_path(case, parts[:2])
             if parts[2] not in files(directory):
                 raise RequestError("File not found", 404)
+            navigation = verified_navigation_file(directory, parts[2])
+            if navigation is not None:
+                return navigation
             review(case, parts[1])
             return safe_path(case, parts)
         expected = {"mermaid": PREVIEW_NAMES, "csv": EXPORT_NAMES | LEGACY_EXPORT_NAMES, "elk": LAYOUT_NAMES,
                     "compact": COMPACTION_NAMES, "connections": CONNECTION_NAMES | LEGACY_CONNECTION_NAMES}[kind]
         if kind in ("elk", "compact", "connections"):
             expected = expected | LAYOUT_DETAIL_NAMES
+            from .layout_overview import navigation_files, verified_navigation_file
+            directory = safe_path(case, parts[:2])
+            navigation = navigation_files(directory)
+            expected = expected | navigation
+            if navigation and parts[2] in navigation | {"graph.html", "details.html", "details.json"} and kind in ("compact", "connections"):
+                return verified_navigation_file(directory, parts[2])
         if parts[2] not in expected:
             raise RequestError("File not found", 404)
         return safe_path(case, parts)
@@ -1518,7 +1534,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise RequestError("Send an application/json request.", 415)
 
     def send(self, status, data, content_type="application/json; charset=utf-8", *, preview=False, download=None,
-             explorer_links=False):
+             explorer_links=False, preview_navigation=False):
         raw = json.dumps(data).encode("utf-8") if content_type.startswith("application/json") and not isinstance(data, bytes) else data
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -1528,6 +1544,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         preview_sandbox = "sandbox allow-popups allow-popups-to-escape-sandbox" if explorer_links else "sandbox"
+        if preview_navigation:
+            # Static, script-free section pages must retain their origin for
+            # relative links to pass the server's Fetch Metadata checks.
+            # Scripts, forms, embedding and network requests remain forbidden.
+            preview_sandbox += " allow-same-origin"
         self.send_header("Content-Security-Policy", (
             preview_sandbox + "; default-src 'none'; img-src data:; style-src 'unsafe-inline'; frame-ancestors 'self'"
             if preview else "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
@@ -1565,9 +1586,22 @@ class Handler(BaseHTTPRequestHandler):
             self.connection.settimeout(10)
             self.security(mutation)
             parsed = urlsplit(self.path)
-            if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+            if parsed.scheme or parsed.netloc or parsed.fragment:
                 raise RequestError("Route not found", 404)
             parts = unquote(parsed.path).strip("/").split("/")
+            query = {}
+            if parsed.query:
+                if mutation or len(parts) != 4 or parts[:2] != ["api", "cases"] or parts[3] != "plots":
+                    raise RequestError("Route not found", 404)
+                try:
+                    if len(parsed.query) > 1024:
+                        raise ValueError
+                    values = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=2)
+                    if set(values) != {"cursor"} or len(values["cursor"]) != 1 or not values["cursor"][0]:
+                        raise ValueError
+                    query["cursor"] = values["cursor"][0]
+                except ValueError:
+                    raise RequestError("Invalid saved-preview cursor") from None
             if mutation:
                 # Only reviewed import routes accept larger, bounded text bodies.
                 is_import = (len(parts) == 4 and parts[:2] == ["api", "cases"]
@@ -1596,7 +1630,7 @@ class Handler(BaseHTTPRequestHandler):
                         result, status = self.post(parts, body)
                 self.send(status, result)
             else:
-                self.get(parts)
+                self.get(parts, query)
         except (BrokenPipeError, ConnectionResetError):
             # Do not log a browser disconnect as an action failure or attempt
             # another response on the same closed connection.
@@ -1607,7 +1641,7 @@ class Handler(BaseHTTPRequestHandler):
             print("Local UI request failed: " + str(error), file=sys.stderr)
             self.send(400, {"error": "Request could not be completed. Check the entered values and saved investigation; details are in the launching terminal."})
 
-    def get(self, parts):
+    def get(self, parts, query=None):
         if parts == ["api", "session"]:
             self.send(200, self.server.session())
         elif parts == ["api", "jobs"]:
@@ -1649,6 +1683,18 @@ class Handler(BaseHTTPRequestHandler):
             result = (investigation_views.collection(case, metadata, parts[4]) if parts[3] == "collection" else
                       investigation_views.shared_collection(self.server.root, case, metadata, parts[4]))
             self.send(200, result)
+        elif len(parts) == 4 and parts[:2] == ["api", "cases"] and parts[3] == "plots":
+            from .workflow_api import plot_summary_page
+            case, _ = self.server.case(parts[2])
+            self.send(200, plot_summary_page(case, (query or {}).get("cursor")))
+        elif len(parts) == 6 and parts[:2] == ["api", "cases"] and parts[3] == "plots" and parts[5] == "summary":
+            from .workflow_api import plot_summary
+            case, _ = self.server.case(parts[2])
+            try:
+                result = plot_summary(case, parts[4])
+            except (TraceError, OSError, ValueError, TypeError, KeyError):
+                raise RequestError("Saved preview is unavailable", 404) from None
+            self.send(200, result)
         elif len(parts) == 5 and parts[:2] == ["api", "cases"] and parts[3] == "plots":
             from .workflow_api import selected_plot
             case, _ = self.server.case(parts[2])
@@ -1683,8 +1729,11 @@ class Handler(BaseHTTPRequestHandler):
             if not path.is_file():
                 raise RequestError("File not found", 404)
             content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            from .layout_overview import navigation_files
+            navigation = navigation_files(path.parent) if path.suffix == ".html" else frozenset()
             self.send(200, path.read_bytes(), content_type, preview=path.suffix in (".html", ".svg"),
                       download=None if path.suffix == ".html" else path.name,
+                      preview_navigation=bool(navigation and path.name in navigation | {"graph.html", "details.html"}),
                       explorer_links=parts[3].split("-")[1] in ("elk", "compact", "connections", "pegouts", "plots") and path.suffix in (".html", ".svg"))
         else:
             path = safe_path(self.server.assets, ["index.html"] if parts == [""] else parts)

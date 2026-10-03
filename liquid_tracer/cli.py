@@ -49,7 +49,7 @@ def connector_arguments(command):
 def context_arguments(command):
     choices = command.add_mutually_exclusive_group()
     choices.add_argument("--group-context-inputs", dest="group_context_inputs", action="store_true", default=None,
-                         help="Summarize isolated external input addresses; retain every input connector")
+                         help="Summarize isolated external addresses and bundle repeated context inputs; retain every input record")
     choices.add_argument("--ungroup-context-inputs", dest="group_context_inputs", action="store_false",
                          help="Display external input addresses individually (default: investigation setting)")
 
@@ -248,6 +248,8 @@ def parser():
                           help="Maximum endpoint distance for peg-outs, or starter path length with --connection-scope hop_limited")
         plot.add_argument("--connection-scope", choices=("all_saved", "hop_limited"), default="all_saved",
                           help="Starter connections: all saved paths, or paths within --max-hops transaction steps")
+        plot.add_argument("--pegout-lbtc-limit",
+                          help="Stop at this cumulative public L-BTC peg-out amount; include the crossing output")
         plot.add_argument("--include-unspent", action="store_true",
                           help="Include paths to outputs recorded as unspent in peg-out plots")
         plot.add_argument("--include-unspendable", action="store_true",
@@ -1408,7 +1410,7 @@ def main(argv=None, *, progress=None, diagnostics=None):
             from .plots import preview_plot
             print(json.dumps(preview_plot(args.case, args.goal, args.run,
                 min_hops=args.min_hops, max_hops=args.max_hops,
-                connection_scope=args.connection_scope,
+                connection_scope=args.connection_scope, pegout_lbtc_limit=args.pegout_lbtc_limit,
                 include_unspent=args.include_unspent, include_unspendable=args.include_unspendable,
                 include_context=args.include_context,
                 layout_mode=args.layout_mode, board_record_id=args.board_record_id,
@@ -1419,7 +1421,7 @@ def main(argv=None, *, progress=None, diagnostics=None):
             from .investigation_boards import generate_and_sync
             print(json.dumps(generate_and_sync(args.case, args.goal, args.run,
                 min_hops=args.min_hops, max_hops=args.max_hops,
-                connection_scope=args.connection_scope,
+                connection_scope=args.connection_scope, pegout_lbtc_limit=args.pegout_lbtc_limit,
                 include_unspent=args.include_unspent, include_unspendable=args.include_unspendable,
                 include_context=args.include_context,
                 layout_mode=args.layout_mode, board_record_id=args.board_record_id,

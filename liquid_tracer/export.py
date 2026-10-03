@@ -516,6 +516,8 @@ def _svg_edge_route(start, end):
 
 
 def svg_graph(graph):
+    from .context_connectors import display_graph
+    graph = display_graph(graph)
     import textwrap
     from .connector_styles import stroke_width
     from .legend import legend_rows, legend_notes
@@ -572,7 +574,8 @@ def svg_graph(graph):
         color = edge_color(edge)
         caption = (f'<text x="{label_x}" y="{label_y-10}" text-anchor="middle" font-size="11" fill="{color}">{html.escape(edge["label"])}</text>'
                    if caption_text(edge) else '')
-        chunks.append(f'<g class="edge {"context" if context else "tracked"}" data-edge-key="{html.escape(edge["id"], quote=True)}"><title>{html.escape(edge["label"] + " | " + edge["outpoint"] + " | " + edge["quantity"])}</title>'
+        title = " | ".join(value for value in (edge["label"], edge.get("outpoint"), edge["quantity"]) if value)
+        chunks.append(f'<g class="edge {"context" if context else "tracked"}" data-edge-key="{html.escape(edge["id"], quote=True)}"><title>{html.escape(title)}</title>'
             f'<path d="{path}" fill="none" stroke="{color}" stroke-width="{stroke_width(edge["role"])}" marker-end="url(#{edge_marker_id(edge)})"/>'
             f'{caption}</g>')
     for node in graph["nodes"]:

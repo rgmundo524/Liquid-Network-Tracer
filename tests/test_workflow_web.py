@@ -365,6 +365,33 @@ class WorkflowWebTests(unittest.TestCase):
             self.assertTrue(generated.call_args.kwargs["include_context"])
             self.assertEqual(generated.call_args.kwargs["max_items"], 120)
 
+    def test_cumulative_limit_request_is_validated_and_forwarded_before_enqueue(self):
+        case, route, run = self.collected()
+        body = {"action": "plot", "goal": "pegouts", "run_id": run, "min_hops": 0, "max_hops": 10}
+        with patch.object(self.server, "start_job", return_value={"id": "plot"}) as start:
+            self.success(route + "/actions", {**body, "pegout_lbtc_limit": "060.00000000"}, 202)
+            args = start.call_args.args[0]
+            self.assertEqual(args[args.index("--pegout-lbtc-limit") + 1], "60")
+            self.assertFalse(start.call_args.kwargs["live"])
+            self.success(route + "/actions", body, 202)
+            self.assertNotIn("--pegout-lbtc-limit", start.call_args.args[0])
+            start.reset_mock()
+            for invalid in (None, True, 60, 1.2, "", "0", "-1", "1e2", "0.000000001"):
+                with self.subTest(invalid=invalid):
+                    self.assertEqual(self.request(route + "/actions", {**body, "pegout_lbtc_limit": invalid})[0], 400)
+            for goal in ("full", "connections"):
+                self.assertEqual(self.request(route + "/actions", {**body, "goal": goal, "pegout_lbtc_limit": "60"})[0], 400)
+            start.assert_not_called()
+
+    def test_cli_forwards_exact_limit_to_preview_and_combined_publication(self):
+        case, _, _ = self.collected()
+        for command, target in (("plot", "liquid_tracer.plots.preview_plot"),
+                                ("plot-sync", "liquid_tracer.investigation_boards.generate_and_sync")):
+            with self.subTest(command=command), contextlib.redirect_stdout(io.StringIO()), patch(target, return_value={}) as call:
+                self.assertEqual(main([command, "--case", str(case), "--goal", "pegouts",
+                                       "--pegout-lbtc-limit", "60.00000001"]), 0)
+                self.assertEqual(call.call_args.kwargs["pegout_lbtc_limit"], "60.00000001")
+
     def test_plot_endpoint_options_are_optional_strict_booleans_and_pegout_only(self):
         case, route, run = self.collected()
         body = {"action": "plot", "goal": "pegouts", "run_id": run, "min_hops": 0, "max_hops": 10}
@@ -595,7 +622,11 @@ class WorkflowWebTests(unittest.TestCase):
             "run_id": run, "min_hops": 0, "max_hops": 10}, 202))
         self.assertEqual(result["goal"], "full")
         self.assertEqual(result["run_id"], run)
-        self.assertTrue(result["reviewable"])
+        self.assertFalse(result["reviewable"])
+        self.assertTrue(result["validation_pending"])
+        checked = self.success(route + "/plots/" + result["preview_id"])
+        self.assertTrue(checked["reviewable"])
+        self.assertFalse(checked["validation_pending"])
         self.assertIn(b"svg", self.success(result["artifact"]["preview_url"]).lower())
         self.assertEqual(self.success(route)["plots"][0]["preview_id"], result["preview_id"])
 

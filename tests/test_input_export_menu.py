@@ -77,7 +77,7 @@ class InputExportMenuTests(unittest.IsolatedAsyncioTestCase):
                 process.assert_not_called()
 
     async def test_import_exports_preserve_paste_review_and_approval_on_success_and_error(self):
-        from textual.widgets import Button, Checkbox, Static, TextArea
+        from textual.widgets import Button, Static, TextArea
         scenarios = [
             (("addresses-import", "input-import-advanced-attributions"), "import", "Address,Name\nSYNTHETIC-draft,Draft name\n", "Name", "Saved name"),
             (("name-colors", "name-color-import", "input-import-advanced-name-colors"), "name-color-import", "Name,Color\nSaved name,#abcdef\n", "Color", "#123456"),
@@ -95,24 +95,25 @@ class InputExportMenuTests(unittest.IsolatedAsyncioTestCase):
                         screen = app.screen
                         screen.query_one("#" + prefix + "-text", TextArea).text = draft
                         await pilot.pause()
+                        self.assertTrue(screen.query_one("#" + prefix + "-apply", Button).disabled)
                         await self.click(app, pilot, "#" + prefix + "-preview")
                         self.assertTrue(screen.review["valid"])
-                        screen.query_one("#" + prefix + "-approved", Checkbox).value = True
-                        await pilot.pause()
                         reviewed = screen.review
+                        approval = reviewed["approval_sha256"]
+                        self.assertTrue(approval)
                         summary = str(screen.query_one("#" + prefix + "-summary", Static).render())
                         await self.click(app, pilot, "#" + prefix + "-export")
                         rows = self.exported_rows(self.exported_path(screen, prefix))
                         self.assertEqual(len(rows), 1)
                         self.assertEqual(rows[0][column], expected)
                         self.assertIs(screen.review, reviewed)
-                        self.assertTrue(screen.query_one("#" + prefix + "-approved", Checkbox).value)
+                        self.assertEqual(screen.review["approval_sha256"], approval)
                         self.assertFalse(screen.query_one("#" + prefix + "-apply", Button).disabled)
                         with patch("liquid_tracer.input_export.save_input_export", side_effect=TraceError("Disk unavailable")):
                             await self.click(app, pilot, "#" + prefix + "-export")
                         self.assertIn("Disk unavailable", str(screen.query_one("#" + prefix + "-export-status", Static).render()))
                         self.assertIs(screen.review, reviewed)
-                        self.assertTrue(screen.query_one("#" + prefix + "-approved", Checkbox).value)
+                        self.assertEqual(screen.review["approval_sha256"], approval)
                         self.assertFalse(screen.query_one("#" + prefix + "-apply", Button).disabled)
                         self.assertEqual(screen.query_one("#" + prefix + "-text", TextArea).text, draft)
                         self.assertEqual(str(screen.query_one("#" + prefix + "-summary", Static).render()), summary)

@@ -70,7 +70,7 @@ class LbtcDisplayTests(unittest.TestCase):
                 caption = edge["label"] + " · " + quantity
                 self.assertEqual(connectors[key]["body"]["captions"][0]["content"], caption)
                 self.assertIn('"' + caption + '"', source)
-                self.assertEqual(titles[key], edge["outpoint"] + " | " + quantity)
+                self.assertEqual(titles[key].split(" | "), [edge["label"], edge["outpoint"], quantity])
         self.assertEqual(edges[f"out:{A}:0"]["details"]["value"], 1_000_000)
         self.assertEqual(edges[f"in:{B}:0"]["details"]["vin"]["prevout"]["value"], 1_000_000)
         self.assertEqual(state, original)

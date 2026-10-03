@@ -8,7 +8,7 @@ from unittest.mock import patch
 from liquid_tracer.common import TraceError
 from liquid_tracer.elk_errors import ElkWorkerFailure
 from liquid_tracer.elk_layout import _request_graph, _worker, optimize_graph
-from liquid_tracer.trace_sections import (MAX_SECTION_NODES, MAX_SECTION_PORTS, _validate_local,
+from liquid_tracer.trace_sections import (MAX_SECTION_NODES, MAX_SECTION_PORTS, SECTION_LAYOUT_VERSION, _validate_local,
                                          enabled, iter_candidates, plan)
 from tests.test_elk_layout import HAS_ELK, synthetic_candidate
 from tests.test_trace_layout import fixture
@@ -123,7 +123,7 @@ class TraceSectionsTests(unittest.TestCase):
         self.assertEqual({n['id'] for n in result['nodes']}, {n['id'] for n in graph['nodes']})
         self.assertEqual([(e['id'], e['source'], e['target'], e['outpoint']) for e in result['edges']],
                          [(e['id'], e['source'], e['target'], e['outpoint']) for e in graph['edges']])
-        self.assertEqual(result['layout']['search']['section_layout_version'], 1)
+        self.assertEqual(result['layout']['search']['section_layout_version'], SECTION_LAYOUT_VERSION)
         self.assertEqual(result['layout']['search']['attempted_count'], 2)
         self.assertEqual(result['layout']['metrics']['after']['node_overlaps'], 0)
         self.assertLess(result['layout']['trace_layout']['spine_alignment'], .01)
@@ -137,11 +137,12 @@ class TraceSectionsTests(unittest.TestCase):
             calls.append(request)
             return synthetic_candidate(request, seeds)
         metadata = {}
-        with patch('liquid_tracer.trace_sections.MAX_SECTION_NODES', 3), \
+        with patch('liquid_tracer.trace_sections.MAX_SECTION_NODES', 5), \
              patch('liquid_tracer.trace_sections.iter_sections', side_effect=sections):
             result = list(iter_candidates(graph, request, [1], worker, lambda i,s: lambda e: None, metadata))
         self.assertGreater(len(calls), 1)
-        self.assertTrue(all(len(call['children']) <= 3 for call in calls))
+        self.assertTrue(all(len(call['children']) <= 5 for call in calls))
+        self.assertLessEqual(metadata['max_section_nodes'], 5)
         self.assertEqual(metadata['execution'], 'parallel')
         self.assertEqual(len(result), 1)
         self.assertEqual(len(result[0][2][0]['nodes']), len(graph['nodes']))
@@ -201,7 +202,7 @@ class TraceSectionsTests(unittest.TestCase):
              patch.dict(os.environ, {'XDG_CACHE_HOME': cache, 'LIQUID_RENDER_HEAP_MB': '512'}), \
              patch('liquid_tracer.trace_sections.MIN_SECTION_NODES', 1):
             result = optimize_graph(graph, 'elbowed', layout_attempts=1)
-        self.assertEqual(result['layout']['search']['section_layout_version'], 1)
+        self.assertEqual(result['layout']['search']['section_layout_version'], SECTION_LAYOUT_VERSION)
         self.assertEqual(result['layout']['metrics']['after']['node_overlaps'], 0)
         self.assertEqual(result['layout']['metrics']['after']['node_intersections'], 0)
         self.assertLess(result['layout']['trace_layout']['spine_alignment'], .01)

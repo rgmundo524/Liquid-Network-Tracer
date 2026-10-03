@@ -47,7 +47,8 @@ def plot_files(directory=None):
         if type(report["csv_export_version"]) is not int or report["csv_export_version"] != 1 or report.get("goal") != "pegouts":
             raise TraceError("Unsupported saved plot CSV exports; regenerate the plot")
         files |= PEGOUT_CSV_FILES
-    return files  # Earlier immutable previews keep their original manifest.
+    from .layout_overview import navigation_files
+    return files | navigation_files(directory)  # Earlier immutable previews retain their manifest.
 
 
 def _ordinary(path):
@@ -225,7 +226,7 @@ def _source(case, run_id, *, progress=None, prepared=None):
 
 def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_unspendable=False,
            include_context=False, transaction_io="complete", attribution_hop_limits="ignore",
-           connection_scope="all_saved"):
+           connection_scope="all_saved", pegout_lbtc_limit=None):
     from .connections import validate_hops, validate_connection_scope
     from .pegout_paths import validate_query
     if not isinstance(goal, str) or goal not in GOALS:
@@ -240,11 +241,14 @@ def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_un
         raise TraceError("Include context addresses must be true or false")
     if goal != "pegouts" and include_context:
         raise TraceError("Include context addresses applies only to peg-out paths plots")
+    if goal != "pegouts" and pegout_lbtc_limit is not None:
+        raise TraceError("A cumulative L-BTC limit applies only to peg-out paths plots")
     if goal == "pegouts":
         return validate_query(seeds=state["seeds"], min_hops=min_hops, max_hops=max_hops,
                               include_unspent=include_unspent, include_unspendable=include_unspendable,
                               include_context=include_context, hop_reference_name=reference_name(state),
-                              transaction_io=transaction_io, attribution_hop_limits=attribution_hop_limits)
+                              transaction_io=transaction_io, attribution_hop_limits=attribution_hop_limits,
+                              pegout_lbtc_limit=pegout_lbtc_limit)
     reference = {"hop_reference_name": reference_name(state)} if reference_name(state) else {}
     if goal == "connections":
         if transaction_io not in (None, "complete"):
@@ -360,7 +364,7 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
                  include_unspendable=False, include_context=False, open_browser=False, progress=None,
                  layout_mode="fresh", board_record_id=None, token=None, transport=http,
                  interval=.02, workers=4, layout_settings=None, data_source="investigation", dataset_id=None,
-                 connection_scope="all_saved", _preflight=None, _board_lock_held=False):
+                 connection_scope="all_saved", pegout_lbtc_limit=None, _preflight=None, _board_lock_held=False):
     """Plot saved evidence afresh, or review additions against a selected live board."""
     from .cli import open_preview
     from .elk_layout import optimize_graph
@@ -390,7 +394,7 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
                        "hop_reference_name": metadata.get("run_defaults", {}).get("hop_reference_name", "")}
         query = _query(goal, preliminary, min_hops, max_hops, include_unspent=include_unspent,
                        include_unspendable=include_unspendable, include_context=include_context,
-                       connection_scope=connection_scope)
+                       connection_scope=connection_scope, pegout_lbtc_limit=pegout_lbtc_limit)
         bound = query.get("max_hops") if goal in ("pegouts", "connections") else None
         scope = query.get("connection_scope") if goal == "connections" else None
         with timings.measure("shared_projection"):
@@ -411,7 +415,7 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
                   "address_tx_counts": deepcopy(state["address_tx_counts"])}
         query = _query(goal, state, min_hops, max_hops, include_unspent=include_unspent,
                        include_unspendable=include_unspendable, include_context=include_context,
-                       connection_scope=connection_scope)
+                       connection_scope=connection_scope, pegout_lbtc_limit=pegout_lbtc_limit)
         settings = _effective_settings(settings, goal, query)
         with timings.measure("build_graph"):
             graph = _graph(state, goal, query, settings, initial_layout=False)
@@ -447,6 +451,10 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
                                            layout_attempts=settings["layout_attempts"], progress=progress)
         coverage = _coverage(state)
         graph["notice"] = coverage["coverage_notice"] + " " + graph["notice"]
+        from .context_connectors import summaries
+        display_edge_count = len(graph["edges"]) - sum(
+            len(edge["details"]["context_summary"]["member_edge_ids"]) - 1
+            for edge in summaries(graph))
         report = {"schema_version": 1, "case_id": state["case_id"], "run_id": state["run_id"],
                   "goal": goal, "query": query, "created_at": now(), **coverage, **fingerprints, **board_fields,
                   "input_snapshot_version": 1, "input_snapshot_at": inputs["captured_at"],
@@ -454,6 +462,7 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
                   "layout_settings": deepcopy(settings), "settings_sha256": digest(canonical(settings)),
                   "min_hops": query.get("min_hops", 0), "max_hops": query.get("max_hops"),
                   "node_count": len(graph["nodes"]), "edge_count": len(graph["edges"]),
+                  "display_edge_count": display_edge_count,
                   "transaction_count": sum(node["kind"] == "transaction" for node in graph["nodes"]),
                   "status": "plotted" if graph["nodes"] else "empty"}
         if state.get("collection_source", {}).get("kind") == "shared":
@@ -470,7 +479,7 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
             report.update(match_count=graph["pegouts"]["match_count"], status=graph["pegouts"]["status"])
             report["pegout_lbtc_summary"] = pegout_lbtc_summary(graph, state)
             report["csv_export_version"] = 1
-            for key in ("endpoint_count", "endpoint_counts", "context_edge_count"):
+            for key in ("endpoint_count", "endpoint_counts", "context_edge_count", "pegout_limit_summary"):
                 if key in graph["pegouts"]:
                     report[key] = deepcopy(graph["pegouts"][key])
         graph["plot"] = report
@@ -502,9 +511,11 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
             raise
         if progress:
             progress({"phase": "exporting_plot", "completed": 1, "total": 1})
-        return {**_summary(graph, destination.name), **result, "directory": str(destination.resolve()),
-                "timings": timings.snapshot(),
-                "browser_opened": open_preview(result["html"]) if open_browser else False}
+        from .preview_numbers import numbered_previews
+        result = {**_summary(graph, destination.name), **result, "directory": str(destination.resolve()),
+                  "timings": timings.snapshot(),
+                  "browser_opened": open_preview(result["html"]) if open_browser else False}
+        return numbered_previews(case, [result], identity=state["case_id"])[0]
 
 
 def _snapshot(case, preview_id, *, with_inputs=False):
@@ -547,6 +558,10 @@ def _snapshot(case, preview_id, *, with_inputs=False):
     if name != reference_name(report["query"]) or name != reference_name(graph):
         raise TraceError("Saved plot hop reference disagrees with its graph; regenerate the plot")
     validate_plan(plan)
+    if ("display_edge_count" in report
+            and (type(report["display_edge_count"]) is not int
+                 or report["display_edge_count"] != len(plan["connectors"]))):
+        raise TraceError("Saved plot displayed connection count disagrees with its Miro plan")
     if plot_plan(graph) != plan:
         raise TraceError("Saved plot and its Miro plan disagree")
     if report["goal"] == "pegouts":
@@ -555,8 +570,12 @@ def _snapshot(case, preview_id, *, with_inputs=False):
         if (canonical(graph.get("graph_options", {}).get("pegout_query")) != canonical(query)
                 or canonical(pegouts.get("query")) != canonical(query)
                 or any(canonical(report.get(key)) != canonical(pegouts.get(key))
-                       for key in ("match_count", "endpoint_count", "endpoint_counts", "context_edge_count", "status"))):
+                       for key in ("match_count", "endpoint_count", "endpoint_counts", "context_edge_count", "status",
+                                   "pegout_limit_summary"))):
             raise TraceError("Saved endpoint options disagree with the graph; regenerate the plot")
+        if query.get("pegout_lbtc_limit") is not None or "pegout_limit_summary" in report:
+            from .pegout_limit import validate_pegout_limit_summary
+            validate_pegout_limit_summary(report.get("pegout_limit_summary"), query)
         if "pegout_lbtc_summary" in report:
             from .pegout_csv import validate_pegout_lbtc_summary
             validate_pegout_lbtc_summary(report["pegout_lbtc_summary"], report.get("match_count"))
@@ -623,7 +642,8 @@ def _review_source(case, graph, source_cache=None, inputs=None):
                       include_context=query.get("include_context", False),
                       transaction_io=query.get("transaction_io"),
                       attribution_hop_limits=query.get("attribution_hop_limits"),
-                      connection_scope=query.get("connection_scope"))
+                      connection_scope=query.get("connection_scope"),
+                      pegout_lbtc_limit=query.get("pegout_lbtc_limit"))
     settings = _snapshot_settings(graph)
     if settings is not None:
         from .export import PRESENTATION_VERSION
@@ -708,4 +728,5 @@ def list_plots(case):
         except (TraceError, OSError, ValueError, TypeError, KeyError) as error:
             reason = str(error)
         result.append(_summary(graph, directory.name, reviewable=reason is None, reason=reason))
-    return sorted(result, key=lambda value: (value["created_at"], value["id"]), reverse=True)
+    from .preview_numbers import numbered_previews
+    return numbered_previews(case, sorted(result, key=lambda value: (value["created_at"], value["id"]), reverse=True))

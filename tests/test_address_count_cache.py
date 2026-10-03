@@ -1,6 +1,7 @@
 """Large count lookups persist only new observations between final exports."""
 import copy
 import contextlib
+import fcntl
 import os
 import sqlite3
 import tempfile
@@ -56,6 +57,34 @@ class AddressCountCacheTests(unittest.TestCase):
         before = set(self.case.iterdir())
         self.assertEqual(_cache(self.case, self.state), {})
         self.assertEqual(set(self.case.iterdir()), before)
+
+    def test_checkpointed_cache_read_preserves_files_and_excludes_a_writer(self):
+        lock_path = self.case / "address-counts.lock"
+        lock_path.touch()
+        journal = self.journal()
+        journal.write({self.address: self.observation()})
+        journal.close()
+        before = {path.name: path.read_bytes() for path in self.case.iterdir() if path.is_file()}
+        with read_snapshot(self.case, self.state["case_id"], SOURCE, _valid) as rows:
+            self.assertEqual(dict(rows), {self.address: self.observation()})
+            with lock_path.open("a") as writer:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with lock_path.open("a") as writer:
+            fcntl.flock(writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.assertEqual(_cache(self.case, self.state), {self.address: self.observation()})
+        self.assertEqual(before, {path.name: path.read_bytes() for path in self.case.iterdir() if path.is_file()})
+
+    def test_live_writer_and_stranded_wal_use_complete_wal_snapshot(self):
+        with (self.case / "address-counts.lock").open("a") as writer:
+            fcntl.flock(writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            journal = self.journal()
+            journal.write({self.address: self.observation()})
+            self.assertGreater((self.case / "address-counts.sqlite3-wal").stat().st_size, 0)
+            self.assertEqual(_cache(self.case, self.state), {self.address: self.observation()})
+            # A stranded WAL also matters when no collector owns the lock.
+            fcntl.flock(writer, fcntl.LOCK_UN)
+            self.assertEqual(_cache(self.case, self.state), {self.address: self.observation()})
 
     def test_reader_at_first_publication_does_not_block_initial_writer(self):
         with contextlib.ExitStack() as readers:

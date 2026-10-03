@@ -770,6 +770,10 @@ def compact_graph(graph, progress=None):
     identities, labels, dimensions, fee order and evidence metadata survive.
     The ELK algorithm identity remains intact; this pass has a separate report.
     """
+    from .context_connectors import display_graph, restore_graph
+    displayed = display_graph(graph)
+    if displayed is not graph:
+        return restore_graph(compact_graph(displayed, progress), graph)
     if not isinstance(graph, dict) or graph.get("layout", {}).get("algorithm") != ALGORITHM:
         raise TraceError("Compact graph requires an existing ELK layout; create an ELK preview first")
     _validate_graph(graph, graph.get("graph_options", {}).get("connector_style", "straight"))

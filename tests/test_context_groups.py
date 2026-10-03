@@ -171,7 +171,7 @@ class ContextGroupTests(unittest.TestCase):
         fewer = group_context_inputs(self.graph(), enabled=True)
         self.assertEqual(group["id"], summaries(fewer)[0]["id"])
 
-    def test_eight_input_summary_retains_visible_input_captions(self):
+    def test_eight_input_summary_retains_input_evidence_with_one_visible_caption(self):
         graph = self.graph(9, continuing=(8,))
         result = group_context_inputs(graph, enabled=True)
         group, = summaries(result)
@@ -180,8 +180,11 @@ class ContextGroupTests(unittest.TestCase):
         self.assertIn("Details in local export", group["label"])
         self.assertTrue(all("caption_display" not in edge for edge in result["edges"]))
         source = mermaid_source(result)
+        self.assertIn("8 context inputs · 8 addresses", source)
+        self.assertIn("vin 8", source)
+        self.assertNotIn("vin 0", source)
         for index in range(9):
-            self.assertIn(f"vin {index}", source)
+            self.assertIn(child_input(index), {edge["id"] for edge in result["edges"]})
 
     def test_ninth_grouped_input_only_changes_caption_presentation(self):
         graph = self.graph(10, continuing=(9,))
@@ -212,10 +215,19 @@ class ContextGroupTests(unittest.TestCase):
         self.assertEqual(build_graph(state), original)
         self.assertEqual(state, original_state)
 
-    def test_mermaid_includes_summary_and_every_original_input_caption(self):
+    def test_mermaid_draws_one_context_summary_and_preserves_remaining_connectors(self):
+        from liquid_tracer.context_connectors import display_graph
         graph = group_context_inputs(self.graph(), enabled=True)
         source = mermaid_source(graph)
         self.assertIn("3 context addresses", source)
+        self.assertEqual(source.count(" -->|"), len(display_graph(graph)["edges"]))
+        self.assertIn("3 context inputs · 3 addresses", source)
+        self.assertIn("vin 3", source)
+
+    def test_legacy_grouped_graph_keeps_every_original_input_caption(self):
+        graph = group_context_inputs(self.graph(), enabled=True)
+        graph.pop("context_connectors")
+        source = mermaid_source(graph)
         self.assertEqual(source.count(" -->|"), len(graph["edges"]))
         for index in range(4):
             self.assertIn(f"vin {index}", source)
@@ -246,7 +258,8 @@ class ContextGroupIntegrationTests(unittest.TestCase):
         validate_plan(plan)
         summary_shape = next(item for item in plan["shapes"] if item["key"] == group["id"])
         self.assertEqual(summary_shape["body"]["data"]["shape"], "rectangle")
-        self.assertEqual(len(plan["connectors"]), len(original_edges))
+        from liquid_tracer.context_connectors import display_graph
+        self.assertEqual(len(plan["connectors"]), len(display_graph(result)["edges"]))
         svg = render_svg(result).decode("utf-8")
         self.assertIn("6 context addresses", svg)
         self.assertIn("Details in local export", svg)

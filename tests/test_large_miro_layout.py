@@ -130,7 +130,15 @@ class LargeMiroLayoutTests(unittest.TestCase):
         for node in value["nodes"]:
             self.assertEqual(self.item(node["id"])["position"],
                              {"x": node["x"], "y": node["y"], "origin": "center"})
-        self.assertEqual(report["created"], len(plan["shapes"]) + len(plan["connectors"]) + len(plan["frames"]))
+        # Frame publication is a separate explicit operation. Ordinary sync
+        # creates the complete drawing while retaining its exact attachments.
+        self.assertEqual(report["created"], len(plan["shapes"]) + len(plan["connectors"]))
+        records = read_json(self.state_path)["items"]
+        self.assertFalse(any(record["endpoint"] == "frames" for record in records.values()))
+        for connector in plan["connectors"]:
+            remote = self.item(connector["key"])
+            for endpoint, attachment in connector.get("attachment", {}).items():
+                self.assertEqual(remote[endpoint]["position"], attachment["position"])
 
 
 if __name__ == "__main__":

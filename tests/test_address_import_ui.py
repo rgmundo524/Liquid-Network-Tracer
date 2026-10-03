@@ -54,9 +54,15 @@ class WebImportTests(unittest.TestCase):
         _, case = self.create(); path, _ = self.server.case(case['id'])
         route = '/api/cases/' + case['id'] + '/address-import'
         self.assertEqual(self.request(route, {'text': A}, headers={'X-Liquid-CSRF': 'wrong'})[0], 403)
-        self.server.active_job = 'busy'
-        try: self.assertEqual(self.request(route, {'text': A})[0], 409)
-        finally: self.server.active_job = None
+        job = test_web.synthetic_running_job(case['id'])
+        self.server.jobs[job['id']] = job
+        before = load_services(path)
+        try:
+            preview = self.success(route, {'text': A})
+            self.assertEqual(self.request(route, {'text': A, 'approve_plan': preview['approval_sha256']})[0], 409)
+            self.assertEqual(load_services(path), before)
+        finally:
+            self.server.jobs.pop(job['id'])
         reviewed = self.success(route, {'text': A}); set_service(path, B)
         self.assertEqual(self.request(route, {'text': A, 'approve_plan': reviewed['approval_sha256']})[0], 400)
         self.assertNotIn(A, load_services(path)['rules'])

@@ -75,7 +75,12 @@ class StarterHopPlotWorkflowTests(unittest.TestCase):
                 self.assertEqual({(row["Transaction Hash"], row["Direction"], row["Number of I/O"])
                                   for row in rows}, expected)
                 self.assertEqual(len(rows), len(expected))
-                self.assertEqual(len(plan["connectors"]), len(graph["edges"]))
+                from liquid_tracer.context_group_miro import evidence
+                from liquid_tracer.context_parallel_miro import input_evidence
+                self.assertEqual(input_evidence(plan), {edge["id"]: evidence(edge) for edge in graph["edges"]})
+                summarized = graph["context_connectors"]["summaries"]
+                reduction = sum(edge["details"]["context_summary"]["input_count"] - 1 for edge in summarized)
+                self.assertEqual(len(plan["connectors"]), len(graph["edges"]) - reduction)
                 saved.append((result, graph, plan, files(Path(result["directory"]))))
         self.assertEqual(len({result["preview_id"] for result, *_ in saved}), 3)
         self.assertEqual(files(self.archive), original)

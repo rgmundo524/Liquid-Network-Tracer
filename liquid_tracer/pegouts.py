@@ -28,8 +28,9 @@ ARCHIVE_FILES = frozenset({"trace.json", "query.json", "evidence-index.json"})
 
 
 def preview_files(directory):
+    from .layout_overview import navigation_files
     directory = Path(directory)
-    return FILES | {name for name in OPTIONAL_FILES
+    return FILES | navigation_files(directory) | {name for name in OPTIONAL_FILES
                     if (directory / name).exists() or (directory / name).is_symlink()}
 
 

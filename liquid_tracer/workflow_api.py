@@ -1,6 +1,8 @@
 """Public HTTP representations for the collection, plot, and board workflow."""
 
 from urllib.parse import quote
+import base64
+import binascii
 import heapq
 import json
 import re
@@ -14,7 +16,11 @@ PLOT_FIELDS = {"id", "preview_id", "run_id", "goal", "min_hops", "max_hops", "cr
                "connection_count", "source_max_hops", "source_run_status", "source_stop_reason",
                "notice", "coverage_notice", "publication_notice", "reviewable", "review_error", "empty", "saved_data_only",
                "layout_mode", "board_record_id", "board_id", "board_name", "hop_reference_name"}
-PLOT_FIELDS.update({"input_snapshot_version", "input_snapshot_at", "validation_pending"})
+PLOT_FIELDS.update({"input_snapshot_version", "input_snapshot_at", "validation_pending",
+                    "preview_number", "preview_number_notice"})
+PLOT_TEXT_FIELDS = {"status", "source_run_status", "source_stop_reason", "notice", "coverage_notice",
+                    "publication_notice", "review_error", "layout_mode", "board_record_id", "board_id",
+                    "board_name", "hop_reference_name", "input_snapshot_at"}
 BOARD_FIELDS = {"id", "record_id", "name", "goal", "board_id", "status", "preview_id", "run_id",
                 "legacy_snapshot", "can_sync", "notice", "pending_count", "created", "reused",
                 "creation_preview_id", "created_board", "reused_board"}
@@ -38,6 +44,20 @@ def public_board(value):
 
 def public_plot(value):
     result = _fields(value, PLOT_FIELDS)
+    # Lightweight reports are deliberately unverified. Invalid optional text
+    # must not reach string-only UI operations while browsing an investigation.
+    for key in PLOT_TEXT_FIELDS:
+        if key in result and result[key] is not None and not isinstance(result[key], str):
+            result.pop(key)
+    display_count, edge_count = value.get("display_edge_count"), value.get("edge_count")
+    if (type(display_count) is int and type(edge_count) is int
+            and 0 <= display_count <= edge_count <= 2 ** 53 - 1):
+        result["display_edge_count"] = display_count
+    if "preview_number" in result and (type(result["preview_number"]) is not int
+                                        or not 1 <= result["preview_number"] <= 2 ** 53 - 1):
+        result.pop("preview_number")
+    if "preview_number_notice" in result and not isinstance(result["preview_number_notice"], str):
+        result.pop("preview_number_notice")
     source = value.get("collection_source")
     if (isinstance(source, dict) and source.get("kind") == "shared"
             and isinstance(source.get("dataset_id"), str) and re.fullmatch(r"[0-9a-f]{32}", source["dataset_id"])
@@ -100,6 +120,13 @@ def public_plot(value):
                 or result.get("query", {}).get("transaction_io") == "complete")
                 and type(context_count) is int and context_count >= 0):
             result["context_edge_count"] = context_count
+        if "pegout_limit_summary" in value and "pegout_lbtc_limit" in result.get("query", {}):
+            from .pegout_limit import validate_pegout_limit_summary
+            try:
+                result["pegout_limit_summary"] = validate_pegout_limit_summary(
+                    value["pegout_limit_summary"], result["query"])
+            except TraceError:
+                pass
         counts = value.get("endpoint_counts")
         if (isinstance(counts, dict) and set(counts) == {"pegout", "unspent", "unspendable"}
                 and all(type(count) is int and count >= 0 for count in counts.values())
@@ -121,6 +148,7 @@ def public_plot(value):
 
 def plot_artifact(case, preview_id, *, verified=False):
     from .plots import reviewed_plot, plot_files
+    from .layout_overview import NAVIGATION_NAME
     from .web import safe_path
     from .common import read_json
     from .plot_csv import csv_links
@@ -131,6 +159,8 @@ def plot_artifact(case, preview_id, *, verified=False):
     identity = read_case(case)["case_id"]
     result = {"preview_id": preview_id, "downloads": []}
     for name in sorted(plot_files(directory)):
+        if NAVIGATION_NAME.fullmatch(name):
+            continue  # Section pages are browsed from graph.html, not thousands of download buttons.
         if not safe_path(case, ["previews", preview_id, name]).is_file():
             continue
         url = "/files/" + identity + "/previews/" + quote(preview_id) + "/" + quote(name)
@@ -161,7 +191,10 @@ def _plot_summary(case, directory, identity):
         raw = stream.read(PLOT_SUMMARY_BYTES + 1)
     if len(raw) > PLOT_SUMMARY_BYTES:
         raise TraceError("Saved plot report is too large")
-    report = json.loads(raw)
+    try:
+        report = json.loads(raw)
+    except (ValueError, RecursionError) as error:
+        raise TraceError("Saved plot report is invalid") from error
     if (not isinstance(report, dict) or type(report.get("schema_version")) is not int
             or report["schema_version"] != 1 or report.get("case_id") != identity
             or report.get("run_id") != directory.name[:16]
@@ -171,6 +204,10 @@ def _plot_summary(case, directory, identity):
             or any(type(report.get(key)) is not int or not 0 <= report[key] <= 2 ** 53 - 1
                    for key in ("node_count", "edge_count", "transaction_count"))):
         raise TraceError("Saved plot report does not match this investigation")
+    if ("display_edge_count" in report
+            and (type(report["display_edge_count"]) is not int
+                 or not 0 <= report["display_edge_count"] <= report["edge_count"])):
+        raise TraceError("Saved plot displayed connection count is invalid")
     files = FILES
     for key, names in (("input_snapshot_version", INPUT_SNAPSHOT_FILES), ("csv_export_version", PEGOUT_CSV_FILES)):
         if key in report:
@@ -184,7 +221,8 @@ def _plot_summary(case, directory, identity):
     if not manifest.is_file():
         raise TraceError("Saved plot is not finished")
     item = public_plot(report)
-    for key in ("id", "preview_id", "review_error", "reason", "reviewable", "validation_pending", "empty"):
+    for key in ("id", "preview_id", "review_error", "reason", "reviewable", "validation_pending", "empty",
+                "preview_number", "preview_number_notice"):
         item.pop(key, None)
     for key in ("match_count", "connection_count", "source_max_hops", "min_hops", "max_hops"):
         if key in item and item[key] is not None and (type(item[key]) is not int or not 0 <= item[key] <= 2 ** 53 - 1):
@@ -209,29 +247,96 @@ def _plot_summary(case, directory, identity):
     return item
 
 
-def plot_summaries(case):
-    """Return bounded, unverified metadata for choosing a saved plot."""
+def _encode_plot_cursor(identity, key):
+    value = json.dumps({"version": 1, "case_id": identity, "before": list(key)}, separators=(",", ":"))
+    return base64.urlsafe_b64encode(value.encode("ascii")).decode("ascii").rstrip("=")
+
+
+def _decode_plot_cursor(cursor, identity):
+    from .plots import PREVIEW_ID
+
+    if cursor is None:
+        return None
+    try:
+        if not isinstance(cursor, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,512}", cursor):
+            raise ValueError
+        raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
+        value = json.loads(raw)
+        if (not isinstance(value, dict) or set(value) != {"version", "case_id", "before"}
+                or type(value["version"]) is not int or value["version"] != 1
+                or value["case_id"] != identity or not isinstance(value["before"], list)
+                or len(value["before"]) != 2):
+            raise ValueError
+        stamp, name = value["before"]
+        if (type(stamp) is not int or not -(2 ** 63) <= stamp < 2 ** 63
+                or not isinstance(name, str) or not PREVIEW_ID.fullmatch(name)
+                or _encode_plot_cursor(identity, (stamp, name)) != cursor):
+            raise ValueError
+        return stamp, name
+    except (ValueError, TypeError, KeyError, binascii.Error):
+        raise TraceError("Invalid saved-preview cursor") from None
+
+
+def plot_summary(case, preview_id):
+    """Look up one saved preview's small report without verifying its graph."""
+    from .plots import PREVIEW_ID, _ordinary
+
+    if not isinstance(preview_id, str) or not PREVIEW_ID.fullmatch(preview_id):
+        raise TraceError("Invalid saved preview identifier")
+    case = _ordinary(case)
+    directory = _ordinary(case / "previews" / preview_id)
+    if not directory.is_dir():
+        raise TraceError("Saved preview is unavailable")
+    from .preview_numbers import numbered_previews
+    identity = read_case(case)["case_id"]
+    return numbered_previews(case, [_plot_summary(case, directory, identity)], identity=identity)[0]
+
+
+def plot_summary_page(case, cursor=None):
+    """Page bounded metadata reads by report-file timestamp and preview ID.
+
+    The cursor advances past every scanned candidate, including corrupt or
+    incomplete reports. Newer arrivals cannot shift the remaining older page.
+    The timestamp is only a display order; it never verifies saved evidence.
+    """
     from .plots import PREVIEW_ID, _ordinary
 
     case = _ordinary(case)
     identity = read_case(case)["case_id"]
+    before = _decode_plot_cursor(cursor, identity)
     previews = _ordinary(case / "previews")
-    candidates = []
-    for directory in previews.glob("*-plots-*"):
-        try:
-            details = directory.lstat()
-            if PREVIEW_ID.fullmatch(directory.name) and stat.S_ISDIR(details.st_mode):
-                candidates.append((details.st_mtime_ns, directory.name, directory))
-        except OSError:
-            continue
-    recent = heapq.nlargest(PLOT_SUMMARY_LIMIT, candidates)
+
+    def candidates():
+        for directory in previews.glob("*-plots-*"):
+            try:
+                if not PREVIEW_ID.fullmatch(directory.name) or not stat.S_ISDIR(directory.lstat().st_mode):
+                    continue
+                report = (directory / "plot.json").lstat()
+                if not stat.S_ISREG(report.st_mode):
+                    continue
+                key = (report.st_mtime_ns, directory.name)
+                if before is None or key < before:
+                    yield (*key, directory)
+            except OSError:
+                continue
+
+    recent = heapq.nlargest(PLOT_SUMMARY_LIMIT + 1, candidates())
+    scanned = recent[:PLOT_SUMMARY_LIMIT]
     result = []
-    for _, _, directory in recent:
+    for _, _, directory in scanned:
         try:
             result.append(_plot_summary(case, directory, identity))
         except (TraceError, OSError, ValueError, TypeError, KeyError):
             continue
-    return sorted(result, key=lambda value: (value["created_at"], value["id"]), reverse=True)
+    cursor = (_encode_plot_cursor(identity, scanned[-1][:2])
+              if len(recent) > PLOT_SUMMARY_LIMIT and scanned else None)
+    from .preview_numbers import numbered_previews
+    return {"plots": numbered_previews(case, result, identity=identity), "next_cursor": cursor}
+
+
+def plot_summaries(case):
+    """Return the first metadata page for callers that only need recent plots."""
+    return plot_summary_page(case)["plots"]
 
 
 def selected_plot(case, preview_id):
@@ -242,7 +347,8 @@ def selected_plot(case, preview_id):
     item = public_plot(_summary(graph, preview_id))
     item["validation_pending"] = False
     item["artifact"] = plot_artifact(case, preview_id, verified=True)
-    return item
+    from .preview_numbers import numbered_previews
+    return numbered_previews(case, [item])[0]
 
 
 def case_boards(case):
@@ -261,8 +367,15 @@ def case_workflow(case, *, lightweight=False):
     from .plots import list_plots
 
     result = {"plots": []}
+    if lightweight:
+        result["plots_next_cursor"] = None
     try:
-        plots = plot_summaries(case) if lightweight else list_plots(case)
+        if lightweight:
+            page = plot_summary_page(case)
+            plots = page["plots"]
+            result["plots_next_cursor"] = page["next_cursor"]
+        else:
+            plots = list_plots(case)
     except (TraceError, OSError, ValueError, TypeError, KeyError):
         plots = []
         result["plots_notice"] = "Saved plots are temporarily unavailable. Wait for collection or settings updates to finish."
@@ -304,7 +417,7 @@ def workflow_action(server, case, metadata, body):
             required.update({"min_hops", "max_hops"})
         endpoint_options = {"include_unspent", "include_unspendable"}
         allowed = {"include_context", "layout_mode", "board_record_id", "layout_settings", "min_hops", "max_hops",
-                   "data_source", "dataset_id", "connection_scope"}
+                   "data_source", "dataset_id", "connection_scope", "pegout_lbtc_limit"}
         if action == "plot-sync":
             allowed.add("name")
         if not required <= set(body) or set(body) - required - endpoint_options - allowed:
@@ -341,6 +454,12 @@ def workflow_action(server, case, metadata, body):
             raise RequestError("Include context addresses must be true or false.")
         if body["goal"] != "pegouts" and body.get("include_context", False):
             raise RequestError("Include context addresses applies only to peg-out paths plots.")
+        pegout_limit = None
+        if "pegout_lbtc_limit" in body:
+            from .pegout_limit import normalize_pegout_lbtc_limit
+            if body["goal"] != "pegouts" or body["pegout_lbtc_limit"] is None:
+                raise RequestError("Choose a cumulative L-BTC amount for peg-out paths only.")
+            pegout_limit = normalize_pegout_lbtc_limit(body["pegout_lbtc_limit"])
         lower, upper = body.get("min_hops", 0), body.get("max_hops", 0)
         if type(lower) is not int or type(upper) is not int or not 0 <= lower <= upper <= 2147483647:
             raise RequestError("Enter whole-number hops from 0 to 2147483647, with minimum no greater than maximum.")
@@ -367,6 +486,8 @@ def workflow_action(server, case, metadata, body):
                      "--min-hops", str(lower), "--max-hops", str(upper)]
         if "connection_scope" in body:
             arguments.extend(["--connection-scope", scope])
+        if pegout_limit is not None:
+            arguments.extend(["--pegout-lbtc-limit", pegout_limit])
         if data_source == "shared":
             arguments.extend(["--data-source", "shared", "--dataset-id", dataset_id])
         if "layout_settings" in body:
@@ -451,9 +572,10 @@ def workflow_action(server, case, metadata, body):
 
 def workflow_result(case, value, action):
     if action == "plot":
-        result = public_plot(value)
-        result["artifact"] = plot_artifact(case, value["preview_id"])
-        return result
+        # Completion only announces the saved preview. Re-reading and hashing
+        # its potentially enormous graph here delays the finished task; explicit
+        # preview, download and publication requests still verify the evidence.
+        return plot_summary(case, value["preview_id"])
     result = public_board(value)
     if action == "plot-sync":
         result = {**public_plot(value), **result}

@@ -103,7 +103,7 @@ class MiroFramesCliTests(unittest.TestCase):
 
     def test_parser_and_dispatch_offer_no_layout_or_trace_options(self):
         parsed = parser().parse_args(["miro-frames", "--case", str(self.case)])
-        self.assertEqual((parsed.run, parsed.max_new_items, parsed.dry_run), ("latest", 750, False))
+        self.assertEqual((parsed.run, parsed.max_new_items, parsed.dry_run), ("latest", 0, False))
         self.assertFalse(hasattr(parsed, "layout_attempts"))
         output = io.StringIO()
         with patch("liquid_tracer.cli.frame_run", return_value={"frames_only": True}) as frames, \

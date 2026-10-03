@@ -8,12 +8,12 @@ from unittest.mock import patch
 
 from liquid_tracer import board_layout
 from liquid_tracer.common import TraceError, read_json
-from liquid_tracer.context_groups import group_context_inputs
 from liquid_tracer.export import build_graph
 from liquid_tracer.miro import make_plan, sync
 from tests.test_board_projection_safety import scope_plan
 from tests.test_input_order import child_input, input_order_state
 from tests.test_presentation_annotations import AnnotationMiro
+from tests.test_context_group_miro import group_context_inputs
 
 
 class ContextGroupUpdateTests(unittest.TestCase):
@@ -87,7 +87,7 @@ class ContextGroupUpdateTests(unittest.TestCase):
         self.item(self.group)["data"]["content"] += "<p>Investigator analysis</p>"
         plan, _ = self.prepare()
         writes = len(self.remote.writes)
-        with self.assertRaisesRegex(TraceError, "manual edits"):
+        with self.assertRaisesRegex(TraceError, "manual (?:text/style )?edits"):
             self.sync(plan)
         self.assertEqual(len(self.remote.writes), writes)
 

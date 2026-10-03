@@ -210,7 +210,7 @@ class PegoutPathTests(unittest.TestCase):
             if not include_context:
                 self.assertEqual(pegout_graph(state, current, group_context_inputs=True), original)
 
-    def test_grouped_context_preserves_endpoint_paths_and_every_input_connector(self):
+    def test_grouped_context_preserves_endpoint_paths_and_every_input_record(self):
         state = graph_state((("a:0", "b"),), raw_links=(("c:0", "b"), ("d:0", "b")), seeds=("a:0",))
         add_pegout(state, tx("b"))
         add_unspendable(state, tx("b"))
@@ -249,7 +249,12 @@ class PegoutPathTests(unittest.TestCase):
         plan = make_plan(graph)
         validate_plan(plan)
         self.assertEqual(plan["namespace"], make_plan(ordinary)["namespace"])
-        self.assertEqual(len(plan["connectors"]), len(ordinary["edges"]))
+        from liquid_tracer.context_connectors import display_graph, summaries
+        self.assertEqual({item["key"] for item in plan["connectors"]},
+                         {edge["id"] for edge in display_graph(graph)["edges"]})
+        bundle, = summaries(graph)
+        self.assertEqual(set(bundle["details"]["context_summary"]["member_edge_ids"]), set(grouped_edges))
+        self.assertEqual(len(plan["connectors"]), len(ordinary["edges"]) - 1)
         self.assertEqual(state, before)
 
     def test_context_grouping_keeps_named_shared_change_and_output_addresses_individual(self):

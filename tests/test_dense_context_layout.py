@@ -4,6 +4,7 @@ import copy
 import unittest
 
 from liquid_tracer.context_groups import CONTEXT_GROUP_VERSION
+from liquid_tracer.context_connectors import display_graph
 from liquid_tracer.edge_labels import caption_text
 from liquid_tracer.elk_layout import _request_graph, attachment_point, optimize_graph
 from liquid_tracer.export import build_graph
@@ -62,23 +63,35 @@ class DenseContextEvidenceTests(unittest.TestCase):
                 self.assertTrue(caption_text(edge))
             self.assertEqual(restored, original_edges[edge["id"]])
 
-    def test_elk_request_keeps_all_ports_and_only_skips_dense_caption_reservations(self):
+    def test_elk_request_uses_one_summary_port_and_preserves_canonical_input_inventory(self):
         graph = build_graph(dense_state(), group_context_inputs=True)
         group, = summaries(graph)
         request, ports, _ = _request_graph(graph)
         children = {node["id"]: node for node in request["children"]}
         self.assertEqual(children[group["id"]]["height"], 160)
+        self.assertEqual(len(children[group["id"]]["ports"]), 1)
+        self.assertEqual(set(ports), {edge["id"] for edge in display_graph(graph)["edges"]})
+        self.assertEqual(len([edge for edge in graph["edges"] if edge["source"] == group["id"]]), 251)
+        self.assertEqual({edge["id"] for edge in request["edges"]}, set(ports))
+        for edge in request["edges"]:
+            self.assertTrue(edge.get("labels"))
+
+    def test_legacy_elk_request_keeps_all_ports_and_original_dense_caption_policy(self):
+        graph = build_graph(dense_state(), group_context_inputs=True)
+        graph.pop("context_connectors")
+        group, = summaries(graph)
+        request, ports, _ = _request_graph(graph)
+        children = {node["id"]: node for node in request["children"]}
         self.assertEqual(len(children[group["id"]]["ports"]), 251)
         self.assertEqual(set(ports), {edge["id"] for edge in graph["edges"]})
         grouped = {edge["id"] for edge in graph["edges"] if edge["source"] == group["id"]}
-        self.assertEqual({edge["id"] for edge in request["edges"]}, set(ports))
         for edge in request["edges"]:
             self.assertEqual(bool(edge.get("labels")), edge["id"] not in grouped)
 
 
 @unittest.skipUnless(HAS_ELK, "local ELK package is not installed")
 class DenseContextEngineTests(unittest.TestCase):
-    def test_251_input_layout_stays_near_its_branch_with_every_connector(self):
+    def test_251_input_layout_draws_one_connector_and_retains_every_input_record(self):
         graph = build_graph(dense_state(), group_context_inputs=True)
         before = copy.deepcopy(graph)
         result = optimize_graph(graph, "elbowed", layout_attempts=1)
@@ -104,9 +117,10 @@ class DenseContextEngineTests(unittest.TestCase):
         self.assertEqual(len({edge["id"] for edge in grouped}), 251)
         self.assertEqual(input_orders(result), input_orders(before))
         by_id = {node["id"]: node for node in result["nodes"]}
-        for edge in grouped:
-            # ELK may quantize nearby ports to the same position on a compact
-            # shape. Each UTXO still has its own connector and both endpoints.
+        displayed = display_graph(result)
+        drawn_groups = [edge for edge in displayed["edges"] if edge["source"] == group["id"]]
+        self.assertEqual(len(drawn_groups), 1)
+        for edge in drawn_groups:
             for attachment, endpoint, index in (("startItem", "source", 0), ("endItem", "target", -1)):
                 self.assertEqual(edge["route"][index], attachment_point(
                     by_id[edge[endpoint]], edge["attachment"][attachment]))
@@ -128,13 +142,10 @@ class DenseContextEngineTests(unittest.TestCase):
 
         plan = make_plan(result)
         validate_plan(plan)
-        self.assertEqual(len(plan["connectors"]), len(result["edges"]))
-        grouped_ids = {edge["id"] for edge in grouped}
+        self.assertEqual(len(plan["connectors"]), len(displayed["edges"]))
+        self.assertFalse({edge["id"] for edge in grouped}.intersection(item["key"] for item in plan["connectors"]))
         for connector in plan["connectors"]:
-            if connector["key"] in grouped_ids:
-                self.assertFalse(connector["body"].get("captions"))
-            else:
-                self.assertTrue(connector["body"].get("captions"))
+            self.assertTrue(connector["body"].get("captions"))
 
 
 if __name__ == "__main__":

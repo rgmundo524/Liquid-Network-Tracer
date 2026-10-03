@@ -56,11 +56,13 @@ class InputImportWebTests(unittest.TestCase):
         endpoint = route + "/input-import"
         body = {"files": batch()}
         self.assertEqual(self.request(endpoint, body, headers={"X-Liquid-CSRF": "wrong"})[0], 403)
-        self.server.active_job = "busy"
+        job = test_web.synthetic_running_job(route.split('/')[3])
+        self.server.jobs[job['id']] = job
         try:
-            self.assertEqual(self.request(endpoint, body)[0], 409)
+            preview = self.success(endpoint, body)
+            self.assertEqual(self.request(endpoint, {**body, "approve_plan": preview["approval_sha256"]})[0], 409)
         finally:
-            self.server.active_job = None
+            self.server.jobs.pop(job['id'])
         for extra in ({"file": "/private/key"}, {"arguments": ["--shell"]}, {"approve_plan": "bad"}):
             self.assertEqual(self.request(endpoint, {**body, **extra})[0], 400)
         review = self.success(endpoint, body)

@@ -32,6 +32,7 @@ from .endpoint_alignment import align_near_horizontal_endpoints
 from .horizontal_spacing import compact_candidate
 from .layout import HORIZONTAL_NODE_GAP
 from .layout_search import LAYOUT_SEARCH_VERSION, layout_seeds, normalize_layout_attempts
+from .layout_compactness import compactness_metrics, compactness_score
 from .branch_layout import (BRANCH_LAYOUT_VERSION, edge_priorities, organization_metrics,
                             compact_context_inputs, hub_nodes)
 from .branch_boundaries import branch_order, boundary_metrics
@@ -379,6 +380,8 @@ def _worker(graph, seeds, progress=None, *, heap_mb=None, cancel_event=None, res
 
 
 def _request_graph(graph, *, structure=None):
+    from .context_connectors import display_graph
+    graph = display_graph(graph)
     original = graph
     graph = hub_layout_view(graph)
     # Source-first layering keeps independent hub spenders in a vertical
@@ -393,6 +396,22 @@ def _request_graph(graph, *, structure=None):
     # Explicit hubs restart presentation depth. The temporary view retains
     # every object and connector; original dependency columns remain saved.
     columns = {key: node["column"] for key, node in main.items()}
+    # A reused address can sit beyond both ends of a transaction dependency.
+    # Keeping only the two displayed edge directions would then still allow
+    # its child transaction to precede its parent inside packed sections.
+    forward_pairs = set()
+    for key, node in main.items():
+        if node["kind"] != "transaction":
+            continue
+        for index, vin in enumerate(node.get("details", {}).get("transaction", {}).get("vin", [])):
+            parent = "tx:" + str(vin.get("txid", ""))
+            if (parent in main and not vin.get("is_pegin") and not vin.get("is_coinbase")
+                    and (key, index) not in hubs["cut_inputs"] and columns[parent] < columns[key]):
+                forward_pairs.add((parent, key))
+    forward_pairs.update((entry, hub) for hub, entry in hubs.get("entries", {}).items()
+                         if entry in main and hub in main)
+    forward_pairs.update((hub, child) for hub, values in hubs.get("forward_roots", hubs["roots"]).items()
+                         for child in values if hub in main and child in main)
     output_alignment = original.get("layout", {}).get("output_alignment")
     if output_alignment:
         columns.update(output_alignment["columns"])
@@ -464,6 +483,7 @@ def _request_graph(graph, *, structure=None):
         "elk.layered.edgeLabels.sideSelection": "ALWAYS_UP", "elk.spacing.edgeLabel": "7",
         "elk.padding": "[top=0,left=0,bottom=0,right=0]", **hub_layering},
         "children": list(children.values()), "edges": edge_values,
+        "forwardNodePairs": sorted(forward_pairs),
         "branchOrganization": BRANCH_LAYOUT_VERSION,
         **boundary_order,
         **center_metadata,
@@ -486,6 +506,11 @@ def _request_graph(graph, *, structure=None):
 
 
 def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style, *, validation_graph=None):
+    from .context_connectors import display_graph, restore_graph
+    displayed = display_graph(graph)
+    if displayed is not graph:
+        return restore_graph(_apply_candidate(displayed, candidate, port_map, fee_ids, connector_style,
+            validation_graph=display_graph(validation_graph) if validation_graph is not None else None), graph)
     input_policy = candidate.get("inputOrderPolicy", "traced_first")
     if input_policy not in ("traced_first", "geometry"):
         raise TraceError("ELK returned an invalid input ordering policy")
@@ -657,6 +682,8 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style, *, va
         validate_alignment(result)
     result["connector_attachment"] = "transaction_ports_v2"
     result["presentation_version"] = max(6, graph.get("presentation_version", 0))
+    from .trace_section_local import refresh_section_bounds
+    refresh_section_bounds(result)
     return result
 
 
@@ -695,6 +722,10 @@ def fallback_graph(graph, connector_style="straight", reason="size_limit"):
     Routing is deliberately simple; geometric quality is measured with the
     same finite comparison budget rather than claimed to be optimized.
     """
+    from .context_connectors import display_graph, restore_graph
+    displayed = display_graph(graph)
+    if displayed is not graph:
+        return restore_graph(fallback_graph(displayed, connector_style, reason), graph)
     _validate_graph(graph, connector_style)
     descriptions = {
         "size_limit": "The graph exceeds the ELK optimization size limit",
@@ -793,7 +824,7 @@ def _validate_rejected_pairs(candidates):
 
 
 def _candidate_score(metrics, miro, ports, organization, neighborhoods, boundaries, centered,
-                     input_policy, *, trace=None):
+                     input_policy, *, trace=None, compactness=None):
     """Keep collision gates strict, then balance readability in Trace layouts.
 
     Standard retains its existing ordering. Trace costs use normalized mean
@@ -816,13 +847,22 @@ def _candidate_score(metrics, miro, ports, organization, neighborhoods, boundari
     readability = (4 * trace["spine_alignment"] + 2 * trace["terminal_distance"]
                    + 3 * trace["branch_interleaving"] + 4 * trace.get("terminal_column_drift", 0)
                    + 2 * (metrics["crossings"] + miro["crossings"]) / edges)
-    return (bool(metrics["truncated"] or miro["truncated"]),
-            metrics["node_overlaps"], metrics["node_intersections"], miro["node_intersections"],
-            ports["coincident_ports"],
-            # Positive-length shared segments hide which arrow is which.
-            # A straighter spine or preferred input order must not buy them.
-            metrics["connector_overlaps"] + miro["connector_overlaps"],
-            round(readability, 8), ports["endpoint_order_inversions"], *standard[3:])
+    primary = (bool(metrics["truncated"] or miro["truncated"]),
+               metrics["node_overlaps"], metrics["node_intersections"], miro["node_intersections"],
+               ports["coincident_ports"],
+               # Positive-length shared segments hide which arrow is which.
+               # A straighter spine or preferred input order must not buy them.
+               metrics["connector_overlaps"] + miro["connector_overlaps"],
+               round(readability, 8), ports["endpoint_order_inversions"])
+    if compactness is None:
+        return (*primary, *standard[3:])
+    # Equal aggregate readability is not permission to worsen an individual
+    # ordering criterion for a smaller canvas. Keep those clarity ties ahead
+    # of compactness; travel and distance remain secondary preferences.
+    clarity = (metrics["crossings"], miro["crossings"], centered["alignment_deviation"],
+               boundaries["interleavings"], neighborhoods["flow_order_inversions"],
+               neighborhoods["sibling_interleavings"])
+    return (*primary, *clarity, *compactness_score(compactness), *standard[3:])
 
 
 def optimize_graph(graph, connector_style="straight", progress=None, *, layout_attempts=None, validation_graph=None):
@@ -835,6 +875,12 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
     Invalid data and cancellation abort the search. The input is never modified.
     Quality measurement has its own work budget and never removes graph elements.
     """
+    from .context_connectors import display_graph, restore_graph
+    displayed = display_graph(graph)
+    if displayed is not graph:
+        return restore_graph(optimize_graph(displayed, connector_style, progress,
+            layout_attempts=layout_attempts,
+            validation_graph=display_graph(validation_graph) if validation_graph is not None else None), graph)
     nodes = _validate_graph(graph, connector_style)
     attempts = normalize_layout_attempts(
         graph.get("graph_options", {}).get("layout_attempts") if layout_attempts is None else layout_attempts)
@@ -859,6 +905,7 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
     failed_attempts = []
     diagnostic_paths = []
     execution = {}
+    compactness_candidates = []
     from .trace_sections import enabled as sections_enabled, iter_candidates
     candidates_stream = (iter_candidates(graph, request, seeds, _worker, attempt_progress, execution, structure=structure)
                          if sections_enabled(graph, request)
@@ -914,11 +961,17 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
             # collision gate. Local forks and transaction proximity matter even
             # within one seed lineage; historical date/port order is secondary.
             trace = trace_metrics(result, structure=structure) if graph.get("graph_options", {}).get("layout_style") == "trace" else None
+            compactness = compactness_metrics(result) if trace else None
+            if compactness is not None:
+                compactness_candidates.append({"candidate_index": candidate_count, "attempt_index": index,
+                                               "seed": candidate["seed"],
+                                               "input_order_policy": result["layout"]["input_order"]["policy"],
+                                               "metrics": compactness})
             score = _candidate_score(score_metrics, miro_estimate, endpoint_metrics, organization,
                                      neighborhoods, boundaries, centered,
-                                     result["layout"]["input_order"]["policy"], trace=trace)
+                                     result["layout"]["input_order"]["policy"], trace=trace, compactness=compactness)
             if best is None or score < best[0]:
-                best = (score, result, metrics, candidate["seed"])
+                best = (score, result, metrics, candidate["seed"], candidate_count)
             # Drop the current candidate and its graph views before requesting
             # another seed. The best tuple alone owns the retained winner.
             del candidate, result, main
@@ -935,7 +988,7 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
         raise TraceError(f"All {attempts} ELK layout attempts failed; no valid layout was produced. "
                          f"Failure categories: {codes}.{guidance} No Miro changes were made."
                          + report_location(diagnostic_paths))
-    _, result, after, seed = best
+    _, result, after, seed, selected_candidate = best
     _report_progress(report, "Packing nearby transaction context", stage="applying")
     # Moving a circle closer can put Miro's midpoint elbow through a different
     # object even when ELK's saved route remains safe. Check that final pass
@@ -979,6 +1032,8 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
     from .context_clearance import repair_context_clearance
     _report_progress(report, "Clearing connector space around context inputs", stage="applying")
     repair_context_clearance(result)
+    from .trace_section_local import refresh_section_bounds
+    refresh_section_bounds(result)
     from .output_alignment import validate_alignment
     validate_alignment(result)
     result["layout"]["branch_organization"]["boundaries"] = boundary_metrics(result)
@@ -987,6 +1042,7 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
         result["layout"]["named_group"] = center_metrics(result)
     if graph.get("graph_options", {}).get("layout_style") == "trace":
         result["layout"]["trace_layout"] = trace_metrics(result, structure=structure)
+        result["layout"]["compactness"] = compactness_metrics(result)
     after = layout_metrics(result)
     result["layout"]["metrics"] = {"before": before, "after": after, "estimated": True,
                                     "attempt_count": attempts, "candidate_count": candidate_count, "selected_seed": seed,
@@ -1001,6 +1057,10 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
                                   "attempted_count": attempts, "successful_count": successful_count,
                                   "failed_count": len(failed_attempts), "failed_attempts": failed_attempts,
                                   "selected_seed": seed, **execution}
+    if compactness_candidates:
+        result["layout"]["search"]["compactness_candidates"] = [
+            {**item, "selected": item["candidate_index"] == selected_candidate}
+            for item in compactness_candidates]
     result.setdefault("graph_options", {})["layout_attempts"] = attempts
     _report_progress(report, "Local ELK layout ready" if not failed_attempts
                      else "Best completed ELK layout ready; some layout attempts failed",

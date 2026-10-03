@@ -110,6 +110,16 @@ class SharedSnapshotPlotTests(unittest.TestCase):
             self.assertEqual(first["connections"], second["connections"])
         return second
 
+    def test_cumulative_limit_matches_full_projection_and_survives_saved_review(self):
+        query = {"max_hops": 3, "pegout_lbtc_limit": "0.00000001"}
+        expected = self.full_plot("pegouts", **query)
+        actual = self.shared_plot("pegouts", **query)
+        graph = self.assert_same_plot_evidence(expected, actual)
+        summary = actual["pegout_limit_summary"]
+        self.assertTrue(summary["limit_reached"])
+        self.assertEqual(summary["stopping_outpoint"], self.endpoint)
+        self.assertEqual([row["outpoint"] for row in graph["pegouts"]["matches"]], [self.endpoint])
+
     def test_three_hop_pegouts_match_full_projection_and_preserve_observations(self):
         before = self.files(self.source_archive)
         expected = self.full_plot("pegouts", max_hops=3)
