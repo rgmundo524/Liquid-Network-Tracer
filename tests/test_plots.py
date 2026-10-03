@@ -734,7 +734,8 @@ class PlotTests(unittest.TestCase):
         with patch("liquid_tracer.transaction_csv.write_transaction_csv", side_effect=TraceError("Synthetic export failure")):
             with self.assertRaisesRegex(TraceError, "Synthetic export failure"):
                 preview_plot(self.case, "full", progress=events.append)
-        self.assertEqual(events[-1], {"phase": "exporting_plot", "completed": 0, "total": 1})
+        self.assertEqual(events[-1]["phase"], "plot_write_exports")
+        self.assertEqual((events[-1]["completed"], events[-1]["total"]), (0, 1))
         self.assertEqual(list_plots(self.case), [])
         self.assertEqual(self.bytes(self.archive), before)
         result = preview_plot(self.case, "full", progress=events.append)

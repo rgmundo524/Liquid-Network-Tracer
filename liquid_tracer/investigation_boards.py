@@ -406,31 +406,50 @@ def create_and_sync(case, preview_id, name=None, *, team_id=None, max_items=0, t
     """Create one private board per reviewed fresh plot, then resume its publication."""
     from .miro import sync
 
+    from .plot_performance import PlotTimings
+    timings = PlotTimings(progress)
     case, _, _ = _paths(case)
-    with _publication_review(case, preview_id) as (graph, plan):
+    with ExitStack() as operation:
+        with timings.measure("review_saved_plot"):
+            reviewed = operation.enter_context(_publication_review(case, preview_id, reuse=True))
+        graph, plan = reviewed
         if graph["plot"].get("layout_mode", "fresh") != "fresh" or "board_layout" in plan:
             raise TraceError("This layout updates an existing board; use Update board for its selected target")
         if not graph.get("nodes"):
             raise TraceError("This plot has no matching paths; no Miro board was created")
         # Complete local validation and the full new-board budget before POSTing.
         # A unique nonexistent state path keeps this dry run independent of any board.
-        sync(plan, "new-board-preflight", case / "miro" / ("preflight-" + uuid.uuid4().hex + ".json"),
-             max_items=max_items, dry_run=True, reorganize=True, interval=interval, workers=workers, progress=progress)
-        record = create_board(case, graph["plot"]["goal"], name, team_id=team_id, transport=transport,
-                              creation_preview_id=preview_id, creation_run_id=graph["run_id"], token=token)
+        with timings.measure("new_board_preflight"):
+            sync(plan, "new-board-preflight", case / "miro" / ("preflight-" + uuid.uuid4().hex + ".json"),
+                 max_items=max_items, dry_run=True, reorganize=True, interval=interval, workers=workers, progress=progress)
+        with timings.measure("create_board"):
+            record = create_board(case, graph["plot"]["goal"], name, team_id=team_id, transport=transport,
+                                  creation_preview_id=preview_id, creation_run_id=graph["run_id"], token=token)
+        from .plots import _VerifiedPlot
+        reusable = reviewed if isinstance(reviewed, _VerifiedPlot) and reviewed.active else None
         result = sync_board(case, record["id"], preview_id, max_items=max_items, transport=transport,
-                            token=token, interval=interval, workers=workers, progress=progress)
+                            token=token, interval=interval, workers=workers, progress=progress,
+                            _review=reusable)
     return {**result, "board_id": record["board_id"], "board_url": record["board_url"],
-            "created_board": record["created"], "reused_board": record["reused"]}
+            "created_board": record["created"], "reused_board": record["reused"],
+            "timings": {**timings.snapshot(), **result.get("timings", {})}}
 
 
 @contextmanager
-def _publication_review(case, preview_id):
+def _publication_review(case, preview_id, *, reuse=False):
     """Frozen plots publish independently; legacy plans retain input locks."""
-    from .plots import reviewed_plot
-    graph, plan = reviewed_plot(case, preview_id)
+    from .plots import reviewed_plot, _VerifiedPlot
+    reviewed = (reviewed_plot(case, preview_id, _capture_reuse=True) if reuse
+                else reviewed_plot(case, preview_id))
+    graph, plan = reviewed
     if graph.get("plot", {}).get("input_snapshot_version") == 1:
-        yield graph, plan
+        if isinstance(reviewed, _VerifiedPlot):
+            reviewed.active = True
+        try:
+            yield reviewed
+        finally:
+            if isinstance(reviewed, _VerifiedPlot):
+                reviewed.active = False
     else:
         # Recheck after acquisition so legacy reviews cannot race an import.
         with _lock(case, trace=True):
@@ -551,12 +570,16 @@ def generate_and_sync(case, goal, run_id="latest", min_hops=0, max_hops=10, *, i
         except (TraceError, OSError, ValueError) as error:
             raise TraceError(str(error) + " Saved plot " + plot["preview_id"] +
                              " is available for recovery; resume that saved plot instead of generating another.") from error
-        return {**plot, **published, "published": True, "status": "synced"}
+        return {**plot, **published, "published": True, "status": "synced",
+                "timings": {**plot.get("timings", {}), **published.get("timings", {})}}
 
 
-def sync_board(case, record_id, preview_id, *, reorganize=False, max_items=0, _board_lock_held=False, **kwargs):
+def sync_board(case, record_id, preview_id, *, reorganize=False, max_items=0, _board_lock_held=False,
+               _review=None, **kwargs):
     """Apply a reviewed fresh publication or a board-bound incremental layout."""
     from .miro import sync
+    from .plot_performance import PlotTimings
+    timings = PlotTimings(kwargs.get("progress"))
 
     case, metadata, path = _paths(case)
     with ExitStack() as operation:
@@ -566,7 +589,15 @@ def sync_board(case, record_id, preview_id, *, reorganize=False, max_items=0, _b
                 raise TraceError("Select a linked managed board; historical snapshots remain read-only")
             if not _board_lock_held:
                 operation.enter_context(_board_lock(case, record_id))
-        graph, plan = operation.enter_context(_publication_review(case, preview_id))
+        if _review is None:
+            with timings.measure("review_saved_plot"):
+                graph, plan = operation.enter_context(_publication_review(case, preview_id))
+        else:
+            from .plots import _VerifiedPlot
+            if not isinstance(_review, _VerifiedPlot):
+                raise TraceError("Invalid saved plot review")
+            with timings.measure("recheck_saved_plot"):
+                graph, plan = _review.check(case, preview_id)
         if graph.get("plot", {}).get("goal") != record["goal"]:
             raise TraceError("The selected plot has a different goal from this board")
         layout_mode = graph["plot"].get("layout_mode")
@@ -595,7 +626,8 @@ def sync_board(case, record_id, preview_id, *, reorganize=False, max_items=0, _b
             _check_legacy_removals(plan, record, state_path)
         _check_plot_address_mode(plan, record, state_path)
         # Validate item budgets and lineage before changing the publication record.
-        sync(plan, record["board_id"], state_path, max_items=max_items, dry_run=True, reorganize=reorganize)
+        with timings.measure("board_preflight"):
+            sync(plan, record["board_id"], state_path, max_items=max_items, dry_run=True, reorganize=reorganize)
         if not record.get("legacy"):
             if record.get("status") in ("syncing", "sync_error", "interrupted") and record.get("preview_id") != preview_id:
                 state = load_state(state_path, {})
@@ -604,7 +636,8 @@ def sync_board(case, record_id, preview_id, *, reorganize=False, max_items=0, _b
             _update_record(case, path, metadata, record_id, status="syncing", preview_id=preview_id,
                            run_id=graph["run_id"], sync_plan_sha256=plan["sha256"], attempted_sync_at=now())
         try:
-            result = sync(plan, record["board_id"], state_path, max_items=max_items, reorganize=reorganize, **kwargs)
+            with timings.measure("write_miro"):
+                result = sync(plan, record["board_id"], state_path, max_items=max_items, reorganize=reorganize, **kwargs)
         except (TraceError, OSError, ValueError):
             if not record.get("legacy"):
                 _update_record(case, path, metadata, record_id, status="sync_error")
@@ -612,4 +645,5 @@ def sync_board(case, record_id, preview_id, *, reorganize=False, max_items=0, _b
         if not record.get("legacy"):
             _update_record(case, path, metadata, record_id, status="synced", published_at=now(),
                            published_plan_sha256=plan["sha256"])
-        return {**result, "record_id": record_id, "preview_id": preview_id, "goal": record["goal"]}
+        return {**result, "record_id": record_id, "preview_id": preview_id, "goal": record["goal"],
+                "timings": timings.snapshot()}

@@ -276,12 +276,13 @@ def _observations(case, run_id):
     return result
 
 
-def _graph(state, goal, query, settings):
+def _graph(state, goal, query, settings, *, initial_layout=True):
     from .connections import connection_graph
     from .export import build_graph
     from .pegout_paths import pegout_graph
     from .plot_scope import project_full_scope
     options = {key: settings[key] for key in ("color_attribution_arrows", "center_name")}
+    options["initial_layout"] = initial_layout
     if goal == "connections":
         return connection_graph(state, query.get("max_hops"), connection_scope=query.get("connection_scope"),
                                 transaction_io=query.get("transaction_io"),
@@ -368,6 +369,8 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
     from .miro import validate_plan
     from .transaction_csv import write_transaction_csv
     from .progress import report_progress
+    from .plot_performance import PlotTimings
+    timings = PlotTimings(progress)
     report_progress(progress, "preparing_plot", 0, 1)
     if layout_mode not in ("fresh", "update"):
         raise TraceError("Choose a fresh layout or an update to an existing Miro board")
@@ -390,14 +393,16 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
                        connection_scope=connection_scope)
         bound = query.get("max_hops") if goal in ("pegouts", "connections") else None
         scope = query.get("connection_scope") if goal == "connections" else None
-        run_id, state, checksum = materialize_shared_source(
-            case, run_id, dataset_id=dataset_id, progress=progress, max_hops=bound, connection_scope=scope)
+        with timings.measure("shared_projection"):
+            run_id, state, checksum = materialize_shared_source(
+                case, run_id, dataset_id=dataset_id, progress=progress, max_hops=bound, connection_scope=scope)
         prepared = (state, checksum)
     with ExitStack() as operation:
         if layout_mode == "update" and not _board_lock_held:
             from .investigation_boards import _board_lock
             operation.enter_context(_board_lock(case, board_record_id))
-        state, settings, fingerprints = _source(case, run_id, progress=progress, prepared=prepared)
+        with timings.measure("load_source"):
+            state, settings, fingerprints = _source(case, run_id, progress=progress, prepared=prepared)
         report_progress(progress, "layout", 0, 1)
         if layout_settings is not None:
             settings = validate_layout_settings(layout_settings)
@@ -408,7 +413,8 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
                        include_unspendable=include_unspendable, include_context=include_context,
                        connection_scope=connection_scope)
         settings = _effective_settings(settings, goal, query)
-        graph = _graph(state, goal, query, settings)
+        with timings.measure("build_graph"):
+            graph = _graph(state, goal, query, settings, initial_layout=False)
         graph["graph_options"].update({key: deepcopy(settings[key]) for key in LAYOUT_SETTINGS.intersection(settings)})
         board_fields = {"layout_mode": layout_mode}
         if layout_mode == "update":
@@ -422,11 +428,13 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
             _check_legacy_removals(board_plan, record, state_path)
             if _preflight is not None:
                 _preflight(graph, record)
-            snapshot = capture(record["board_id"], state_path, board_plan["namespace"],
-                               token=token, transport=transport, interval=interval,
-                               workers=workers, progress=progress)
-            graph = prepare_graph(graph, snapshot, connector_style=settings["connector_style"],
-                                  layout_attempts=settings["layout_attempts"], progress=progress)
+            with timings.measure("read_board"):
+                snapshot = capture(record["board_id"], state_path, board_plan["namespace"],
+                                   token=token, transport=transport, interval=interval,
+                                   workers=workers, progress=progress)
+            with timings.measure("layout"):
+                graph = prepare_graph(graph, snapshot, connector_style=settings["connector_style"],
+                                      layout_attempts=settings["layout_attempts"], progress=progress)
             board_fields.update(board_record_id=record["id"], board_id=record["board_id"],
                                 board_name=record["name"],
                                 update_counts=deepcopy(graph["board_layout"].get("counts", {})))
@@ -434,8 +442,9 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
             if _preflight is not None:
                 _preflight(graph, None)
             if graph["nodes"]:
-                graph = optimize_graph(graph, connector_style=settings["connector_style"],
-                                       layout_attempts=settings["layout_attempts"], progress=progress)
+                with timings.measure("layout"):
+                    graph = optimize_graph(graph, connector_style=settings["connector_style"],
+                                           layout_attempts=settings["layout_attempts"], progress=progress)
         coverage = _coverage(state)
         graph["notice"] = coverage["coverage_notice"] + " " + graph["notice"]
         report = {"schema_version": 1, "case_id": state["case_id"], "run_id": state["run_id"],
@@ -468,29 +477,33 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
         destination = _ordinary(case / "previews" / (state["run_id"] + "-plots-" + uuid.uuid4().hex[:8]))
         if progress:
             progress({"phase": "exporting_plot", "completed": 0, "total": 1})
-        result = export_layout(graph, destination) if graph["nodes"] else _empty_export(graph, destination)
+        with timings.measure("export_preview"):
+            result = export_layout(graph, destination) if graph["nodes"] else _empty_export(graph, destination)
         try:
-            plan = plot_plan(graph)
-            validate_plan(plan)
-            save_json(destination / "miro-plan.json", plan)
-            save_json(destination / "plot.json", report)
-            save_json(destination / "inputs.json", inputs)
-            (destination / "graph.mmd").write_text(mermaid_source(graph) if graph["nodes"] else
-                "flowchart LR\n  %% No matching activity in saved collection data.\n", encoding="utf-8")
-            write_transaction_csv(destination / "transactions.csv", graph, state)
-            if goal == "pegouts":
-                from .pegout_csv import write_pegout_csvs
-                write_pegout_csvs(destination, graph, state, observations=_observations(case, state["run_id"]))
-            manifest = "".join(digest((destination / name).read_bytes()) + "  " + name + "\n"
-                               for name in sorted(plot_files(destination) - {"SHA256SUMS"}))
-            (destination / "SHA256SUMS.tmp").write_text(manifest, encoding="utf-8")
-            (destination / "SHA256SUMS.tmp").replace(destination / "SHA256SUMS")
+            with timings.measure("build_plan"):
+                plan = plot_plan(graph)
+                validate_plan(plan)
+                save_json(destination / "miro-plan.json", plan)
+            with timings.measure("write_exports"):
+                save_json(destination / "plot.json", report)
+                save_json(destination / "inputs.json", inputs)
+                (destination / "graph.mmd").write_text(mermaid_source(graph) if graph["nodes"] else
+                    "flowchart LR\n  %% No matching activity in saved collection data.\n", encoding="utf-8")
+                write_transaction_csv(destination / "transactions.csv", graph, state)
+                if goal == "pegouts":
+                    from .pegout_csv import write_pegout_csvs
+                    write_pegout_csvs(destination, graph, state, observations=_observations(case, state["run_id"]))
+                manifest = "".join(digest((destination / name).read_bytes()) + "  " + name + "\n"
+                                   for name in sorted(plot_files(destination) - {"SHA256SUMS"}))
+                (destination / "SHA256SUMS.tmp").write_text(manifest, encoding="utf-8")
+                (destination / "SHA256SUMS.tmp").replace(destination / "SHA256SUMS")
         except BaseException:
             (destination / "SHA256SUMS").unlink(missing_ok=True)
             raise
         if progress:
             progress({"phase": "exporting_plot", "completed": 1, "total": 1})
         return {**_summary(graph, destination.name), **result, "directory": str(destination.resolve()),
+                "timings": timings.snapshot(),
                 "browser_opened": open_preview(result["html"]) if open_browser else False}
 
 
@@ -623,12 +636,59 @@ def _review_source(case, graph, source_cache=None, inputs=None):
         raise TraceError("Evidence, address counts, trace controls or plot settings changed; regenerate the plot")
 
 
-def reviewed_plot(case, preview_id):
+def _review_inventory(case, preview_id):
+    """Bind one in-process review to the exact files that were verified.
+
+    This inventory never authorizes a cold read. Reuse is restricted to the
+    lifetime of a publication operation that has already hashed these bytes.
+    ctime and inode detect replacement or edits with restored size/mtime.
+    """
+    from .cli import run_path
+    from .snapshot_index import _inventory, _stat
+    if not isinstance(preview_id, str) or not PREVIEW_ID.fullmatch(preview_id):
+        raise TraceError("Choose a saved investigation plot")
+    directory = _ordinary(case / "previews" / preview_id)
+    preview = {name: _stat(_ordinary(directory / name)) for name in sorted(plot_files(directory))}
+    archive = _inventory(run_path(case, preview_id[:16]), require_snapshot=False)
+    return preview, archive
+
+
+class _VerifiedPlot(tuple):
+    """Private, operation-scoped capability; ordinary callers still get a pair."""
+    def __new__(cls, graph, plan, case, preview_id, inventory):
+        value = super().__new__(cls, (graph, plan))
+        value.case = case.absolute()
+        value.preview_id = preview_id
+        value.inventory = inventory
+        value.active = False
+        return value
+
+    def check(self, case, preview_id):
+        if not self.active or self.case != Path(case).absolute() or self.preview_id != preview_id:
+            raise TraceError("Saved plot review is not active for this publication")
+        try:
+            current = _review_inventory(self.case, self.preview_id)
+        except (OSError, ValueError) as error:
+            raise TraceError("Saved plot or source changed during publication; review it again") from error
+        if current != self.inventory:
+            raise TraceError("Saved plot or source changed during publication; review it again")
+        from .investigations import read_case
+        if read_case(self.case)["case_id"] != self[0]["plot"]["case_id"]:
+            raise TraceError("Saved plot no longer belongs to this investigation")
+        return self
+
+
+def reviewed_plot(case, preview_id, *, _capture_reuse=False):
     """Verify archived bytes and frozen inputs; older plots keep strict review."""
     case = _ordinary(case)
+    before = _review_inventory(case, preview_id) if _capture_reuse else None
     graph, plan, inputs = _snapshot(case, preview_id, with_inputs=True)
     _review_source(case, graph, inputs=inputs)
-    return graph, plan
+    if not _capture_reuse:
+        return graph, plan
+    if _review_inventory(case, preview_id) != before:
+        raise TraceError("Saved plot or source changed while being reviewed; review it again")
+    return _VerifiedPlot(graph, plan, case, preview_id, before)
 
 
 def list_plots(case):

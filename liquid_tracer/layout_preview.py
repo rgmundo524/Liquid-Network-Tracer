@@ -63,7 +63,15 @@ def layout_notice(graph, *, include_named_group=True):
                 + " Miro routes may differ. Crossing counts are estimates.")
     notice = LAYOUT_NOTICE
     if graph.get("graph_options", {}).get("layout_style") == "trace":
-        notice += " Trace layout favors a clear main path, separate branches, and nearby endpoints."
+        search = layout.get("search", {})
+        sections = search.get("section_count") if isinstance(search, dict) else None
+        if (isinstance(search, dict) and search.get("section_layout_version") == 1
+                and type(sections) is int and sections > 0):
+            notice = (f"Trace layout arranged in {sections:,} sections around the preferred backbone; "
+                      "connections between sections are routed after placement. "
+                      "Miro routes may differ. Crossing counts are estimates.")
+        else:
+            notice += " Trace layout favors a clear main path, separate branches, and nearby endpoints."
     input_order = layout.get("input_order", {})
     if (isinstance(input_order, dict) and input_order.get("policy") == "geometry"
             and input_order.get("fallback_reason") == "traced_first_order_not_preserved"):

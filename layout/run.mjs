@@ -220,6 +220,9 @@ try {
       for (const node of graph.children) node.x = alignmentPositions[node.id];
     }
   }
+  const sectionLayout = request.graph.sectionLayout ?? false;
+  if (typeof sectionLayout !== 'boolean') throw new Error('Invalid Trace section layout');
+  delete request.graph.sectionLayout;
   const requestedProfile = request.graph.branchProfile;
   if (requestedProfile !== undefined && !['balanced', 'flow_weighted'].includes(requestedProfile)) {
     throw new Error('Invalid branch placement profile');
@@ -293,7 +296,7 @@ try {
     graph.layoutOptions['elk.randomSeed'] = String(seed);
     // Explicit metadata preserves the placement profile when seeds are sent
     // separately. Keep the historical defaults for direct batched callers.
-    const branchProfile = centerNodeOrder ? 'flow_weighted' : requestedProfile ?? (organizeBranches && (request.seeds.length === 1 || seedIndex > 0)
+    const branchProfile = sectionLayout ? 'balanced' : centerNodeOrder ? 'flow_weighted' : requestedProfile ?? (organizeBranches && (request.seeds.length === 1 || seedIndex > 0)
       ? 'flow_weighted' : 'balanced');
     Object.assign(diagnostic, {seed, branch_profile: branchProfile,
       input_order_policy: 'geometry', stage: 'geometry_layout'});
@@ -316,7 +319,9 @@ try {
     graph = null;
     diagnostic.stage = 'order_constraints';
     const firstCandidate = layoutCandidate(result, seed, branchProfile, 'geometry', boundaryOrdering, spacers);
-    const constraints = constrainInputOrder(result, orders);
+    // Section geometry supplies local ordering to the global Trace assembler.
+    // It has no need for a second expensive, fixed-port layout calculation.
+    const constraints = sectionLayout ? null : constrainInputOrder(result, orders);
     if (constraints) {
       // Compare ELK's crossing-aware port order with the historical traced-first
       // order. This retains the already calculated result, without another run.
@@ -346,7 +351,7 @@ try {
       candidates.push(secondCandidate);
     } else {
       // Identical policies need only one candidate; retain the preferred order.
-      firstCandidate.inputOrderPolicy = 'traced_first';
+      firstCandidate.inputOrderPolicy = sectionLayout ? 'geometry' : 'traced_first';
       candidates.push(firstCandidate);
     }
   }

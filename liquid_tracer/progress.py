@@ -12,6 +12,20 @@ from .performance import public_api_diagnostics
 
 
 MESSAGES = {
+    "plot_shared_projection": "Preparing the shared-data view",
+    "plot_load_source": "Loading and verifying the plot source",
+    "plot_build_graph": "Building graph objects and connections",
+    "plot_read_board": "Reading the current Miro arrangement",
+    "plot_layout": "Arranging the graph (including ELK resource waits)",
+    "plot_export_preview": "Saving the graph preview",
+    "plot_build_plan": "Building the saved Miro plan",
+    "plot_write_exports": "Writing and verifying plot downloads",
+    "plot_review_saved_plot": "Verifying the saved plot for publication",
+    "plot_recheck_saved_plot": "Checking that reviewed plot files are unchanged",
+    "plot_new_board_preflight": "Checking the new-board publication budget",
+    "plot_board_preflight": "Checking the destination board plan",
+    "plot_create_board": "Creating or recovering the Miro board",
+    "plot_write_miro": "Writing the saved plot to Miro",
     "preparing_plot": "Checking saved plot inputs and destination",
     "verifying_files": "Verifying saved file checksums",
     "loading_collection": "Loading verified transaction data",
@@ -61,6 +75,9 @@ COLLECTION_PHASES = {
 ELK_STAGES = {
     "preparing": "Preparing the graph for ELK",
     "measuring_input": "Measuring the input layout before ELK",
+    "section_preparing": "Preparing Trace sections around the preferred backbone",
+    "section_ready": "Trace section layout completed",
+    "section_assembling": "Assembling Trace sections and their connections",
     "calculating": "Calculating the graph layout with ELK",
     "applying": "Validating ELK coordinates and connector routes",
     "input_order_fallback": "Preferred connector ordering unavailable; retaining ELK geometry for validation",
@@ -87,6 +104,21 @@ _ELK_MEMORY_FAILURES = {
     "memory_exhausted": "renderer reported memory exhaustion; close other applications to free memory",
     "worker_killed": "worker was killed; memory exhaustion is possible but unconfirmed",
 }
+
+
+def _public_trace_sections(event):
+    """Section counts are independent of the much smaller attempt budget."""
+    value = {}
+    count, worker_count = event.get("section_count"), event.get("section_worker_count")
+    if type(count) is int and 0 <= count <= 2 ** 53 - 1:
+        value["section_count"] = count
+        if type(worker_count) is int and 0 <= worker_count <= count:
+            value["section_worker_count"] = worker_count
+    index, total = event.get("section_index"), event.get("section_total")
+    if (type(index) is int and type(total) is int and 1 <= index <= total <= 2 ** 53 - 1
+            and ("section_count" not in value or total <= value["section_count"])):
+        value.update(section_index=index, section_total=total)
+    return value
 
 
 def _public_elk_workers(event, attempt_total):
@@ -234,13 +266,22 @@ def public_progress(event):
             value["message"] += f"; layout attempt {attempt} of {attempts}"
             if type(seed) is int and 1 <= seed <= 2 ** 31 - 1:
                 value["seed"] = seed
+        value.update(_public_trace_sections(event))
+        if "section_index" in value:
+            value["message"] += f"; Trace section {value['section_index']:,} of {value['section_total']:,}"
+        elif "section_count" in value:
+            value["message"] += f"; {value['section_count']:,} Trace sections"
+            if "section_worker_count" in value:
+                value["message"] += f"; {value['section_worker_count']:,} sections require ELK"
         for field in ("node_count", "edge_count", "heap_mb"):
             number = event.get(field)
             if type(number) is int and 0 <= number <= 2 ** 53 - 1:
                 value[field] = number
         if "node_count" in value and "edge_count" in value:
             value["message"] += f" ({value['node_count']:,} objects, {value['edge_count']:,} connections)"
-        value.update(_public_elk_workers(event, value.get("attempt_total")))
+        worker_limit = (min(64, value["section_total"]) if "section_total" in value
+                        else value.get("attempt_total"))
+        value.update(_public_elk_workers(event, worker_limit))
         if value.get("worker_count", 1) > 1:
             value["message"] += (f"; up to {value['worker_count']} ELK workers"
                                  f"; {value['active_workers']} active")
@@ -301,6 +342,7 @@ class ProgressReporter:
         self.previous_phase = None
         self.previous_stage = None
         self.previous_attempt = None
+        self.previous_section = None
         self.previous_completed = None
         self.file_time = self.terminal_time = float("-inf")
 
@@ -309,8 +351,10 @@ class ProgressReporter:
         if value is None:
             return
         now = time.monotonic()
+        section = (value.get("section_index"), value.get("section_total"))
         urgent = (value["phase"] != self.previous_phase or value.get("stage") != self.previous_stage
                   or value.get("attempt_index") != self.previous_attempt
+                  or section != self.previous_section
                   or (value["phase"] == "collecting" and value["completed"] != self.previous_completed)
                   or value["phase"] == "waiting"
                   or (value["phase"] not in COLLECTION_PHASES and value["total"] > 0
@@ -318,6 +362,7 @@ class ProgressReporter:
         self.previous_phase = value["phase"]
         self.previous_stage = value.get("stage")
         self.previous_attempt = value.get("attempt_index")
+        self.previous_section = section
         self.previous_completed = value["completed"]
         if self.path is not None and (urgent or now - self.file_time >= .1):
             temporary = self.path.with_name(self.path.name + ".tmp")
@@ -337,7 +382,7 @@ class ProgressReporter:
             try:
                 prefix = ("Collection: " if value["phase"] in COLLECTION_PHASES or value["phase"] == "exporting_collection" else
                           "Counts: " if value["phase"].startswith("address_counts") else
-                          "Plot: " if value["phase"] == "exporting_plot" else
+                          "Plot: " if value["phase"] == "exporting_plot" or value["phase"].startswith("plot_") else
                           "Peg-outs: " if value["phase"].startswith("pegout_") else
                           "ELK: " if value["phase"] in ("optimizing", "compacting") else "Miro: ")
                 print(prefix + value["message"] + counts + wait + elapsed, file=sys.stderr, flush=True)

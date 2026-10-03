@@ -264,7 +264,7 @@ def _endpoint_matches(state, endpoints, distances):
 
 
 def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=None,
-                 group_context_inputs=False, include_fees=None, hub_addresses=None):
+                 group_context_inputs=False, include_fees=None, hub_addresses=None, initial_layout=True):
     """Select qualifying transactions, then show their requested local context.
 
     Complete I/O is explicitly versioned in the query so archived path-only
@@ -282,6 +282,10 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
 
     if type(group_context_inputs) is not bool:
         raise TraceError("Context input grouping must be enabled or disabled")
+    if type(initial_layout) is not bool:
+        raise TraceError("Initial layout refinement must be enabled or disabled")
+    # Grouped summaries embed member coordinates in semantic export records.
+    initial_layout = initial_layout or group_context_inputs
     if include_fees is not None and type(include_fees) is not bool:
         raise TraceError("Fee flows must be enabled or disabled")
     if not isinstance(query, dict):
@@ -355,14 +359,14 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
                         resolve_saved_inputs=state.get("collection_source", {}).get("kind") == "shared",
                         saved_transactions=state["transactions"], hub_addresses=hub_addresses,
                         color_attribution_arrows=color_attribution_arrows, center_name=center_name,
-                        edge_ids=edge_ids,
+                        edge_ids=edge_ids, initial_layout=initial_layout,
                         respect_attribution_hops=query.get("attribution_hop_limits") != "ignore")
     node_ids = {edge[field] for edge in graph["edges"] for field in ("source", "target")}
     graph["nodes"] = [node for node in graph["nodes"] if node["id"] in node_ids]
     if not complete_io:
         graph["fee_items"] = {}
     graph["layout"] = arrange({node["id"]: node for node in graph["nodes"]}, graph["edges"],
-                              reduced["transactions"], graph["fee_items"])
+                              reduced["transactions"], graph["fee_items"], refine=initial_layout)
     graph["activity_frames"] = activity_frames(graph)
     scope = SEED_SCOPE if "seeds" in query else SCOPE
     if query.get("attribution_hop_limits") == "ignore":

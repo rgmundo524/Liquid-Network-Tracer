@@ -16,6 +16,7 @@ from .services import confidence_value
 from .attribution_presentation import display_name, attribution_reference
 from .name_colors import apply_name_colors, apply_attribution_arrow_colors, color_text, color_value
 from .edge_labels import caption_text
+from .graph_preparation import LabelLookup
 
 PRESENTATION_VERSION = 25
 # Both renderers and their legends use this palette. Node colors describe the
@@ -173,7 +174,7 @@ def _reference_fields(item, enabled):
 def build_graph(state, merge_addresses=True, include_fees=False, *, group_context_inputs=False, hub_addresses=None,
                 color_attribution_arrows=None, center_name=None, edge_ids=None,
                 respect_attribution_hops=True, respect_stops=True, resolve_saved_inputs=False,
-                saved_transactions=None):
+                saved_transactions=None, initial_layout=True):
     """Build display nodes, optionally limited to exact input/output edges.
 
     Apply a path's edge selection before shared-address aggregation so excluded
@@ -181,6 +182,8 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
     transaction evidence and vin/vout indices remain intact.
     """
     from .investigations import validate_settings
+    if type(initial_layout) is not bool:
+        raise TraceError("Initial layout refinement must be enabled or disabled")
     if type(respect_attribution_hops) is not bool:
         raise TraceError("Attribution hop limits must be respected or explicitly ignored for graph lineage")
     if type(respect_stops) is not bool:
@@ -206,6 +209,7 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
     nodes, edges, fee_items = {}, [], {}
     reference_name = state.get("hop_reference_name", "")
     occurrence_keys = defaultdict(set)
+    labels_for = LabelLookup(state["labels"])
     unspent_endpoints = _unspent_endpoints(state)
     starting_transactions = {seed.rsplit(":", 1)[0] for seed in state["seeds"]}
     ranks, cycle_groups = transaction_ranks(state["transactions"])
@@ -226,7 +230,7 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
         kind = output_kind(output)
         tracked = state["outputs"].get(key) if network == "liquid" else None
         reference = _reference_fields(tracked, reference_name and kind != "fee")
-        matches = match_labels(state["labels"], key, output) if network == "liquid" else []
+        matches = labels_for(key, output) if network == "liquid" else []
         if kind != "spendable":
             label = "PEG-OUT REQUEST" if kind == "pegout" else ("FEE" if kind == "fee" else "UNSPENDABLE")
             peg = output.get("pegout") or {}
@@ -361,7 +365,10 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
         apply_attribution_arrow_colors(nodes, edges)
     for node in nodes.values():
         node["text_color"] = color_text(node["color"])
-    layout = arrange(nodes, edges, state["transactions"], fee_items)
+    # Group summaries retain original member geometry in their details. Keep
+    # those historical records stable for semantic preview fingerprints.
+    layout = arrange(nodes, edges, state["transactions"], fee_items,
+                     refine=initial_layout or group_context_inputs)
     layout["cycle_groups"] = cycle_groups
     mode = "merged" if merge_addresses else "outpoint_occurrences"
     graph = {"schema_version": 2, "presentation_version": PRESENTATION_VERSION,

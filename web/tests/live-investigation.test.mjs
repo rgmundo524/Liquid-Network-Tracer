@@ -2318,7 +2318,7 @@ test('changed settings block syncing but retain both CSV downloads from the vali
     assert.match(html, /download="transactions.csv"/);
     assert.match(html, /download="endpoints.csv"/);
     assert.doesNotMatch(html, /Generate this plot again to add|syncing remain available/);
-    if (page === 'plots') assert.match(html.match(/<button[^>]*data-action="plot-boards"[^>]*>/)[0], /disabled/);
+    if (page === 'plots') assert.match(html.match(/<button[^>]*data-action="workflow-write-miro"[^>]*>/)[0], /disabled/);
   }
 });
 
@@ -2507,7 +2507,7 @@ test('one saved ELK plot feeds SVG export and Miro sync without generating anoth
   await view.dispatch('view-plots');
   workflowEdit(view, 'plot-picker', 'reviewed');
   const html = view.workspace();
-  assert.match(html, /Sync with Miro/);
+  assert.match(html, /Choose Miro board/);
   assert.match(html, /Download ELK SVG/);
   assert.match(html, /href="\/files\/case1\/previews\/reviewed\/graph.svg"/);
   await view.dispatch('plot-boards');
@@ -2963,7 +2963,7 @@ test('successful update layout generation selects its exact board plot after ref
   assert.match(boardCardHtml(view, 'cashouts'), /value="update" selected/);
 });
 
-test('Plots and Miro share one workspace with unique controls and one primary generate action', async () => {
+test('Plots and Miro show preview first with unique controls and a primary preview action', async () => {
   const view = await harness();
   view.state.activeCase = workflowCase({boards: [workflowBoard('full', 'board')],
     plots: [workflowPlot('full', 'fresh', {layout_mode: 'fresh'})]});
@@ -2977,8 +2977,11 @@ test('Plots and Miro share one workspace with unique controls and one primary ge
   const ids = [...html.matchAll(/\sid="([^"]+)"/g)].map(match => match[1]);
   assert.equal(ids.length, new Set(ids).size, 'merged controls must not duplicate DOM IDs');
   assert.ok(html.indexOf('id="workflow-board-name"') < html.indexOf('data-action="workflow-plot-sync"'));
-  assert.match(html, /class="btn primary" data-action="workflow-plot-sync"[^>]*>[\s\S]*?Generate & create board/);
-  assert.match(html, /<details class="tool-details"><summary>Preview without syncing<\/summary>/);
+  assert.match(html, /class="btn primary" data-action="workflow-plot"[^>]*>[\s\S]*?Generate preview/);
+  assert.match(html, /<details class="tool-details"><summary>Advanced: generate and publish in one step<\/summary>/);
+  assert.ok(html.indexOf('id="saved-plots-panel"') < html.indexOf('data-action="workflow-plot-sync"'));
+  assert.ok(html.indexOf('id="saved-plots-panel"') < html.indexOf('id="miro-boards-panel"'));
+  assert.ok(html.indexOf('title="Full trace saved plot"') < html.indexOf('data-action="workflow-write-miro"'));
   assert.match(html, /<details class="panel" id="create-sync-board-panel"><summary/);
 });
 
@@ -5060,4 +5063,193 @@ test('Trace layout labels saved workflow settings without invalidating legacy re
   assert.ok(view.currentCompaction());
   await view.dispatch('view-plots');
   assert.match(view.workspace(), /<summary>Saved layout settings<\/summary><p>Trace layout/);
+});
+
+
+const savedPreviewPanel = view => view.workspace().match(/<section class="panel" id="saved-plots-panel"[\s\S]*?<\/section>/)[0];
+const previewWriteControl = (preview = 'reviewed', caseId = 'case1') => ({dataset: {preview, caseId}});
+const previewWriteButton = view => savedPreviewPanel(view).match(/<button[^>]*data-action="workflow-write-miro"[^>]*>/)?.[0];
+
+test('Write to Miro publishes the selected saved preview without rerunning generation or saving changed settings', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'publish', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase({plots: [workflowPlot('full', 'other', {layout_mode: 'fresh'}),
+    workflowPlot('pegouts', 'reviewed', {layout_mode: 'fresh', input_snapshot_version: 1})]});
+  await view.dispatch('view-plots');
+  workflowEdit(view, 'plot-picker', 'reviewed');
+  workflowEdit(view, 'preview-board-name', 'Reviewed result');
+  workflowEdit(view, 'max-hops', '99');
+  view.plotForm({connector_style: 'curved'});
+  assert.match(savedPreviewPanel(view), /Later changes in the form above do not change this saved preview/);
+  await view.dispatch('workflow-write-miro', previewWriteControl());
+  assert.deepEqual(view.calls.filter(call => call.body), [{path: '/api/cases/case1/actions',
+    body: {action: 'board-create-sync', preview_id: 'reviewed', name: 'Reviewed result'}}]);
+  assert.equal(view.state.job.live, true);
+  assert.match(previewWriteButton(view), /disabled/);
+  const count = view.calls.length;
+  await view.dispatch('workflow-write-miro', previewWriteControl());
+  assert.equal(view.calls.length, count, 'same publication cannot be queued twice');
+});
+
+test('Write to Miro binds an update to its saved destination, even when the form selects another board', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'publish', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'reviewed', {layout_mode: 'update',
+    board_record_id: 'target', board_id: 'miro-target', input_snapshot_version: 1})],
+    boards: [workflowBoard('pegouts', 'other'), workflowBoard('pegouts', 'target')]});
+  await view.dispatch('view-plots');
+  await view.dispatch('workflow-board-prepare', boardControl('other'));
+  await view.dispatch('workflow-write-miro', previewWriteControl());
+  assert.deepEqual(view.calls.filter(call => call.body), [{path: '/api/cases/case1/actions',
+    body: {action: 'board-sync', record_id: 'target', preview_id: 'reviewed', reorganize: false}}]);
+});
+
+test('Write to Miro permits removal-only updates and preserves their exact saved preview', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'publish', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'reviewed', {layout_mode: 'update',
+    board_record_id: 'target', board_id: 'miro-target', empty: true, node_count: 0, edge_count: 0})],
+    boards: [workflowBoard('pegouts', 'target')]});
+  await view.dispatch('view-plots');
+  assert.doesNotMatch(previewWriteButton(view), /disabled/);
+  await view.dispatch('workflow-write-miro', previewWriteControl());
+  assert.equal(view.calls.at(-1).body.action, 'board-sync');
+  assert.equal(view.calls.at(-1).body.preview_id, 'reviewed');
+});
+
+test('Write to Miro resumes a linked interrupted creation instead of creating a second board', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'resume', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase({plots: [workflowPlot('full', 'reviewed', {layout_mode: 'fresh'})],
+    boards: [workflowBoard('full', 'target', {status: 'interrupted', pending_count: 2,
+      preview_id: 'reviewed', creation_preview_id: 'reviewed'})]});
+  await view.dispatch('view-plots');
+  assert.match(savedPreviewPanel(view), /Resume writing this exact preview/);
+  await view.dispatch('workflow-write-miro', previewWriteControl());
+  assert.deepEqual(view.calls.at(-1).body, {action: 'board-sync', record_id: 'target', preview_id: 'reviewed', reorganize: false});
+});
+
+test('Write to Miro retries a known rejection with the original board name', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'retry', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase({plots: [workflowPlot('full', 'reviewed', {layout_mode: 'fresh'})],
+    boards: [workflowBoard('full', 'target', {status: 'creation_rejected', board_id: null, can_sync: false,
+      name: 'Original name', preview_id: 'reviewed', creation_preview_id: 'reviewed'})]});
+  await view.dispatch('view-plots');
+  workflowEdit(view, 'saved-board-name', 'Do not replace');
+  await view.dispatch('workflow-write-miro', previewWriteControl());
+  assert.deepEqual(view.calls.at(-1).body, {action: 'board-create-sync', preview_id: 'reviewed', name: 'Original name'});
+});
+
+for (const creationPreview of ['reviewed', 'another-preview']) {
+  test(`Write to Miro blocks uncertain creation for ${creationPreview} and leaves its recovery controls available`, async () => {
+    const view = await harness();
+    view.state.activeCase = workflowCase({plots: [workflowPlot('full', 'reviewed', {layout_mode: 'fresh'})],
+      boards: [workflowBoard('full', 'unknown', {status: 'pending_creation', board_id: null, can_sync: false,
+        preview_id: creationPreview, creation_preview_id: creationPreview})]});
+    await view.dispatch('view-plots');
+    assert.match(previewWriteButton(view), /disabled/);
+    assert.match(boardCardHtml(view, 'unknown'), /Link created board to this entry/);
+    await assert.rejects(view.dispatch('workflow-write-miro', previewWriteControl()), /uncertain result|uncertain board creation/);
+    assert.ok(!view.calls.some(call => call.path.endsWith('/actions')));
+  });
+}
+
+for (const extra of [{validation_pending: true, reviewable: false}, {reviewable: false, reason: 'Saved source changed.'},
+  {empty: true, node_count: 0}]) {
+  test(`Write to Miro blocks unchecked, stale or empty previews: ${JSON.stringify(extra)}`, async () => {
+    const view = await harness();
+    view.state.activeCase = workflowCase({plots: [workflowPlot('full', 'reviewed', {layout_mode: 'fresh', ...extra})]});
+    view.state.caseView = 'plots';
+    assert.match(previewWriteButton(view), /disabled/);
+    await assert.rejects(view.dispatch('workflow-write-miro', previewWriteControl()), /Check this saved|Saved source changed|valid preview/);
+    assert.ok(!view.calls.some(call => call.path.endsWith('/actions')));
+  });
+}
+
+test('Write to Miro waits for board records without blocking offline preview generation', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({sections: stagedSections({workflow: 'ready', collection: 'ready', boards: 'loading'}),
+    plots: [workflowPlot('full', 'reviewed', {layout_mode: 'fresh'})]});
+  view.state.caseView = 'plots';
+  assert.match(previewWriteButton(view), /disabled/);
+  assert.doesNotMatch(view.workspace().match(/<button[^>]*data-action="workflow-plot"[^>]*>/)[0], /disabled/);
+  await assert.rejects(view.dispatch('workflow-write-miro', previewWriteControl()), /Waiting for Miro board records/);
+  assert.ok(!view.calls.some(call => call.path.endsWith('/actions')));
+});
+
+for (const boards of [[], [workflowBoard('full', 'target', {board_id: 'changed-board'})], [workflowBoard('pegouts', 'target')]]) {
+  test(`Write to Miro cannot redirect an update with a missing or mismatched destination: ${JSON.stringify(boards)}`, async () => {
+    const view = await harness();
+    view.state.activeCase = workflowCase({plots: [workflowPlot('full', 'reviewed', {layout_mode: 'update',
+      board_record_id: 'target', board_id: 'miro-target'})], boards});
+    view.state.caseView = 'plots';
+    assert.match(previewWriteButton(view), /disabled/);
+    await assert.rejects(view.dispatch('workflow-write-miro', previewWriteControl()), /destination captured by this preview is unavailable/);
+    assert.ok(!view.calls.some(call => call.path.endsWith('/actions')));
+  });
+}
+
+test('already synced preview opens its existing board and cannot create or sync it again', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [workflowPlot('full', 'reviewed', {layout_mode: 'fresh'})],
+    boards: [workflowBoard('full', 'target', {status: 'synced', preview_id: 'reviewed', creation_preview_id: 'reviewed'})]});
+  view.state.caseView = 'plots';
+  assert.equal(previewWriteButton(view), undefined);
+  assert.match(savedPreviewPanel(view), /Open synced Miro board/);
+  await assert.rejects(view.dispatch('workflow-write-miro', previewWriteControl()), /already synced/);
+  assert.ok(!view.calls.some(call => call.path.endsWith('/actions')));
+});
+
+test('an initial preview cannot overwrite its board after a later layout was written', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [workflowPlot('full', 'reviewed', {layout_mode: 'fresh'})],
+    boards: [workflowBoard('full', 'target', {status: 'synced', preview_id: 'later', creation_preview_id: 'reviewed'})]});
+  view.state.caseView = 'plots';
+  assert.match(previewWriteButton(view), /disabled/);
+  assert.match(savedPreviewPanel(view), /Open Miro board/);
+  await assert.rejects(view.dispatch('workflow-write-miro', previewWriteControl()), /later saved layout/);
+  assert.ok(!view.calls.some(call => call.path.endsWith('/actions')));
+});
+
+test('an old preview control cannot publish a newly selected layout or another investigation', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [workflowPlot('full', 'reviewed', {layout_mode: 'fresh'}),
+    workflowPlot('full', 'later', {layout_mode: 'fresh'})]});
+  view.state.caseView = 'plots';
+  workflowEdit(view, 'plot-picker', 'later');
+  await assert.rejects(view.dispatch('workflow-write-miro', previewWriteControl()), /selected preview changed/);
+  await assert.rejects(view.dispatch('workflow-write-miro', previewWriteControl('later', 'other-case')), /selected preview changed/);
+  assert.ok(!view.calls.some(call => call.path.endsWith('/actions')));
+});
+
+test('Write to Miro respects board resource conflicts while allowing independent boards', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'publish', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase({plots: [workflowPlot('full', 'reviewed', {layout_mode: 'update',
+    board_record_id: 'target', board_id: 'miro-target', input_snapshot_version: 1})],
+    boards: [workflowBoard('full', 'target')]});
+  view.state.caseView = 'plots';
+  view.state.job = {id: 'busy', action: 'board-sync', caseId: 'case1', resource_kind: 'board', resource_key: 'miro-target'};
+  assert.match(previewWriteButton(view), /disabled/);
+  await view.dispatch('workflow-write-miro', previewWriteControl());
+  assert.ok(!view.calls.some(call => call.path.endsWith('/actions')));
+  view.state.job = {id: 'other', action: 'board-sync', caseId: 'case1', resource_kind: 'board', resource_key: 'miro-other'};
+  assert.doesNotMatch(previewWriteButton(view), /disabled/);
+  await view.dispatch('workflow-write-miro', previewWriteControl());
+  assert.equal(view.calls.at(-1).body.action, 'board-sync');
+});
+
+
+test('publishing a saved new-board preview prepares subsequent previews to update that same board', async () => {
+  const plot = workflowPlot('pegouts', 'reviewed', {layout_mode: 'fresh'});
+  const board = workflowBoard('pegouts', 'target', {status: 'synced', preview_id: 'reviewed', creation_preview_id: 'reviewed'});
+  const detail = workflowCase({plots: [plot], boards: [board]});
+  const view = await harness(path => path === '/api/jobs/publish' ? {status: 'succeeded', result: {...board, record_id: board.id}}
+    : path === '/api/cases/case1/overview' ? detail : undefined);
+  view.state.activeCase = workflowCase({plots: [plot]});
+  view.currentWorkflow(view.state.activeCase).plot = 'reviewed';
+  view.state.job = {id: 'publish', action: 'board-create-sync', caseId: 'case1', live: true};
+  await view.pollJob();
+  const draft = view.currentWorkflow(view.state.activeCase);
+  assert.equal(draft.layoutMode, 'update');
+  assert.equal(draft.layoutBoard, 'target');
+  assert.equal(draft.goal, 'pegouts');
+  assert.equal(draft.plot, 'reviewed');
+  assert.match(savedPreviewPanel(view), /Open synced Miro board/);
+  assert.match(savedPreviewPanel(view), /src="\/files\/case1\/previews\/reviewed\/graph.html#chart"/);
 });

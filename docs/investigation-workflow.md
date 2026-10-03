@@ -1,4 +1,4 @@
-# Collect data, then generate and sync a plot
+# Collect data, preview a plot, then write it to Miro
 
 An investigation owns one set of saved collection runs and can have several Miro
 boards. Each board has a name and a plotting goal. Use the same collected data
@@ -154,7 +154,7 @@ the **Hops collected** measurement. The progress indicator may return to 0 as
 branches re-enter the group, so it remains a depth indicator, not a completion
 percentage.
 
-## 2. Generate and sync from saved data
+## 2. Preview and publish from saved data
 
 Open **Plots & Miro** and select the saved run, plotting goal, and board
 destination. The available goals are shown together:
@@ -167,9 +167,16 @@ destination. The available goals are shown together:
 
 Choose **New board** and enter a name for a fresh arrangement, or choose
 **Update existing board** and a destination with the same plotting goal.
-Set the appearance and, for peg-out paths, the hop range, then choose **Generate & create board** or
-**Generate & update board**. Each runs layout generation and Miro publication
-as one job. There is no required preview-review or separate sync step.
+Set the appearance and, for peg-out paths, the hop range, then choose **Generate
+preview**. The saved preview appears above the publication controls. Inspect it,
+then use **Write to Miro** beside that preview to create its first private board
+or sync its captured existing-board destination. Publication uses the saved
+layout without running ELK again. After first publication, the destination
+switches to that board for future update previews.
+
+The optional **Advanced: generate and publish in one step** section retains the
+combined generation/publication actions. Those actions generate a new layout;
+use **Write to Miro** to publish the preview already on screen.
 
 Both modes use the selected collection run and current attribution, colors,
 and change-output rules. Neither fetches transactions or address statistics.
@@ -177,9 +184,10 @@ Missing data must be collected separately. Changing a plotting goal or tracing
 rule never modifies the archived evidence. A saved preview, SVG, and transaction
 CSV are still produced for later inspection and download.
 
-**Generate preview only** remains available for local output or an optional review before
-publication. Fresh previews are offline. Update previews read Miro's current
-objects, connectors, and positions without writing to the board.
+**Generate preview** also works for local-only output. Fresh previews are offline.
+Update previews read Miro's current objects, connectors, and positions without
+writing to the board. Changing the generation form does not change an existing
+preview; generate another preview to capture those changes.
 
 An update preserves retained nodes at their indexed Miro positions. ELK arranges
 only new graph nodes in a clear area beyond the board's current contents, and
@@ -315,7 +323,7 @@ generated layout. Separate branch hubs remain Full trace-only. The optional
 fee-flow toggle applies to Full trace and Paths to peg-outs; Starter connections
 always displays transaction fees. Existing saved layouts keep their captured
 fee choice; generate another layout to apply a different choice.
-**Generate & update board** applies grouping changes. Replaced
+Generate an update preview, then use **Write to Miro** to apply grouping changes. Replaced
 context objects join the newly arranged additions.
 
 **Save layout settings** persists the preferences with this investigation, even
@@ -346,9 +354,10 @@ SVG**, its local preview, and supporting files. Saved-layout publication control
 remain available for preview-only plots and recovery; using them does not run
 ELK again.
 
-Miro publication uses the saved graph and layout. **Create & sync** publishes a
-fresh layout to a new private board. **Update board** applies the preview bound
-to that existing board. Miro chooses connector routes, so exact bends can differ
+Miro publication uses the saved graph and layout. **Write to Miro** publishes a
+fresh layout to its private board or applies the preview bound to an existing
+board. An already synced preview offers **Open synced Miro board**. Interrupted
+operations keep their saved-board recovery controls. Miro chooses connector routes, so exact bends can differ
 from the ELK SVG.
 
 ### Manage boards
@@ -358,11 +367,11 @@ board, including historical boards. Each block has its own name, goal, status,
 Miro link, and saved layout information. Managed boards also have their own
 compatible layout picker and sync controls.
 
-1. Choose **New board**, its name, tracing goal, and settings, then **Generate &
-   create board**. The layout is saved before the board is created and synced.
-2. To maintain a board, select **Update existing board** and that target, then
-   **Generate & update board**. Existing positions stay intact; additions arrive
-   in the separate ELK-arranged area and connect to retained objects.
+1. Choose **New board**, its name, tracing goal, and settings, then **Generate
+   preview**. Review it and choose **Write to Miro** to create and populate the board.
+2. To maintain a board, select **Update existing board** and that target, generate
+   a preview, then **Write to Miro**. Existing positions stay intact; additions
+   arrive in the separate ELK-arranged area and connect to retained objects.
 3. If publication is interrupted, use the board's saved-layout resume control.
    It reuses that layout and board. Generating a different fresh layout creates
    a separate board, even if its name matches.

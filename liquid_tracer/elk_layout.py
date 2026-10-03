@@ -39,6 +39,7 @@ from .named_group_layout import (CORE_STRAIGHTNESS, center_order, center_metrics
 from .transaction_neighborhoods import neighborhood_order, neighborhood_metrics
 from .hub_layout import hub_plan, hub_layout_view
 from .trace_layout import trace_structure, trace_order, trace_priorities, trace_metrics
+from .graph_preparation import copy_for_geometry
 
 
 ALGORITHM = "elk_layered_v1"
@@ -377,7 +378,7 @@ def _worker(graph, seeds, progress=None, *, heap_mb=None, cancel_event=None, res
             process.communicate()
 
 
-def _request_graph(graph):
+def _request_graph(graph, *, structure=None):
     original = graph
     graph = hub_layout_view(graph)
     # Source-first layering keeps independent hub spenders in a vertical
@@ -402,7 +403,7 @@ def _request_graph(graph):
                                            "elk.portConstraints": "FIXED_SIDE"}}
     edge_values = []
     priorities = edge_priorities(graph)
-    trace = trace_structure(graph)
+    trace = trace_structure(graph) if structure is None else structure
     centered = group_structure(graph)
     if trace["enabled"]:
         for key, priority in trace_priorities(graph, trace).items():
@@ -645,6 +646,8 @@ def _apply_candidate(graph, candidate, port_map, fee_ids, connector_style, *, va
                         "edge_labels": {"version": LABEL_LAYOUT_VERSION, "estimated": True,
                                         "font_size": FONT_SIZE, "placement": "center_above",
                                         "reserved_count": len(label_map), "miro_positions_exact": False}}
+    if "sectionGeometry" in candidate:
+        result["layout"]["section_geometry"] = copy.deepcopy(candidate["sectionGeometry"])
     if input_fallback is not None:
         result["layout"]["input_order"]["fallback_reason"] = input_fallback
     result.setdefault("graph_options", {})["connector_style"] = connector_style
@@ -825,6 +828,7 @@ def _candidate_score(metrics, miro, ports, organization, neighborhoods, boundari
 def optimize_graph(graph, connector_style="straight", progress=None, *, layout_attempts=None, validation_graph=None):
     """Compare bounded parallel ELK attempts without graph size or time ceilings.
 
+    Large Trace graphs use bounded section jobs around the preferred backbone.
     A bounded candidate batch and the best result are retained. Possible memory
     failures retry alone with the full heap budget, then remain sequential.
     Other worker-process failures skip a seed, retaining earlier valid results.
@@ -845,7 +849,8 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
     report = attempt_progress(1, seeds[0])
     _report_progress(report, "Preparing local ELK search; cancel to stop", stage="preparing",
                      node_count=len(graph["nodes"]), edge_count=len(graph["edges"]))
-    request, ports, fee_ids = _request_graph(graph)
+    structure = trace_structure(graph)
+    request, ports, fee_ids = _request_graph(graph, structure=structure)
     _report_progress(report, "Measuring input layout", stage="measuring_input")
     before = layout_metrics(graph)
     best = None
@@ -854,7 +859,11 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
     failed_attempts = []
     diagnostic_paths = []
     execution = {}
-    for index, seed, candidates in iter_attempts(request, seeds, _worker, attempt_progress, execution):
+    from .trace_sections import enabled as sections_enabled, iter_candidates
+    candidates_stream = (iter_candidates(graph, request, seeds, _worker, attempt_progress, execution, structure=structure)
+                         if sections_enabled(graph, request)
+                         else iter_attempts(request, seeds, _worker, attempt_progress, execution))
+    for index, seed, candidates in candidates_stream:
         report = attempt_progress(index, seed)
         if isinstance(candidates, ElkWorkerFailure):
             if candidates.diagnostic_path:
@@ -904,7 +913,7 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
             # bends that Miro cannot receive. Branch separation follows every
             # collision gate. Local forks and transaction proximity matter even
             # within one seed lineage; historical date/port order is secondary.
-            trace = trace_metrics(result) if graph.get("graph_options", {}).get("layout_style") == "trace" else None
+            trace = trace_metrics(result, structure=structure) if graph.get("graph_options", {}).get("layout_style") == "trace" else None
             score = _candidate_score(score_metrics, miro_estimate, endpoint_metrics, organization,
                                      neighborhoods, boundaries, centered,
                                      result["layout"]["input_order"]["policy"], trace=trace)
@@ -931,7 +940,7 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
     # Moving a circle closer can put Miro's midpoint elbow through a different
     # object even when ELK's saved route remains safe. Check that final pass
     # against the same endpoint/board estimates before accepting its positions.
-    compacted = copy.deepcopy(result)
+    compacted = copy_for_geometry(result)
     compact_context_inputs(compacted)
     if compacted["layout"]["branch_organization"].get("context_inputs_moved", 0):
         alignment = compacted["layout"].get("endpoint_alignment", {})
@@ -977,7 +986,7 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
     if graph.get("graph_options", {}).get("center_name"):
         result["layout"]["named_group"] = center_metrics(result)
     if graph.get("graph_options", {}).get("layout_style") == "trace":
-        result["layout"]["trace_layout"] = trace_metrics(result)
+        result["layout"]["trace_layout"] = trace_metrics(result, structure=structure)
     after = layout_metrics(result)
     result["layout"]["metrics"] = {"before": before, "after": after, "estimated": True,
                                     "attempt_count": attempts, "candidate_count": candidate_count, "selected_seed": seed,

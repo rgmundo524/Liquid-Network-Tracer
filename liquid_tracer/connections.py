@@ -312,7 +312,8 @@ def _connecting_outpoints(state, max_hops=10, *, connection_scope=None):
 
 
 def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, center_name=None,
-                     connection_scope=None, transaction_io=None, group_context_inputs=False):
+                     connection_scope=None, transaction_io=None, group_context_inputs=False,
+                     initial_layout=True):
     """Select connecting transactions, then display their requested local I/O.
 
     Complete I/O is explicit so historical path-only snapshots retain their
@@ -327,6 +328,10 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
     complete_io = validate_transaction_io(transaction_io) == "complete"
     if type(group_context_inputs) is not bool:
         raise TraceError("Context input grouping must be enabled or disabled")
+    if type(initial_layout) is not bool:
+        raise TraceError("Initial layout refinement must be enabled or disabled")
+    # Grouped summaries embed member coordinates in semantic export records.
+    initial_layout = initial_layout or group_context_inputs
     all_saved = connection_scope == "all_saved"
     saved_evidence = connection_scope in ("all_saved", "hop_limited")
     if saved_evidence:
@@ -361,7 +366,7 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
                         color_attribution_arrows=color_attribution_arrows, center_name=center_name,
                         respect_attribution_hops=not saved_evidence, respect_stops=not saved_evidence,
                         resolve_saved_inputs=saved_evidence or complete_io,
-                        saved_transactions=state["transactions"] if complete_io else None)
+                        saved_transactions=state["transactions"] if complete_io else None, initial_layout=initial_layout)
     edge_ids.update(context_edge_ids)
     graph["edges"] = [e for e in graph["edges"] if e["id"] in edge_ids]
     for edge in graph["edges"]:
@@ -395,7 +400,7 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
     if not complete_io:
         graph["fee_items"] = {}
     graph["layout"] = arrange({n["id"]: n for n in graph["nodes"]}, graph["edges"],
-                              reduced["transactions"], graph["fee_items"])
+                              reduced["transactions"], graph["fee_items"], refine=initial_layout)
     graph["activity_frames"] = activity_frames(graph)
     report.update(transaction_count=len(selected), connection_count=len(report["pairs"]))
     graph["connections"] = report
