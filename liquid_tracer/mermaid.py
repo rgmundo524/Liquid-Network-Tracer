@@ -17,9 +17,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .name_colors import color_text
+from .edge_labels import caption_text
 from .graph_markers import node_border
 from .common import TraceError, save_json
 from .export import COLORS, edge_color, legend_lines
+from .legend import LEGEND_CSS, legend_html
 from .attribution_presentation import register_html
 from .processes import defer_cancellation_during_spawn
 from .render_runtime import renderer_failure, renderer_heap_mb
@@ -68,6 +70,9 @@ def _label(value):
 
 
 def _items(graph):
+    from .context_connectors import display_graph
+
+    graph = display_graph(graph)
     nodes = sorted(graph["nodes"], key=lambda node: node["id"])
     edges = sorted(graph["edges"], key=lambda edge: edge["id"])
     if not nodes:
@@ -81,7 +86,7 @@ def _items(graph):
 
 
 def mermaid_source(graph):
-    """Return deterministic, standalone Mermaid text, including every edge."""
+    """Return deterministic Mermaid text, including every displayed edge."""
     nodes, edges, ids = _items(graph)
     lines = ["flowchart LR", "  %% Local Liquid Network trace; IDs map to mermaid-node-map.json."]
     shapes = {"transaction": ("[", "]"), "context_group": ("[", "]"),
@@ -103,14 +108,20 @@ def mermaid_source(graph):
         lines.append(f"  {identifier}{start}{_label(label)}{end}")
         lines.append(f"  style {identifier} fill:{color},stroke:{border},stroke-width:{thickness}px,color:{color_text(color)}")
     for edge in edges:
+        if not caption_text(edge):
+            lines.append(f"  {ids[edge['source']]} --> {ids[edge['target']]}")
+            continue
         caption = edge["label"] + (" · " + edge["quantity"] if edge.get("quantity") else "")
         lines.append(f"  {ids[edge['source']]} -->|{_label(caption)}| {ids[edge['target']]}")
     for index, edge in enumerate(edges):
-        lines.append(f"  linkStyle {index} stroke:{edge_color(edge['role'])},stroke-width:2px,color:#334155")
+        lines.append(f"  linkStyle {index} stroke:{edge_color(edge)},stroke-width:2px,color:#334155")
     return "\n".join(lines) + "\n"
 
 
 def _preview_html(graph, svg):
+    from .context_connectors import display_graph
+
+    displayed_count = len(display_graph(graph)["edges"])
     # An SVG image cannot execute embedded scripts. Embedding the image also
     # makes this page portable and keeps viewing independent of a web server.
     encoded = base64.b64encode(svg).decode("ascii")
@@ -146,16 +157,18 @@ pre {{ white-space:pre-wrap; overflow-wrap:anywhere; }}
 summary {{ cursor:pointer; }} li {{ margin:6px 0; }}
 .chart {{ overflow:auto; padding:24px; background:white; }}
 .chart img {{ display:block; max-width:none; }}
+{LEGEND_CSS}
 </style></head><body>
 <header><h1>Liquid trace · {title}</h1>
-<p>Run {run_id} · {len(graph['nodes'])} nodes · {len(graph['edges'])} links · Fees {fees}{simulated}</p>
+<p>Run {run_id} · {len(graph['nodes'])} nodes · {displayed_count} links · Fees {fees}{simulated}</p>
 <p>{notice}</p>
 <p>{layout_note}</p>
 <p>Scroll to explore; use your browser zoom to adjust the scale.</p>
 <p><a href="graph.mmd" download>Mermaid source</a> · <a href="graph.svg" download>SVG</a> ·
 <a href="graph.json" download>Graph details</a> · <a href="mermaid-node-map.json" download>Node identifiers</a></p>
 {register_html(graph)}
-<details><summary>Legend</summary><ul>{items}</ul></details></header>
+{legend_html(graph)}
+<details><summary>Detailed evidence notes</summary><ul>{items}</ul></details></header>
 <main class="chart"><img alt="Directed Liquid Network transaction graph" src="data:image/svg+xml;base64,{encoded}"></main>
 </body></html>
 """

@@ -67,6 +67,11 @@ every pair of objects. Validate all geometry before making any changes.
 
     for node in candidate["nodes"]:
         rectangle(node, _NODE_GUARD)
+    # Locally solved sections are rigid envelopes. Compact the gaps between
+    # them without stretching their internal routes or invalidating their
+    # saved bounds. Older section candidates contain no envelope list.
+    for section in candidate.get("sectionGeometry", {}).get("sections", []):
+        rectangle(section, _ROUTE_GUARD)
     for edge in candidate["edges"]:
         if not isinstance(edge, dict):
             raise TraceError("ELK returned invalid geometry for horizontal spacing")

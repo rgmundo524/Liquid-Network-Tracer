@@ -110,11 +110,12 @@ class ChangeOutputWebTests(unittest.TestCase):
         revision = self.success(endpoint, {})["revision"]
         body = {"txid": txid, "vout": 1, "expected_revision": revision}
         self.assertEqual(self.request(endpoint, body, headers={"X-Liquid-CSRF": "wrong"})[0], 403)
-        self.server.active_job = "busy"
+        job = test_web.synthetic_running_job(route.split('/')[3])
+        self.server.jobs[job['id']] = job
         try:
             self.assertEqual(self.request(endpoint, body)[0], 409)
         finally:
-            self.server.active_job = None
+            self.server.jobs.pop(job['id'])
         before = load_services(case)
         for extra in ({"file": "/private"}, {"vout": True}, {"vout": -1}, {"vout": "1"},
                       {"vout": 2**32}, {"notes": []}, {"expected_revision": None}, {"expected_revision": True}):

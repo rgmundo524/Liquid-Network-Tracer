@@ -14,11 +14,12 @@ from pathlib import Path
 
 from .api import http
 from .common import TraceError, canonical, digest, now
-from .export import COLORS, edge_color, legend_lines
+from .export import edge_color
+from . import legend_miro, miro_legend_updates
 from .edge_labels import FONT_SIZE as CAPTION_FONT_SIZE, caption_text
 from .connector_styles import stroke_width
 from .name_colors import color_text
-from . import presentation_items, context_group_miro
+from . import presentation_items, context_group_miro, context_parallel_miro, plot_miro, board_layout
 from .address_counts import caption as count_caption
 from .graph_markers import node_border
 from .miro_http import MiroHTTP
@@ -34,34 +35,12 @@ from .miro_creation_parents import (normalize_created_shapes, validate_creation_
 
 
 def make_plan(graph):
-    shapes, connectors = [], []
+    from .context_connectors import display_graph
+
+    graph = display_graph(graph)
+    legend_shapes, legend_catalog = legend_miro.make_items(graph)
+    shapes, connectors = [legend_shapes[0]], []
     incremental = "namespace" in graph
-    title = ("SYNTHETIC DATA · " if graph["simulated"] else "") + "Liquid UTXO trace"
-    if not incremental:
-        title += " · " + graph["run_id"]
-    shapes.append({"key": "legend", "body": {"data": {"shape": "rectangle", "content":
-        "<p><strong>" + html.escape(title) + "</strong></p><p>"
-        + "<br>".join(html.escape(line) for line in legend_lines(graph))
-        + "</p><p>" + html.escape(graph["notice"]) + "</p>"},
-        "position": {"x": 700, "y": -160, "origin": "center"}, "geometry": {"width": 1300, "height": 260},
-        "style": {"fillColor": COLORS["address"], "fontSize": "14", "textAlign": "left"}}})
-    if incremental:
-        details = graph.get("run", {})
-        lines = ["Run: " + graph["run_id"]]
-        for key in ("started_at", "finished_at", "status", "parent_run", "stop_reason", "max_hops", "seeds", "limits", "stats"):
-            if key in details:
-                value = details[key]
-                if key == "seeds" and isinstance(value, list):
-                    transactions = {str(seed).rpartition(":")[0] for seed in value}
-                    lines.append(f"Starting outputs: {len(value)} across {len(transactions)} transactions")
-                    continue
-                lines.append(key.replace("_", " ") + ": " + (json.dumps(value, ensure_ascii=False)
-                             if isinstance(value, (dict, list)) else str(value)))
-        shapes.append({"key": "run:" + graph["run_id"], "body": {
-            "data": {"shape": "rectangle", "content": "<p>" + "<br>".join(html.escape(s) for s in lines) + "</p>"},
-            "position": {"x": 700, "y": -480, "origin": "center"},
-            "geometry": {"width": 1300, "height": 280},
-            "style": {"fillColor": "#e0f2fe", "fontSize": "14", "textAlign": "left"}}})
     for node in graph["nodes"]:
         # References remain in local registers/exports, not as dangling Miro
         # labels after the on-board cards have been retired.
@@ -84,10 +63,12 @@ def make_plan(graph):
                       "textAlign": "center", "textAlignVertical": "middle"}}})
     transaction_keys = {node["id"] for node in graph["nodes"] if node["kind"] == "transaction"}
     for edge in graph["edges"]:
+        caption = caption_text(edge)
         connector = {"key": edge["id"], "source": edge["source"], "target": edge["target"], "body": {
-            "shape": edge.get("connector_shape", "curved"), "captions": [{"content": html.escape(caption_text(edge)), "position": "50%"}],
+            "shape": edge.get("connector_shape", "curved"),
+            "captions": [{"content": html.escape(caption), "position": "50%"}] if caption else [],
             "style": {"startStrokeCap": "none", "endStrokeCap": "stealth", "strokeStyle": "normal",
-                      "strokeColor": edge_color(edge["role"]),
+                      "strokeColor": edge_color(edge),
                       "strokeWidth": str(stroke_width(edge["role"])), "fontSize": str(CAPTION_FONT_SIZE)}}}
         if graph.get("connector_attachment") == "transaction_sides_v1":
             connector["attachment"] = {}
@@ -100,21 +81,15 @@ def make_plan(graph):
             # Preserve ELK's return-link exceptions for compact-plan geometry
             # checks. This metadata is never sent to the Miro connector API.
             connector["routing_exception"] = edge.get("routing_exception")
-        connector["context_evidence"] = context_group_miro.evidence(edge)
+        if edge["id"].startswith(context_parallel_miro.PREFIX):
+            connector["context_parallel_evidence"] = context_parallel_miro.display_evidence(edge)
+        elif edge["id"].startswith(context_group_miro.DISPLAY_PREFIX):
+            connector["context_display_evidence"] = context_group_miro.display_evidence(edge)
+        else:
+            connector["context_evidence"] = context_group_miro.evidence(edge)
         connectors.append(connector)
-    if graph.get("layout"):
-        # The graph supplies its actual top bound, including the optional fee row.
-        top = min((node["y"] - node["height"] / 2 for node in graph["nodes"]), default=0)
-        shapes[0]["body"]["position"]["y"] = top - 230
-        if incremental:
-            shapes[1]["body"]["position"]["y"] = top - 550
-        annotations = graph["layout"].get("annotations", {})
-        note_shapes = [(shapes[0], "legend")] + ([(shapes[1], "run")] if incremental else [])
-        for shape, name in note_shapes:
-            if name in annotations:
-                shape["body"]["position"].update({field: annotations[name][field] for field in ("x", "y")})
     plan = {"schema_version": 2 if incremental else 1, "run_id": graph["run_id"], "shapes": shapes, "connectors": connectors}
-    for key in ("layout", "fee_items", "include_fees", "connector_attachment", "graph_options", "address_convergences"):
+    for key in ("layout", "fee_items", "include_fees", "connector_attachment", "graph_options", "address_convergences", "board_layout"):
         if key in graph:
             plan[key] = copy.deepcopy(graph[key])
     if "fee_items" in graph:
@@ -125,10 +100,13 @@ def make_plan(graph):
         plan["namespace"] = copy.deepcopy(graph["namespace"])
         plan["run"] = copy.deepcopy(graph.get("run", {}))
     annotations, annotation_catalog = presentation_items.make_items(graph,
-        [_bounds(item["body"], item["key"]) for item in shapes if item["key"] == "legend" or item["key"].startswith("run:")])
+        [_bounds(item["body"], item["key"]) for item in shapes if item["key"] == "legend"])
     shapes.extend(annotations)
-    plan["presentation_items"] = annotation_catalog
+    shapes.extend(legend_shapes[1:])
+    plan["presentation_items"] = {**annotation_catalog, **legend_catalog}
     plan["context_group_items"] = context_group_miro.catalog(graph)
+    plan["context_parallel_items"] = context_parallel_miro.catalog(graph)
+    board_layout.finalize_plan(plan)
     if "activity_frames" in graph:
         plan["activity_frames"] = copy.deepcopy(graph["activity_frames"])
         plan["frames"] = frame_bodies(plan["activity_frames"], {
@@ -182,6 +160,9 @@ def validate_plan(plan):
     _validate_attachments(plan)
     _fee_catalog(plan)
     context_group_miro.validate(plan)
+    context_parallel_miro.validate(plan)
+    plot_miro.validate(plan)
+    board_layout.validate(plan)
     if "activity_frames" in plan:
         seeds = plan.get("run", {}).get("seeds")
         starts = ({"tx:" + seed.rpartition(":")[0] for seed in seeds
@@ -394,12 +375,21 @@ def _recover_updates(state, remote):
         if key not in remote:
             continue
         record = state["items"][key]
-        actual = _editable(remote[key], record["endpoint"])
-        for path, desired in _fields(_editable(entry["patch"], record["endpoint"])):
+        desired_fields = _editable(entry["patch"], record["endpoint"])
+        actual = _comparison_editable(remote[key], record["endpoint"], desired_fields)
+        for path, desired in _fields(desired_fields):
             current = _get(actual, path)
             if _same(current, desired, path):
                 _set(record["managed"], path, current)
                 _set(record["intent"], path, desired)
+        if ((key == "legend" or record.get("presentation_proof", {}).get("kind") == "legend")
+                and "geometry" in entry["patch"]
+                and miro_legend_updates.geometry_snapshot(remote[key]) ==
+                    miro_legend_updates.geometry_snapshot(entry["patch"])):
+            miro_legend_updates.remember_geometry(record, remote[key])
+        if key.startswith(context_group_miro.PREFIX) and "geometry" in entry["patch"]:
+            context_group_miro.acknowledge_resize(record, remote[key], entry["patch"]["geometry"])
+        plot_miro.acknowledge(record, remote[key], entry["patch"])
 
 
 def _editable(body, endpoint):
@@ -415,6 +405,30 @@ def _editable(body, endpoint):
         result["captions"] = [{k: copy.deepcopy(c[k]) for k in ("content", "position") if k in c}
                               for c in body["captions"]]
     return result
+
+
+def _comparison_editable(body, endpoint, saved):
+    """Compare full reads without mistaking omitted empty captions for edits.
+
+    Miro can omit both captions and their font size on an unlabelled connector.
+    Only reconcile those omissions when the saved captions are already empty.
+    A new/deleted caption, an explicit font change, or other missing style fields
+    must still be detected. Partial list bodies first receive an individual GET
+    in miro_reads; do not use this helper to relax that completeness check.
+
+    Keep _editable unchanged: it also reads PATCHes, where an absent captions
+    field means leave the caption alone, not clear it.
+    """
+    actual = _editable(body, endpoint)
+    if (endpoint == "connectors" and saved.get("captions") == []
+            and ("captions" not in body or body["captions"] == [])):
+        actual["captions"] = []
+        style = actual.get("style")
+        if isinstance(style, dict) and "fontSize" not in style:
+            saved_style = saved.get("style", {})
+            if "fontSize" in saved_style:
+                style["fontSize"] = copy.deepcopy(saved_style["fontSize"])
+    return actual
 
 
 def _check_lineage(plan, state):
@@ -483,7 +497,7 @@ def _baseline(intent, remote, endpoint):
 
 def _merge_fields(record, body, remote, key):
     desired = _editable(body, record["endpoint"])
-    actual = _editable(remote, record["endpoint"])
+    actual = _comparison_editable(remote, record["endpoint"], record["managed"])
     managed = copy.deepcopy(record["managed"])
     intent = copy.deepcopy(record["intent"])
     patch, conflicts = {}, []
@@ -499,6 +513,14 @@ def _merge_fields(record, body, remote, key):
         else:
             conflicts.append({"key": key, "item_id": record["id"], "field": ".".join(path),
                               "reason": "Remote field differs from last managed value; manual edit preserved"})
+    # A newly added caption needs its generated font even if Miro discarded the
+    # unused font while the connector was unlabelled.
+    if (record["endpoint"] == "connectors" and patch.get("captions")
+            and record["managed"].get("captions") == []
+            and "fontSize" in record["managed"].get("style", {})
+            and isinstance(remote.get("style"), dict) and "fontSize" not in remote["style"]
+            and "fontSize" in desired.get("style", {})):
+        _set(patch, ("style", "fontSize"), desired["style"]["fontSize"])
     return patch, managed, intent, conflicts
 
 
@@ -616,9 +638,31 @@ def _fee_catalog(plan):
     return catalog
 
 
+def _run_note_removals(state):
+    """Retire only mapped summaries proven by their run and generated intent."""
+    removals = {}
+    for key, record in state["items"].items():
+        if not key.startswith("run:"):
+            continue
+        run_id = key[len("run:"):]
+        data = record["intent"].get("data", {})
+        prefix = "<p>Run: " + html.escape(run_id)
+        content = data.get("content", "")
+        if (not run_id or (run_id not in state["runs"] and run_id != state.get("active_run_id"))
+                or record["endpoint"] != "shapes"
+                or not isinstance(content, str) or not content.startswith((prefix + "<br>", prefix + "</p>"))):
+            raise TraceError("Mapped run summary has no valid generated identity; preserve the mapping before syncing")
+        removals[key] = {"schema_version": 1, "kind": "run_note", "key": key, "run_id": run_id}
+    return removals
+
+
 def _fee_removals(plan, state):
     catalog = _fee_catalog(plan)
-    removals = {}
+    parallel_removals = context_parallel_miro.removals(plan, state)
+    removals = plot_miro.removals(plan, state, replacements=parallel_removals)
+    removals.update(parallel_removals)
+    retained_state = {**state, "items": {key: record for key, record in state["items"].items()
+                                       if key not in removals}}
     if catalog and not plan["include_fees"]:
         for key, proof in catalog.items():
             record = state["items"].get(key)
@@ -633,8 +677,9 @@ def _fee_removals(plan, state):
                                                                record["intent"].get("data", {}).get("content", "")):
                 raise TraceError("Mapped event was not generated as a fee; refusing to remove a non-fee item")
             removals[key] = proof
-    removals.update(presentation_items.removals(plan, state))
-    removals.update(context_group_miro.removals(plan, state))
+    removals.update(presentation_items.removals(plan, retained_state))
+    removals.update(context_group_miro.removals(plan, retained_state))
+    removals.update(_run_note_removals(retained_state))
     pending = state.get("pending_deletions", {})
     if not isinstance(pending, dict):
         raise TraceError("Malformed pending Miro deletions; restore the sync state")
@@ -650,13 +695,13 @@ def _fee_removals(plan, state):
 def _check_fee_removals(state, remote, removals):
     for key in removals:
         record = state["items"][key]
-        if key not in remote:  # Only an attempted pending DELETE can reach here.
+        if key not in remote:  # An attempted DELETE or an already absent retired run summary.
             continue
-        actual = _editable(remote[key], record["endpoint"])
+        actual = _comparison_editable(remote[key], record["endpoint"], record["managed"])
         for path, previous in _fields(record["managed"]):
             if not _same(_get(actual, path), previous, path):
                 raise TraceError("Generated item " + key + " has manual edits. Preserve those notes and restore the generated content before removing this fee or annotation. No board writes made.")
-        if record["endpoint"] == "shapes" and remote[key].get("data", {}).get("shape") != ("rectangle" if key.startswith(presentation_items.PREFIX) else "rhombus"):
+        if record["endpoint"] == "shapes" and remote[key].get("data", {}).get("shape") != ("rectangle" if key.startswith((presentation_items.PREFIX, "run:")) else "rhombus"):
             raise TraceError("Generated shape type was changed; restore it before removing this fee or annotation. No board writes made.")
     for key, record in state["items"].items():
         if record["endpoint"] != "connectors":
@@ -916,6 +961,46 @@ def _placements(plan, state, remote, removed, reorganize):
     return presentation_items.place_badges(plan, state, remote, removed, reorganize, _ordinary_placements)
 
 
+def _cyclic_connector_keys(plan, excluded=()):
+    """Find genuine directed cycles without recursion or layout assumptions."""
+    children = {item["key"]: set() for item in plan["shapes"] if item["key"] not in excluded}
+    parents = {key: set() for key in children}
+    for edge in plan["connectors"]:
+        source, target = edge["source"], edge["target"]
+        if source in children and target in children:
+            children[source].add(target)
+            parents[target].add(source)
+    seen, finished = set(), []
+    for root in sorted(children):
+        if root in seen:
+            continue
+        seen.add(root)
+        stack = [(root, iter(sorted(children[root])))]
+        while stack:
+            key, following = stack[-1]
+            child = next(following, None)
+            if child is None:
+                finished.append(key)
+                stack.pop()
+            elif child not in seen:
+                seen.add(child)
+                stack.append((child, iter(sorted(children[child]))))
+    membership = {}
+    for root in reversed(finished):
+        if root in membership:
+            continue
+        membership[root] = root
+        stack = [root]
+        while stack:
+            for parent in parents[stack.pop()]:
+                if parent not in membership:
+                    membership[parent] = root
+                    stack.append(parent)
+    return {edge["key"] for edge in plan["connectors"]
+            if edge["source"] in membership and edge["target"] in membership
+            and membership[edge["source"]] == membership[edge["target"]]}
+
+
 def _ordinary_placements(plan, state, remote, removed, reorganize):
     """Place new connected groups near their existing anchors, preserving old items.
 
@@ -1037,6 +1122,24 @@ def _ordinary_placements(plan, state, remote, removed, reorganize):
 
     graph_targets = {key for key in targets if key != "legend" and not key.startswith(("run:", presentation_items.PREFIX)) and key not in fee_keys}
     remaining = set(graph_targets)
+    cyclic_edges = None
+
+    def horizontal_range(group, ignored=()):
+        lower, upper = -math.inf, math.inf
+        for edge in plan["connectors"]:
+            source, target = edge["source"], edge["target"]
+            if source in fee_keys or target in fee_keys or edge["key"] in ignored:
+                continue
+            if planned[source][0] >= planned[target][0]:
+                continue  # Reused-address cycles are intentionally return links.
+            if source in existing and target in group:
+                lower = max(lower, existing[source][0] + existing[source][2] / 2 + 80
+                            - (planned[target][0] - planned[target][2] / 2))
+            if source in group and target in existing:
+                upper = min(upper, existing[target][0] - existing[target][2] / 2 - 80
+                            - (planned[source][0] + planned[source][2] / 2))
+        return lower, upper
+
     while remaining:
         seed = min(remaining, key=lambda key: (planned[key][0], planned[key][1], key))
         group, stack = set(), [seed]
@@ -1050,19 +1153,15 @@ def _ordinary_placements(plan, state, remote, removed, reorganize):
         anchors = {neighbor for key in group for neighbor in adjacency[key] if neighbor in existing and neighbor not in fee_keys}
         dx = statistics.median(existing[key][0] - planned[key][0] for key in anchors) if anchors else 0
         dy = statistics.median(existing[key][1] - planned[key][1] for key in anchors) if anchors else 0
-        lower, upper = -math.inf, math.inf
-        for edge in plan["connectors"]:
-            source, target = edge["source"], edge["target"]
-            if source in fee_keys or target in fee_keys:
-                continue
-            if planned[source][0] >= planned[target][0]:
-                continue  # Reused-address cycles are intentionally return links.
-            if source in existing and target in group:
-                lower = max(lower, existing[source][0] + existing[source][2] / 2 + 80
-                            - (planned[target][0] - planned[target][2] / 2))
-            if source in group and target in existing:
-                upper = min(upper, existing[target][0] - existing[target][2] / 2 - 80
-                            - (planned[source][0] + planned[source][2] / 2))
+        lower, upper = horizontal_range(group)
+        if lower > upper:
+            # A fresh layout can choose the opposite visual return edge in a
+            # reused-address cycle. Existing board positions stay fixed, so
+            # only edges inside a proven directed cycle may become returns.
+            # All acyclic forward constraints remain binding.
+            if cyclic_edges is None:
+                cyclic_edges = _cyclic_connector_keys(plan, fee_keys)
+            lower, upper = horizontal_range(group, cyclic_edges)
         if lower > upper:
             raise TraceError("Existing Miro positions leave no left-to-right space for this continuation; choose Reorganize graph or move its connected shapes before syncing. No board writes made.")
         dx = max(lower, min(dx, upper))
@@ -1154,13 +1253,20 @@ def _create_items(plan, state, journal, requests, base, headers, positions, mapp
             body.update(_connection_body(item, state["items"][item["source"]]["id"],
                                          state["items"][item["target"]]["id"]))
         pending = {"key": key, "endpoint": endpoint, "body": body, "run_id": plan["run_id"]}
+        projection_proof = plot_miro.creation_proof(plan, endpoint, body)
+        if projection_proof is not None:
+            pending["projection_proof"] = projection_proof
         if key in plan.get("presentation_items", {}):
             pending["presentation_proof"] = copy.deepcopy(plan["presentation_items"][key])
         if key in plan.get("fee_items", {}):
             pending["fee_proof"] = copy.deepcopy(plan["fee_items"][key])
         if key in plan.get("context_group_items", {}):
             pending["context_group_proof"] = copy.deepcopy(plan["context_group_items"][key])
+        if key in plan.get("context_parallel_items", {}):
+            pending["context_parallel_proof"] = copy.deepcopy(plan["context_parallel_items"][key])
         if endpoint == "connectors":
+            if "context_evidence" in item:
+                pending["context_evidence"] = copy.deepcopy(item["context_evidence"])
             pending.update({"source": item["source"], "target": item["target"]})
             if item.get("attachment"):
                 pending["attachments"] = copy.deepcopy(item["attachment"])
@@ -1238,7 +1344,13 @@ def _create_items(plan, state, journal, requests, base, headers, positions, mapp
             records = {pending["key"]: _record_pending(pending, item_id, response)}
         # Atomically record the entire acknowledged batch before its connector
         # IDs can be used. Invalid response matching never saves partial guesses.
+        acknowledged_bodies = ({body["id"]: body for body in normalized}
+                               if job["endpoint"] == "items/bulk" else {response["id"]: response})
         journal.commit(sets=[(("items", key), record) for key, record in records.items()] +
+                       ([(("board_layout_sync", "items", record["id"]), board_layout._descriptor(acknowledged_bodies[record["id"]]))
+                         for record in records.values()] +
+                        [(("board_layout_sync", "mapped", key), board_layout.mapped_record(record))
+                         for key, record in records.items()] if plan.get("board_layout") else []) +
                        [(("pending_creation_detaches", key), detaches[record["id"]])
                         for key, record in records.items() if record["id"] in detaches],
                        deletes=[("pending_creations", pending["key"]) for pending in batch])
@@ -1286,14 +1398,19 @@ def _require_inline_counts(plan):
                          "generate a fresh preview with inline counts before publishing")
 
 
-def sync(plan, board_id, state_path, max_items=750, token=None, transport=http, interval=.02, dry_run=False,
+def _require_no_run_notes(plan):
+    if any(item["key"].startswith("run:") for item in plan["shapes"]):
+        raise TraceError("This saved Miro plan contains retired run summaries; use normal sync or generate a fresh preview before publishing")
+
+
+def sync(plan, board_id, state_path, max_items=0, token=None, transport=http, interval=.02, dry_run=False,
          reorganize=False, progress=None, workers=4):
-    """Sync graph objects, leaving export frames for the separate frame action."""
+    """Sync graph objects; zero disables the optional new-item budget."""
     return _sync(plan, board_id, state_path, max_items, token, transport, interval, dry_run,
                  reorganize, progress, workers)
 
 
-def sync_frames(plan, board_id, state_path, max_items=750, token=None, transport=http, interval=.02,
+def sync_frames(plan, board_id, state_path, max_items=0, token=None, transport=http, interval=.02,
                 dry_run=False, progress=None, workers=4):
     """Create or refresh export frames around the completed graph's live geometry.
 
@@ -1359,7 +1476,7 @@ def _check_frame_operation(plan, state, frames_only):
             raise TraceError("Finish the interrupted graph updates before creating or updating frames")
 
 
-def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http, interval=.02, dry_run=False,
+def _sync(plan, board_id, state_path, max_items=0, token=None, transport=http, interval=.02, dry_run=False,
           reorganize=False, progress=None, workers=4, *, frames_only=False):
     """Add bounded runs to one board; preserve manually edited fields and geometry.
 
@@ -1380,13 +1497,17 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
     https://developers.miro.com/reference/rate-limiting
     """
     validate_plan(plan)
+    if plan.get("board_layout") and reorganize:
+        raise TraceError("Board update layouts preserve existing positions; sync without reorganizing")
     _require_inline_counts(plan)
+    if not frames_only:
+        _require_no_run_notes(plan)
     namespace = _namespace(plan)
     if (not isinstance(board_id, str) or not board_id or len(board_id) > 200
             or any(c in board_id for c in "/?#") or any(c.isspace() for c in board_id)):
         raise TraceError("Provide the Miro board ID, not its full URL")
-    if not isinstance(max_items, int) or max_items < 0:
-        raise TraceError("max-items must be a nonnegative integer (it limits new items)")
+    if type(max_items) is not int or max_items < 0:
+        raise TraceError("max-items must be a nonnegative integer (0 means unlimited new items)")
     if (isinstance(interval, bool) or not isinstance(interval, (int, float))
             or not math.isfinite(interval) or interval < 0):
         raise TraceError("Miro interval must be finite and nonnegative")
@@ -1408,15 +1529,16 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
         _check_frame_operation(plan, current, frames_only)
         removals = {} if frames_only else _fee_removals(plan, current)
         frame_removals = _frame_removals(plan, current) if frames_only else {}
-        if not reorganize and any(proof.get("kind") == "context_group_replacement" for proof in removals.values()):
+        if not reorganize and not plan.get("board_layout") and any(proof.get("kind") in ("context_group_replacement", context_parallel_miro.KIND) for proof in removals.values()):
             raise TraceError("Changing context grouping on an existing board replaces generated objects; "
                              "choose Sync and reorganize to apply this layout change. Ordinary sync preserves manual positions and ports.")
         report = {"dry_run": dry_run, "board_url": "https://miro.com/app/board/" + urllib.parse.quote(board_id, safe="") + "/",
                   "run_id": plan["run_id"], "namespace": namespace, "state_path": str(state_path), "max_items": max_items,
-                  "reorganize": reorganize, "frames_only": frames_only, "fee_items_to_remove": sum(not key.startswith(presentation_items.PREFIX) and proof.get("kind") != "context_group_replacement" for key, proof in removals.items()),
+                  "reorganize": reorganize, "frames_only": frames_only, "fee_items_to_remove": sum(not key.startswith((presentation_items.PREFIX, "run:")) and proof.get("kind") not in ("context_group_replacement", context_parallel_miro.KIND) for key, proof in removals.items()),
                   "annotations_to_remove": sum(key.startswith(presentation_items.PREFIX) for key in removals),
+                  "run_notes_to_remove": sum(proof.get("kind") == "run_note" for proof in removals.values()),
                   "frames_to_remove": len(frame_removals),
-                  "context_items_to_replace": sum(proof.get("kind") == "context_group_replacement" for proof in removals.values())}
+                  "context_items_to_replace": sum(proof.get("kind") in ("context_group_replacement", context_parallel_miro.KIND) for proof in removals.values())}
         layout = plan.get("layout", {})
         if not frames_only and layout.get("algorithm"):
             report["layout_algorithm"] = layout["algorithm"]
@@ -1438,7 +1560,7 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
             report["mapped_" + endpoint] = len(collection) - report["new_" + endpoint]
         report["new_items"] = report["new_shapes"] + report["new_connectors"] + report["new_frames"]
         report["existing_items"] = len(current["items"])
-        if report["new_items"] > max_items:
+        if max_items and report["new_items"] > max_items:
             raise TraceError(f"Sync needs {report['new_items']} new items, above max-items={max_items}; reduce the trace or explicitly raise the limit")
         return report
 
@@ -1479,35 +1601,54 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
                                                          progress=status_progress, quota=quota))
         # Resume only acknowledged creation detaches before ordinary frame
         # preflight. This never replays POST or changes a parent frame.
-        if state.get("pending_creation_detaches"):
+        if state.get("pending_creation_detaches") and not plan.get("board_layout"):
             with SyncState(state_path, state) as recovery_journal:
                 finish_creation_detaches(state, recovery_journal, requests, base, headers)
         # The complete live preflight must succeed before new sync writes.
         remote = preflight(requests, base, headers, state, {**removals, **preflight_frame_removals}, progress=status_progress)
+        board_live = None
+        if plan.get("board_layout") and not frames_only:
+            board_live, _ = board_layout.read_live(requests, base, headers, state, remote)
+            board_layout.check_live(plan, state, board_live)
+            if state.get("pending_creation_detaches"):
+                with SyncState(state_path, state) as recovery_journal:
+                    finish_creation_detaches(state, recovery_journal, requests, base, headers)
         live_frame_records = {key: record for key, record in state["items"].items()
                               if record["endpoint"] == "frames" and key in remote}
         live_frame_ids = {record["id"] for record in live_frame_records.values()}
 
         status_progress.emit("framing" if frames_only else "layout", 0, 1,
                              "Checking live graph bounds for frames" if frames_only else "Checking connections and preparing the layout")
+        # An acknowledged historical update may have reached Miro before its
+        # response was lost. Reconcile that journal before distinguishing a
+        # manual edit from generated content on a retiring run summary.
+        original_recovered = {key: copy.deepcopy(state["items"][key])
+                              for key in state.get("pending_updates", {})}
+        _recover_updates(state, remote)
         context_removals = {key: proof for key, proof in removals.items()
-                            if proof.get("kind") == "context_group_replacement"}
+                            if proof.get("kind") in ("context_group_replacement", context_parallel_miro.KIND)}
+        projection_removals = {key: proof for key, proof in removals.items()
+                               if proof.get("kind") == "board_projection"}
         _check_fee_removals(state, remote, {key: proof for key, proof in removals.items()
-                                         if key not in context_removals})
+                                         if key not in context_removals and key not in projection_removals})
+        if projection_removals:
+            from .address_migration import _inventory
+            plot_miro.check_remote(state, remote, projection_removals,
+                                   _inventory(requests, base, headers), allow_moved=bool(plan.get("board_layout")),
+                                   context_removals=context_removals)
         if context_removals:
             from .address_migration import _inventory
             context_group_miro.check_remote(state, remote, context_removals,
-                                           _inventory(requests, base, headers))
-        annotation_removals = {state["items"][key]["id"] for key in removals if key.startswith(presentation_items.PREFIX)}
+                                           _inventory(requests, base, headers), projection_removals=projection_removals,
+                                           allow_organization=bool(plan.get("board_layout")))
+        annotation_removals = {state["items"][key]["id"] for key in removals if key.startswith((presentation_items.PREFIX, "run:"))}
         if annotation_removals:
             from .address_migration import _inventory
             inventory = _inventory(requests, base, headers)
             if any((item.get(field) or {}).get("id") in annotation_removals for item in inventory.values()
                    for field in ("startItem", "endItem")):
                 raise TraceError("A board connector attaches to a retiring annotation; preserve that attachment before syncing")
-        original_recovered = {key: copy.deepcopy(state["items"][key])
-                              for key in state.get("pending_updates", {})}
-        _recover_updates(state, remote)
+        legend_updates, context_resizes = {}, {}
         if frames_only:
             # Read every retained shape, including older run notes, at its actual
             # canvas position. No graph placement or annotation resizing runs.
@@ -1522,7 +1663,21 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
                     if remote[item["key"]].get(field, {}).get("id") != state["items"][record[logical]]["id"]:
                         raise TraceError("Miro connector endpoints changed; repair the connection before framing. No board writes made.")
         else:
-            positions, shift_x = _placements(plan, state, remote, removals, reorganize)
+            legend_updates = {} if plan.get("board_layout") else miro_legend_updates.resize_updates(plan, state, remote, removals)
+            if reorganize:
+                context_resizes = context_group_miro.resize_updates(plan, state, remote, removals)
+            placement_remote = {key: {**body, **legend_updates.get(key, {}), **context_resizes.get(key, {})}
+                                for key, body in remote.items()}
+            if plan.get("board_layout"):
+                positions = {item["key"]: _bounds(placement_remote[item["key"]], item["key"])[:2]
+                             if item["key"] in state["items"] and item["key"] not in removals
+                             else _bounds(item["body"], item["key"])[:2] for item in plan["shapes"]}
+                shift_x = 0
+            else:
+                positions, shift_x = _placements(plan, state, placement_remote, removals, reorganize)
+            if not reorganize:
+                positions.update({key: (change["position"]["x"], change["position"]["y"])
+                                  for key, change in legend_updates.items()})
             frames = []
         if frames_only and _compact_layout(plan):
             _check_compact_frames(plan, frames, positions)
@@ -1543,11 +1698,15 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
                             raise TraceError("Miro connector endpoints were changed for " + key + "; restore or repair this connection before syncing. No board writes made.")
                 patch, managed, intent, item_conflicts = _merge_fields(record, item["body"], remote[key], key)
                 annotation = plan.get("presentation_items", {}).get(key)
-                if (reorganize or annotation) and endpoint == "shapes":
+                if not plan.get("board_layout") and (reorganize or annotation or key in legend_updates) and endpoint == "shapes":
                     x, y = positions[key]
                     if any(float(remote[key]["position"][field]) != value for field, value in (("x", x), ("y", y))):
                         patch["position"] = {"x": x, "y": y, "origin": "center"}
-                if annotation and annotation["kind"] == "attribution":
+                if key in legend_updates:
+                    patch["geometry"] = copy.deepcopy(legend_updates[key]["geometry"])
+                if key in context_resizes:
+                    patch["geometry"] = copy.deepcopy(context_resizes[key]["geometry"])
+                if annotation and annotation["kind"] == "attribution" and not plan.get("board_layout"):
                     geometry = presentation_items.note_geometry(item["body"], remote[key])
                     if any(float(remote[key]["geometry"][axis]) != geometry[axis] for axis in geometry):
                         patch["geometry"] = geometry
@@ -1643,6 +1802,8 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
         # _recover_updates refreshed these records from live evidence. Save those
         # changes alongside the new edit journal before dispatching mutations.
         initial_sets.extend((("items", key), record) for key, record in recovered_records.items())
+        if board_live is not None:
+            initial_sets.append((("board_layout_sync",), board_layout.checkpoint(plan, board_live, remote, state, updates)))
         journal.commit(sets=initial_sets)
         mapped_ids = {record["id"] for record in state["items"].values()}
         if not frames_only:
@@ -1659,7 +1820,8 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
             del state["items"][key]
             mapped_ids.remove(record["id"])
             del pending_deletions[key]
-            journal.commit(deletes=[("items", key), ("pending_deletions", key)])
+            journal.commit(deletes=[("items", key), ("pending_deletions", key)] +
+                           ([("board_layout_sync", "items", record["id"]), ("board_layout_sync", "mapped", key)] if plan.get("board_layout") else []))
             report["deleted"] += 1
             status_progress.emit("removing", report["deleted"], len(removals), "Removing obsolete generated items")
         status_progress.emit("updating", 0, len(updates), "Applying changes while preserving manual edits")
@@ -1687,6 +1849,11 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
                 for path, value in _fields(_editable(patch, record["endpoint"])):
                     _set(intent, path, value)
                     _set(managed, path, _get(actual, path))
+                if key in legend_updates:
+                    miro_legend_updates.remember_geometry(record, response)
+                if key in context_resizes and not context_group_miro.acknowledge_resize(record, response, patch["geometry"]):
+                    raise TraceError("Miro did not acknowledge context-summary dimensions; rerun sync to reconcile the saved update journal")
+                plot_miro.acknowledge(record, response, patch)
                 report["updated"] += 1
                 if record["endpoint"] == "frames":
                     report["updated_frames"] += 1
@@ -1704,7 +1871,9 @@ def _sync(plan, board_id, state_path, max_items=750, token=None, transport=http,
             # PATCHes and refreshed baselines still persist before continuing.
             if patch or changed:
                 state["pending_updates"].pop(key, None)
-                journal.commit(sets=[(("items", key), record)], deletes=[("pending_updates", key)])
+                journal.commit(sets=[(("items", key), record)] +
+                               ([(("board_layout_sync", "items", record["id"]), board_layout._descriptor(response))]
+                                if patch and plan.get("board_layout") else []), deletes=[("pending_updates", key)])
             checked += 1
             status_progress.emit("updating", checked, len(updates), "Applying changes while preserving manual edits")
         # Native frame children must be detached and acknowledged before a
@@ -1774,6 +1943,8 @@ def _record_pending(pending, item_id, response=None):
     intent = _editable(pending["body"], pending["endpoint"])
     record = {"id": item_id, "endpoint": pending["endpoint"], "intent": intent,
               "managed": _baseline(intent, response or {}, pending["endpoint"])}
+    if pending.get("key") == "legend" or pending.get("presentation_proof", {}).get("kind") == "legend":
+        miro_legend_updates.remember_geometry(record, response or pending["body"])
     if pending["endpoint"] == "connectors":
         record.update({"source": pending["source"], "target": pending["target"]})
         if pending.get("attachments"):
@@ -1786,19 +1957,30 @@ def _record_pending(pending, item_id, response=None):
         record["frame_proof"] = copy.deepcopy(pending["frame_proof"])
     if "context_group_proof" in pending:
         record["context_group_proof"] = copy.deepcopy(pending["context_group_proof"])
+    for field in ("context_parallel_proof", "context_evidence"):
+        if field in pending:
+            record[field] = copy.deepcopy(pending[field])
+    if "projection_proof" in pending:
+        record["projection_proof"] = copy.deepcopy(pending["projection_proof"])
+        plot_miro.acknowledge(record, response or pending["body"])
     return record
 
 
-def publish(plan, board_id, state_path, max_items=750, token=None, transport=http, interval=.4):
+def publish(plan, board_id, state_path, max_items=0, token=None, transport=http, interval=.4):
     """Append this run as a snapshot. Acknowledged items are never posted twice.
 
     Ambiguous POST outcomes are deliberately not automatically retried: the
     remote item may exist even if its response was lost. Reconcile via CLI.
     """
     validate_plan(plan)
+    if plan.get("board_layout"):
+        raise TraceError("Board update layouts require registered board sync")
     _require_inline_counts(plan)
+    _require_no_run_notes(plan)
+    if type(max_items) is not int or max_items < 0:
+        raise TraceError("max-items must be a nonnegative integer (0 means unlimited items)")
     count = len(plan["shapes"]) + len(plan["connectors"]) + len(plan.get("frames", []))
-    if count > max_items:
+    if max_items and count > max_items:
         raise TraceError(f"Plan has {count} items, above max-items={max_items}; select a smaller trace or explicitly raise the limit")
     token = token or os.getenv("MIRO_ACCESS_TOKEN")
     if not token:

@@ -17,8 +17,10 @@ class ElkWorkerFailure(TraceError):
     instead. Only fixed failure categories are suitable for search metadata.
     """
 
-    def __init__(self, message, *, failure_code="unknown_exit", returncode=None):
+    def __init__(self, message, *, failure_code="unknown_exit", returncode=None, diagnostic_path=None):
         super().__init__(message)
         self.failure_code = (failure_code if isinstance(failure_code, str)
                              and failure_code in RENDERER_FAILURE_CODES else "unknown_exit")
         self.returncode = returncode if type(returncode) is int else None
+        # Local-only; never copied into graph/search metadata or browser output.
+        self.diagnostic_path = diagnostic_path

@@ -106,7 +106,10 @@ class BoundaryWorkflowTests(unittest.TestCase):
         evidence = copy.deepcopy(state)
         graph = build_graph(state)
         before = copy.deepcopy(graph)
-        baseline = optimize_graph(graph, "elbowed", layout_attempts=1)
+        # One normal attempt now includes branch ordering. Compare explicitly
+        # against unconstrained ELK rather than assuming attempt 1 is ordinary.
+        with patch("liquid_tracer.elk_layout.neighborhood_order", return_value=None):
+            baseline = optimize_graph(graph, "elbowed", layout_attempts=1)
         organized = optimize_graph(graph, "elbowed", layout_attempts=2)
         self.assertLessEqual(collision_gates(organized), collision_gates(baseline))
         old_metrics, new_metrics = boundary_metrics(baseline), boundary_metrics(organized)
@@ -139,7 +142,8 @@ class BoundaryWorkflowTests(unittest.TestCase):
     def test_verified_merge_retains_lineage_and_collision_priority(self):
         graph = build_graph(wide_trees(joint_spend=True))
         before = copy.deepcopy(graph)
-        baseline = optimize_graph(graph, "elbowed", layout_attempts=1)
+        with patch("liquid_tracer.elk_layout.neighborhood_order", return_value=None):
+            baseline = optimize_graph(graph, "elbowed", layout_attempts=1)
         organized = optimize_graph(graph, "elbowed", layout_attempts=2)
         self.assertLessEqual(collision_gates(organized), collision_gates(baseline))
         old_metrics, new_metrics = boundary_metrics(baseline), boundary_metrics(organized)

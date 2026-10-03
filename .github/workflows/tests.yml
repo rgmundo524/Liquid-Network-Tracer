@@ -11,7 +11,8 @@ permissions:
 jobs:
   python:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # The full Textual/ELK suite exceeds 20 minutes locally; allow runner variance and setup.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -29,7 +30,8 @@ jobs:
 
   devenv:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Runs the same full suite plus cold Nix dependencies and the Astro build/check.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31

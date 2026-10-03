@@ -13,7 +13,8 @@ from liquid_tracer.connections import (connection_graph, connecting_outpoints, p
 from liquid_tracer.export import build_graph
 from liquid_tracer.investigations import create_investigation, read_case, update_case
 from liquid_tracer.miro import make_plan, validate_plan, _namespace
-from liquid_tracer.services import set_service
+from liquid_tracer.services import load_services, set_service
+from liquid_tracer.name_colors import set_name_colors
 from tests.test_attribution_convergence import graph_state, annotation, tx
 from tests.test_branch_interactions import shared_state, receiving
 from tests.fixtures import output
@@ -124,17 +125,21 @@ class ConnectionPathTests(unittest.TestCase):
         self.assertTrue(all(e["outpoint"] in graph["connections"]["outpoints"] for e in graph["edges"]))
         self.assertFalse(any(e["role"].startswith("context") for e in graph["edges"]))
         self.assertEqual({n["color"] for n in graph["nodes"] if n.get("role") == "seed"}, {"#112233"})
-        self.assertEqual(graph["address_mode"], "outpoint_occurrences")
+        self.assertEqual(graph["address_mode"], "merged")
 
-    def test_parallel_utxos_remain_separate_and_deterministic(self):
+    def test_parallel_utxos_share_one_address_and_keep_distinct_connectors(self):
         state = graph_state((("a:0", "b"), ("a:1", "b")), seeds=("a:0", "a:1", "b:0"))
         before = connecting_outpoints(state)
         state["links"] = dict(reversed(list(state["links"].items())))
         state["seeds"].reverse()
         self.assertEqual(connecting_outpoints(state), before)
         graph = connection_graph(state)
-        self.assertEqual(len([n for n in graph["nodes"] if n["kind"] == "address"]), 2)
-        self.assertEqual(len(graph["edges"]), 4)
+        address, = [n for n in graph["nodes"] if n["kind"] == "address"]
+        self.assertEqual({item["outpoint"] for item in address["details"]["occurrences"]},
+                         {tx("a") + ":0", tx("a") + ":1"})
+        self.assertEqual({edge["id"] for edge in graph["edges"]},
+                         {"out:" + tx("a") + ":0", "out:" + tx("a") + ":1",
+                          "in:" + tx("b") + ":0", "in:" + tx("b") + ":1"})
 
     def test_random_dags_match_exhaustive_path_union_oracle(self):
         rng = random.Random(842)
@@ -187,13 +192,15 @@ class ConnectionPreviewTests(unittest.TestCase):
         self.assertEqual(plan["schema_version"], 1)
         with self.assertRaises(TraceError): _namespace(plan)
         self.assertEqual(before, {p.name: p.read_bytes() for p in self.archive.iterdir()})
-        self.assertEqual(len(graph["edges"]), 4)
+        self.assertEqual(len(graph["edges"]), 5)
+        self.assertEqual(result["transaction_io"], "complete")
         self.assertIn("does not fetch", result["notice"])
         directory = Path(result["directory"])
         self.assertIn("flowchart LR", (directory/"graph.mmd").read_text())
         self.assertIn("#c4b5fd", (directory/"graph.mmd").read_text())
 
     def test_no_matches_create_empty_graph_and_no_publication_or_layout(self):
+        self.state, self.archive = saved_case(self.case, graph_state())
         with patch("liquid_tracer.elk_layout.optimize_graph", side_effect=AssertionError("no layout")):
             result = preview_connections(self.case, max_hops=1)
         graph, _ = reviewed_connections(self.case, result["preview_id"])
@@ -201,6 +208,39 @@ class ConnectionPreviewTests(unittest.TestCase):
         with patch("liquid_tracer.miro.publish", side_effect=AssertionError("no board writes")):
             self.assertEqual(publish_connections(self.case, result["preview_id"], "unused")["items"], 0)
         self.assertFalse((self.case/"miro").exists())
+
+    def test_current_arrow_preference_colors_connections_and_invalidates_old_preview(self):
+        set_service(self.case, "SYNTHETIC-c-address", name="Exchange", stop_tracing=False)
+        set_name_colors(self.case, [{"name": "Exchange", "color": "#123456"}],
+                        expected_revision=load_services(self.case)["revision"])
+        original = preview_connections(self.case, max_hops=2)
+        self.assertFalse(original["color_attribution_arrows"])
+        update_case(self.case, {"run_defaults": {"color_attribution_arrows": True}})
+        with self.assertRaisesRegex(TraceError, "changed"):
+            reviewed_connections(self.case, original["preview_id"])
+        result = preview_connections(self.case, max_hops=2)
+        graph, _ = reviewed_connections(self.case, result["preview_id"])
+        self.assertTrue(result["color_attribution_arrows"])
+        self.assertTrue(graph["graph_options"]["color_attribution_arrows"])
+        named = {node["id"] for node in graph["nodes"] if node.get("color_source") == "name"}
+        self.assertTrue(named)
+        attached = [edge for edge in graph["edges"] if {edge["source"], edge["target"]} & named]
+        self.assertEqual(len(attached), 2)
+        self.assertEqual({edge["color"] for edge in attached}, {"#123456"})
+
+    def test_center_group_change_invalidates_review_and_preserves_path_evidence(self):
+        with patch("liquid_tracer.elk_layout.optimize_graph", side_effect=lambda graph, **kw: graph):
+            original = preview_connections(self.case, max_hops=2)
+            previous, _ = reviewed_connections(self.case, original["preview_id"])
+            update_case(self.case, {"run_defaults": {"center_name": "Example Exchange"}})
+            with self.assertRaisesRegex(TraceError, "changed"):
+                reviewed_connections(self.case, original["preview_id"])
+            result = preview_connections(self.case, max_hops=2)
+        graph, _ = reviewed_connections(self.case, result["preview_id"])
+        self.assertEqual(result["center_name"], "Example Exchange")
+        self.assertEqual(graph["graph_options"]["center_name"], "Example Exchange")
+        self.assertEqual(graph["edges"], previous["edges"])
+        self.assertEqual(graph["connections"], previous["connections"])
 
     def test_stale_settings_and_modified_previews_fail_closed(self):
         result = preview_connections(self.case, max_hops=2)
@@ -227,6 +267,7 @@ class ConnectionPreviewTests(unittest.TestCase):
         first = publish_connections(self.case, result["preview_id"], "snapshot-board", token="test", transport=remote, interval=0)
         second = publish_connections(self.case, result["preview_id"], "snapshot-board", token="test", transport=remote, interval=0)
         self.assertEqual(first["items"], second["items"])
+        set_service(self.case, "SYNTHETIC-c-address", name="New reviewed label", stop_tracing=False)
         next_preview = preview_connections(self.case, max_hops=3)
         with self.assertRaisesRegex(TraceError, "different board or plan"):
             publish_connections(self.case, next_preview["preview_id"], "snapshot-board", token="test", transport=remote, interval=0)

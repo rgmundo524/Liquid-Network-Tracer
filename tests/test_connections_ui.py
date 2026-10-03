@@ -9,10 +9,11 @@ from unittest.mock import patch
 from liquid_tracer.cli import main
 from liquid_tracer.common import TraceError, canonical, digest, read_json, save_json
 from liquid_tracer.connections import FILES, preview_connections, reviewed_connections
-from liquid_tracer.investigations import read_case
+from liquid_tracer.investigations import read_case, update_case
 from liquid_tracer.menu import create_app
 from tests import test_web, test_menu_addresses
 from tests.test_connections import saved_case
+from tests.test_attribution_convergence import graph_state
 
 
 class ConnectionWebTests(unittest.TestCase):
@@ -42,26 +43,35 @@ class ConnectionWebTests(unittest.TestCase):
 
     def test_offline_action_returns_files_and_reopens_selected_snapshot(self):
         case, route, state = self.setup_case()
+        update_case(case, {"run_defaults": {"color_attribution_arrows": True}})
         before = (case/"case.json").read_bytes()
         job = self.success(route+"/actions", {"action": "connections", "run_id": state["run_id"], "connection_hops": 2}, status=202)
         result = self.wait(job)
         self.assertEqual(result["connection_count"], 1)
-        self.assertEqual(result["max_hops"], 2)
-        self.assertEqual(result["address_counts"]["remaining"], 0)
-        self.assertGreater(result["address_counts"]["known"], 0)
+        self.assertIsNone(result["max_hops"])
+        self.assertEqual(result["connection_scope"], "all_saved")
+        self.assertEqual(result["transaction_io"], "complete")
+        self.assertGreater(result["context_edge_count"], 0)
+        self.assertTrue(result["color_attribution_arrows"])
+        self.assertNotIn("address_counts", result)
         self.assertEqual({f["name"] for f in result["downloads"] if f["name"].endswith(".csv")}, {"transactions.csv"})
         csv_url = next(f["url"] for f in result["downloads"] if f["name"] == "transactions.csv")
         self.assertIn(b"Block,Time,Transaction Label,Transaction Hash", self.success(csv_url))
         self.assertNotIn("directory", result)
         self.assertIn("/connections-", "/"+result["preview_id"][17:])
         page = self.success(result["preview_url"])
-        self.assertIn(b"Starter-to-starter", page)
+        self.assertIn(b"All saved starter-to-starter", page)
         self.assertIn(b'href="details.html"', page)
         for name in ("details.html", "details.json"):
             url = next(f["url"] for f in result["downloads"] if f["name"] == name)
             self.assertEqual(self.request(url)[0], 200)
         detail = self.success(route)
         self.assertEqual(detail["artifacts"][state["run_id"]]["connections"]["connection_count"], 1)
+        self.assertEqual(detail["artifacts"][state["run_id"]]["connections"]["connection_scope"], "all_saved")
+        self.assertEqual(detail["artifacts"][state["run_id"]]["connections"]["transaction_io"], "complete")
+        self.assertEqual(detail["artifacts"][state["run_id"]]["connections"]["context_edge_count"], result["context_edge_count"])
+        self.assertIsNone(detail["artifacts"][state["run_id"]]["connections"]["max_hops"])
+        self.assertTrue(detail["artifacts"][state["run_id"]]["connections"]["color_attribution_arrows"])
         self.assertEqual(detail["artifacts"][state["run_id"]]["connections"]["downloads"], result["downloads"])
         self.assertEqual((case/"case.json").read_bytes(), before)
 
@@ -104,6 +114,7 @@ class ConnectionWebTests(unittest.TestCase):
 
     def test_cli_empty_chart_and_no_network(self):
         case, _, _ = self.setup_case()
+        saved_case(case, graph_state())
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             self.assertEqual(main(["connections", "--case", str(case), "--hops", "1"]), 0)
@@ -119,19 +130,44 @@ class ConnectionMenuTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = test_menu_addresses.AddressMenuTests.asyncSetUp
     click = test_menu_addresses.AddressMenuTests.click
 
-    async def test_terminal_hop_form_uses_offline_worker(self):
-        from textual.widgets import Input
+    async def test_terminal_connections_uses_all_saved_evidence_without_hop_chooser(self):
         saved_case(self.case)
         app = create_app(self.root)
         with patch("liquid_tracer.menu._OfflineCalculation.run", return_value=subprocess.CompletedProcess([], 0, json.dumps({"connection_count": 1,"html":"example.html"}), "")) as worker:
             async with app.run_test(size=(120, 70)) as pilot:
                 app.created(self.case); await pilot.pause()
                 await self.click(app, pilot, "#connections")
-                app.screen.query_one("#connection-hops", Input).value = "10"
+                self.assertEqual(len(app.screen.query("#connection-hops")), 0)
                 await self.click(app, pilot, "#connection-go")
                 await pilot.pause()
                 self.assertTrue(worker.called)
                 args = worker.call_args.args[0]
                 self.assertIn("connections", args)
-                self.assertIn("10", args)
+                self.assertNotIn("--hops", args)
                 self.assertIn("--open", args)
+
+    async def test_publication_picker_preserves_legacy_scope_and_labels_all_saved_snapshots(self):
+        from textual.widgets import Select
+        saved_case(self.case)
+        legacy = "a" * 16 + "-connections-" + "b" * 8
+        current = "c" * 16 + "-connections-" + "d" * 8
+        for preview in (legacy, current):
+            (self.case / "previews" / preview).mkdir(parents=True)
+        graphs = {
+            legacy: {"nodes": ["node"], "connections": {"max_hops": 3}},
+            current: {"nodes": ["node"], "connections": {"max_hops": None, "connection_scope": "all_saved"}},
+        }
+        app = create_app(self.root)
+        with patch("liquid_tracer.connections_menu.reviewed_connections",
+                   side_effect=lambda case, preview: (graphs[preview], {})):
+            async with app.run_test(size=(120, 70)) as pilot:
+                app.created(self.case); await pilot.pause()
+                await self.click(app, pilot, "#connections-publish")
+                select = app.screen.query_one("#connection-preview", Select)
+                labels = {value: str(label) for label, value in select._options}
+                self.assertEqual(labels[legacy], legacy + " (3 hops)")
+                self.assertEqual(labels[current], current + " (all saved connections)")
+                select.value = legacy
+                self.assertEqual(select.value, legacy)
+                select.value = current
+                self.assertEqual(select.value, current)

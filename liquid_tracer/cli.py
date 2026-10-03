@@ -1,9 +1,11 @@
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
@@ -18,7 +20,8 @@ from .export import build_graph, export_run
 from .investigations import read_case, update_case, validate_settings
 from .inspection import inspect_transaction, inspect_transactions, parse_transaction_hashes
 from .miro import _load_sync_state, _namespace, make_plan, publish, resolve, sync, validate_plan
-from .progress import ProgressReporter
+from .progress import ProgressReporter, report_progress
+from .performance import public_performance
 from .layout_search import DEFAULT_LAYOUT_ATTEMPTS, MAX_LAYOUT_ATTEMPTS, normalize_layout_attempts
 from .store import Store
 from .trace import new_state, trace
@@ -46,7 +49,7 @@ def connector_arguments(command):
 def context_arguments(command):
     choices = command.add_mutually_exclusive_group()
     choices.add_argument("--group-context-inputs", dest="group_context_inputs", action="store_true", default=None,
-                         help="Summarize isolated external input addresses; retain every input connector")
+                         help="Summarize isolated external addresses and bundle repeated context inputs; retain every input record")
     choices.add_argument("--ungroup-context-inputs", dest="group_context_inputs", action="store_false",
                          help="Display external input addresses individually (default: investigation setting)")
 
@@ -80,6 +83,14 @@ def parser():
     inputs.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     inputs.add_argument("--kind", choices=("all", "attributions", "name-colors", "change-outputs"), default="all")
     inputs.add_argument("--out", type=Path, help="New output directory outside runs/ (default: a new case exports directory)")
+    input_import = commands.add_parser("input-import", help="Preview/apply attribution, color, and change-output CSVs together; offline")
+    input_import.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    input_import.add_argument("--file", type=Path, action="append", required=True,
+                              help="UTF-8 CSV; repeat for up to three files, one per input type")
+    input_import.add_argument("--on-conflict", choices=("keep", "replace"), default="keep")
+    input_approval = input_import.add_mutually_exclusive_group()
+    input_approval.add_argument("--dry-run", action="store_true", help="Preview only (the default)")
+    input_approval.add_argument("--approve-plan", help="Apply the exact approval_sha256 from a reviewed preview")
     bulk = commands.add_parser("address-import", help="Preview/apply bulk address attributions before or between runs; offline")
     bulk.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     bulk.add_argument("--file", type=Path, required=True, help="UTF-8 CSV, JSON array, or plain address list")
@@ -142,7 +153,7 @@ def parser():
     service.add_argument("--notes", "--rationale", dest="notes", default=None, help="Notes supporting the attribution")
     service.add_argument("--confidence", choices=("suspected", "confirmed"), default=None)
     service.add_argument("--source", default=None)
-    service.add_argument("--hop-limit", default=UNSET, help="Additional hops after this address; blank clears the cap")
+    service.add_argument("--hop-limit", default=UNSET, help="Additional hops shown after this address in full/connection plots; ignored by collection and peg-out paths; blank clears the cap")
     service.add_argument("--stop-tracing", choices=("true", "false"), default=None)
     service.add_argument("--disable", action="store_true", help="Disable this designation so future continuation can resume its branches")
     run = commands.add_parser("trace", help="Start or extend a bounded run")
@@ -154,19 +165,22 @@ def parser():
     run.add_argument("--only", action="append", help="Resume only these frontier outpoints; may be repeated")
     run.add_argument("--hops", type=int, help="Absolute maximum hop depth (default: 3)")
     run.add_argument("--additional-hops", type=int, help="Increase the resumed run's hop ceiling by this many")
-    run.add_argument("--max-transactions", type=int, default=250, help="New unique transactions per run, including seed funding transactions")
-    run.add_argument("--max-outpoints", type=int, default=2000)
-    run.add_argument("--max-requests", type=int, default=600, help="All HTTP attempts, including OAuth and retries")
-    run.add_argument("--max-seconds", type=float, default=300)
+    run.add_argument("--hop-reference-name", default=None,
+                     help="Count hops from this attribution name, resetting each matching output to zero; blank uses seed hops")
+    run.add_argument("--max-transactions", type=int, default=0, help="New unique transactions per run; 0 means unlimited (default)")
+    run.add_argument("--max-outpoints", type=int, default=0, help="Output lookup budget; 0 means unlimited (default)")
+    run.add_argument("--max-requests", type=int, default=0, help="All HTTP attempts, including OAuth and retries; 0 means unlimited (default)")
+    run.add_argument("--max-seconds", type=float, default=0, help="Total tracing duration; 0 means unlimited (default)")
     run.add_argument("--base-url", default=ENTERPRISE)
     run.add_argument("--auth", choices=["blockstream", "none"], default="blockstream")
     run.add_argument("--fixture", type=Path, help="Offline synthetic API responses; no network calls")
     run.add_argument("--labels", type=Path)
     run.add_argument("--include-unconfirmed", action="store_true")
     run.add_argument("--tx-cache-seconds", type=float, default=86400)
-    run.add_argument("--api-workers", type=int, default=8, help="Concurrent explorer requests, from 1 to 8 (default: 8)")
+    run.add_argument("--api-workers", type=int, default=8,
+                     help="Initial explorer concurrency, 1 to 8 (default: 8, adapts up to 64); values below 8 cap automatic growth")
     run.add_argument("--api-rate-limit", type=float,
-                     help="Verified account requests/second; use 95%% of this limit (default: LIQUID_BLOCKSTREAM_API_RPS, otherwise the enterprise target of 49 requests/second or 4 for other endpoints)")
+                     help="Verified account requests/second; use 95%% of this limit (default: LIQUID_BLOCKSTREAM_API_RPS, otherwise adaptive enterprise throughput or 4 requests/second for other endpoints)")
     run.add_argument("--min-interval", type=float,
                      help="Additional minimum seconds between requests; cannot exceed the configured rate ceiling")
     address_display = run.add_mutually_exclusive_group()
@@ -177,7 +191,17 @@ def parser():
     fee_arguments(run)
     run.add_argument("--offline-preview", action="store_true", help="Also save optional HTML/SVG inspection files")
     run.add_argument("--miro-board", help="Sync the saved run to this Miro board URL or ID")
-    run.add_argument("--max-new-items", type=int, default=750, help="Maximum new Miro shapes plus connectors")
+    run.add_argument("--max-new-items", type=int, default=0, help="Maximum new Miro shapes plus connectors; 0 means unlimited (default)")
+    shared = commands.add_parser("shared-collect", help="Collect shared workspace evidence using one investigation's policy")
+    shared.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    shared.add_argument("--request", help="Prepared immutable collection request ID")
+    shared.add_argument("--members-json", help="JSON array of open investigation IDs for a fresh collection")
+    shared.add_argument("--resume", help="Pinned shared run ID; retains its saved seeds and members")
+    shared.add_argument("--hops", type=int, help="Fresh hop ceiling or additional hops for continuation")
+    shared.add_argument("--hop-reference-name", default=None)
+    recovery = commands.add_parser("recover-collection", help="Seal a finished collection interrupted during counts/export; offline")
+    recovery.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    recovery.add_argument("--run", help="Unsealed finished run ID; auto-select only when exactly one exists")
     export = commands.add_parser("export", help="Regenerate a run export, fetching missing address transaction counts")
     export.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                         help="Case directory (default: LIQUID_CASE_DIR)")
@@ -204,16 +228,94 @@ def parser():
     fee_arguments(layout)
     connector_arguments(layout)
     context_arguments(layout)
+    for command, description in (("plot", "Prepare a saved-data plot without changing Miro"),
+                                 ("plot-sync", "Generate a saved-data layout and create or update its Miro board")):
+        plot = commands.add_parser(command, help=description)
+        plot.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+        plot.add_argument("--goal", choices=("full", "connections", "pegouts"), required=True)
+        plot.add_argument("--run", default="latest")
+        plot.add_argument("--data-source", choices=("investigation", "shared"), default="investigation",
+                          help="Plot this investigation's collection or a saved shared collection using this investigation's seeds")
+        plot.add_argument("--dataset-id", help="Pinned shared collection identity")
+        plot.add_argument("--layout-mode", choices=("fresh", "update"), default="fresh",
+                          help="Create a fresh layout, or preserve a selected Miro board and arrange additions separately")
+        plot.add_argument("--board-record-id", help="Investigation board record to read for an update layout")
+        plot.add_argument("--layout-settings-json", type=json.loads,
+                          help="Validated layout settings snapshot for this operation")
+        plot.add_argument("--min-hops", type=int, default=0,
+                          help="Minimum endpoint distance for peg-out plots; ignored by Starter connections")
+        plot.add_argument("--max-hops", type=int, default=10,
+                          help="Maximum endpoint distance for peg-outs, or starter path length with --connection-scope hop_limited")
+        plot.add_argument("--connection-scope", choices=("all_saved", "hop_limited"), default="all_saved",
+                          help="Starter connections: all saved paths, or paths within --max-hops transaction steps")
+        plot.add_argument("--pegout-lbtc-limit",
+                          help="Stop at this cumulative public L-BTC peg-out amount; include the crossing output")
+        plot.add_argument("--include-unspent", action="store_true",
+                          help="Include paths to outputs recorded as unspent in peg-out plots")
+        plot.add_argument("--include-unspendable", action="store_true",
+                          help="Include paths to non-peg-out unspendable outputs in peg-out plots")
+        plot.add_argument("--include-context", action="store_true",
+                          help="Compatibility flag; new peg-out plots always display every input and output of selected transactions")
+        if command == "plot":
+            plot.add_argument("--open", dest="open_browser", action="store_true")
+        else:
+            plot.add_argument("--name", help="Name for a new private Miro board")
+            plot.add_argument("--max-items", type=int, default=0)
+    managed_boards = commands.add_parser("investigation-boards", help="List every saved Miro board for an investigation")
+    managed_boards.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    for command, help_text in (("investigation-board-create", "Create a private Miro board for a plotting goal"),
+                               ("investigation-board-link", "Link an existing Miro board to a plotting goal")):
+        managed = commands.add_parser(command, help=help_text)
+        managed.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+        managed.add_argument("--goal", choices=("full", "connections", "pegouts"), required=True)
+        managed.add_argument("--name", required=True)
+        if command == "investigation-board-link":
+            managed.add_argument("--board", required=True)
+            managed.add_argument("--record")
+    managed_sync = commands.add_parser("investigation-board-sync", help="Sync a reviewed plot to its investigation board")
+    managed_sync.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    managed_sync.add_argument("--record", required=True)
+    managed_sync.add_argument("--preview", required=True)
+    managed_sync.add_argument("--reorganize", action="store_true")
+    managed_sync.add_argument("--max-items", type=int, default=0)
+    managed_create_sync = commands.add_parser("investigation-board-create-sync",
+        help="Create a private Miro board and sync a reviewed fresh plot")
+    managed_create_sync.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    managed_create_sync.add_argument("--preview", required=True)
+    managed_create_sync.add_argument("--name", required=True)
+    managed_create_sync.add_argument("--max-items", type=int, default=0)
     connections = commands.add_parser("connections", help="Plot only saved directed paths between starting transactions")
     connections.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     connections.add_argument("--run", default="latest")
-    connections.add_argument("--hops", type=int, default=10, help="Maximum transaction hops per starter-to-starter path (default: 10)")
+    connections.add_argument("--hops", type=int, default=10,
+                             help="Maximum starter path length when --connection-scope hop_limited is selected")
+    connections.add_argument("--connection-scope", choices=("all_saved", "hop_limited"), default="all_saved")
     connections.add_argument("--open", dest="open_browser", action="store_true")
     connection_publish = commands.add_parser("connections-publish", help="Publish a reviewed connection-only snapshot to a separate Miro board")
     connection_publish.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     connection_publish.add_argument("--preview", required=True)
     connection_publish.add_argument("--board", required=True)
-    connection_publish.add_argument("--max-items", type=int, default=750)
+    connection_publish.add_argument("--max-items", type=int, default=0)
+    pegouts = commands.add_parser("pegouts", help="Trace forward from saved selected seeds and plot peg-out requests in an inclusive hop range")
+    pegouts.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    origin = pegouts.add_mutually_exclusive_group()
+    origin.add_argument("--txid", help="Optional different Liquid transaction; searches all its outputs instead of saved selected seeds, at hop 0")
+    origin.add_argument("--resume", help="Resume a saved peg-out search with the same origin and hop range")
+    pegouts.add_argument("--min-hops", type=int, default=0, help="Minimum transaction distance to a peg-out, inclusive")
+    pegouts.add_argument("--max-hops", type=int, default=10, help="Maximum transaction distance to a peg-out, inclusive")
+    for limit in ("transactions", "outpoints", "requests"):
+        pegouts.add_argument("--max-" + limit, type=int, help="Per-search budget; defaults to investigation settings")
+    pegouts.add_argument("--max-seconds", type=float, help="Per-search time budget; defaults to investigation settings")
+    pegouts.add_argument("--open", dest="open_browser", action="store_true")
+    pegout_preview = commands.add_parser("pegouts-preview", help="Rebuild a peg-out search chart from saved search evidence")
+    pegout_preview.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    pegout_preview.add_argument("--search", required=True)
+    pegout_preview.add_argument("--open", dest="open_browser", action="store_true")
+    pegout_publish = commands.add_parser("pegouts-publish", help="Publish a reviewed peg-out snapshot to a separate Miro board")
+    pegout_publish.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    pegout_publish.add_argument("--preview", required=True)
+    pegout_publish.add_argument("--board", required=True)
+    pegout_publish.add_argument("--max-items", type=int, default=0)
     compact = commands.add_parser("compact-preview", help="Compact an ELK layout locally and save a before/after comparison for review")
     compact.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     compact.add_argument("--run", default="latest")
@@ -224,9 +326,14 @@ def parser():
     counts = commands.add_parser("address-counts", help="Fetch missing address transaction counts without tracing or layout")
     counts.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     counts.add_argument("--run", default="latest")
-    counts.add_argument("--max-requests", type=int, default=1000)
-    counts.add_argument("--max-seconds", type=int, default=300)
+    counts.add_argument("--max-requests", type=int, default=0, help="HTTP attempt budget; 0 means unlimited (default)")
+    counts.add_argument("--max-seconds", type=float, default=0, help="Total duration budget; 0 means unlimited (default)")
     counts.add_argument("--refresh", action="store_true", help="Refresh already cached counts too")
+    probe = commands.add_parser("explorer-probe", help="Measure throughput while saving useful missing address counts")
+    probe.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    probe.add_argument("--run", default="latest", help="Completed saved collection to use (default: latest)")
+    probe.add_argument("--seconds", type=float, default=60, help="Request duration budget for this probe (default: 60); saving can finish afterward")
+    probe.add_argument("--max-requests", type=int, default=10000, help="Maximum probe HTTP attempts, including authentication and retries (default: 10000)")
     csv = commands.add_parser("csv-export", help="Export displayed transaction input/output rows without API calls")
     csv.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                      help="Case directory (default: LIQUID_CASE_DIR)")
@@ -245,8 +352,8 @@ def parser():
     rebuild.add_argument("--run", default="latest", help="Saved run ID (default: latest; a retry retains its original run)")
     rebuild.add_argument("--source-board", required=True, help="Currently linked board ID or URL; keep this original value when retrying")
     rebuild.add_argument("--name", help="New board name (default: investigation name, at most 60 characters)")
-    rebuild.add_argument("--max-new-items", type=int, default=750,
-                         help="Maximum new shapes plus connectors; the entire graph must fit before board creation")
+    rebuild.add_argument("--max-new-items", type=int, default=0,
+                         help="Maximum new shapes plus connectors; 0 means unlimited (default)")
     migration = commands.add_parser("miro-merge-addresses", help="Review or resume in-place conversion to shared address circles")
     migration.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     migration.add_argument("--board", help="Existing mapped board (default: saved case board)")
@@ -266,18 +373,18 @@ def parser():
     context_arguments(update)
     update.add_argument("--reorganize", action="store_true",
                         help="Apply the current automatic layout to managed graph items, replacing their manual positions")
-    update.add_argument("--max-new-items", type=int, default=750)
+    update.add_argument("--max-new-items", type=int, default=0)
     frames = commands.add_parser("miro-frames", help="Create or update Miro export frames after the graph is finished")
     frames.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     frames.add_argument("--run", default="latest", help="Already synced run ID (default: latest saved run)")
     frames.add_argument("--board", help="Miro board URL or ID (default: saved case board)")
-    frames.add_argument("--max-new-items", type=int, default=750, help="Maximum new frames for this action")
+    frames.add_argument("--max-new-items", type=int, default=0, help="Maximum new frames for this action; 0 means unlimited (default)")
     frames.add_argument("--dry-run", action="store_true", help="Check saved mapping and frame counts without network or writes")
     miro = commands.add_parser("miro-publish", help="Legacy: create a separate snapshot; use miro-sync for cumulative graphs")
     miro.add_argument("--plan", type=Path, required=True)
     miro.add_argument("--board-id", required=True)
     miro.add_argument("--state", type=Path, required=True, help="Persistent local publication state")
-    miro.add_argument("--max-items", type=int, default=750)
+    miro.add_argument("--max-items", type=int, default=0)
     reconcile = commands.add_parser("miro-resolve", help="Resolve a POST with uncertain outcome after inspecting the board")
     reconcile.add_argument("--state", type=Path, required=True)
     reconcile.add_argument("--key", help="Logical item key to reconcile when multiple creations have uncertain outcomes")
@@ -348,26 +455,43 @@ def save_latest(case, run_id):
         save_json(path, metadata)
 
 
-def verify_export(directory):
-    """Verify archived bytes before using a completed run as new evidence input."""
+def verify_export(directory, *, progress=None):
+    """Verify archived bytes with bounded memory and cancellable progress."""
     directory = Path(directory)
     manifest = directory / "SHA256SUMS"
     if not manifest.is_file():
         raise TraceError("Saved run has no SHA256SUMS manifest; use an intact completed export")
-    seen = set()
+    seen, files = set(), []
+    base = directory.resolve()
     for line in manifest.read_text(encoding="utf-8").splitlines():
         parts = line.split("  ", 1)
         if len(parts) != 2 or len(parts[0]) != 64 or any(c not in "0123456789abcdef" for c in parts[0]):
             raise TraceError("Malformed saved-run checksum manifest")
         checksum, name = parts
         path = directory / name
-        if not path.resolve().is_relative_to(directory.resolve()) or name in seen or not path.is_file():
+        if not path.resolve().is_relative_to(base) or name in seen or not path.is_file():
             raise TraceError("Missing, duplicated, or invalid file in saved-run manifest: " + name)
-        if digest(path.read_bytes()) != checksum:
-            raise TraceError("Saved-run checksum mismatch: " + name + "; restore the original evidence")
+        files.append((path, name, checksum, path.stat().st_size))
         seen.add(name)
     if not {"trace.json", "graph.json", "miro-plan.json"}.issubset(seen):
         raise TraceError("Saved-run manifest is missing required trace or graph files")
+    total = sum(size for _, _, _, size in files)
+    completed = 0
+    started = time.monotonic()
+    report_progress(progress, "verifying_files", completed, total)
+    for path, name, checksum, size in files:
+        hashed, read = hashlib.sha256(), 0
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                read += len(chunk)
+                if read > size:
+                    raise TraceError("Saved-run file changed during verification: " + name)
+                hashed.update(chunk)
+                completed += len(chunk)
+                report_progress(progress, "verifying_files", completed, total,
+                                elapsed_seconds=time.monotonic() - started)
+        if read != size or hashed.hexdigest() != checksum:
+            raise TraceError("Saved-run checksum mismatch: " + name + "; restore the original evidence")
 
 
 def board_id(value):
@@ -446,11 +570,30 @@ def context_input_grouping(metadata, explicit=None):
     return value
 
 
+def attribution_arrow_coloring(metadata):
+    """Resolve the current case's optional attribution arrow colors."""
+    defaults = metadata.get("run_defaults", {})
+    if not isinstance(defaults, dict):
+        raise TraceError("Invalid investigation run defaults; restore case.json")
+    value = defaults.get("color_attribution_arrows", False)
+    if type(value) is not bool:
+        raise TraceError("color_attribution_arrows must be true or false")
+    return value
+
+
 def branch_hubs(metadata):
     defaults = metadata.get("run_defaults", {})
     if not isinstance(defaults, dict):
         raise TraceError("Invalid investigation run defaults; restore case.json")
     return validate_settings({"hub_addresses": defaults.get("hub_addresses", [])})["hub_addresses"]
+
+
+def centered_name_group(metadata):
+    """Resolve the optional board organization without changing trace controls."""
+    defaults = metadata.get("run_defaults", {})
+    if not isinstance(defaults, dict):
+        raise TraceError("Invalid investigation run defaults; restore case.json")
+    return validate_settings({"center_name": defaults.get("center_name", "")})["center_name"]
 
 
 def layout_search_attempts(metadata, explicit=None):
@@ -464,7 +607,8 @@ def layout_search_attempts(metadata, explicit=None):
 
 def refresh_presentation(plan, trace_path, include_fees=False, connector_style="straight", progress=None,
                          service_settings=None, preview_directory=None, fetch_address_counts=False, count_report=None,
-                         group_context_inputs=False, hub_addresses=None, layout_attempts=None, save_layout=False):
+                         group_context_inputs=False, hub_addresses=None, layout_attempts=None, save_layout=False,
+                         color_attribution_arrows=None, center_name=None):
     """Verify historical topology, then create a current shared-address view."""
     namespace = _namespace(plan)
     state = read_json(trace_path)
@@ -472,6 +616,10 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
             or state.get("case_id") != namespace["case_id"]
             or state.get("source") != namespace["source"]):
         raise TraceError("Saved trace does not match the Miro plan's run, case, or API source")
+    from .plot_scope import project_collected_full_scope
+    # Verify the original plan against the original attribution snapshot. A
+    # broader new collection can have a deliberately narrower archived graph.
+    archived_display = project_collected_full_scope(state)
     if service_settings is not None:
         state["labels"] = apply_service_labels(state["labels"], service_settings)
         state["service_controls"] = {key: value for key, value in service_settings.items() if key != "history"}
@@ -480,7 +628,8 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
         if (count_case / "case.json").is_file():
             apply_saved_counts(count_case, state)
         merged = namespace["address_mode"] == "merged"
-        full_graph = build_graph(state, merged, include_fees=True)
+        full_graph = build_graph(archived_display if archived_display is not state else state,
+                                 merged, include_fees=True)
         full_plan = make_plan(full_graph)
         fee_outpoints = {f"{txid}:{index}" for txid, record in state["transactions"].items()
                          for index, output in enumerate(record["data"]["vout"])
@@ -494,7 +643,7 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
     def topology(value):
         return (
             {(item["key"], item["body"]["data"]["shape"]) for item in value["shapes"]
-             if item["key"] not in value.get("presentation_items", {})},
+             if item["key"] not in value.get("presentation_items", {}) and not item["key"].startswith("run:")},
             {(item["key"], item["source"], item["target"]) for item in value["connectors"]},
         )
 
@@ -507,8 +656,9 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
             raise TraceError("Presentation refresh would change saved graph topology beyond fee flows; use an explicit verified --plan or regenerate an export for review")
     # Layout is a derivative of verified evidence, never a rewrite of the archive.
     from .elk_layout import optimize_graph
-    graph = build_graph(state, merge_addresses=True, include_fees=include_fees,
-                        group_context_inputs=group_context_inputs, hub_addresses=hub_addresses)
+    graph = build_graph(project_collected_full_scope(state), merge_addresses=True, include_fees=include_fees,
+                        group_context_inputs=group_context_inputs, hub_addresses=hub_addresses,
+                        color_attribution_arrows=color_attribution_arrows, center_name=center_name)
     if fetch_address_counts:
         report = ensure_counts(count_case, state, graph=graph, progress=progress)
         if count_report is not None:
@@ -640,7 +790,7 @@ def recover_miro_run(case, confirmed_empty=False, progress=None):
     return {**report, "board_url": "https://miro.com/app/board/" + quote(target, safe="") + "/"}
 
 
-def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_path=None,
+def sync_run(case, run_id, board=None, max_new_items=0, dry_run=False, plan_path=None,
              include_fees=None, reorganize=False, progress=None, connector_style=None, compact_preview=None,
              group_context_inputs=None, layout_attempts=None):
     if compact_preview is not None and (not reorganize or plan_path is not None):
@@ -681,7 +831,8 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
                                     service_settings=load_services(case), preview_directory=Path(case) / "previews",
                                     fetch_address_counts=not dry_run, count_report=count_report,
                                     group_context_inputs=context_input_grouping(metadata, group_context_inputs),
-                                    hub_addresses=branch_hubs(metadata),
+                                    color_attribution_arrows=attribution_arrow_coloring(metadata),
+                                    hub_addresses=branch_hubs(metadata), center_name=centered_name_group(metadata),
                                     layout_attempts=layout_search_attempts(metadata, layout_attempts),
                                     save_layout=not dry_run)
     # Validate the mapping, lineage, and item budget locally before saving a selection.
@@ -691,7 +842,18 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
     result = sync(plan, target, state_path, max_items=max_new_items, dry_run=True, **options)
     if not dry_run:
         with compaction_apply_lock(case, compaction_meta):
-            update_case(case, {"miro_board": target})
+            # Trace-and-sync already owns trace.lock exclusively. Link only
+            # the validated board here, without recursively acquiring that
+            # scope lock through the general settings editor.
+            with (case / "case.lock").open("a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise TraceError("Investigation settings are busy; sync after that operation finishes") from None
+                latest_metadata = read_case(case)
+                if latest_metadata["case_id"] != namespace["case_id"]:
+                    raise TraceError("Saved plan no longer matches this investigation")
+                save_json(case / "case.json", {**latest_metadata, "miro_board": target})
             result = sync(plan, target, state_path, max_items=max_new_items, dry_run=False, **options)
     report = {**result, "run_id": run_id, "board_id": target,
               "board_url": "https://miro.com/app/board/" + quote(target, safe="") + "/",
@@ -700,7 +862,9 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
               "presentation_version": plan.get("presentation_version", 1),
               "include_fees": plan.get("include_fees", True),
               "group_context_inputs": plan.get("graph_options", {}).get("group_context_inputs", False),
+              "color_attribution_arrows": plan.get("graph_options", {}).get("color_attribution_arrows", False),
               "hub_addresses": plan.get("graph_options", {}).get("hub_addresses", []),
+              "center_name": plan.get("graph_options", {}).get("center_name", ""),
               "reorganize": bool(reorganize),
               "presentation_refreshed": plan["sha256"] != archived_plan_sha256}
     if "layout_attempts" in plan.get("graph_options", {}):
@@ -717,7 +881,7 @@ def sync_run(case, run_id, board=None, max_new_items=750, dry_run=False, plan_pa
     return report
 
 
-def frame_run(case, run_id="latest", board=None, max_new_items=750, dry_run=False, progress=None):
+def frame_run(case, run_id="latest", board=None, max_new_items=0, dry_run=False, progress=None):
     """Frame the exact published presentation without recalculating its graph."""
     from .miro import sync_frames
     from .miro_state import load_state
@@ -773,6 +937,7 @@ def frame_run(case, run_id="latest", board=None, max_new_items=750, dry_run=Fals
 
 
 def run_trace(args, progress=None):
+    shared_request = getattr(args, "_shared_request", None)
     if args.miro_board:
         args.miro_board = board_id(args.miro_board)
         if args.max_new_items < 0:
@@ -799,56 +964,105 @@ def run_trace(args, progress=None):
             args.resume = resolve_latest(args.case, args.resume)
             verify_export(run_path(args.case, args.resume))
         parent = read_json(run_path(args.case, args.resume) / "trace.json") if args.resume else None
+        if parent and parent.get("collection_source", {}).get("kind") == "shared":
+            raise TraceError("This run is a shared evidence view; continue the shared collection instead of a private trace")
         identity = case_identity(args.case)
         if parent and parent.get("case_id", identity) != identity:
             raise TraceError("The resumed run belongs to a different case")
         if parent and parent.get("run_id") != args.resume:
             raise TraceError("Saved trace does not match the selected run")
+        from .group_hops import normalize_reference_name, reference_addresses, reference_name
+        metadata = read_case(args.case)
+        if metadata.get("shared_dataset") is True and shared_request is None:
+            raise TraceError("Use shared-collect with an explicit investigation policy for this dataset")
+        if shared_request is not None:
+            if (metadata.get("shared_dataset") is not True or shared_request["dataset_id"] != identity
+                    or shared_request["resume"] != args.resume):
+                raise TraceError("Prepared collection does not match this shared dataset and parent")
+            if args.resume and metadata.get("latest_run") != args.resume:
+                raise TraceError("Shared collection advanced; continue from its latest saved run")
+            metadata = {**metadata, "run_defaults": shared_request["settings"]}
+        reference = normalize_reference_name(args.hop_reference_name if args.hop_reference_name is not None
+            else reference_name(parent) if parent else metadata.get("run_defaults", {}).get("hop_reference_name", ""))
+        changed_reference = bool(parent and reference.casefold() != reference_name(parent).casefold())
+        if changed_reference and args.additional_hops is not None:
+            raise TraceError("Changing the hop origin requires --hops for the new maximum, not --additional-hops")
         hops = args.hops if args.hops is not None else (parent["limits"]["max_hops"] if parent else 3)
         if args.additional_hops is not None:
             hops += args.additional_hops
-        if parent and hops < parent["limits"]["max_hops"]:
+        if parent and not changed_reference and hops < parent["limits"]["max_hops"]:
             raise TraceError("Continuation cannot lower its parent's hop ceiling; start a fresh run to narrow scope")
         limits = Limits(hops, args.max_transactions, args.max_outpoints, args.max_requests, args.max_seconds)
         limits.validate()
-        labels = load_labels(args.labels) if args.labels else (parent["labels"] if parent else [])
-        service_settings = load_services(args.case)
+        labels = (shared_request["labels"] if shared_request is not None else
+                  load_labels(args.labels) if args.labels else (parent["labels"] if parent else []))
+        service_settings = (shared_request["service_controls"] if shared_request is not None else load_services(args.case))
         labels = apply_service_labels(labels, service_settings)
+        if reference and not reference_addresses({"labels": labels, "hop_reference_name": reference}):
+            raise TraceError("The hop reference name has no enabled address attributions; choose an existing named group")
         merge_addresses = bool(args.merge_addresses)
         store = Store(args.case)
         api = None
         try:
             api = Esplora(store, "pending", limits, args.base_url, args.auth, args.fixture,
                           args.tx_cache_seconds, args.min_interval, workers=args.api_workers,
-                          advertised_rps=args.api_rate_limit)
+                          advertised_rps=args.api_rate_limit, adaptive_workers=args.fixture is None)
             state = new_state(seeds, api.base, limits, labels, parent, case_id=identity)
+            if reference:
+                state["hop_reference_name"] = reference
+            else:
+                state.pop("hop_reference_name", None)
             state["service_controls"] = {key: value for key, value in service_settings.items() if key != "history"}
             state["fetch_options"] = {"workers": api.workers,
                                       "advertised_rps": api.advertised_rps,
                                       "effective_rps": api.effective_rps,
                                       "rate_limit_source": api.rate_limit_source,
                                       "min_interval": api.min_interval,
+                                      "min_interval_explicit": args.min_interval is not None and args.min_interval > 0,
                                       "fixture": api.fixture is not None}
             metadata = read_case(args.case)
+            if shared_request is not None:
+                metadata = {**metadata, "run_defaults": shared_request["settings"]}
+                state["shared_collection"] = {key: shared_request[key] for key in (
+                    "schema_version", "dataset_id", "request_id", "captured_at", "policy_case_id", "policy_case_name",
+                    "members", "settings", "service_controls")}
             state["investigation"] = {"case_id": identity, "name": metadata.get("name"),
                                       "miro_board": args.miro_board or metadata.get("miro_board") or None}
             state["address_mode"] = "merged" if merge_addresses else "outpoint_occurrences"
             state["graph_options"] = {**state.get("graph_options", {}),
-                                      "include_fees": include_fee_flows(metadata, args.include_fees)}
+                                      "include_fees": include_fee_flows(metadata, args.include_fees),
+                                      "color_attribution_arrows": attribution_arrow_coloring(metadata),
+                                      "center_name": centered_name_group(metadata)}
             api.run_id = state["run_id"]
             destination = run_path(args.case, state["run_id"])
             only = {f"{t}:{i}" for t, i in map(parse_outpoint, args.only)} if args.only else None
-            state = trace(api, state, limits, destination / "trace.json", args.include_unconfirmed, only)
+            state = trace(api, state, limits, destination / "trace.json", args.include_unconfirmed, only,
+                          progress=progress)
+            count_started = time.monotonic()
             if state["status"] != "error" and state.get("stop_reason") != "interrupted":
                 count_report = ensure_counts(args.case, state, fixture=args.fixture, progress=progress)
+                state["performance"]["address_counts_seconds"] = time.monotonic() - count_started
             else:
                 apply_saved_counts(args.case, state)
                 count_report = {}
+                state["performance"]["address_counts_seconds"] = 0.0
+            preserve_trace_failure = state["status"] == "error" or state.get("stop_reason") == "interrupted"
+            if not preserve_trace_failure:
+                report_progress(progress, "exporting_collection", 0, 1)
             export_run(store, state, destination, merge_addresses, args.offline_preview)
+            from .run_summaries import remember_run_summary
+            remember_run_summary(destination, state)
             save_latest(args.case, state["run_id"])
+            if not preserve_trace_failure:
+                report_progress(progress, "exporting_collection", 1, 1)
             summary = {"run_id": state["run_id"], "status": state["status"],
                 "stop_reason": state.get("stop_reason"), "stats": state["stats"], "errors": state["errors"],
-                "directory": str(destination.resolve()), "address_counts": count_report}
+                "directory": str(destination.resolve()), "address_counts": count_report,
+                "performance": public_performance(state.get("performance"))}
+            if shared_request is not None:
+                summary.update(dataset_id=identity, shared_collection=True,
+                               policy_case_name=shared_request["policy_case_name"],
+                               seed_count=len(state["seeds"]))
             failed = state["status"] == "error"
             if args.miro_board:
                 try:
@@ -882,7 +1096,7 @@ def open_preview(path):
         return False
 
 
-def saved_graph(case, run_id="latest", include_fees=None, *, group_context_inputs=None):
+def saved_graph(case, run_id="latest", include_fees=None, *, group_context_inputs=None, full_accounting=False):
     """Build current presentation from a verified snapshot, without case writes."""
     case = Path(case)
     metadata = read_case(case)
@@ -899,9 +1113,12 @@ def saved_graph(case, run_id="latest", include_fees=None, *, group_context_input
     state["service_controls"] = {key: value for key, value in service_settings.items() if key != "history"}
     apply_saved_counts(case, state)
     fees = include_fee_flows(metadata, include_fees)
-    graph = build_graph(state, merge_addresses=True, include_fees=fees,
+    from .plot_scope import project_collected_full_scope
+    graph = build_graph(state if full_accounting else project_collected_full_scope(state),
+                        merge_addresses=True, include_fees=fees,
                         group_context_inputs=context_input_grouping(metadata, group_context_inputs),
-                        hub_addresses=branch_hubs(metadata))
+                        color_attribution_arrows=attribution_arrow_coloring(metadata),
+                        hub_addresses=branch_hubs(metadata), center_name=centered_name_group(metadata))
     return run_id, archive, graph
 
 
@@ -917,6 +1134,7 @@ def mermaid_run(case, run_id="latest", out=None, include_fees=None, open_browser
     result = export_mermaid(graph, destination)
     result["address_counts"] = counts
     result.update({"run_id": run_id, "include_fees": graph["include_fees"],
+                   "color_attribution_arrows": graph.get("graph_options", {}).get("color_attribution_arrows", False),
                    "browser_opened": open_preview(result["html"]) if open_browser else False})
     return result
 
@@ -941,7 +1159,9 @@ def layout_preview_run(case, run_id="latest", out=None, include_fees=None,
     result["address_counts"] = counts
     result.update({"run_id": run_id, "include_fees": graph["include_fees"], "connector_style": style,
                    "group_context_inputs": graph.get("graph_options", {}).get("group_context_inputs", False),
+                   "color_attribution_arrows": graph.get("graph_options", {}).get("color_attribution_arrows", False),
                    "hub_addresses": graph.get("graph_options", {}).get("hub_addresses", []),
+                   "center_name": graph.get("graph_options", {}).get("center_name", ""),
                    "layout_algorithm": graph["layout"]["algorithm"], "layout_attempts": attempts,
                    "browser_opened": open_preview(result["html"]) if open_browser else False})
     if graph["layout"].get("fallback_reason") in ("size_limit", "timeout", "mermaid_size_limit", "mermaid_timeout"):
@@ -975,7 +1195,9 @@ def compact_preview_run(case, run_id="latest", include_fees=None, connector_styl
                                service_sha256=services_before)
     result.update(address_counts=counts, run_id=run_id, include_fees=after["include_fees"], connector_style=style,
                   group_context_inputs=after.get("graph_options", {}).get("group_context_inputs", False),
+                  color_attribution_arrows=after.get("graph_options", {}).get("color_attribution_arrows", False),
                   hub_addresses=after.get("graph_options", {}).get("hub_addresses", []),
+                  center_name=after.get("graph_options", {}).get("center_name", ""),
                   layout_algorithm=after["layout"]["algorithm"], layout_attempts=attempts,
                   browser_opened=open_preview(result["html"]) if open_browser else False)
     return result
@@ -986,7 +1208,7 @@ def csv_run(case, run_id="latest", out=None, include_fees=None):
 
     case = Path(case)
     # Grouping is a drawing choice; tabular I/O keeps its original endpoints.
-    run_id, archive, graph = saved_graph(case, run_id, include_fees, group_context_inputs=False)
+    run_id, archive, graph = saved_graph(case, run_id, include_fees, group_context_inputs=False, full_accounting=True)
     destination = Path(out) if out is not None else case / "exports" / (run_id + "-csv-" + uuid.uuid4().hex[:8])
     if destination.resolve().is_relative_to((case / "runs").resolve()):
         raise TraceError("Save CSV exports outside runs/ to preserve archived evidence")
@@ -995,7 +1217,7 @@ def csv_run(case, run_id="latest", out=None, include_fees=None):
     return result
 
 
-def main(argv=None, *, progress=None):
+def main(argv=None, *, progress=None, diagnostics=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     progress = progress if progress is not None else ProgressReporter()
     try:
@@ -1009,6 +1231,16 @@ def main(argv=None, *, progress=None):
             from .input_export import save_input_export
             print(json.dumps(save_input_export(args.case, args.kind, args.out), indent=2, ensure_ascii=False))
             return 0
+        if args.command == "input-import":
+            from .input_import import apply_import, preview_import, read_import
+            if len(args.file) > 3:
+                raise TraceError("Choose up to three CSV files, one per input type")
+            files = [{"name": path.name, "text": read_import(path), "policy": args.on_conflict}
+                     for path in args.file]
+            result = (apply_import(args.case, files, approval_sha256=args.approve_plan)
+                      if args.approve_plan else preview_import(args.case, files))
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0 if result.get("valid", True) else 1
         if args.command == "address-import":
             from .address_import import apply_import, preview_import, read_import
             text = read_import(args.file)
@@ -1068,6 +1300,12 @@ def main(argv=None, *, progress=None):
                                   max_seconds=args.max_seconds, refresh=args.refresh, progress=progress)
             print(json.dumps(result, indent=2))
             return 0
+        if args.command == "explorer-probe":
+            from .explorer_probe import probe_explorer
+            result = probe_explorer(args.case, args.run, seconds=args.seconds,
+                                    max_requests=args.max_requests, progress=progress)
+            print(json.dumps(result, indent=2))
+            return 0
         if args.command == "address-inspect":
             from .address_review import inspect_case_address
             print(json.dumps(inspect_case_address(args.case, args.address, max_pages=args.max_pages,
@@ -1116,6 +1354,24 @@ def main(argv=None, *, progress=None):
             return run_menu(args.investigations_dir)
         if args.command == "trace":
             return run_trace(args, progress=progress)
+        if args.command == "recover-collection":
+            from .collection_recovery import recover_collection
+            print(json.dumps(recover_collection(args.case, args.run, progress=progress), indent=2))
+            return 0
+        if args.command == "shared-collect":
+            from .shared_collection import collect_prepared, prepare_collection
+            if args.request:
+                if any(value is not None for value in (args.members_json, args.resume, args.hops, args.hop_reference_name)):
+                    raise TraceError("A prepared shared collection request cannot be combined with new controls")
+                request_id = args.request
+            else:
+                if args.hops is None:
+                    raise TraceError("Choose a hop allowance for the shared collection")
+                members = json.loads(args.members_json) if args.members_json is not None else None
+                prepared = prepare_collection(args.case, members, hops=args.hops, resume=args.resume,
+                                              hop_reference_name=args.hop_reference_name)
+                request_id = prepared["request_id"]
+            return collect_prepared(args.case, request_id, progress=progress)
         if args.command == "export":
             if args.out.exists():
                 raise TraceError("Choose a new export directory to preserve earlier evidence")
@@ -1134,7 +1390,9 @@ def main(argv=None, *, progress=None):
                 state["labels"] = apply_service_labels(state["labels"], service_settings)
                 state["service_controls"] = {key: value for key, value in service_settings.items() if key != "history"}
                 state["graph_options"] = {**state.get("graph_options", {}),
-                                          "include_fees": include_fee_flows(read_case(args.case), args.include_fees)}
+                                          "include_fees": include_fee_flows(read_case(args.case), args.include_fees),
+                                          "color_attribution_arrows": attribution_arrow_coloring(read_case(args.case)),
+                                          "center_name": centered_name_group(read_case(args.case))}
                 merged = bool(args.merge_addresses)
                 ensure_counts(args.case, state, progress=progress)
                 export_run(store, state, args.out, merged, args.offline_preview)
@@ -1148,13 +1406,69 @@ def main(argv=None, *, progress=None):
                                                 args.connector_style, args.open_browser, progress,
                                                 group_context_inputs=args.group_context_inputs,
                                                 layout_attempts=args.layout_attempts), indent=2))
+        elif args.command == "plot":
+            from .plots import preview_plot
+            print(json.dumps(preview_plot(args.case, args.goal, args.run,
+                min_hops=args.min_hops, max_hops=args.max_hops,
+                connection_scope=args.connection_scope, pegout_lbtc_limit=args.pegout_lbtc_limit,
+                include_unspent=args.include_unspent, include_unspendable=args.include_unspendable,
+                include_context=args.include_context,
+                layout_mode=args.layout_mode, board_record_id=args.board_record_id,
+                layout_settings=args.layout_settings_json,
+                data_source=args.data_source, dataset_id=args.dataset_id,
+                open_browser=args.open_browser, progress=progress), indent=2))
+        elif args.command == "plot-sync":
+            from .investigation_boards import generate_and_sync
+            print(json.dumps(generate_and_sync(args.case, args.goal, args.run,
+                min_hops=args.min_hops, max_hops=args.max_hops,
+                connection_scope=args.connection_scope, pegout_lbtc_limit=args.pegout_lbtc_limit,
+                include_unspent=args.include_unspent, include_unspendable=args.include_unspendable,
+                include_context=args.include_context,
+                layout_mode=args.layout_mode, board_record_id=args.board_record_id,
+                layout_settings=args.layout_settings_json,
+                data_source=args.data_source, dataset_id=args.dataset_id,
+                name=args.name, max_items=args.max_items, progress=progress), indent=2))
+        elif args.command == "investigation-boards":
+            from .investigation_boards import list_boards
+            print(json.dumps({"boards": list_boards(args.case)}, indent=2))
+        elif args.command == "investigation-board-create":
+            from .investigation_boards import create_board as create_investigation_board
+            print(json.dumps(create_investigation_board(args.case, args.goal, args.name), indent=2))
+        elif args.command == "investigation-board-link":
+            from .investigation_boards import link_board
+            print(json.dumps(link_board(args.case, args.goal, args.name, args.board,
+                                        record_id=args.record), indent=2))
+        elif args.command == "investigation-board-sync":
+            from .investigation_boards import sync_board
+            print(json.dumps(sync_board(args.case, args.record, args.preview,
+                reorganize=args.reorganize, max_items=args.max_items, progress=progress), indent=2))
+        elif args.command == "investigation-board-create-sync":
+            from .investigation_boards import create_and_sync
+            print(json.dumps(create_and_sync(args.case, args.preview, args.name,
+                max_items=args.max_items, progress=progress), indent=2))
         elif args.command == "connections":
             from .connections import preview_connections
             print(json.dumps(preview_connections(args.case, args.run, args.hops,
+                                                connection_scope=args.connection_scope,
                                                 open_browser=args.open_browser, progress=progress), indent=2))
         elif args.command == "connections-publish":
             from .connections import publish_connections
             print(json.dumps(publish_connections(args.case, args.preview, args.board, max_items=args.max_items), indent=2))
+        elif args.command == "pegouts":
+            from .pegouts import search_pegouts
+            result = search_pegouts(args.case, args.txid, args.min_hops, args.max_hops,
+                resume=args.resume, max_transactions=args.max_transactions, max_outpoints=args.max_outpoints,
+                max_requests=args.max_requests, max_seconds=args.max_seconds,
+                open_browser=args.open_browser, progress=progress)
+            print(json.dumps(result, indent=2))
+            return 1 if result.get("status") == "error" else 0
+        elif args.command == "pegouts-preview":
+            from .pegouts import preview_pegouts
+            print(json.dumps(preview_pegouts(args.case, args.search,
+                open_browser=args.open_browser, progress=progress), indent=2))
+        elif args.command == "pegouts-publish":
+            from .pegouts import publish_pegouts
+            print(json.dumps(publish_pegouts(args.case, args.preview, args.board, max_items=args.max_items), indent=2))
         elif args.command == "compact-preview":
             print(json.dumps(compact_preview_run(args.case, args.run, args.include_fees,
                                                  args.connector_style, args.open_browser, progress,
@@ -1211,6 +1525,12 @@ def main(argv=None, *, progress=None):
         return 130
     except (TraceError, OSError, ValueError, KeyError) as error:
         print("Error: " + str(error), file=sys.stderr)
+        from .miro_conflicts import from_error, print_report
+        report = from_error(error)
+        if report is not None:
+            print_report(report, file=sys.stderr)
+            if diagnostics is not None:
+                diagnostics(report)
         return 1
 
 

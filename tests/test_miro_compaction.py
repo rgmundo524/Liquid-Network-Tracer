@@ -113,21 +113,17 @@ class MiroCompactionTests(unittest.TestCase):
         self.sync(compact_plan(compact=False), reorganize=True)
         self.assertEqual(self.item("tx:1")["position"]["x"], 500 * 700 / 160)
 
-    def test_retained_run_note_only_translates_compact_group_and_frames_refit(self):
+    def test_continuation_uses_compact_positions_and_frames_refit(self):
         self.sync(compact_plan(compact=False, spread=1500))
-        note = self.item("run:one")
-        note["position"].update({"x": 500, "y": 50})
-        previous = copy.deepcopy(note)
         plan = compact_plan(run="two")
         self.sync(plan, reorganize=True)
         translations = {(self.item(item["key"])["position"]["x"] - item["body"]["position"]["x"],
                          self.item(item["key"])["position"]["y"] - item["body"]["position"]["y"])
                         for item in plan["shapes"]}
-        self.assertEqual(len(translations), 1)
-        self.assertNotEqual(translations, {(0, 0)})
-        self.assertEqual(note, previous)
+        self.assertEqual(translations, {(0, 0)})
         self.frame(plan)
-        self.assertTrue(contains(self.item("frame:graph"), note))
+        for item in plan["shapes"]:
+            self.assertTrue(contains(self.item("frame:graph"), self.item(item["key"])))
 
     def test_marker_does_not_bypass_local_geometry_validation(self):
         plan = compact_plan(spread=300)

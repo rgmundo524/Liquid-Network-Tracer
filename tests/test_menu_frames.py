@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from liquid_tracer.cli import main
-from liquid_tracer.investigations import create_investigation, update_case
+from liquid_tracer.investigations import create_investigation, read_case, update_case
 from liquid_tracer.menu import create_app
 
 
@@ -27,7 +27,7 @@ class MiroFrameMenuTests(unittest.IsolatedAsyncioTestCase):
             root = Path(directory) / "cases"
             fixture = PROJECT / "tests/data/synthetic-api.json"
             case = create_investigation(root, "Finished graph", board="SYNTHETIC=", fixture=str(fixture),
-                                        run_defaults={"max_new_items": 123})
+                                        run_defaults={"budget_limits_enabled": True, "max_new_items": 123})
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(main(["trace", "--case", str(case), "--fixture", str(fixture),
                                        "--seeds-file", str(PROJECT / "tests/data/synthetic-seeds.txt"), "--hops", "0"]), 0)
@@ -67,6 +67,12 @@ class MiroFrameMenuTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("Miro export frames updated", str(app.screen.query_one("#action-status", Static).render()))
                     self.assertEqual(before, {str(p.relative_to(case)): p.read_bytes()
                                               for p in (case / "runs").rglob("*") if p.is_file()})
+                    update_case(case, {"run_defaults": dict(read_case(case)["run_defaults"], budget_limits_enabled=False)})
+                    await click(pilot, "#frames")
+                    await click(pilot, "#submit")
+                    command = process.call_args.args[0]
+                    self.assertEqual(command[command.index("--max-new-items") + 1], "0")
+                    self.assertEqual(read_case(case)["run_defaults"]["max_new_items"], 123)
                     update_case(case, {"miro_board": None})
                     app.screen.update_summary()
                     self.assertTrue(app.screen.query_one("#frames", Button).disabled)

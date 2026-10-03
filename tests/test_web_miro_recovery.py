@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from liquid_tracer.investigations import create_investigation, read_case, update_case
 from liquid_tracer.web import LocalServer
+from tests.test_web import synthetic_running_job
 
 
 class WebMiroRecoveryTests(unittest.TestCase):
@@ -94,11 +95,8 @@ class WebMiroRecoveryTests(unittest.TestCase):
         body = {"action": "miro-recover", "confirm_empty": True}
         with patch.object(self.server, "start_job") as start:
             self.assertEqual(self.request(body, csrf=False)[0], 403)
-            self.server.active_job = "synthetic-busy"
-            try:
+            with patch.dict(self.server.jobs, {"f" * 32: synthetic_running_job(self.case_id)}):
                 self.assertEqual(self.request(body)[0], 409)
-            finally:
-                self.server.active_job = None
             start.assert_not_called()
         self.status.assert_not_called()
 

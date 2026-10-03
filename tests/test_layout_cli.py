@@ -26,6 +26,11 @@ class LayoutCliTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        isolated = {"XDG_CACHE_HOME": str(self.root / "cache"), "XDG_STATE_HOME": str(self.root / "state")}
+        isolated.update({name: os.environ[name] for name in ("LIQUID_RENDER_HEAP_MB", "LIQUID_ELK_WORKERS")
+                         if name in os.environ})
+        self.enterContext(patch.dict(os.environ, isolated))
+        self.enterContext(patch.dict(NODE_ENV, isolated))
         self.case = self.root / "case"
         self.fixture = self.root / "synthetic.json"
         save_json(self.fixture, fixture())
@@ -73,8 +78,8 @@ class LayoutCliTests(unittest.TestCase):
     def test_default_hides_fee_presentation_but_retains_evidence(self):
         self.start()
         state, graph = (read_json(self.run / name) for name in ("trace.json", "graph.json"))
-        self.assertEqual(state["graph_options"], {"include_fees": False})
-        self.assertEqual(graph["graph_options"], {"include_fees": False})
+        self.assertEqual(state["graph_options"], {"include_fees": False, "color_attribution_arrows": False, "center_name": ""})
+        self.assertEqual(graph["graph_options"], {"include_fees": False, "color_attribution_arrows": False, "center_name": ""})
         self.assertTrue(any(out.get("scriptpubkey_type") == "fee"
                             for tx in state["transactions"].values() for out in tx["data"]["vout"]))
         for filename in ("outputs.csv", "events.csv"):

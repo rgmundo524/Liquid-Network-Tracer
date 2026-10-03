@@ -69,11 +69,13 @@ class NameColorImportWebTests(unittest.TestCase):
         endpoint = route + "/name-color-import"
         payload = {"text": "Name,Color\nPerp,#123456\n"}
         self.assertEqual(self.request(endpoint, payload, headers={"X-Liquid-CSRF": "wrong"})[0], 403)
-        self.server.active_job = "busy"
+        job = test_web.synthetic_running_job(route.split('/')[3])
+        self.server.jobs[job['id']] = job
         try:
-            self.assertEqual(self.request(endpoint, payload)[0], 409)
+            preview = self.success(endpoint, payload)
+            self.assertEqual(self.request(endpoint, {**payload, "approve_plan": preview["approval_sha256"]})[0], 409)
         finally:
-            self.server.active_job = None
+            self.server.jobs.pop(job['id'])
         before = (case / "services.json").read_bytes()
         for extra in ({"file": "/private"}, {"role": "seed"}, {"format": ["csv"]},
                       {"policy": "overwrite"}, {"approve_plan": "wrong"}):

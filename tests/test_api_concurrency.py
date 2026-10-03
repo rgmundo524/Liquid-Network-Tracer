@@ -55,6 +55,7 @@ class ApiConcurrencyTests(unittest.TestCase):
         result = api.prefetch(endpoints + endpoints[:2])
         self.assertEqual(list(result), endpoints)
         self.assertEqual(maximum, 4)
+        self.assertEqual(api.request_metrics()['peak_in_flight'], 4)
         self.assertCountEqual(calls, endpoints)
         self.assertEqual(len(set(pair[1] for pair in result.values())), 8)
         self.assertEqual(len(list(self.store.observations(api.used))), 8)
@@ -157,6 +158,7 @@ class ApiConcurrencyTests(unittest.TestCase):
         # together and fail by roughly the entire 21ms shared interval.
         self.assertTrue(all(b - a >= api.min_interval - .004
                             for a, b in zip(starts, starts[1:])), starts)
+        self.assertGreater(api.request_metrics()['pacing_wait_seconds_total'], .02)
 
     def test_enterprise_operating_target_is_49_shared_across_workers(self):
         lock, starts = threading.Lock(), []
@@ -207,7 +209,7 @@ class ApiConcurrencyTests(unittest.TestCase):
         self.assertEqual(gets.count('Bearer private-token-1'), 4)
         self.assertEqual(gets.count('Bearer private-token-2'), 4)
         self.assertEqual(len(api.used), 8)
-        archive = (self.store.case / 'evidence.sqlite').read_bytes()
+        archive = b''.join(path.read_bytes() for path in self.store.case.glob('evidence.sqlite*') if path.is_file())
         for secret in (b'private-client', b'private-secret', b'private-token'):
             self.assertNotIn(secret, archive)
 
@@ -357,9 +359,11 @@ class ApiConcurrencyTests(unittest.TestCase):
             self.assertIsNone(api.advertised_rps)
             self.assertAlmostEqual(api.effective_rps, 49)
             self.assertEqual(api.min_interval, 1 / 49)
-            self.assertEqual(api.rate_limit_source, 'enterprise_target')
+            self.assertEqual(api.rate_limit_source, 'enterprise_adaptive')
+            self.assertEqual(api.api_rate_mode, 'adaptive')
             slower = self.client(lambda *args: None, advertised_rps=None, min_interval=.25)
             self.assertEqual(slower.effective_rps, 4)
+            self.assertEqual(slower.api_rate_mode, 'fixed')
         with patch.dict(os.environ, {'LIQUID_BLOCKSTREAM_ENTERPRISE_RPS': '25'}, clear=True):
             self.assertEqual(default_min_interval(), 1 / 25)
             self.assertEqual(default_min_interval('https://enterprise.blockstream.info/liquidtestnet/api'), 1 / 25)
@@ -439,7 +443,7 @@ class ApiConcurrencyTests(unittest.TestCase):
             return 503, {}, b'{"retry":true}'
 
         api = self.client(transport)
-        with patch.object(api.budget, 'pause'):
+        with patch.object(api._cancelled, 'wait', return_value=False):
             results = api.prefetch(['/tx/one'] * 8)
             with self.assertRaisesRegex(TraceError, 'retries exhausted'):
                 api.get('/tx/one')
@@ -449,6 +453,277 @@ class ApiConcurrencyTests(unittest.TestCase):
         self.assertEqual(len(list(self.store.observations(api.used))), 4)
         attempts = self.store.db.execute('SELECT status FROM attempts ORDER BY id').fetchall()
         self.assertEqual([row['status'] for row in attempts], ['started', '503'] * 4)
+
+    def test_prefetch_streams_on_caller_thread_before_other_requests_finish(self):
+        slow_started, release = threading.Event(), threading.Event()
+        caller = threading.get_ident()
+        callbacks = []
+
+        def transport(method, url, *args):
+            if url.endswith('/slow'):
+                slow_started.set()
+                self.assertTrue(release.wait(timeout=3))
+            else:
+                self.assertTrue(slow_started.wait(timeout=3))
+            return 200, {}, b'{}'
+
+        api = self.client(transport, workers=2)
+
+        def result(endpoint, value):
+            self.assertEqual(threading.get_ident(), caller)
+            self.assertIsInstance(value, tuple)
+            callbacks.append(endpoint)
+            if endpoint.endswith('/fast'):
+                self.assertFalse(release.is_set())
+                release.set()
+
+        response = api.prefetch(['/tx/fast', '/tx/slow'], on_result=result)
+        self.assertEqual(callbacks, ['/tx/fast', '/tx/slow'])
+        self.assertEqual(list(response), callbacks)
+
+    def test_adaptive_prefetch_grows_past_initial_workers_then_shrinks(self):
+        lock, batch_started, release = threading.Lock(), threading.Event(), threading.Event()
+        target = 1
+        active = maximum = 0
+        batch_count = 0
+        callbacks = []
+
+        def transport(method, url, *args):
+            nonlocal active, maximum, batch_count
+            index = int(url.rsplit('/', 1)[1])
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+                if 1 <= index <= 10:
+                    batch_count += 1
+                    if batch_count == 10:
+                        batch_started.set()
+                if index > 10:
+                    self.assertEqual(active, 1)
+            if 1 <= index <= 10:
+                self.assertTrue(batch_started.wait(timeout=3))
+                if index != 1:
+                    self.assertTrue(release.wait(timeout=3))
+            with lock:
+                active -= 1
+            return 200, {}, b'{}'
+
+        api = self.client(transport, workers=1, adaptive_workers=True)
+
+        def result(endpoint, value):
+            nonlocal target
+            self.assertIsInstance(value, tuple)
+            callbacks.append(endpoint)
+            if endpoint == '/tx/0':
+                target = 10
+            elif endpoint == '/tx/1':
+                target = 1
+
+        def concurrency():
+            if target == 1 and '/tx/1' in callbacks:
+                # Replenishment reevaluates the smaller target while nine
+                # started requests remain, and must submit nothing new yet.
+                with lock:
+                    self.assertLessEqual(batch_count, 10)
+                release.set()
+            return target
+
+        endpoints = ['/tx/' + str(index) for index in range(15)]
+        response = api.prefetch(endpoints, on_result=result, concurrency=concurrency)
+        self.assertTrue(all(isinstance(value, tuple) for value in response.values()))
+        self.assertEqual(maximum, 10)
+        self.assertEqual(api.worker_ceiling, 64)
+        self.assertCountEqual(callbacks, endpoints)
+
+    def test_invalid_dynamic_targets_fall_back_to_initial_workers(self):
+        for adaptive in (False, True):
+            for target in (0, True, 1.5, 65, None):
+                with self.subTest(adaptive=adaptive, target=target):
+                    barrier = threading.Barrier(2)
+
+                    def transport(*args):
+                        barrier.wait(timeout=3)
+                        return 200, {}, b'{}'
+
+                    api = self.client(transport, workers=2, adaptive_workers=adaptive,
+                                      run_id=f'fallback-{adaptive}-{target}')
+                    result = api.prefetch(['/tx/one', '/tx/two'], concurrency=lambda: target)
+                    self.assertTrue(all(isinstance(value, tuple) for value in result.values()))
+                    self.assertEqual(api.worker_ceiling, 64 if adaptive else 2)
+        for value in (None, 0, 1, 'true'):
+            with self.subTest(adaptive_workers=value), self.assertRaisesRegex(TraceError, 'boolean'):
+                self.client(lambda *args: None, adaptive_workers=value)
+
+    def test_false_stream_callback_drains_started_without_replenishment(self):
+        slow_started, release = threading.Event(), threading.Event()
+        calls, callbacks = [], []
+
+        def transport(method, url, *args):
+            endpoint = url.removeprefix(ENTERPRISE)
+            calls.append(endpoint)
+            if endpoint == '/tx/slow':
+                slow_started.set()
+                self.assertTrue(release.wait(timeout=3))
+            else:
+                self.assertTrue(slow_started.wait(timeout=3))
+            return 200, {}, b'{}'
+
+        api = self.client(transport, workers=2, adaptive_workers=True)
+
+        def result(endpoint, value):
+            callbacks.append(endpoint)
+            self.assertIsInstance(value, tuple)
+            if endpoint == '/tx/fast':
+                release.set()
+                return False
+
+        response = api.prefetch(['/tx/fast', '/tx/slow', '/tx/unscheduled'], on_result=result)
+        self.assertCountEqual(calls, ['/tx/fast', '/tx/slow'])
+        self.assertCountEqual(callbacks, calls)
+        self.assertIsInstance(response['/tx/unscheduled'], StopRun)
+        self.assertEqual(str(response['/tx/unscheduled']), 'prefetch_stopped')
+        self.assertEqual(len(list(self.store.observations(api.used))), 2)
+
+    def test_keyboard_interrupt_streams_started_success_after_archiving(self):
+        started, release = threading.Event(), threading.Event()
+        caller, callbacks = threading.get_ident(), []
+
+        def transport(*args):
+            started.set()
+            self.assertTrue(release.wait(timeout=3))
+            return 200, {}, b'{}'
+
+        api = self.client(transport, workers=1)
+
+        def interrupted_wait(*args, **kwargs):
+            self.assertTrue(started.wait(timeout=3))
+            release.set()
+            raise KeyboardInterrupt()
+
+        def result(endpoint, value):
+            self.assertEqual(threading.get_ident(), caller)
+            self.assertEqual(len(list(self.store.observations(api.used))), 1)
+            callbacks.append((endpoint, value))
+
+        with patch('liquid_tracer.api.wait', side_effect=interrupted_wait):
+            with self.assertRaises(KeyboardInterrupt):
+                api.prefetch(['/tx/started', '/tx/queued'], on_result=result)
+        self.assertEqual([endpoint for endpoint, _ in callbacks], ['/tx/started'])
+        self.assertEqual(api.budget.requests, 1)
+
+    def test_callback_failure_is_not_repeated_and_original_error_survives_close(self):
+        api = self.client(lambda *args: (200, {}, b'{}'), workers=2)
+        calls = []
+        close = api.close
+
+        def result(endpoint, value):
+            calls.append(endpoint)
+            raise ValueError('consumer failed')
+
+        def interrupted_close():
+            close()
+            raise KeyboardInterrupt()
+
+        with patch.object(api, 'close', side_effect=interrupted_close):
+            with self.assertRaisesRegex(ValueError, 'consumer failed'):
+                api.prefetch(['/tx/one', '/tx/two'], on_result=result)
+        self.assertEqual(len(calls), 1)
+
+    def test_interrupt_inside_callback_still_delivers_other_started_success(self):
+        slow_started, release = threading.Event(), threading.Event()
+        caller, callbacks = threading.get_ident(), []
+        interrupted = KeyboardInterrupt('interrupted during callback')
+
+        def transport(method, url, *args):
+            if url.endswith('/slow'):
+                slow_started.set()
+                self.assertTrue(release.wait(timeout=3))
+            else:
+                self.assertTrue(slow_started.wait(timeout=3))
+            return 200, {}, b'{}'
+
+        api = self.client(transport, workers=2)
+
+        def result(endpoint, value):
+            self.assertEqual(threading.get_ident(), caller)
+            self.assertIsInstance(value, tuple)
+            callbacks.append(endpoint)
+            if endpoint == '/tx/fast':
+                release.set()
+                raise interrupted
+            self.assertEqual(len(list(self.store.observations(api.used))), 2)
+
+        with self.assertRaises(KeyboardInterrupt) as caught:
+            api.prefetch(['/tx/fast', '/tx/slow', '/tx/queued'], on_result=result)
+        self.assertIs(caught.exception, interrupted)
+        self.assertEqual(callbacks, ['/tx/fast', '/tx/slow'])
+        self.assertEqual(api.budget.requests, 2)
+
+    def test_transport_latency_excludes_gate_storage_and_oauth_but_totals_include_oauth(self):
+        clock = [100.]
+
+        def transport(*args):
+            clock[0] += .25
+            return 200, {}, b'{}'
+
+        api = self.client(transport)
+
+        def admission(*args):
+            clock[0] += 30.
+            return 20.
+
+        def archive_attempt(*args):
+            clock[0] += 10.
+
+        with patch('liquid_tracer.api.time.monotonic', side_effect=lambda: clock[0]), \
+             patch.object(api, '_admit', side_effect=admission), \
+             patch.object(self.store, 'attempt', side_effect=archive_attempt):
+            api.call('GET', ENTERPRISE + '/one', 'esplora', '/one')
+            api.call('POST', 'https://example.invalid/token', 'oauth', '/token')
+        self.assertEqual(api.request_metrics(), {'latency_seconds': .25,
+                                                'api_rate_mode': 'fixed',
+                                                'api_target_rps': api.effective_rps,
+                                                'service_latency_seconds': None,
+                                                'completed_endpoints': 0,
+                                                'completed_requests': 1, 'pressure_events': 0,
+                                                'network_seconds_total': .5,
+                                                'pacing_wait_seconds_total': 0.,
+                                                'retry_wait_seconds_total': 0.,
+                                                'evidence_seconds_total': 20.,
+                                                'quota_reserve_calls': 0, 'quota_reserve_seconds': 0.,
+                                                'quota_admitted': 0, 'quota_denied': 0,
+                                                'local_deadline_timeouts': 0,
+                                                'cache_hits': 0, 'coalesced_hits': 0,
+                                                'rate_limit_responses': 0, 'retry_responses': 0,
+                                                'peak_in_flight': 1, 'in_flight': 0,
+                                                **self.store.storage_metrics()})
+
+    def test_transport_metrics_count_retry_and_network_pressure(self):
+        statuses = iter([429, 500, 502, 503, 504, 200])
+
+        def transport(*args):
+            status = next(statuses)
+            return status, {}, b'{}'
+
+        api = self.client(transport)
+        with patch.object(api, '_cooldown'), patch.object(api._cancelled, 'wait', return_value=False):
+            first = api.prefetch(['/tx/first'])
+            second = api.prefetch(['/tx/second'])
+        self.assertIsInstance(first['/tx/first'], TraceError)
+        self.assertIsInstance(second['/tx/second'], tuple)
+        metrics = api.request_metrics()
+        self.assertEqual(metrics['completed_requests'], 6)
+        self.assertEqual(metrics['pressure_events'], 5)
+        self.assertEqual(metrics['rate_limit_responses'], 1)
+        self.assertEqual(metrics['retry_responses'], 5)
+        self.assertGreaterEqual(metrics['latency_seconds'], 0)
+        with patch.object(api, 'transport', side_effect=TraceError('network error')):
+            api.prefetch(['/tx/network'])
+        self.assertEqual(api.request_metrics()['completed_requests'], 7)
+        self.assertEqual(api.request_metrics()['pressure_events'], 6)
+        # Returning a snapshot cannot let consumers change internal counters.
+        metrics['pressure_events'] = 1000
+        self.assertEqual(api.request_metrics()['pressure_events'], 6)
 
 
 if __name__ == '__main__':

@@ -115,10 +115,10 @@ class MiroSyncTests(unittest.TestCase):
         first = make_plan(graph())
         initial = self.sync(first)
         old_ids = {k: v["id"] for k, v in read_json(self.state_path)["items"].items()}
-        self.assertEqual(initial["created"], 7)
+        self.assertEqual(initial["created"], 6)
         second = make_plan(graph("two", True))
-        report = self.sync(second, max_items=5)
-        self.assertEqual((report["new_shapes"], report["new_connectors"], report["created"]), (3, 2, 5))
+        report = self.sync(second, max_items=4)
+        self.assertEqual((report["new_shapes"], report["new_connectors"], report["created"]), (2, 2, 4))
         self.assertEqual(report["updated"], 0)
         self.assertEqual(report["runs"], 2)
         mapping = read_json(self.state_path)["items"]
@@ -129,9 +129,9 @@ class MiroSyncTests(unittest.TestCase):
         repeated = self.sync(second, max_items=0)
         self.assertEqual(len(self.remote.writes), before)
         self.assertEqual((repeated["created"], repeated["updated"]), (0, 0))
-        self.assertEqual(len(self.remote.items), 12)
-        self.assertIn("run:one", mapping)
-        self.assertIn("run:two", mapping)
+        self.assertEqual(len(self.remote.items), 10)
+        self.assertFalse(any(key.startswith("run:") for key in mapping))
+        self.assertEqual(set(read_json(self.state_path)["runs"]), {"one", "two"})
 
     def test_continuation_reports_checked_items_before_any_board_writes(self):
         self.sync(make_plan(graph()))
@@ -145,14 +145,14 @@ class MiroSyncTests(unittest.TestCase):
 
         report = self.sync(make_plan(graph("two", True)), progress=progress)
         preflight = [event for event in events if event["phase"] == "preflight"]
-        self.assertEqual([event["completed"] for event in preflight], list(range(8)))
-        self.assertEqual({event["total"] for event in preflight}, {7})
+        self.assertEqual([event["completed"] for event in preflight], list(range(7)))
+        self.assertEqual({event["total"] for event in preflight}, {6})
         creating = [event for event in events if event["phase"] == "creating"]
-        self.assertEqual([event["completed"] for event in creating], list(range(6)))
-        self.assertEqual({event["total"] for event in creating}, {5})
+        self.assertEqual([event["completed"] for event in creating], list(range(5)))
+        self.assertEqual({event["total"] for event in creating}, {4})
         self.assertEqual(events[-1]["phase"], "complete")
         self.assertEqual(writes_during_preflight, [])
-        self.assertEqual(report["created"], 5)
+        self.assertEqual(report["created"], 4)
         for event in events:
             self.assertEqual(set(event), {"phase", "completed", "total", "message"})
             self.assertNotIn("test-token", json.dumps(event))
@@ -186,7 +186,7 @@ class MiroSyncTests(unittest.TestCase):
 
         sync(make_plan(graph("two", True)), "board=", self.state_path,
              token="test-token", transport=transport, workers=4)
-        self.assertEqual([method for method, _ in starts], ["GET"] * 7 + ["POST"] * 3)
+        self.assertEqual([method for method, _ in starts], ["GET"] * 6 + ["POST"] * 3)
         # Request starts share one gate: four workers do not multiply the quota.
         for (method, before), (_, after) in zip(starts, starts[1:]):
             minimum_gap = .02
@@ -211,7 +211,7 @@ class MiroSyncTests(unittest.TestCase):
         self.assertGreater(events[waiting]["retry_after"], 0)
         self.assertLessEqual(events[waiting]["retry_after"], 1)
         self.assertEqual(events[waiting]["reason"], "rate_limit")
-        self.assertEqual((events[waiting]["completed"], events[waiting]["total"]), (0, 7))
+        self.assertEqual((events[waiting]["completed"], events[waiting]["total"]), (0, 6))
         self.assertIn("rate limit", events[waiting]["message"])
         self.assertEqual(events[waiting + 1], events[waiting - 1])
         self.assertEqual((report["created"], report["updated"]), (0, 0))
@@ -231,9 +231,9 @@ class MiroSyncTests(unittest.TestCase):
                       transport=transport, interval=0, workers=1, progress=events.append)
         waiting = [event for event in events if event["phase"] == "waiting"]
         self.assertEqual(len(waiting), 1)
-        self.assertEqual((waiting[0]["completed"], waiting[0]["total"]), (0, 7))
-        self.assertEqual(report["created"], 7)
-        self.assertEqual(len(self.remote.items), 7)
+        self.assertEqual((waiting[0]["completed"], waiting[0]["total"]), (0, 6))
+        self.assertEqual(report["created"], 6)
+        self.assertEqual(len(self.remote.items), 6)
         self.assertIsNone(read_json(self.state_path)["pending"])
 
     def test_server_read_retry_reports_wait_and_keeps_preflight_before_writes(self):
@@ -255,7 +255,7 @@ class MiroSyncTests(unittest.TestCase):
         self.assertEqual(len(waiting), 1)
         self.assertIn("retrying a Miro read", waiting[0]["message"])
         self.assertEqual(waiting[0]["reason"], "server_retry")
-        self.assertEqual([call[0] for call in self.remote.calls[:7]], ["GET"] * 7)
+        self.assertEqual([call[0] for call in self.remote.calls[:6]], ["GET"] * 6)
 
     def test_failed_progress_reporting_cannot_lose_acknowledged_remote_ids(self):
         def fail(event):
@@ -263,7 +263,7 @@ class MiroSyncTests(unittest.TestCase):
 
         report = self.sync(make_plan(graph()), progress=fail)
         state = read_json(self.state_path)
-        self.assertEqual(report["created"], 7)
+        self.assertEqual(report["created"], 6)
         self.assertEqual({record["id"] for record in state["items"].values()}, set(self.remote.items))
         self.assertIsNone(state["pending"])
         self.assertIsNone(state["active_run_id"])
@@ -300,7 +300,7 @@ class MiroSyncTests(unittest.TestCase):
                 self.assertNotIn("position", body)
                 self.assertNotIn("geometry", body)
                 self.assertNotIn("parent", body)
-        for key in ("run:two", "tx:2", "addr:c"):
+        for key in ("tx:2", "addr:c"):
             item = self.item(key)
             self.assertGreater(item["position"]["x"] - item["geometry"]["width"] / 2, 10160)
         self.assertEqual(self.item("addr:c")["position"]["x"] - self.item("tx:2")["position"]["x"], 400)
@@ -355,26 +355,26 @@ class MiroSyncTests(unittest.TestCase):
             self.fail("Dry run must not call network transport")
         with patch.dict("os.environ", {}, clear=True):
             report = sync(plan, "board=", target, dry_run=True, transport=fail)
-        self.assertEqual(report["new_items"], 7)
+        self.assertEqual(report["new_items"], 6)
         self.assertTrue(report["remote_preflight_required"])
         self.assertFalse(target.parent.exists())
         self.sync(plan)
         before = self.state_path.read_bytes()
         with patch.dict("os.environ", {}, clear=True):
             report = sync(make_plan(graph("two", True)), "board=", self.state_path, dry_run=True, transport=fail)
-        self.assertEqual(report["new_items"], 5)
+        self.assertEqual(report["new_items"], 4)
         self.assertEqual(report["mapped_shapes"], 4)
         self.assertEqual(self.state_path.read_bytes(), before)
 
     def test_new_item_budget_is_checked_before_network(self):
-        with self.assertRaisesRegex(TraceError, "7 new items"):
-            self.sync(make_plan(graph()), max_items=6)
+        with self.assertRaisesRegex(TraceError, "6 new items"):
+            self.sync(make_plan(graph()), max_items=5)
         self.assertEqual(self.remote.calls, [])
         self.assertFalse(self.state_path.exists())
         self.sync(make_plan(graph()))
         count = len(self.remote.calls)
-        with self.assertRaisesRegex(TraceError, "5 new items"):
-            self.sync(make_plan(graph("two", True)), max_items=4)
+        with self.assertRaisesRegex(TraceError, "4 new items"):
+            self.sync(make_plan(graph("two", True)), max_items=3)
         self.assertEqual(len(self.remote.calls), count)
 
     def test_uncertain_post_requires_reconciliation_then_resumes_without_duplicates(self):
@@ -401,7 +401,7 @@ class MiroSyncTests(unittest.TestCase):
         self.assertIn("intent", record)
         result = self.sync(plan)
         self.assertEqual(result["created"], 2)
-        self.assertEqual(len(self.remote.items), 7)
+        self.assertEqual(len(self.remote.items), 6)
         self.assertEqual(self.item("legend")["id"], "remote-1")
 
     def test_uncertain_connector_reconciliation_keeps_endpoints_and_captions(self):
@@ -415,10 +415,10 @@ class MiroSyncTests(unittest.TestCase):
             sync(plan, "board=", self.state_path, token="test-token", transport=transport, interval=0, workers=1)
         pending = next(iter(read_json(self.state_path)["pending_creations"].values()))
         self.assertEqual(pending["endpoint"], "connectors")
-        resolve(self.state_path, item_id="remote-6")
+        resolve(self.state_path, item_id="remote-5")
         result = self.sync(plan)
         self.assertEqual(result["created"], 1)
-        self.assertEqual(len(self.remote.items), 7)
+        self.assertEqual(len(self.remote.items), 6)
         self.assertEqual(self.item("input:1:0")["startItem"]["id"], self.item("addr:a")["id"])
 
     def test_server_normalization_does_not_cause_spurious_patch(self):
@@ -449,12 +449,12 @@ class MiroSyncTests(unittest.TestCase):
             self.sync(bad)
         self.assertEqual(self.remote.calls, [])
 
-    def test_run_notes_are_distinct_and_legend_is_stable(self):
+    def test_runs_retain_metadata_without_adding_shapes_and_legend_is_stable(self):
         one, two = make_plan(graph()), make_plan(graph("two"))
-        self.assertEqual(one["shapes"][0], two["shapes"][0])
-        self.assertEqual(one["shapes"][1]["key"], "run:one")
-        self.assertEqual(two["shapes"][1]["key"], "run:two")
-        self.assertIn("max_hops", two["shapes"][1]["body"]["data"]["content"])
+        self.assertEqual(one["shapes"], two["shapes"])
+        self.assertFalse(any(item["key"].startswith("run:") for item in two["shapes"]))
+        self.assertEqual((one["run_id"], two["run_id"]), ("one", "two"))
+        self.assertEqual(two["run"]["limits"], {"max_hops": 2})
 
     def test_frame_relative_coordinates_abort_before_any_writes(self):
         self.sync(make_plan(graph()))
@@ -474,7 +474,7 @@ class MiroSyncTests(unittest.TestCase):
         item["position"]["x"] = 10000
         item["geometry"] = {"width": 100, "height": 1200, "rotation": 90}
         self.sync(make_plan(graph("two", True)))
-        for key in ("run:two", "tx:2", "addr:c"):
+        for key in ("tx:2", "addr:c"):
             new = self.item(key)
             self.assertGreaterEqual(new["position"]["x"] - new["geometry"]["width"] / 2, 10900)
         self.assertEqual(self.item("addr:a")["geometry"], {"width": 100, "height": 1200, "rotation": 90})

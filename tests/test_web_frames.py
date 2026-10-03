@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import patch
 
-from liquid_tracer.investigations import update_case
+from liquid_tracer.investigations import read_case, update_case
 from tests import test_web
 
 
@@ -27,6 +27,8 @@ class WebFramesTests(unittest.TestCase):
 
     def test_frame_job_uses_saved_board_and_budget_without_layout_or_trace_flags(self):
         route, path, run = self.traced()
+        update_case(path, {"run_defaults": {**read_case(path)["run_defaults"],
+                                           "budget_limits_enabled": True}})
         with patch.object(self.server, "start_job", return_value={"id": "synthetic"}) as start:
             self.success(route + "/actions", {"action": "miro-frames", "run_id": run}, 202)
         start.assert_called_once_with(["miro-frames", "--case", str(path), "--run", run,
@@ -70,11 +72,8 @@ class WebFramesTests(unittest.TestCase):
         body = {"action": "miro-frames", "run_id": run}
         with patch.object(self.server, "start_job") as start:
             self.assertEqual(self.request(route + "/actions", body, headers={"X-Liquid-CSRF": ""})[0], 403)
-            self.server.active_job = "synthetic-busy"
-            try:
+            with patch.dict(self.server.jobs, {"f" * 32: test_web.synthetic_running_job(route.rsplit("/", 1)[1])}):
                 self.assertEqual(self.request(route + "/actions", body)[0], 409)
-            finally:
-                self.server.active_job = None
             start.assert_not_called()
 
     def test_result_exposes_frame_counts_without_saved_plan_or_paths(self):

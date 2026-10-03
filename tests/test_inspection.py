@@ -42,7 +42,7 @@ class TransactionInspectionTests(unittest.TestCase):
                     self.assertEqual(status, 1)
                     self.assertEqual(output, "")
                     self.assertIn("64 hexadecimal characters", errors)
-            for option, value in (("--max-requests", "0"), ("--max-seconds", "nan"),
+            for option, value in (("--max-requests", "-1"), ("--max-seconds", "nan"),
                                   ("--max-seconds", "-1")):
                 self.assertEqual(self.invoke("--txid", A, option, value)[0], 1)
             directory.assert_not_called()
@@ -207,7 +207,7 @@ class TransactionInspectionTests(unittest.TestCase):
                 with self.subTest(value=value), self.assertRaises(TraceError) as error:
                     inspect_transactions(value)
                 self.assertNotIn("accidentally-pasted-secret", str(error.exception))
-            for options in ({"max_requests": 0}, {"max_seconds": float("nan")}, {"max_seconds": -1}):
+            for options in ({"max_requests": -1}, {"max_seconds": float("nan")}, {"max_seconds": -1}):
                 with self.subTest(options=options), self.assertRaises(TraceError):
                     inspect_transactions([A, B], **options)
             directory.assert_not_called()
@@ -236,6 +236,11 @@ class TransactionInspectionTests(unittest.TestCase):
         self.assertEqual(clients[0].budget.limits.max_seconds, 300)
         self.assertFalse(clients[0].store.case.exists())
         self.assertEqual(list(self.root.iterdir()), [self.fixture_path])
+
+    def test_zero_request_and_time_budgets_inspect_the_complete_selected_batch(self):
+        txids, _ = self.batch_fixture()
+        result = inspect_transactions(txids, fixture=self.fixture_path, max_requests=0, max_seconds=0)
+        self.assertEqual([item["txid"] for item in result["transactions"]], txids)
 
     def test_ten_paid_lookups_share_one_oauth_token_without_tracing(self):
         txids, transactions = self.batch_fixture()

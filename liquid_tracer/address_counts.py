@@ -5,15 +5,36 @@ No address-history scan, UTXO expansion or attribution follows from a count.
 """
 import copy
 import fcntl
+import math
+import time
 import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from .address_activity import validate_address
+from .address_count_cache import CountCacheJournal, read_snapshot
 from .common import StopRun, TraceError, canonical, digest, read_json, save_json
+from .performance import public_api_diagnostics
 
 COUNT_GAP = 20
 COUNT_HEIGHT = 28
+
+
+def _saved_min_interval(options):
+    """Only replay an intentional interval, not an old computed 49 RPS floor."""
+    interval = options.get("min_interval")
+    if options.get("min_interval_explicit") is False:
+        # New enterprise_target snapshots represent an explicitly configured
+        # numeric rate. Adaptive snapshots use enterprise_adaptive instead.
+        return interval if options.get("rate_limit_source") == "enterprise_target" else None
+    if ("min_interval_explicit" not in options
+            and options.get("rate_limit_source") == "enterprise_target"
+            and options.get("advertised_rps") is None
+            and type(interval) in (int, float)
+            and 0 < interval < 1
+            and math.isclose(interval, 1 / 49, rel_tol=1e-12, abs_tol=0)):
+        return None
+    return interval
 
 
 def label(node):
@@ -47,11 +68,15 @@ def _valid(record, source, address):
 
 
 def addresses(state):
+    from .saved_inputs import input_evidence, saved_input_output
+    resolve = "saved_transactions" in state or state.get("collection_source", {}).get("kind") == "shared"
+    evidence = input_evidence(state) if resolve else None
     result = set()
     for record in state['transactions'].values():
         transaction = record['data']
         outputs = list(transaction['vout'])
-        outputs.extend(vin.get('prevout') or {} for vin in transaction['vin']
+        outputs.extend((saved_input_output(evidence, vin) if resolve else vin.get('prevout') or {})
+                       for vin in transaction['vin']
                        if not vin.get('is_pegin') and not vin.get('is_coinbase'))
         for output in outputs:
             address = output.get('scriptpubkey_address')
@@ -63,7 +88,7 @@ def addresses(state):
     return sorted(result)
 
 
-def _cache(case, state):
+def _legacy_cache(case, state):
     path = Path(case) / 'address-counts.json'
     if path.is_symlink():
         raise TraceError('Address count storage must not be a symbolic link')
@@ -81,16 +106,51 @@ def _cache(case, state):
     return counts
 
 
+def _cache(case, state):
+    # Establish the journal snapshot before opening JSON. A writer may replace
+    # JSON and clear its journal concurrently, but this ordering cannot lose an
+    # observation between the two cache representations.
+    with read_snapshot(case, state['case_id'], state['source'], _valid) as rows:
+        counts = _legacy_cache(case, state)
+        for address, record in rows:
+            if address not in counts or record['observed_at'] >= counts[address]['observed_at']:
+                counts[address] = record
+    return counts
+
+
+def _shared_cache(case, state, wanted):
+    """Read later count observations from this projection's original dataset."""
+    provenance = state.get('collection_source', {})
+    if not isinstance(provenance, dict) or provenance.get('kind') != 'shared':
+        return {}
+    from .shared_collection import _dataset_metadata, _safe, dataset_path
+    shared = dataset_path(case)
+    if not _safe(shared / 'case.json').exists():
+        return {}  # Archived projections remain usable without the shared pool.
+    metadata = _dataset_metadata(shared)
+    if (metadata['case_id'] != provenance.get('dataset_id')
+            or metadata['source'] != state['source']):
+        return {}  # A replacement pool must not supply another dataset's counts.
+    identity = {'case_id': metadata['case_id'], 'source': state['source']}
+    wanted = set(wanted)
+    return {address: record for address, record in _cache(shared, identity).items()
+            if address in wanted}
+
+
 def apply_saved_counts(case, state):
     """Overlay cached counts and verified address reviews, without any API call."""
     from .address_review import _index, _read_activity
     counts = {a: copy.deepcopy(r) for a, r in state.get('address_tx_counts', {}).items()
               if _valid(r, state['source'], a)}
+    wanted = addresses(state)
+    for address, record in _shared_cache(case, state, wanted).items():
+        if address not in counts or record['observed_at'] >= counts[address]['observed_at']:
+            counts[address] = copy.deepcopy(record)
     for address, record in _cache(case, state).items():
         if address not in counts or record['observed_at'] >= counts[address]['observed_at']:
             counts[address] = copy.deepcopy(record)
     index = _index(case)
-    for address in addresses(state):
+    for address in wanted:
         if address not in index['addresses']:
             continue
         record = _read_activity(case, address, index)
@@ -131,10 +191,10 @@ def _transaction_counts(body, address):
     return values
 
 
-def _progress(progress, phase, done, total):
+def _progress(progress, phase, done, total, **metrics):
     if progress is not None:
         try:
-            progress({"phase": phase, "completed": done, "total": total})
+            progress({"phase": phase, "completed": done, "total": total, **metrics})
         except Exception:
             pass  # Progress is advisory; never lose a successful observation.
 
@@ -155,13 +215,14 @@ def _failure_reason(error):
 
 def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=False,
                     progress=None, transport=None, fixture=None, best_effort=False):
-    """One bounded, serialized cache update. Never acquires trace.lock.
+    """Fetch counts concurrently, with serialized cache updates and no trace.lock.
 
     Callers may already own trace.lock (trace -> export -> Miro). A separate
     ancillary-cache lock avoids recursive flock deadlocks and lost updates.
     A visual job uses a separate, reported statistics budget, not trace hops.
     """
     from .api import ENTERPRISE, Esplora, Limits
+    from .count_concurrency import CountConcurrency
     from .store import Store
     limits = Limits(max_hops=0, max_transactions=1, max_outpoints=1,
                     max_requests=max_requests, max_seconds=max_seconds)
@@ -189,7 +250,8 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
         source = state["source"]
         fetched, examined, stop = 0, 0, None
         failures = []
-        store, api = None, None
+        concurrency_report = {}
+        store, api, journal = None, None, None
         _progress(progress, "address_counts", len(wanted)-len(todo), len(wanted))
         try:
             if todo:
@@ -204,55 +266,133 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
                     fetch_options = state.get("fetch_options", {})
                     store = Store(case)
                     api = Esplora(store, "counts-"+uuid.uuid4().hex, limits, base=base, auth=auth,
-                                  fixture=fixture, tx_cache_seconds=0, workers=1,
+                                  fixture=fixture, tx_cache_seconds=0, workers=fetch_options.get("workers", 8),
+                                  adaptive_workers=True,
                                   advertised_rps=fetch_options.get("advertised_rps"),
-                                  min_interval=fetch_options.get("min_interval"), **options)
+                                  min_interval=_saved_min_interval(fetch_options), **options)
                     if api.base != source:
                         raise TraceError("Address-count source does not match the saved run")
-                    for address in todo:
+                    scaling = CountConcurrency(api.workers, len(todo),
+                                               0 if api.fixture is not None else api.effective_rps)
+                    started = last_saved = time.monotonic()
+                    pending = {}
+                    checkpoint_count = 0
+                    checkpoint_seconds = 0.0
+                    peak_active_clients = 0
+                    failure = None
+                    journal = CountCacheJournal(case, state['case_id'], source)
+
+                    def checkpoint(*, force=False):
+                        nonlocal last_saved, checkpoint_count, checkpoint_seconds
+                        if pending and (force or len(pending) >= 32 or time.monotonic() - last_saved >= 1):
+                            saving_started = time.monotonic()
+                            journal.write(pending)
+                            pending.clear()
+                            last_saved = time.monotonic()
+                            checkpoint_count += 1
+                            checkpoint_seconds += last_saved - saving_started
+
+                    def workers():
+                        return scaling.target(api.request_metrics())
+
+                    def metrics():
+                        nonlocal peak_active_clients
+                        feedback = api.request_metrics()
+                        diagnostics = public_api_diagnostics(feedback)
+                        peak_active_clients = max(peak_active_clients,
+                                                  diagnostics.get("shared_api_active_clients", 0))
+                        if peak_active_clients:
+                            diagnostics["shared_api_peak_active_clients"] = peak_active_clients
+                        return {"worker_count": scaling.target(feedback), "worker_limit": scaling.ceiling,
+                                "fetched": fetched,
+                                "observed_rps": fetched / max(.001, time.monotonic() - started),
+                                **diagnostics,
+                                **{key: value for key, value in feedback.items()
+                                   if key in ("shared_api_wait_seconds", "shared_api_wait_reason")}}
+
+                    def idle_progress():
+                        _progress(progress, "address_counts", len(wanted)-len(todo)+examined,
+                                  len(wanted), **metrics())
+
+                    def receive(endpoint, result):
+                        nonlocal fetched, examined, stop, failure
+                        address = endpoint.removeprefix("/address/")
                         try:
-                            body, oid = api.get("/address/"+address)
+                            if isinstance(result, TraceError):
+                                raise result
+                            body, oid = result
                             confirmed, mempool = _transaction_counts(body, address)
                         except StopRun as error:
-                            stop = str(error)
-                            break
+                            stop = stop or str(error)
+                            return False
                         except TraceError as error:
-                            if not best_effort:
-                                raise
+                            if not best_effort and failure is None:
+                                failure = error
                             reason = _failure_reason(error)
                             failures.append({"address": address, "reason": reason})
-                            examined += 1
-                            _progress(progress, "address_counts", len(wanted)-len(todo)+examined, len(wanted))
-                            # A global connection/authentication problem should not
-                            # cause the same failing request for every address.
                             if reason in ("authentication_failed", "network_failed"):
-                                stop = reason
-                                break
-                            continue
-                        observation = next(store.observations([oid]))
-                        counts[address] = {"address": address, "source": source,
-                            "observed_at": observation["fetched_at"],
-                            "confirmed_tx_count": confirmed, "mempool_tx_count": mempool,
-                            "observation_ids": [oid]}
-                        data = {"schema_version": 1, "case_id": state["case_id"], "source": source, "counts": counts}
-                        data["sha256"] = digest(canonical(data))
-                        save_json(case/"address-counts.json", data)
-                        fetched += 1
+                                stop = stop or reason
+                        else:
+                            observation = next(store.observations([oid]))
+                            counts[address] = {"address": address, "source": source,
+                                "observed_at": observation["fetched_at"],
+                                "confirmed_tx_count": confirmed, "mempool_tx_count": mempool,
+                                "observation_ids": [oid]}
+                            pending[address] = counts[address]
+                            fetched += 1
+                            checkpoint()
                         examined += 1
-                        _progress(progress, "address_counts", len(wanted)-len(todo)+examined, len(wanted))
+                        _progress(progress, "address_counts", len(wanted)-len(todo)+examined, len(wanted), **metrics())
+                        # Stop replenishing the window after a global failure;
+                        # the API still delivers all already-started results.
+                        return stop is None and failure is None
+
+                    _progress(progress, "address_counts", len(wanted)-len(todo), len(wanted), **metrics())
+                    try:
+                        api.prefetch(["/address/" + address for address in todo],
+                                     on_result=receive, concurrency=workers, on_idle=idle_progress,
+                                     retain_results=False)
+                    finally:
+                        checkpoint(force=True)
+                        if fetched:
+                            saving_started = time.monotonic()
+                            # Compatibility export once per lookup, rather than
+                            # hashing and rewriting all preceding counts for
+                            # every checkpoint. A failed export leaves the
+                            # committed journal intact for the next reader.
+                            data = {"schema_version": 1, "case_id": state["case_id"], "source": source, "counts": counts}
+                            data["sha256"] = digest(canonical(data))
+                            save_json(case/"address-counts.json", data)
+                            journal.compacted()
+                            checkpoint_seconds += time.monotonic() - saving_started
+                    concurrency_report = {"concurrency_mode": scaling.mode, "peak_workers": scaling.peak,
+                        "worker_limit": scaling.ceiling, "elapsed_seconds": time.monotonic() - started,
+                        "checkpoint_count": checkpoint_count, "checkpoint_seconds": checkpoint_seconds,
+                        "observed_rps": fetched / max(.001, time.monotonic() - started)}
+                    feedback = api.request_metrics()
+                    concurrency_report.update(public_api_diagnostics(feedback))
+                    peak_active_clients = max(peak_active_clients,
+                        concurrency_report.get("shared_api_active_clients", 0))
+                    if peak_active_clients:
+                        concurrency_report["shared_api_peak_active_clients"] = peak_active_clients
+                    if failure is not None:
+                        raise failure
             known = sum(address in counts for address in wanted)
             remaining = len(todo)-fetched
             reason = stop or ("lookup_failed" if failures else None)
             notice = (f"Address transaction counts: {known:,}/{len(wanted):,} available. "
                       + (f"Lookup incomplete ({reason}); unavailable counts remain ??." if remaining
                          else "Confirmed plus mempool totals, at their saved observation times."))
-            _progress(progress, "address_counts_incomplete" if remaining else "address_counts_ready", known, len(wanted))
+            _progress(progress, "address_counts_incomplete" if remaining else "address_counts_ready",
+                      known, len(wanted), **(metrics() if api is not None else {}))
             return {"run_id": state["run_id"], "fetched": fetched, "known": known,
                     "total": len(wanted), "remaining": remaining, "failed": len(failures),
                     "stop_reason": reason, "errors": failures,
-                    "requests_this_lookup": api.budget.requests if api is not None else 0,
+                    **concurrency_report, "requests_this_lookup": api.budget.requests if api is not None else 0,
                     "notice": notice}
         finally:
+            if journal is not None:
+                journal.close()
             if api is not None:
                 api.close()
             if store is not None:
@@ -266,18 +406,23 @@ def ensure_counts(case, state, *, graph=None, progress=None, fixture=None, trans
     saved_graph. CSV, read-only pages, dry runs and immutable snapshot publication
     remain offline. Only addresses in the selected graph are queried when supplied.
     """
-    from .investigations import read_case
+    from .investigations import read_case, effective_run_settings
     metadata = read_case(case)
     if metadata["case_id"] != state["case_id"]:
         raise TraceError("Address counts do not match this investigation")
     wanted = (addresses(state) if graph is None else
               {node["details"]["address"] for node in graph["nodes"]
                if node["kind"] == "address" and node["details"].get("network") == "liquid"})
-    defaults = metadata.get("run_defaults", {})
-    limits = state.get("limits", {})
+    settings = metadata.get("run_defaults", {})
+    if metadata.get("shared_dataset") is True:
+        # The shared collector freezes one focused investigation's policy at
+        # launch. Its ancillary count phase must use that same snapshot, not
+        # the workspace dataset's initial/default preferences.
+        settings = state.get("shared_collection", {}).get("settings", settings)
+    defaults = effective_run_settings(settings)
     report = _collect_counts(case, state, wanted,
-        max_requests=defaults.get("max_requests", limits.get("max_requests", 1000)),
-        max_seconds=defaults.get("max_seconds", limits.get("max_seconds", 300)),
+        max_requests=defaults["max_requests"],
+        max_seconds=defaults["max_seconds"],
         fixture=fixture or metadata.get("fixture"), progress=progress,
         transport=transport, best_effort=True)
     if graph is not None:
@@ -297,7 +442,7 @@ def ensure_graph_counts(case, graph, *, progress=None):
     return ensure_counts(case, state, graph=graph, progress=progress)
 
 
-def fetch_counts(case, run_id="latest", max_requests=1000, max_seconds=300, refresh=False, progress=None, transport=None):
+def fetch_counts(case, run_id="latest", max_requests=0, max_seconds=0, refresh=False, progress=None, transport=None):
     """Explicit missing-count lookup/refresh; ordinary visual jobs call ensure_counts."""
     from .cli import resolve_latest, run_path, verify_export
     from .investigations import read_case
@@ -348,4 +493,19 @@ def public_count_report(report):
     allowed = {"authentication_failed", "network_failed", "fixture_unavailable", "http_failed",
                "invalid_response", "lookup_failed", "lookup_in_progress", "request_limit", "time_limit", "server_retry_later", "interrupted"}
     value["stop_reason"] = reason if isinstance(reason, str) and reason in allowed else None
+    if report.get("concurrency_mode") in ("auto", "fixed"):
+        value["concurrency_mode"] = report["concurrency_mode"]
+    for key in ("peak_workers", "worker_limit"):
+        number = report.get(key)
+        if type(number) is int and 1 <= number <= 64:
+            value[key] = number
+    for key in ("checkpoint_count", "rate_limit_responses", "retry_responses"):
+        number = report.get(key)
+        if type(number) is int and 0 <= number <= 2**53-1:
+            value[key] = number
+    for key in ("elapsed_seconds", "observed_rps", "checkpoint_seconds"):
+        number = report.get(key)
+        if type(number) in (int, float) and math.isfinite(number) and 0 <= number <= 2**53-1:
+            value[key] = number
+    value.update(public_api_diagnostics(report))
     return value

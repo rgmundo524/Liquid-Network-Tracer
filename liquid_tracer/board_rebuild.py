@@ -179,7 +179,7 @@ def _create(receipt, path, transport):
     return target
 
 
-def rebuild_board(case, run_id="latest", source_board=None, name=None, max_new_items=750, progress=None,
+def rebuild_board(case, run_id="latest", source_board=None, name=None, max_new_items=0, progress=None,
                   transport=http):
     """Create once per source board; retry the same frozen graph on its replacement.
 
@@ -187,7 +187,7 @@ def rebuild_board(case, run_id="latest", source_board=None, name=None, max_new_i
     A later intentional rebuild supplies the currently linked replacement as its
     source. No DELETE is sent and no source mapping is changed.
     """
-    from .cli import (board_id, branch_hubs, connector_appearance, context_input_grouping, include_fee_flows,
+    from .cli import (attribution_arrow_coloring, board_id, branch_hubs, connector_appearance, context_input_grouping, include_fee_flows,
                       layout_search_attempts, refresh_presentation, resolve_latest, run_path, verify_export)
     from .services import load_services
 
@@ -195,7 +195,7 @@ def rebuild_board(case, run_id="latest", source_board=None, name=None, max_new_i
     metadata = read_case(case)
     source = board_id(source_board)
     if type(max_new_items) is not int or max_new_items < 0:
-        raise TraceError("--max-new-items must be a nonnegative integer")
+        raise TraceError("--max-new-items must be a nonnegative integer (0 means unlimited new items)")
     if name is not None:
         board_options(name)
     directory = _directory(case, source)
@@ -252,6 +252,7 @@ def rebuild_board(case, run_id="latest", source_board=None, name=None, max_new_i
                 progress=progress, service_settings=load_services(case), preview_directory=case / "previews",
                 fetch_address_counts=True, count_report=count_report,
                 group_context_inputs=context_input_grouping(metadata), hub_addresses=branch_hubs(metadata),
+                color_attribution_arrows=attribution_arrow_coloring(metadata),
                 layout_attempts=layout_search_attempts(metadata))
             # A fresh board needs every shape and connector. Check the full item
             # budget and sync invariants before even recording a POST intent.

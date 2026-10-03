@@ -129,8 +129,12 @@ def _pack(group, desired, positions, owners):
         positions[key] = value + shift
 
 
-def arrange(nodes, edges, transactions, fee_items):
-    """Mutate display positions only; fees do not influence main-flow geometry."""
+def arrange(nodes, edges, transactions, fee_items, *, refine=True):
+    """Mutate display positions only; fees do not influence main-flow geometry.
+
+    ELK callers may omit row-refinement sweeps while retaining dependency
+    columns, object dimensions, nonoverlapping initial rows, and fee placement.
+    """
     fee_keys = {key for key, item in fee_items.items() if item["endpoint"] == "shapes"}
     main = {key: node for key, node in nodes.items() if key not in fee_keys}
     neighbors = {key: set() for key in main}
@@ -193,7 +197,7 @@ def arrange(nodes, edges, transactions, fee_items):
         levels = sorted(columns)
         # A fixed number of two-way barycentric sweeps makes runtime finite,
         # keeps branch/join neighbors together, and reduces crossing connectors.
-        for _ in range(6):
+        for _ in range(6 if refine else 0):
             for forward in (True, False):
                 for column in (levels if forward else reversed(levels)):
                     desired = {}
@@ -229,5 +233,4 @@ def arrange(nodes, edges, transactions, fee_items):
     return {"algorithm": "dependency_layers_v1", "direction": "left_to_right",
             "main_top": main_top, "main_bottom": main_bottom,
             "fee_row_y": -100 if shown_fees else None,
-            "annotations": {"legend": {"x": 700, "y": -160 + annotation_shift},
-                            "run": {"x": 700, "y": -480 + annotation_shift}}}
+            "annotations": {"legend": {"x": 700, "y": -160 + annotation_shift}}}

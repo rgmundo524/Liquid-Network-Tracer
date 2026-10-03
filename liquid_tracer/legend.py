@@ -1,0 +1,232 @@
+"""Shared, presentation-only color key for Miro and local graph previews."""
+
+import html
+
+from .name_colors import color_value, validate_name_colors
+from .role_colors import validate_role_colors
+
+
+_ROLES = (
+    ("starting_transaction", "Starting transaction", "A transaction provided as a starting point."),
+    ("transaction", "Subsequent transaction", "A transaction reached in later hops."),
+    ("seed", "Selected seed", "An output selected to begin tracing."),
+    ("candidate", "Reachable address", "An address reached by the traced outputs."),
+    ("unspent_endpoint", "Unspent endpoint", "A traced output observed unspent at its last check."),
+    ("address", "Context address", "An address shown for transaction context."),
+    ("event", "Event", "Peg-out requests, fees, and other events."),
+    ("traced_edge", "Traced arrow", "A thicker arrow showing a traced UTXO link."),
+    ("context_edge", "Context arrow", "A thinner arrow showing transaction context."),
+)
+
+LEGEND_CSS = """
+.trace-legend { margin:20px 0 8px; color:#172033; }
+.trace-legend h2 { font-size:18px; margin:0 0 12px; }
+.trace-legend-rows { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr)); gap:12px 28px; padding:0; margin:0; list-style:none; }
+.trace-legend-row { display:flex; gap:12px; align-items:flex-start; margin:0; min-width:0; }
+.trace-legend-swatch { display:block; flex:0 0 20px; width:20px; height:20px; margin-top:2px; border:1px solid #64748b; border-radius:50%; box-sizing:border-box; }
+.trace-legend-label { display:block; font-weight:650; overflow-wrap:anywhere; }
+.trace-legend-description { display:block; margin-top:2px; color:#475569; overflow-wrap:anywhere; }
+.trace-legend-notes { margin:14px 0 0; padding-left:18px; color:#475569; font-size:13px; }
+.trace-legend-notes li { margin:5px 0; }
+"""
+
+
+def legend_rows(graph=None):
+    """Return one swatch and definition per role or referenced attribution name.
+
+    Colors come from the graph's presentation snapshot. Unreferenced case names
+    stay out of the key. Names differing only in capitalization share a row.
+    Neither saved evidence nor the supplied graph is modified.
+    """
+    from .export import PALETTE
+
+    graph = graph or {}
+    settings = graph.get("service_controls", {})
+    colors = validate_role_colors(settings.get("role_colors", {}))
+    rows = [{"key": "role:" + role, "color": colors.get(role, PALETTE[role][1]),
+             "label": label, "description": description}
+            for role, label, description in _ROLES]
+    palette = validate_name_colors(settings.get("name_colors", {}))
+    names = {}
+    for node in graph.get("nodes", []):
+        details = node.get("details", {})
+        if node.get("kind") != "address" or details.get("network") != "liquid":
+            continue
+        assigned = validate_name_colors(details.get("name_colors", {}))
+        for assessment in details.get("address_attributions", []):
+            name = assessment.get("entity") or assessment.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            name = name.strip()
+            key = name.casefold()
+            color = assigned.get(key, palette.get(key))
+            if color is not None:
+                names.setdefault(key, {"variants": set(), "color": color})["variants"].add(name)
+    arrows = graph.get("graph_options", {}).get("color_attribution_arrows", False)
+    description = ("Assigned to this name and arrows directly touching its addresses."
+                   if arrows else "Assigned to addresses with this attribution name.")
+    for key, record in sorted(names.items()):
+        rows.append({"key": "name:" + key, "color": color_value(record["color"]),
+                     "label": sorted(record["variants"])[0], "description": description})
+    return rows
+
+
+def legend_notes(graph=None):
+    """Short interpretation notes, separate from the scan-friendly color key."""
+    arrows = (graph or {}).get("graph_options", {}).get("color_attribution_arrows", False)
+    all_saved_connections = ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
+                             and (graph or {}).get("connections", {}).get("connection_scope") == "all_saved")
+    limited_connections = ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
+                           and (graph or {}).get("connections", {}).get("connection_scope") == "hop_limited")
+    notes = [
+        "Squares = transactions; circles = addresses; diamonds = events.",
+        "Selected seeds keep their seed color. Assigned name colors override other address colors.",
+        ("Named arrows color only links directly entering or leaving that address; other arrows use the defaults."
+         if arrows else "Arrows use the traced and context colors shown above."),
+        "Thick red borders mark branch convergence. Colors and links do not prove ownership or allocate value.",
+        "L-BTC amounts use L-BTC units: 100,000,000 base units = 1 L-BTC. Other assets use base units.",
+        ("?? = not publicly available. Collection stop labels remain visible but do not limit this saved-data view."
+         if all_saved_connections or limited_connections else "?? = not publicly available. STOP TRACING = an explicit address boundary."),
+    ]
+    from .group_hops import normalize_reference_name
+    name = normalize_reference_name((graph or {}).get("hop_reference_name", ""))
+    if name:
+        notes.append(f"Hops count away from attribution group {name}. A reached output in that group resets "
+                     "its own branch to 0; outside outputs continue independently. "
+                     + ("These distances describe saved paths and do not limit starter connections."
+                        if all_saved_connections else
+                        "These display distances do not reset the transaction-hop connection limit; attribution stops and hop limits are ignored."
+                        if limited_connections else "Attribution stop rules "
+                        + ("still apply." if (graph or {}).get("pegouts", {}).get("query", {}).get("attribution_hop_limits") == "ignore"
+                           else "and hop allowances still apply.")))
+    if all_saved_connections:
+        notes.extend([
+            "Starter connections use every verified saved spend path between selected starting transactions. "
+            "Stop-tracing rules, attribution hop limits, and a plot hop cutoff do not restrict this view.",
+            "Saved unconfirmed spends are included and may change. No additional transaction data is fetched; "
+            "branches absent from the saved collection cannot establish a connection.",
+        ])
+    if limited_connections:
+        maximum = graph["connections"]["max_hops"]
+        notes.extend([
+            f"Starter connections include paths of at most {maximum} ordinary transaction steps from each selected starter to another. "
+            "Named groups and intermediate starters do not reset this limit. Attribution stop rules and hop limits are ignored.",
+            "Saved unconfirmed spends remain eligible and may change. No additional transaction data is fetched; "
+            "branches absent from the saved collection cannot establish a connection.",
+        ])
+    if ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
+            and (graph or {}).get("connections", {}).get("transaction_io") == "complete"):
+        notes.extend([
+            "Every input and output of each connecting transaction is displayed, including fees. "
+            "Thinner context arrows and unfollowed branch outputs do not establish additional starter connections.",
+            "Separate UTXO occurrences keep their existing identities; optional context groups summarize "
+            "isolated inputs without combining their evidence or CSV rows.",
+        ])
+    if (graph or {}).get("graph_options", {}).get("view") == "pegout_paths":
+        from .common import TraceError
+        from .pegout_paths import validate_query
+
+        report = graph.get("pegouts", {})
+        query = report.get("query") if isinstance(report, dict) else None
+        if not isinstance(query, dict):
+            raise TraceError("Peg-out legend requires its reviewed search query")
+        query = validate_query(query.get("txid"), query.get("min_hops"), query.get("max_hops"),
+                               seeds=query.get("seeds"), include_unspent=query.get("include_unspent", False),
+                               include_unspendable=query.get("include_unspendable", False),
+                               include_context=query.get("include_context", False),
+                               hop_reference_name=query.get("hop_reference_name", ""),
+                               transaction_io=query.get("transaction_io"),
+                               attribution_hop_limits=query.get("attribution_hop_limits"),
+                               pegout_lbtc_limit=query.get("pegout_lbtc_limit"))
+        if query.get("pegout_lbtc_limit") is not None:
+            from .pegout_limit import validate_pegout_limit_summary
+            limit = validate_pegout_limit_summary(report.get("pegout_limit_summary"), query)
+            notes.append(f"Cumulative peg-out target: {limit['target_lbtc']} L-BTC; "
+                         f"selected total: {limit['total_lbtc']} L-BTC; excess: {limit['excess_lbtc']} L-BTC. "
+                         + ("The target was reached; the whole crossing output is included. "
+                            if limit["limit_reached"] else "The target was not reached in the qualifying saved paths. ")
+                         + "Endpoints are visited by ordinary distance from the selected seeds, then transaction ID and output index. "
+                         "Unknown amounts or assets do not count toward the target. Other context outputs are not counted. "
+                         "This is an exploration cutoff, not an allocation of stolen funds.")
+        complete_io = query.get("transaction_io") == "complete"
+        if "seeds" in query:
+            count = len({seed.split(":")[0] for seed in query["seeds"]})
+            origin = (f"Peg-out search: {len(query['seeds'])} selected seed UTXO(s) "
+                      f"from {count} starting transaction(s).")
+            hop_zero = "Each starting transaction is hop 0."
+        else:
+            origin = "Peg-out search origin: " + query["txid"]
+            hop_zero = "The origin is hop 0."
+        if query.get("hop_reference_name"):
+            hop_zero = ("Selected outputs in the named group reset their own path to hop 0; "
+                        "outside outputs beyond the limit are not followed.")
+        coverage = ("Coverage: bounded search completed. " if report.get("source_run_status") == "bounded_complete"
+                    else "Coverage: partial search. ")
+        notes.extend([
+            origin,
+            f"Range: {query['min_hops']} to {query['max_hops']} "
+            + ("group-relative" if query.get("hop_reference_name") else "transaction")
+            + " hops, inclusive. " + hop_zero,
+            ("Qualifying paths are shown with transaction context. Thinner context arrows do not establish traced paths "
+             "or add endpoint matches. Combined path edges can also form routes outside the selected range."
+             if complete_io or query.get("include_context") else
+             "Only qualifying paths are plotted. Their combined edges can also form routes outside the selected range."),
+            "Peg-out diamonds are Liquid requests, not confirmation of Bitcoin payouts.",
+            coverage + "Stopped, unconfirmed or unsearched branches may contain undiscovered peg-outs; no result does not prove absence.",
+        ])
+        if query.get("attribution_hop_limits") == "ignore":
+            notes.append("Attribution CSV hop limits are ignored for these paths. Explicit stop-tracing rules "
+                         "and the selected plot hop range still apply. Only saved transactions are available.")
+        if graph.get("address_mode") == "merged":
+            notes.append(("One circle per full address per network; traced UTXOs keep their own arrows. "
+                          if graph.get("context_connectors", {}).get("summaries") else
+                          "One circle per full address per network; each UTXO keeps its own arrows. ")
+                         + "Sharing a circle does not establish a spend between unrelated outputs.")
+        if complete_io:
+            io_notice = ("Every input and output of displayed transactions is included, including fees. "
+                         if graph.get("include_fees") is not False else
+                         "Every input and non-fee output of displayed transactions is included. "
+                         "Fee flows are hidden; their original transaction evidence is retained. ")
+            notes.append(io_notice + "Context branch outputs do not become endpoint matches or imply unspent status. "
+                         "Earlier and later transactions are only included when they belong to a qualifying path.")
+        elif query.get("include_context"):
+            notes.append("Context includes other input addresses and spendable sibling outputs of displayed transactions. "
+                         "It does not expand the trace to their earlier or later transactions.")
+        if query.get("include_unspent") or query.get("include_unspendable"):
+            endpoints = ["peg-out requests"]
+            if query.get("include_unspent"):
+                endpoints.append("unspent UTXOs")
+            if query.get("include_unspendable"):
+                endpoints.append("provably unspendable outputs")
+            notes.append("Selected endpoints: " + ", ".join(endpoints) + ". The same hop range and trace boundaries apply to each.")
+            if query.get("include_unspent"):
+                notes.append("Unspent means observed unspent in the selected saved run, not a live balance. "
+                             "Unchecked and hop-limited outputs do not qualify.")
+            if query.get("include_unspendable"):
+                notes.append("Unspendable diamonds identify outputs whose scripts cannot be spent. Fee outputs are excluded"
+                             + (" from endpoint selection." if complete_io else "."))
+    if (graph or {}).get("context_connectors", {}).get("summaries"):
+        notes.append("Each isolated context group uses one counted connector. Original input records remain "
+                     "in local details and CSV exports; grouping does not imply common ownership or a known total.")
+        if any(edge.get("details", {}).get("context_summary", {}).get("kind") == "parallel"
+               for edge in graph["context_connectors"]["summaries"]):
+            notes.append("Repeated context inputs from one address to the same transaction share a counted arrow. "
+                         "The address stays visible and traced inputs retain their own arrows. "
+                         "Bundled input labels, outpoints and amounts are listed in local details and CSV exports.")
+    return notes
+
+
+def legend_html(graph=None):
+    """Escaped HTML key; include LEGEND_CSS in the enclosing document."""
+    rows = []
+    for row in legend_rows(graph):
+        rows.append('<li class="trace-legend-row" data-legend-key="'
+                    + html.escape(row["key"], quote=True) + '">'
+                    '<span class="trace-legend-swatch" aria-hidden="true" style="background-color:'
+                    + row["color"] + '"></span><span><span class="trace-legend-label">'
+                    + html.escape(row["label"]) + '</span><span class="trace-legend-description">'
+                    + html.escape(row["description"]) + '</span></span></li>')
+    notes = "".join("<li>" + html.escape(note) + "</li>" for note in legend_notes(graph))
+    return ('<section class="trace-legend" aria-label="Graph legend"><h2>Graph legend</h2>'
+            '<ul class="trace-legend-rows">' + "".join(rows) + '</ul>'
+            '<ul class="trace-legend-notes">' + notes + '</ul></section>')

@@ -42,7 +42,6 @@ def change_output_import_screen(base, button, case):
                 table.styles.height = 10
                 yield table
                 yield Static("", id="change-import-detail", markup=False)
-                yield Checkbox("I reviewed these change-output designations and clear requests", id="change-import-approved")
                 yield Static("", id="change-import-error", markup=False)
             with Horizontal(classes="buttons form-actions"):
                 yield button("Back", id="change-import-back")
@@ -56,7 +55,6 @@ def change_output_import_screen(base, button, case):
 
         def invalidate(self):
             self.review = None
-            self.query_one("#change-import-approved", Checkbox).value = False
             self.query_one("#change-import-apply", button).disabled = True
             self.query_one("#change-import-rows", DataTable).clear()
             self.query_one("#change-import-detail", Static).update("")
@@ -78,9 +76,6 @@ def change_output_import_screen(base, button, case):
         def on_checkbox_changed(self, event: Checkbox.Changed):
             if event.checkbox.id == "change-import-replace" and self.is_mounted:
                 self.invalidate()
-            elif event.checkbox.id == "change-import-approved":
-                self.query_one("#change-import-apply", button).disabled = not (
-                    event.value and self.review and self.review["valid"])
 
         def inputs(self):
             path = self.query_one("#change-import-file", Input).value.strip()
@@ -129,9 +124,10 @@ def change_output_import_screen(base, button, case):
                         f"{counts['keep']} conflicts kept, {counts['unchanged']} unchanged, "
                         f"{self.review['duplicate_rows']} identical duplicates.\n" + self.review["notice"])
                     error.update("\n".join(f"Row {item['row']}: {item['message']}" for item in self.review["errors"]))
+                    self.query_one("#change-import-apply", button).disabled = not self.review["valid"]
                 elif action == "change-import-apply":
-                    if not self.review or not self.review["valid"] or not self.query_one("#change-import-approved", Checkbox).value:
-                        raise TraceError("Preview and approve the import before saving")
+                    if not self.review or not self.review["valid"]:
+                        raise TraceError("Preview the import before saving")
                     text, format, policy = self.inputs()
                     result = apply_import(case, text, approval_sha256=self.review["approval_sha256"], format=format, policy=policy)
                     self.invalidate()

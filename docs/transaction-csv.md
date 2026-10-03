@@ -50,7 +50,7 @@ hashes, normal CSV quoting and Unicode, and spreadsheet-formula protection.
 Import hash/address columns as text in spreadsheet applications to preserve IDs.
 The file never parses abbreviated captions or uses visual styling as evidence.
 
-## Full graph versus starter connections
+## Fee visibility and plotting goals
 
 Use the ordinary **Create CSV export** for the selected full-trace snapshot.
 Its current fee visibility applies: a hidden fee arrow has no exported row.
@@ -58,10 +58,18 @@ Current local attribution settings apply. Manual edits made only in Miro are
 not imported, and a browser-only temporary visibility toggle is not a saved
 export selection. No API calls, ELK recalculation or retracing are needed.
 
-For a connection-only graph, regenerate **Starter connections** and select its
-**Transaction CSV** download. Only its connecting arrows are exported. No-match
-results have the header and zero data rows. Existing connection snapshots remain
-readable/publishable; regenerate a preview to obtain its new transaction CSV.
+For **Paths to peg-outs**, the saved layout's **Include transaction fee flows**
+choice also controls fee rows. Hiding fees does not change peg-out matches,
+endpoint totals, or the raw transaction evidence. Previously saved CSVs retain
+their original selection.
+
+For **Starter connections**, generate a new plot and select its **Transaction
+CSV** download. The connection search selects relevant transactions; the CSV
+contains every input and output of those transactions, including context inputs,
+off-path outputs, and fees. Context grouping preserves individual input rows.
+No-match results have the header and zero data rows. Older connection snapshots
+retain their original connecting-arrows-only selection; generate a new layout
+to obtain complete transaction accounting.
 
 New trace archives also include `transactions.csv`. Internal legacy graph and
 raw evidence tables stay in those archives for reproducibility and compatibility;

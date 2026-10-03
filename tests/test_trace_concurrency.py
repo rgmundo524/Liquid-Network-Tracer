@@ -174,11 +174,14 @@ class TraceConcurrencyTests(unittest.TestCase):
                 self.assertEqual(evidence_topology(parallel), evidence_topology(serial))
                 self.assertEqual(Counter(concurrent.calls), Counter(sequential.calls))
                 self.assertTrue(all(count == 1 for count in Counter(concurrent.calls).values()))
-                self.assertLessEqual(len(concurrent.calls), limits.max_requests)
+                if limits.max_requests:
+                    self.assertLessEqual(len(concurrent.calls), limits.max_requests)
                 fetched_transactions = [endpoint for endpoint in concurrent.calls
                                         if not endpoint.endswith("/outspends")]
-                self.assertLessEqual(len(fetched_transactions), limits.max_transactions)
-                self.assertLessEqual(parallel["stats"]["outpoints_examined_this_run"], limits.max_outpoints)
+                if limits.max_transactions:
+                    self.assertLessEqual(len(fetched_transactions), limits.max_transactions)
+                if limits.max_outpoints:
+                    self.assertLessEqual(parallel["stats"]["outpoints_examined_this_run"], limits.max_outpoints)
 
     def test_stops_terminal_outputs_and_unconfirmed_activity_are_not_expanded_by_prefetch(self):
         roots = self.roots

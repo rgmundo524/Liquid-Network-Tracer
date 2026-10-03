@@ -28,10 +28,20 @@ def has_hop_limits(labels):
     return any(label.get("hop_limit") is not None for label in labels)
 
 
-def output_budget(labels, key, output):
+def output_budget(labels, key, output, *, respect_attribution_hops=True, respect_stops=True):
+    """Return a path allowance under explicit view-specific boundaries.
+
+    Collection and new peg-out queries ignore attribution display limits. Full
+    plots and legacy saved queries retain them through the default behavior.
+    Only an all-saved starter connection view explicitly ignores stop rules.
+    """
+    if not respect_attribution_hops and not respect_stops:
+        return math.inf
     matches = match_labels(labels, key, output)
-    if any(label.get("stop") is True for label in matches):
+    if respect_stops and any(label.get("stop") is True for label in matches):
         return 0
+    if not respect_attribution_hops:
+        return math.inf
     limits = [hop_limit_value(label["hop_limit"]) for label in matches
               if label.get("hop_limit") is not None]
     return min((n for n in limits if n is not None), default=math.inf)
@@ -46,8 +56,15 @@ class HopScope:
     """
     active = True
 
-    def __init__(self, state):
+    def __init__(self, state, *, respect_attribution_hops=True):
         self.state = state
+        self.respect_attribution_hops = respect_attribution_hops
+        from .group_hops import reference_name, reference_addresses, restore_scope_outputs
+        self.reference_name = reference_name(state)
+        self.reference_addresses = reference_addresses(state)
+        self.hop_ceiling = state.get("limits", {}).get("max_hops", math.inf)
+        if self.reference_name:
+            restore_scope_outputs(state)
         self.by_tx = defaultdict(list)
         self.paths = defaultdict(list)
         self.pending = defaultdict(list)
@@ -69,7 +86,8 @@ class HopScope:
     @staticmethod
     def _restore(item):
         control = item.pop("trace_control", None)
-        if control and item["status"] in {"suspected_service_stop", "held_behind_service", "attribution_hop_limit"}:
+        if control and item["status"] in {"suspected_service_stop", "analyst_stop", "held_behind_service", "attribution_hop_limit",
+                                          "named_group_hop_limit"}:
             item["status"] = control["previous_status"]
 
     @staticmethod
@@ -95,6 +113,8 @@ class HopScope:
         matches = self._matches(key, output)
         if any(label.get("stop") is True for label in matches):
             return 0
+        if not self.respect_attribution_hops:
+            return math.inf
         limits = [hop_limit_value(m.get("hop_limit")) for m in matches]
         return min((n for n in limits if n is not None), default=math.inf)
 
@@ -104,19 +124,25 @@ class HopScope:
     def depth(self, item):
         return self.depths.get(item["outpoint"], item["depth"])
 
+    def permits_depth(self, depth):
+        # One spender can be inspected at the boundary to find a group reset.
+        return depth <= self.hop_ceiling if self.reference_name else depth < self.hop_ceiling
+
     def blocked(self, key):
         return bool(self.state["outputs"][key].get("trace_control"))
 
     def permits(self, item, output):
         key = item["outpoint"]
         cap = self._cap(key, output)
-        return cap > 0 and any(remaining > 0 for _, remaining in self.paths[key] + self.pending[key])
+        return cap > 0 and any(remaining > 0 and self.permits_depth(depth)
+                              for depth, remaining in self.paths[key] + self.pending[key])
 
     def refresh(self, key):
         """Resolve an initially unfetched seed before any outspend request."""
         deferred = self.pending.pop(key, [])
         if deferred:
-            self._walk([(depth, key, remaining) for depth, remaining in deferred])
+            return self._walk([(depth, key, remaining) for depth, remaining in deferred])
+        return []
 
     def admit(self, key, depth, parent=None):
         starts = []
@@ -124,7 +150,7 @@ class HopScope:
             starts.append((0, key, math.inf))
         if parent is not None:
             starts.extend((d + 1, key, remaining - 1) for d, remaining in self.paths[parent]
-                          if remaining > 0)
+                          if remaining > 0 and (not self.reference_name or d <= self.hop_ceiling))
         return self._walk(starts)
 
     def mark_stop(self, item, address):
@@ -147,6 +173,9 @@ class HopScope:
                 self.reachable.add(key)
                 self.depths[key] = min(depth, self.depths.get(key, depth))
                 continue
+            if (self.reference_name and output_kind(output) == "spendable"
+                    and output.get("scriptpubkey_address") in self.reference_addresses):
+                depth = 0
             remaining = min(remaining, self._cap(key, output))
             old = self.paths[key]
             if any(d <= depth and r >= remaining for d, r in old):
@@ -155,17 +184,28 @@ class HopScope:
             self.reachable.add(key)
             self._restore(item)
             item["labels"] = self._matches(key, output)
-            viable = [d for d, r in self.paths[key] if r > 0]
+            viable = [d for d, r in self.paths[key] if r > 0
+                      and (not self.reference_name or d <= self.hop_ceiling)]
             self.depths[key] = min(viable or [d for d, _ in self.paths[key]])
             item["trace_scope_depth"] = self.depths[key]
-            if not viable and output_kind(output) == "spendable":
+            if self.reference_name and self.depths[key] > self.hop_ceiling:
+                kind = output_kind(output)
+                if kind != "spendable":
+                    item["status"] = kind
+                self._hold(item, "named_group_hop_limit")
+            elif not viable and output_kind(output) == "spendable":
                 stopped = any(m.get("stop") is True for m in item["labels"])
-                self._hold(item, "suspected_service_stop" if stopped else "attribution_hop_limit",
+                reason = "suspected_service_stop" if stopped else "attribution_hop_limit"
+                if (stopped and not self.respect_attribution_hops
+                        and not any(m.get("kind") == "address" and m.get("stop") is True for m in item["labels"])):
+                    reason = "analyst_stop"
+                self._hold(item, reason,
                            output.get("scriptpubkey_address") if stopped else None)
             elif remaining > 0:
                 admitted.add(key)
             link = self.state["links"].get(key)
-            if remaining > 0 and link and output_kind(output) == "spendable":
+            if (remaining > 0 and link and output_kind(output) == "spendable"
+                    and (not self.reference_name or depth <= self.hop_ceiling)):
                 for child in self.by_tx[link["spending_txid"]]:
                     heapq.heappush(queue, (depth + 1, child, remaining - 1))
         return sorted(admitted)

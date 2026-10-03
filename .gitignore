@@ -12,6 +12,7 @@ devenv.local.yaml
 cases/
 demo-case/
 runs/
+run-summaries/
 miro/
 case.json
 case.lock

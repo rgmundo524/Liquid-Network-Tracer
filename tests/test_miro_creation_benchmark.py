@@ -11,7 +11,7 @@ class MiroCreationBenchmarkTests(unittest.TestCase):
         options = types.SimpleNamespace(transactions=4, latency=0, interval=0, unpaced_credit=True)
         serial = measure(miro, options, 1)
         parallel = measure(miro, options, 4)
-        self.assertEqual(serial["native_items"], 19)
+        self.assertEqual(serial["native_items"], 18)
         self.assertEqual(serial["shape_post_requests"], 1)
         self.assertEqual(serial["connector_post_requests"], 8)
         for field in ("board_sha256", "mapping_sha256", "request_counts"):

@@ -189,6 +189,9 @@ class ChangeElkTests(unittest.TestCase):
         state["transactions"] = dict(reversed(list(state["transactions"].items())))
         state["service_controls"]["change_outputs"] = dict(reversed(list(state["service_controls"]["change_outputs"].items())))
         result = optimize_graph(build_graph(state), "elbowed", layout_attempts=3)
+        # Peak process memory varies between runs; geometry and ordering do not.
+        for graph in (original, result):
+            self.assertGreater(graph["layout"]["search"].pop("peak_rss_mb"), 0)
         self.assertEqual(original, result)
 
     def test_incompatible_change_inputs_to_one_spender_are_reported(self):

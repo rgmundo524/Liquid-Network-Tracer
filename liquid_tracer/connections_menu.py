@@ -1,8 +1,8 @@
 """Terminal dialogs for connection-only previews and explicit snapshot publication."""
 from pathlib import Path
 from .common import TraceError
-from .connections import PREVIEW_ID, SCOPE, reviewed_connections, validate_hops
-from .investigations import read_case
+from .connections import PREVIEW_ID, SCOPE, reviewed_connections
+from .investigations import effective_run_settings, read_case
 
 
 def connection_screen(base, button, case, *, publish=False):
@@ -17,6 +17,7 @@ def connection_screen(base, button, case, *, publish=False):
                 yield Label("Publish starter connections" if publish else "Starter connections", classes="title")
                 yield Static(SCOPE, markup=False)
                 if publish:
+                    settings = effective_run_settings(read_case(case).get("run_defaults", {}))
                     rows = []
                     directory = Path(case) / "previews"
                     for path in sorted(directory.glob("*-connections-*"), reverse=True):
@@ -24,7 +25,10 @@ def connection_screen(base, button, case, *, publish=False):
                         try:
                             graph, _ = reviewed_connections(case, path.name)
                             if graph["nodes"]:
-                                rows.append((path.name + f" ({graph['connections']['max_hops']} hops)", path.name))
+                                scope = graph["connections"]
+                                label = ("all saved connections" if scope.get("connection_scope") == "all_saved"
+                                         else f"{scope['max_hops']} hops")
+                                rows.append((path.name + f" ({label})", path.name))
                         except (TraceError, OSError, ValueError, TypeError, KeyError):
                             continue
                     yield Select(rows, id="connection-preview", prompt="Choose a reviewed snapshot")
@@ -32,13 +36,15 @@ def connection_screen(base, button, case, *, publish=False):
                     yield Input(id="connection-board")
                     yield Checkbox("I reviewed this snapshot and authorize publication to the board above", id="connection-confirm")
                     yield Static("The full-trace board is protected. One immutable snapshot per board. "
-                                 "Repeating the same publication reuses acknowledged items.", markup=False)
+                                 "Repeating the same publication reuses acknowledged items. "
+                                 "Older snapshots keep their original stop rules and hop bounds.", markup=False)
+                    yield Static(f"New Miro item budget: {settings['max_new_items'] or 'unlimited'}.", markup=False)
                 else:
-                    yield Label("Maximum transaction hops per connecting path")
-                    yield Input(value="10", id="connection-hops", type="integer")
-                    yield Static("Uses the latest saved run. All qualifying paths are kept, not only the shortest. "
-                                 "Unconnected starters, side branches and context are omitted. "
-                                 "Run the trace to the required depth first. No Miro changes are made here.", markup=False)
+                    yield Static("Uses all verified connections in the latest saved run, with no plotting hop cutoff. "
+                                 "Attribution stops and hop limits do not prune this view; labels and recorded confirmation status remain. "
+                                 "Each connecting transaction shows all inputs and outputs, including fees and context. "
+                                 "Other branch outputs stay visible without following their descendants. Unconnected starters are omitted. "
+                                 "Only verified UTXO spends create paths. No blockchain requests or Miro changes are made here.", markup=False)
                 yield Static("", id="connection-error", markup=False)
             with Horizontal(classes="buttons form-actions"):
                 yield button("Back", id="connection-back")
@@ -61,14 +67,14 @@ def connection_screen(base, button, case, *, publish=False):
                         raise TraceError("Review the snapshot and confirm publication first")
                     target = board_id(self.query_one("#connection-board", Input).value)
                     metadata = read_case(case)
+                    settings = effective_run_settings(metadata.get("run_defaults", {}))
                     if metadata.get("miro_board") and target == board_id(metadata["miro_board"]):
                         raise TraceError("Choose a separate Miro board; the full trace is protected")
                     arguments = ["connections-publish", "--case", str(case), "--preview", preview,
-                                 "--board", target, "--max-items", str(metadata.get("run_defaults", {}).get("max_new_items", 750))]
+                                 "--board", target, "--max-items", str(settings["max_new_items"])]
                 else:
-                    hops = validate_hops(int(self.query_one("#connection-hops", Input).value))
                     arguments = ["connections", "--case", str(case), "--run", resolve_latest(case, "latest"),
-                                 "--hops", str(hops), "--open"]
+                                 "--open"]
                 self.dismiss((arguments, publish))
             except (TraceError, ValueError, OSError, KeyError, TypeError) as exc:
                 self.query_one("#connection-error", Static).update(str(exc))

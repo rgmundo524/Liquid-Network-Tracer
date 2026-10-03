@@ -31,7 +31,7 @@ class ProgressReportTests(unittest.TestCase):
         self.assertNotIn(SENTINEL, json.dumps(result))
 
     def test_only_known_progress_fields_reach_the_browser_or_terminal(self):
-        for phase in ("optimizing", "preflight", "layout", "updating", "removing", "creating", "waiting", "complete"):
+        for phase in ("optimizing", "exporting_plot", "preflight", "layout", "updating", "removing", "creating", "waiting", "complete"):
             with self.subTest(phase=phase):
                 result = public_progress({"phase": phase, "completed": 2, "total": 4,
                                           "message": SENTINEL, "token": SENTINEL,
@@ -153,7 +153,7 @@ class ProgressReportTests(unittest.TestCase):
             request, result = Path(directory) / "request.json", Path(directory) / "result.json"
             request.write_text(json.dumps({"arguments": ["miro-sync", "--dry-run"]}))
 
-            def pretend_cli(arguments, *, progress=None):
+            def pretend_cli(arguments, *, progress=None, diagnostics=None):
                 self.assertEqual(arguments, ["miro-sync", "--dry-run"])
                 self.assertIsInstance(progress, ProgressReporter)
                 progress({"phase": "updating", "completed": 1, "total": 2, "message": SENTINEL})

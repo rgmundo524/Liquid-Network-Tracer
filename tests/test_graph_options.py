@@ -10,11 +10,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from liquid_tracer.cli import csv_run, main, parser, saved_graph, verify_export
+from liquid_tracer.cli import csv_run, main, parser, saved_graph, sync_run, verify_export
 from liquid_tracer.common import read_json, save_json
 from liquid_tracer.export import build_graph
 from liquid_tracer.investigations import update_case
-from tests.fixtures import A, X, fixture, output
+from liquid_tracer.name_colors import set_name_colors
+from liquid_tracer.services import load_services, set_service
+from tests.fixtures import A, B, X, fixture, output
 from tests.test_context_groups import summaries
 from tests.test_elk_layout import HAS_ELK
 from tests.test_input_order import input_order_state
@@ -66,6 +68,38 @@ class GraphHubTests(unittest.TestCase):
         self.assertEqual(graph["graph_options"].get("hub_addresses", []), [])
         self.assertFalse(any(node.get("layout_hub") for node in graph["nodes"]))
         self.assertEqual(graph, build_graph(state, hub_addresses=[]))
+
+
+class CenterNameGraphTests(unittest.TestCase):
+    def test_name_selection_preserves_nodes_edges_and_original_evidence(self):
+        from tests.test_attribution_convergence import annotation, graph_state
+        state = graph_state((("a:0", "c"), ("c:0", "b")),
+                            labels=[annotation(stop=False), annotation(address="SYNTHETIC-c-address", stop=False)])
+        state["graph_options"] = {"center_name": "Example Exchange"}
+        original = copy.deepcopy(state)
+        baseline = build_graph(state, center_name="")
+        graph = build_graph(state)
+        self.assertEqual(graph["graph_options"]["center_name"], "Example Exchange")
+        self.assertEqual(graph["nodes"], baseline["nodes"])
+        self.assertEqual(graph["edges"], baseline["edges"])
+        self.assertEqual(graph["run"], baseline["run"])
+        self.assertEqual(state, original)
+        self.assertEqual(build_graph(state, center_name="  Another group  ")["graph_options"]["center_name"],
+                         "Another group")
+        self.assertEqual(build_graph(state, center_name="")["graph_options"]["center_name"], "")
+
+    def test_selected_named_context_addresses_remain_individual(self):
+        from tests.test_attribution_convergence import annotation
+        state = input_order_state(5, continuing=(4,))
+        inputs = state["transactions"][txid("input-order-child")]["data"]["vin"]
+        named = [inputs[index]["prevout"]["scriptpubkey_address"] for index in (0, 1)]
+        state["labels"] = [annotation(address=address, name="Example Exchange", stop=False) for address in named]
+        graph = build_graph(state, group_context_inputs=True, center_name="Example Exchange")
+        visible = {node["details"].get("address") for node in graph["nodes"] if node["kind"] == "address"}
+        self.assertTrue(set(named) <= visible)
+        hidden = {node["details"]["address"] for group in summaries(graph) for node in group["details"]["members"]}
+        self.assertFalse(set(named) & hidden)
+        self.assertTrue(summaries(graph))
 
 
 class SavedGraphOptionsTests(unittest.TestCase):
@@ -131,6 +165,100 @@ class SavedGraphOptionsTests(unittest.TestCase):
         self.assertFalse(summaries(saved_graph(self.case)[2]))
         self.assertEqual((self.case / "case.json").read_bytes(), metadata)
         self.assertEqual(self.snapshot(self.archive), original)
+
+    def test_arrow_coloring_uses_current_settings_without_retracing_or_changing_archive(self):
+        set_service(self.case, "SYNTHETIC-victim-deposit", name="Example service", stop_tracing=False)
+        set_name_colors(self.case, [{"name": "Example service", "color": "#123abc"}],
+                        expected_revision=load_services(self.case)["revision"])
+        original = self.snapshot(self.archive)
+        baseline = saved_graph(self.case)[2]
+        colored_ids = {"out:" + A + ":0", "in:" + B + ":0"}
+        for enabled in (True, False):
+            update_case(self.case, {"run_defaults": {"color_attribution_arrows": enabled}})
+            with patch("liquid_tracer.cli.Esplora", side_effect=AssertionError("Must not retrace")):
+                graph = saved_graph(self.case)[2]
+            self.assertIs(graph["graph_options"]["color_attribution_arrows"], enabled)
+            self.assertEqual(graph["nodes"], baseline["nodes"])
+            self.assertEqual([(e["id"], e["source"], e["target"], e["role"]) for e in graph["edges"]],
+                             [(e["id"], e["source"], e["target"], e["role"]) for e in baseline["edges"]])
+            self.assertEqual({e["id"] for e in graph["edges"] if e.get("color") == "#123abc"},
+                             colored_ids if enabled else set())
+        self.assertEqual(self.snapshot(self.archive), original)
+        verify_export(self.archive)
+
+    def test_normal_sync_refreshes_arrow_setting_over_the_archived_snapshot(self):
+        set_service(self.case, "SYNTHETIC-victim-deposit", name="Example service", stop_tracing=False)
+        set_name_colors(self.case, [{"name": "Example service", "color": "#123abc"}],
+                        expected_revision=load_services(self.case)["revision"])
+        original = self.snapshot(self.archive)
+        for enabled in (True, False):
+            update_case(self.case, {"run_defaults": {"color_attribution_arrows": enabled}})
+            with patch("liquid_tracer.elk_layout.optimize_graph", side_effect=lambda graph, **kw: graph), \
+                    patch("liquid_tracer.cli.sync", return_value={"dry_run": True}) as sync, \
+                    patch("liquid_tracer.cli.Esplora", side_effect=AssertionError("Must not retrace")):
+                report = sync_run(self.case, "latest", board="SYNTHETIC-board", dry_run=True)
+            self.assertIs(report["color_attribution_arrows"], enabled)
+            plan = sync.call_args.args[0]
+            arrow = next(item for item in plan["connectors"] if item["key"] == "out:" + A + ":0")
+            self.assertEqual(arrow["body"]["style"]["strokeColor"], "#123abc" if enabled else "#155e75")
+        self.assertEqual(self.snapshot(self.archive), original)
+
+    def test_continuation_snapshots_current_arrow_preference(self):
+        set_service(self.case, "SYNTHETIC-victim-deposit", name="Example service", stop_tracing=False)
+        set_name_colors(self.case, [{"name": "Example service", "color": "#123abc"}],
+                        expected_revision=load_services(self.case)["revision"])
+        original = self.snapshot(self.archive)
+        for enabled in (True, False):
+            update_case(self.case, {"run_defaults": {"color_attribution_arrows": enabled}})
+            report = self.invoke(["trace", "--case", str(self.case), "--fixture", str(self.fixture),
+                                  "--resume", "latest", "--additional-hops", "0"])
+            archive = Path(report["directory"])
+            state, graph = read_json(archive / "trace.json"), read_json(archive / "graph.json")
+            self.assertIs(state["graph_options"]["color_attribution_arrows"], enabled)
+            self.assertIs(graph["graph_options"]["color_attribution_arrows"], enabled)
+            self.assertEqual(len(graph["nodes"]), len(saved_graph(self.case)[2]["nodes"]))
+            arrow = next(item for item in graph["edges"] if item["id"] == "out:" + A + ":0")
+            self.assertEqual(arrow.get("color"), "#123abc" if enabled else None)
+            verify_export(archive)
+        self.assertEqual(self.snapshot(self.archive), original)
+
+    def test_current_center_group_reaches_preview_and_sync_without_retracing(self):
+        original = self.snapshot(self.archive)
+        baseline = saved_graph(self.case)[2]
+        for name in ("Example service", ""):
+            update_case(self.case, {"run_defaults": {"center_name": name}})
+            with patch("liquid_tracer.cli.Esplora", side_effect=AssertionError("Must not retrace")):
+                graph = saved_graph(self.case)[2]
+                with patch("liquid_tracer.elk_layout.optimize_graph", side_effect=lambda graph, **kw: graph), \
+                        patch("liquid_tracer.cli.sync", return_value={"dry_run": True}) as sync:
+                    result = sync_run(self.case, "latest", board="SYNTHETIC-board", dry_run=True)
+            self.assertEqual(graph["graph_options"]["center_name"], name)
+            self.assertEqual(result["center_name"], name)
+            self.assertEqual(sync.call_args.args[0]["graph_options"]["center_name"], name)
+            self.assertEqual(graph["nodes"], baseline["nodes"])
+            self.assertEqual(graph["edges"], baseline["edges"])
+        self.assertEqual(self.snapshot(self.archive), original)
+        verify_export(self.archive)
+
+    def test_continuation_and_export_snapshot_current_center_group(self):
+        original = self.snapshot(self.archive)
+        update_case(self.case, {"run_defaults": {"center_name": "Example service"}})
+        result = self.invoke(["trace", "--case", str(self.case), "--fixture", str(self.fixture),
+                              "--resume", "latest", "--additional-hops", "0"])
+        archive = Path(result["directory"])
+        for file in ("trace.json", "graph.json"):
+            self.assertEqual(read_json(archive / file)["graph_options"]["center_name"], "Example service")
+        update_case(self.case, {"run_defaults": {"center_name": ""}})
+        destination = self.root / "refreshed-export"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(main(["export", "--case", str(self.case), "--run", result["run_id"],
+                                   "--out", str(destination)]), 0)
+        self.assertEqual(read_json(destination / "graph.json")["graph_options"]["center_name"], "")
+        self.assertEqual(read_json(archive / "graph.json")["graph_options"]["center_name"], "Example service")
+        self.assertEqual(self.snapshot(self.archive), original)
+        verify_export(archive)
+        verify_export(destination)
 
     def test_csv_export_keeps_all_individual_inputs_when_grouping_is_enabled(self):
         self.configure(True)

@@ -15,6 +15,7 @@ from liquid_tracer.export import (COLORS, PALETTE, PRESENTATION_VERSION,
                                   build_graph, edge_color, graph_quantity,
                                   short, svg_graph, transaction_date)
 from liquid_tracer.miro import make_plan, validate_plan
+from liquid_tracer.legend import legend_rows
 from liquid_tracer.store import Store
 from liquid_tracer.trace import new_state, trace
 from tests.fixtures import A, B, C, X, fixture
@@ -79,7 +80,7 @@ class GraphPresentationTests(unittest.TestCase):
         self.assertEqual(graph_quantity(hidden), "?? ??")
         self.assertEqual(graph_quantity({}), "?? ??")
         self.assertEqual(graph_quantity({"asset": LBTC}), "?? L-BTC")
-        self.assertEqual(graph_quantity({"value": 0, "asset": LBTC}), "0 base units L-BTC")
+        self.assertEqual(graph_quantity({"value": 0, "asset": LBTC}), "0 L-BTC")
         self.assertEqual(graph_quantity({"value": 9007199254740993}),
                          "9007199254740993 base units ??")
         other_asset = "12" * 32
@@ -138,18 +139,21 @@ class GraphPresentationTests(unittest.TestCase):
             self.assertEqual(connectors[edge["id"]]["style"]["strokeColor"], expected_color)
         svg_text = " ".join(svg.itertext())
         legend = shapes["legend"]["data"]["content"]
-        for color_name, _ in PALETTE.values():
-            self.assertIn(color_name.lower(), legend.lower())
-            self.assertIn(color_name.lower(), svg_text.lower())
-        self.assertIn("provided starting transactions", legend)
-        self.assertIn("Starting role takes priority", legend)
-        self.assertIn("selected seed outputs", legend)
-        self.assertIn("amount asset", legend)
+        for row in legend_rows(graph):
+            self.assertIn(row["color"], legend)
+            self.assertIn(row["label"], legend)
+            self.assertIn(row["label"], svg_text)
+            self.assertIn(row["description"], legend)
+        self.assertEqual(legend.count("●"), len(legend_rows(graph)))
+        self.assertIn("Selected seeds keep their seed color", legend)
         self.assertIn("?? = not publicly available", legend)
         # The full legend fits above the existing first row; its extra color
         # descriptions must not cover the graph after this presentation update.
         svg_group = svg.find("{http://www.w3.org/2000/svg}g")
         header_text = svg_group.findall("{http://www.w3.org/2000/svg}text")
+        header_text += [text for group in svg_group.findall("{http://www.w3.org/2000/svg}g")
+                        if group.get("data-legend-key")
+                        for text in group.findall("{http://www.w3.org/2000/svg}text")]
         header_bottom = max(float(text.attrib["y"]) + float(text.attrib["font-size"])
                             for text in header_text)
         first_node_top = min(node["y"] - node["height"] / 2 for node in graph["nodes"])
@@ -294,19 +298,16 @@ class GraphPresentationTests(unittest.TestCase):
         self.assertEqual(plan["presentation_version"], PRESENTATION_VERSION)
         self.assertEqual(plan["namespace"], graph["namespace"])
         self.assertEqual({item["key"] for item in plan["shapes"]},
-                         {node["id"] for node in graph["nodes"]} | {"legend", "run:" + graph["run_id"]} | set(plan["presentation_items"]))
+                         {node["id"] for node in graph["nodes"]} | {"legend"} | set(plan["presentation_items"]))
         self.assertEqual({(item["key"], item["source"], item["target"]) for item in plan["connectors"]},
                          {(edge["id"], edge["source"], edge["target"]) for edge in graph["edges"]})
 
-    def test_run_note_summarizes_many_seeds_without_losing_full_plan_metadata(self):
+    def test_many_seeds_remain_in_plan_metadata_without_adding_a_run_note(self):
         graph = build_graph(self.state)
         seeds = [f"{index:064x}:0" for index in range(10)] + [f"{0:064x}:1"]
         graph["run"]["seeds"] = seeds
         plan = make_plan(graph)
-        content = next(item["body"]["data"]["content"] for item in plan["shapes"]
-                       if item["key"].startswith("run:"))
-        self.assertIn("Starting outputs: 11 across 10 transactions", content)
-        self.assertNotIn(seeds[0], content)
+        self.assertFalse(any(item["key"].startswith("run:") for item in plan["shapes"]))
         self.assertEqual(plan["run"]["seeds"], seeds)
 
 
