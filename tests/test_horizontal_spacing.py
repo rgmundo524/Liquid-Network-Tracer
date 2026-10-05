@@ -85,6 +85,35 @@ class HorizontalSpacingTests(unittest.TestCase):
         self.assertEqual(result["edges"], before["edges"])
         self.assertEqual(result["horizontal_spacing"]["removed_width"], 0)
 
+    def test_section_envelopes_translate_rigidly_while_outer_gap_shrinks(self):
+        raw = candidate()
+        raw["sectionGeometry"] = {"sections": [
+            {"id": "local-a", "x": -24, "y": -24, "width": 894.4, "height": 208},
+            {"id": "local-b", "x": 1976, "y": -24, "width": 208, "height": 208}]}
+        raw["nodes"].append({"id": "c", "x": 2000, "y": 0, "width": 160, "height": 160})
+        before = copy.deepcopy(raw)
+        compact_candidate(raw)
+        self.assertEqual(raw["nodes"][:2], before["nodes"][:2])
+        self.assertEqual(raw["edges"], before["edges"])
+        self.assertGreater(raw["horizontal_spacing"]["removed_width"], 0)
+        self.assertLess(raw["nodes"][2]["x"], 2000)
+        envelope = raw["sectionGeometry"]["sections"][1]
+        self.assertEqual(raw["nodes"][2]["x"] - envelope["x"], 24)
+        self.assertEqual(envelope["width"], 208)
+        frozen = copy.deepcopy(raw)
+        compact_candidate(raw)
+        self.assertEqual(raw["nodes"], frozen["nodes"])
+        self.assertEqual(raw["sectionGeometry"], frozen["sectionGeometry"])
+
+    def test_invalid_section_bounds_fail_before_mutation(self):
+        raw = candidate()
+        raw["sectionGeometry"] = {"sections": [
+            {"id": "local", "x": 0, "y": 0, "width": float("inf"), "height": 160}]}
+        before = copy.deepcopy(raw)
+        with self.assertRaises(TraceError):
+            compact_candidate(raw)
+        self.assertEqual(raw, before)
+
     def test_malformed_geometry_fails_before_any_mutation(self):
         for value in (None, True, float("inf"), "20", 10 ** 400):
             raw = candidate()

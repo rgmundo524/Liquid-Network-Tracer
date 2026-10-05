@@ -76,6 +76,24 @@ class NameColorStorageTests(unittest.TestCase):
         row = name_color_catalog(self.case)['rows'][0]
         self.assertEqual((row['addresses'], row['color']), (2, '#123abc'))
 
+    def test_unused_palette_can_be_saved_before_attribution_and_cleared(self):
+        before = load_services(self.case)
+        self.assertEqual(self.save('Unknown Service', '#BDBDBD')['changed'], 1)
+        settings = load_services(self.case)
+        self.assertEqual(settings['rules'], before['rules'])
+        self.assertEqual(settings['name_colors'], {'unknown service': '#bdbdbd'})
+        row = name_color_catalog(self.case)['rows'][0]
+        self.assertEqual((row['key'], row['addresses'], row['enabled_addresses']), ('unknown service', 0, 0))
+        self.ingest([{'address': 'SYNTHETIC-new', 'name': 'Unknown Service', 'stop_tracing': False}])
+        row = name_color_catalog(self.case)['rows'][0]
+        self.assertEqual((row['addresses'], row['color']), (1, '#bdbdbd'))
+        rules = load_services(self.case)['rules']
+        self.assertEqual(self.save('Unknown Service', None)['changed'], 1)
+        self.assertEqual(load_services(self.case)['rules'], rules)
+        before_bytes = (self.case / 'services.json').read_bytes()
+        self.assertEqual(self.save('Never assigned', None)['changed'], 0)
+        self.assertEqual((self.case / 'services.json').read_bytes(), before_bytes)
+
     def test_casefold_unicode_and_different_names_stay_distinct(self):
         self.ingest([{'address': 'SYNTHETIC-one', 'name': 'Straße'},
                      {'address': 'SYNTHETIC-two', 'name': 'STRASSE'},
@@ -115,7 +133,9 @@ class NameColorStorageTests(unittest.TestCase):
             with self.subTest(color=invalid), self.assertRaises(TraceError):
                 self.save(color=invalid)
             self.assertEqual(path.read_bytes(), before)
-        for updates in ([], [{'name': 'unknown', 'color': '#abcdef'}],
+        for updates in ([], [{'name': 'New Service', 'color': '#abcdef'}, {'name': 'Other', 'color': 'invalid'}],
+                        [{'name': 'Unknown', 'color': '#abcdef'}, {'name': 'unknown', 'color': '#123456'}],
+                        [{'name': 'New Service', 'color': '#abcdef'}, {'name': 'ß' * 181, 'color': '#123456'}],
                         [{'name': 'BTSE', 'color': '#123456'}, {'name': 'btse', 'color': '#654321'}],
                         [{'name': 'BTSE', 'color': '#abcdef', 'stop_tracing': False}]):
             with self.subTest(updates=updates), self.assertRaises(TraceError):

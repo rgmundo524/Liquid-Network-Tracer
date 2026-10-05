@@ -194,8 +194,10 @@ class AttachmentCandidateTests(unittest.TestCase):
         self.assertEqual(result["layout"]["input_order"]["policy"], "geometry")
         self.assertEqual(result["nodes"], winning_geometry[0]["nodes"])
         self.assertEqual(result["edges"], winning_geometry[0]["edges"])
-        self.assertEqual(result["layout"]["branch_organization"]["context_compaction_rejected"],
-                         "attachment_routing_estimate")
+        # The same unsafe move may also violate transaction proximity; either
+        # gate may supply the diagnostic while the chosen geometry is retained.
+        self.assertIn(result["layout"]["branch_organization"]["context_compaction_rejected"],
+                      ("attachment_routing_estimate", "transaction_neighborhood_quality"))
         self.assertEqual(result["layout"]["metrics"]["attachments"]["endpoint_order_inversions"], 0)
         self.assertEqual(layout_metrics(result)["crossings"], 0)
         self.assertEqual(graph, original)

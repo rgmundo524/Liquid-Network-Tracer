@@ -23,8 +23,10 @@ transaction to the saved graph. Confidential amounts remain unknown.
 
 ## Import a CSV
 
-Choose **Import change outputs**, upload a UTF-8 file or paste its contents, then
-preview and apply the reviewed changes. The required columns are `Txid` and
+Choose **Import CSV files** and select a UTF-8 change-output CSV, optionally
+together with attribution and name-color CSVs. Preview the combined batch and
+apply the reviewed changes once. JSON and pasted contents remain available
+through the advanced change-output importer. The required columns are `Txid` and
 `ChangeVout`; `Notes` is optional. Use the
 [CSV template](../examples/change-outputs-template.csv), replacing its example hash.
 

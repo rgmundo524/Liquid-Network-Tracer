@@ -73,35 +73,84 @@ function constrainInputOrder(graph, orders) {
 
 function validateInputOrder(graph, orders) {
   const nodes = new Map(graph.children.map(node => [node.id, node]));
+  let preserved = true;
   for (const [id, {west, east}] of orders) {
     const node = nodes.get(id);
-    if (!node || !sameOrder(orderedPorts(node, west, 'WEST'), west)
-        || !sameOrder(orderedPorts(node, east, 'EAST'), east)) {
-      throw new Error('ELK did not preserve input port order');
-    }
+    if (!node) throw new Error('Missing ordered layout node');
+    // Inspect every node and both sides even after an order mismatch. Missing
+    // or malformed ports are fatal; a rejected optional ordering is not.
+    const inputs = orderedPorts(node, west, 'WEST');
+    const outputs = orderedPorts(node, east, 'EAST');
+    if (!sameOrder(inputs, west) || !sameOrder(outputs, east)) preserved = false;
   }
+  return preserved;
 }
 
-function layoutCandidate(result, seed, branchProfile, inputOrderPolicy, branchBoundary) {
+function layoutCandidate(result, seed, branchProfile, inputOrderPolicy, branchBoundary, spacers = new Set()) {
+  if (spacers.size) {
+    const returnedSpacers = result.children.filter(node => spacers.has(node.id));
+    if (returnedSpacers.length !== spacers.size || new Set(returnedSpacers.map(node => node.id)).size !== spacers.size) {
+      throw new Error('Invalid output alignment spacer result');
+    }
+  }
   // Snapshot data-only geometry before a second layout can mutate its request.
   // Sections contain nested points, so copying only their array is insufficient.
   return {
     seed, branchProfile, inputOrderPolicy, branchBoundary,
-    nodes: result.children.map(({id, x, y, width, height, ports}) =>
+    nodes: (spacers.size ? result.children.filter(node => !spacers.has(node.id)) : result.children).map(({id, x, y, width, height, ports}) =>
       ({id, x, y, width, height, ports: (ports || []).map(({id, x, y}) => ({id, x, y}))})),
     edges: result.edges.map(({id, sections, labels}) => ({id, sections: structuredClone(sections),
       labels: (labels || []).map(({id, x, y, width, height}) => ({id, x, y, width, height}))})),
   };
 }
 
-// Only these fixed codes and adapter-owned values leave a failed worker.
-// ELK errors can contain graph IDs, labels, paths or whole parser excerpts.
+// Keep the safe failure record separate from the bounded private trace. The
+// supervisor stores the latter locally; it must never enter normal summaries.
 const diagnostic = {version: 1, stage: 'read_request'};
+let engineVersion = null;
+let engineBuild = 'non_minified';
+// This controls captured frames, not V8's actual call-stack capacity.
+Error.stackTraceLimit = 64;
+
+function failureTrace(error, code) {
+  let truncated = false;
+  const property = (value, key) => {
+    try { return value?.[key]; } catch { truncated = true; return undefined; }
+  };
+  const boundedText = (value, limit) => {
+    if (typeof value !== 'string') return '';
+    if (value.length > limit) truncated = true;
+    return value.slice(0, limit);
+  };
+  const errors = [];
+  const seen = new Set();
+  let current = error;
+  while (current !== null && current !== undefined && errors.length < 4 && !seen.has(current)) {
+    seen.add(current);
+    const rawStack = boundedText(property(current, 'stack'), 8192);
+    const lines = rawStack.split('\n');
+    if (lines.length > 65) truncated = true;
+    errors.push({
+      name: boundedText(property(current, 'name'), 128),
+      message: boundedText(typeof current === 'string' ? current : property(current, 'message'), 1024),
+      stack: lines.slice(0, 65).join('\n'),
+    });
+    current = property(current, 'cause');
+  }
+  if (current !== null && current !== undefined) truncated = true;
+  return {...diagnostic, code, engine_version: engineVersion, engine_build: engineBuild,
+    runtime: {node: process.versions.node, v8: process.versions.v8,
+      platform: process.platform, arch: process.arch}, errors, truncated};
+}
+
 function failureCode(error) {
   if (diagnostic.stage === 'load_engine') return 'elk_worker_setup';
   if (['read_request', 'validate_request'].includes(diagnostic.stage)) return 'elk_invalid_request';
-  const message = typeof error?.message === 'string' ? error.message : '';
-  const name = typeof error?.name === 'string' ? error.name : '';
+  const readText = key => {
+    try { return typeof error?.[key] === 'string' ? error[key] : ''; } catch { return ''; }
+  };
+  const message = readText('message');
+  const name = readText('name');
   const signature = `${name}\n${message}`;
   if (['Invalid ordered layout ports', 'Missing ordered layout node', 'ELK did not preserve input port order'].includes(message)) return 'elk_input_order';
   // Exceptions while inspecting or encoding returned geometry must remain
@@ -143,6 +192,37 @@ try {
       || request.seeds.some(seed => !Number.isInteger(seed) || seed <= 0 || seed > 2147483647)) {
     throw new Error('Invalid layout request');
   }
+  const spacerIds = request.graph.outputAlignmentSpacers ?? [];
+  const alignmentPositions = request.graph.outputAlignmentPositions;
+  delete request.graph.outputAlignmentSpacers;
+  delete request.graph.outputAlignmentPositions;
+  if (!Array.isArray(spacerIds)) throw new Error('Invalid output alignment spacers');
+  const spacers = new Set(spacerIds);
+  const requestNodes = new Map(spacers.size ? request.graph.children.map(node => [node.id, node]) : []);
+  if (spacers.size !== spacerIds.length || spacerIds.some(id => {
+        const node = requestNodes.get(id);
+        return typeof id !== 'string' || !node || node.width !== 1 || node.height !== 1 || node.ports?.length !== 0;
+      })
+      || request.graph.edges.some(edge => [...edge.sources, ...edge.targets].some(id => spacers.has(id)))) {
+    throw new Error('Invalid output alignment spacers');
+  }
+  requestNodes.clear();
+  if (spacers.size && alignmentPositions === undefined
+      || alignmentPositions !== undefined && (!alignmentPositions || typeof alignmentPositions !== 'object'
+      || Array.isArray(alignmentPositions) || Object.keys(alignmentPositions).length !== request.graph.children.length
+      || request.graph.children.some(node => !Number.isFinite(alignmentPositions[node.id])))) {
+    throw new Error('Invalid output alignment positions');
+  }
+  function seedOutputColumns(graph) {
+    if (alignmentPositions) {
+      // The fixed-port rerun must use the same column seeds. Native caption
+      // margins in a previous result are not a new layering instruction.
+      for (const node of graph.children) node.x = alignmentPositions[node.id];
+    }
+  }
+  const sectionLayout = request.graph.sectionLayout ?? false;
+  if (typeof sectionLayout !== 'boolean') throw new Error('Invalid Trace section layout');
+  delete request.graph.sectionLayout;
   const requestedProfile = request.graph.branchProfile;
   if (requestedProfile !== undefined && !['balanced', 'flow_weighted'].includes(requestedProfile)) {
     throw new Error('Invalid branch placement profile');
@@ -150,8 +230,10 @@ try {
   delete request.graph.branchProfile;
   const boundaryOrdering = request.graph.boundaryOrdering === undefined ? false : request.graph.boundaryOrdering;
   const branchNodeOrder = request.graph.branchNodeOrder;
+  const centerNodeOrder = request.graph.centerNodeOrder;
   delete request.graph.boundaryOrdering;
   delete request.graph.branchNodeOrder;
+  delete request.graph.centerNodeOrder;
   if (typeof boundaryOrdering !== 'boolean') throw new Error('Invalid branch boundary ordering');
   if (branchNodeOrder !== undefined) {
     const childIds = new Set(request.graph.children.map(node => node.id));
@@ -162,14 +244,29 @@ try {
     }
   }
   if (boundaryOrdering && !branchNodeOrder) throw new Error('Missing branch boundary node order');
+  if (centerNodeOrder !== undefined) {
+    const childIds = new Set(request.graph.children.map(node => node.id));
+    if (!Array.isArray(centerNodeOrder) || centerNodeOrder.length !== childIds.size
+        || new Set(centerNodeOrder).size !== childIds.size
+        || centerNodeOrder.some(id => typeof id !== 'string' || !childIds.has(id))) {
+      throw new Error('Invalid named group node order');
+    }
+  }
   const orders = inputPortOrders(request.graph);
-  const organizeBranches = [1, 2].includes(request.graph.branchOrganization);
+  const organizeBranches = [1, 2, 3, 4, 5, 6].includes(request.graph.branchOrganization);
   delete request.graph.branchOrganization;
   // Load and construct inside the diagnostic boundary so setup failures do
   // not expose module paths or get retried as stochastic seed failures.
   diagnostic.stage = 'load_engine';
-  const {default: ELK} = await import('elkjs/lib/elk.bundled.js');
-  const elk = new ELK();
+  const {default: enginePackage} = await import('elkjs/package.json', {with: {type: 'json'}});
+  engineVersion = typeof enginePackage.version === 'string' ? enginePackage.version.slice(0, 128) : null;
+  const {default: ELK} = await import('elkjs/lib/elk-api.js');
+  const {default: stackSafeEngine} = await import('./elk-stack-safe.cjs');
+  const {Worker} = stackSafeEngine.loadWorker();
+  engineBuild = stackSafeEngine.ENGINE_BUILD;
+  // Same pinned engine and algorithms, with iterative network-simplex walks
+  // and readable function names on failure. The loader verifies the source.
+  const elk = new ELK({workerFactory: url => new Worker(url)});
   if (typeof elk.layout !== 'function') throw new Error('Invalid layout engine');
   diagnostic.stage = 'validate_request';
   const candidates = [];
@@ -178,9 +275,9 @@ try {
     // second complete copy throughout ELK's calculation.
     let graph = request.seeds.length === 1 ? request.graph : structuredClone(request.graph);
     if (request.seeds.length === 1) request.graph = null;
-    if (boundaryOrdering) {
+    if (boundaryOrdering || centerNodeOrder) {
       const children = new Map(graph.children.map(node => [node.id, node]));
-      graph.children = branchNodeOrder.map(id => children.get(id));
+      graph.children = (centerNodeOrder || branchNodeOrder).map(id => children.get(id));
       const ranks = new Map();
       graph.children.forEach((child, index) => {
         ranks.set(child.id, index);
@@ -192,11 +289,14 @@ try {
       // edges. Only vertical node order is constrained for this alternative.
       graph.layoutOptions['elk.layered.considerModelOrder.strategy'] = 'NODES_AND_EDGES';
       graph.layoutOptions['elk.layered.crossingMinimization.forceNodeModelOrder'] = 'true';
+      // Keep disconnected members in the same central band instead of packing
+      // their components into unrelated rectangles after the layout.
+      if (centerNodeOrder) graph.layoutOptions['elk.separateConnectedComponents'] = 'false';
     }
     graph.layoutOptions['elk.randomSeed'] = String(seed);
     // Explicit metadata preserves the placement profile when seeds are sent
     // separately. Keep the historical defaults for direct batched callers.
-    const branchProfile = requestedProfile ?? (organizeBranches && (request.seeds.length === 1 || seedIndex > 0)
+    const branchProfile = sectionLayout ? 'balanced' : centerNodeOrder ? 'flow_weighted' : requestedProfile ?? (organizeBranches && (request.seeds.length === 1 || seedIndex > 0)
       ? 'flow_weighted' : 'balanced');
     Object.assign(diagnostic, {seed, branch_profile: branchProfile,
       input_order_policy: 'geometry', stage: 'geometry_layout'});
@@ -214,11 +314,14 @@ try {
         graph.layoutOptions['elk.spacing.edgeNode'] = String(Math.max(edgeSpacing, nodeSpacing / 2));
       }
     }
+    seedOutputColumns(graph);
     let result = await elk.layout(graph);
     graph = null;
     diagnostic.stage = 'order_constraints';
-    const firstCandidate = layoutCandidate(result, seed, branchProfile, 'geometry', boundaryOrdering);
-    const constraints = constrainInputOrder(result, orders);
+    const firstCandidate = layoutCandidate(result, seed, branchProfile, 'geometry', boundaryOrdering, spacers);
+    // Section geometry supplies local ordering to the global Trace assembler.
+    // It has no need for a second expensive, fixed-port layout calculation.
+    const constraints = sectionLayout ? null : constrainInputOrder(result, orders);
     if (constraints) {
       // Compare ELK's crossing-aware port order with the historical traced-first
       // order. This retains the already calculated result, without another run.
@@ -226,13 +329,29 @@ try {
       // Reuse the first result as the second request rather than cloning a
       // large graph. Fixed indices override the first pass's port positions.
       Object.assign(diagnostic, {input_order_policy: 'traced_first', stage: 'traced_first_layout'});
+      seedOutputColumns(result);
+      // ELK reuses supplied sections and does not remove old bendPoints when
+      // a formerly bent connection becomes straight. The first candidate is
+      // already snapshotted; discard only its computed routes in this rerun
+      // request so every connection receives fresh geometry.
+      for (const edge of result.edges) delete edge.sections;
       result = await elk.layout(result);
       diagnostic.stage = 'validate_input_order';
-      validateInputOrder(result, constraints);
-      candidates.push(layoutCandidate(result, seed, branchProfile, 'traced_first', boundaryOrdering));
+      const ordered = validateInputOrder(result, constraints);
+      const secondCandidate = layoutCandidate(result, seed, branchProfile, 'traced_first', boundaryOrdering, spacers);
+      if (!ordered) {
+        // The first snapshot retains ELK's crossing-aware geometry and will
+        // still undergo the Python adapter's complete layout validation.
+        // Do not let an optional port-order preference discard that layout.
+        firstCandidate.inputOrderFallback = 'traced_first_order_not_preserved';
+        // Return the rejected alternative for full adapter validation too.
+        // An ordering mismatch must not hide unrelated malformed geometry.
+        secondCandidate.inputOrderRejected = 'traced_first_order_not_preserved';
+      }
+      candidates.push(secondCandidate);
     } else {
       // Identical policies need only one candidate; retain the preferred order.
-      firstCandidate.inputOrderPolicy = 'traced_first';
+      firstCandidate.inputOrderPolicy = sectionLayout ? 'geometry' : 'traced_first';
       candidates.push(firstCandidate);
     }
   }
@@ -251,7 +370,24 @@ try {
     // A missing measurement leaves the Python scheduler in serial mode.
   }
 } catch (error) {
-  // Do not echo user graph input, parser excerpts, paths, or environment values.
-  process.stderr.write(`LIQUID_ELK_FAILURE ${JSON.stringify({...diagnostic, code: failureCode(error)})}\n`);
+  const code = failureCode(error);
+  process.stderr.write(`LIQUID_ELK_FAILURE ${JSON.stringify({...diagnostic, code})}\n`);
+  try {
+    const trace = failureTrace(error, code);
+    // Python also treats these Unicode characters as line separators. Escape
+    // them so the structured record always occupies one stderr line.
+    const encodeTrace = () => JSON.stringify(trace).replace(/[\u0085\u2028\u2029]/g,
+      character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
+    let encoded = encodeTrace();
+    // Bound encoded bytes too, including escaped control characters/Unicode.
+    while (Buffer.byteLength(encoded, 'utf8') > 64 * 1024) {
+      trace.truncated = true;
+      for (const entry of trace.errors) entry.stack = entry.stack.slice(0, Math.floor(entry.stack.length / 2));
+      encoded = encodeTrace();
+    }
+    process.stderr.write(`LIQUID_ELK_TRACE ${encoded}\n`);
+  } catch {
+    // A diagnostic failure must never hide the original safe failure record.
+  }
   process.exitCode = 1;
 }

@@ -15,7 +15,8 @@ from .graph_markers import node_border
 from .connector_styles import stroke_width
 from .common import TraceError, save_json
 from .layout_search_reporting import layout_search_warning
-from .export import COLORS, edge_color, legend_lines
+from .export import COLORS, edge_color, edge_marker_id, legend_lines
+from .legend import LEGEND_CSS, legend_html
 from .edge_labels import (FONT_SIZE, LINE_HEIGHT, PADDING_Y, caption_box, caption_text,
                           validate_label_layout)
 
@@ -43,17 +44,40 @@ def _explorer_url(graph, node):
 
 def layout_title(graph):
     layout = graph.get("layout", {})
+    if layout.get("algorithm") == "board_incremental_v1":
+        return "Miro board update layout"
     if layout.get("algorithm") == "dependency_layers_v1":
         return "Dependency layout fallback" if layout.get("fallback_reason") else "Dependency layout"
+    if graph.get("graph_options", {}).get("layout_style") == "trace":
+        return "Trace layout"
     return "ELK layout"
 
 
-def layout_notice(graph):
+def layout_notice(graph, *, include_named_group=True):
     layout = graph.get("layout", {})
+    if layout.get("algorithm") == "board_incremental_v1":
+        return ("Existing objects retain their indexed Miro positions. ELK arranges new objects in a separate area. "
+                + str(layout.get("existing_routing_notice", "")))
     if layout.get("algorithm") == "dependency_layers_v1":
         return (str(layout.get("fallback_notice") or "Dependency layout; ELK optimization was not applied.")
                 + " Miro routes may differ. Crossing counts are estimates.")
     notice = LAYOUT_NOTICE
+    if graph.get("graph_options", {}).get("layout_style") == "trace":
+        from .trace_sections import SECTION_LAYOUT_VERSION
+        search = layout.get("search", {})
+        sections = search.get("section_count") if isinstance(search, dict) else None
+        version = search.get("section_layout_version") if isinstance(search, dict) else None
+        if (type(version) is int and 1 <= version <= SECTION_LAYOUT_VERSION
+                and type(sections) is int and sections > 0):
+            notice = (f"Trace layout arranged in {sections:,} sections around the preferred backbone; "
+                      "connections between sections are routed after placement. "
+                      "Miro routes may differ. Crossing counts are estimates.")
+        else:
+            notice += " Trace layout favors a clear main path, separate branches, and nearby endpoints."
+    input_order = layout.get("input_order", {})
+    if (isinstance(input_order, dict) and input_order.get("policy") == "geometry"
+            and input_order.get("fallback_reason") == "traced_first_order_not_preserved"):
+        notice += " Preferred connector ordering was unavailable; valid ELK geometry was retained."
     search_warning = (layout_search_warning(layout.get("metrics"))
                       or layout_search_warning(layout.get("search")))
     if search_warning:
@@ -61,6 +85,17 @@ def layout_notice(graph):
     changes = layout.get("change_outputs")
     if changes:
         notice += f" Change rows: {len(changes.get('applied', []))} aligned; {len(changes.get('skipped', []))} skipped."
+    group = layout.get("named_group")
+    name = graph.get("graph_options", {}).get("center_name", "")
+    if include_named_group and isinstance(group, dict) and name:
+        count = group.get("matched_addresses", 0)
+        if count:
+            notice += (f" Center named group '{name}': {count} address objects and "
+                       f"{group.get('connecting_transactions', 0)} connecting transactions prioritized for alignment.")
+        else:
+            notice += f" Center named group '{name}': no eligible address objects in this graph."
+        if group.get("excluded_hubs"):
+            notice += f" {group['excluded_hubs']} selected branch hubs retain their separate placement."
     return notice
 
 
@@ -136,6 +171,8 @@ def _attachment(edge, key, node, other, source):
 
 
 def _geometry(graph):
+    from .context_connectors import display_graph
+    graph = display_graph(graph)
     if not isinstance(graph, dict) or not isinstance(graph.get("nodes"), list) or not isinstance(graph.get("edges"), list):
         raise TraceError("ELK preview requires graph nodes and edges")
     if not graph["nodes"]:
@@ -263,7 +300,7 @@ def drawing_bounds(nodes, edges):
 
 def _svg(graph, nodes, edges, *, banner=True):
     notice = ("Dependency layout fallback · Full graph retained; crossing optimization skipped."
-              if graph.get("layout", {}).get("fallback_reason") else layout_notice(graph))
+              if graph.get("layout", {}).get("fallback_reason") else layout_notice(graph, include_named_group=False))
     left, top, right, bottom = drawing_bounds(nodes, edges)
     margin = 180
     x, y = left - margin, top - margin
@@ -276,19 +313,20 @@ def _svg(graph, nodes, edges, *, banner=True):
              '.explorer-link:focus-visible > g '
              '{ filter:drop-shadow(0 0 5px #0f766e); }</style>',
              '<defs>']
-    for key, color in (("traced", COLORS["traced_edge"]), ("context", COLORS["context_edge"])):
-        lines.append(f'<marker id="arrow-{key}" markerWidth="9" markerHeight="7" refX="8" refY="3.5" '
+    markers = {edge_marker_id(edge): edge_color(edge) for edge in edges}
+    for key, color in sorted(markers.items()):
+        lines.append(f'<marker id="{key}" markerWidth="9" markerHeight="7" refX="8" refY="3.5" '
                      f'orient="auto" markerUnits="userSpaceOnUse"><path d="M 0 0 L 9 3.5 L 0 7 Z" fill="{color}"/></marker>')
     lines.extend(['</defs>', f'<rect x="{_fmt(x)}" y="{_fmt(y)}" width="{_fmt(width)}" height="{_fmt(height)}" fill="white"/>',
                   *([f'<text x="{_fmt(left)}" y="{_fmt(top - 100)}" font-family="sans-serif" font-size="15" fill="#475569">'
                      + _escape(notice) + '</text>'] if banner else []), '<g id="edges" fill="none">'])
     for index, edge in enumerate(edges):
-        marker = "context" if edge.get("role", "").startswith("context") else "traced"
-        caption = _text(caption_text(edge))
+        marker = edge_marker_id(edge)
+        caption = _text(caption_text(edge, display=False))
         lines.append(f'<path id="edge-{index}" data-edge-id="{_escape(edge["id"])}" '
                      f'data-source="{_escape(edge["source"])}" data-target="{_escape(edge["target"])}" '
                      f'data-appearance="{edge["connector_shape"]}" d="{_path(edge["points"], edge["connector_shape"] == "curved")}" '
-                     f'stroke="{edge_color(edge.get("role", ""))}" stroke-width="{stroke_width(edge.get("role", ""))}" marker-end="url(#arrow-{marker})">'
+                     f'stroke="{edge_color(edge)}" stroke-width="{stroke_width(edge.get("role", ""))}" marker-end="url(#{marker})">'
                      f'<title>{_escape(caption)}</title></path>')
     lines.append('</g><g id="nodes" font-family="sans-serif" text-anchor="middle" fill="#172033">')
     for index, node in enumerate(nodes):
@@ -358,6 +396,8 @@ def _svg(graph, nodes, edges, *, banner=True):
 
 def render_svg(graph):
     """Render validated geometry directly, without Node, Chromium, or layout work."""
+    from .context_connectors import display_graph
+    graph = display_graph(graph)
     return _svg(graph, *_geometry(graph))
 
 
@@ -406,6 +446,7 @@ details {{ margin-top:8px; }} summary {{ cursor:pointer; }} li {{ margin:4px 0; 
 .chart {{ overflow:auto; background:white; }} .chart svg {{ display:block; max-width:none; }}
 body:has(#chart:target) header {{ display:none; }}
 #chart:target svg {{ width:100%; height:auto; }}
+{LEGEND_CSS}
 </style></head><body><header><div class="summary"><div><h1>Liquid trace · {_escape(layout_title(graph))}</h1>
 <p>Run {_escape(graph.get('run_id', ''))} · {len(graph['nodes'])} nodes · {len(graph['edges'])} links · Fees {fees}{simulated}</p>
 <p>{_escape(layout_notice(graph))}</p><p>Scroll to explore; use your browser zoom to adjust the scale. Select Explorer on a transaction or address to open Blockstream in a new tab.</p>
@@ -413,24 +454,30 @@ body:has(#chart:target) header {{ display:none; }}
 <a href="layout-report.json" download>Layout report</a>{detail_link}</p></div>{_metrics_table(metrics, layout_title(graph))}</div>
 {register_html(graph)}
 {change_details}
-<details><summary>Legend and evidence notes</summary><p>{_escape(graph.get('notice', ''))}</p>
+{legend_html(graph)}
+<details><summary>Detailed evidence notes</summary><p>{_escape(graph.get('notice', ''))}</p>
 <p>Before uses the saved graph's baseline layout, not live Miro positions. Collision counts exclude label boxes and Miro's automatic curves.
 Counts prefixed with ≥ are lower bounds because the comparison limit was reached.</p><ul>{legend}</ul></details></header>
 <main id="chart" class="chart">{inline_svg}</main>
 </body></html>\n'''
 
 
-def export_layout(graph, directory):
+def export_layout(graph, directory, *, section_overview=True):
     """Write a new preview, publishing graph.html only after every file succeeds."""
-    nodes, edges = _geometry(graph)
-    svg = _svg(graph, nodes, edges)
+    from .context_connectors import display_graph
+    displayed = display_graph(graph)
+    nodes, edges = _geometry(displayed)
+    svg = _svg(displayed, nodes, edges)
     layout = graph.get("layout", {})
     if not isinstance(layout, dict) or not isinstance(layout.get("metrics", {}), dict):
         raise TraceError("ELK preview contains invalid layout metadata")
     metrics = layout.get("metrics", {})
-    from .layout_details import render_details
-    details_document, details_index = render_details(graph, nodes, edges, svg)
-    document = _preview_html(graph, svg, metrics, detail_pages=True)
+    from .layout_overview import enabled, export_overview
+    overview = section_overview and enabled(nodes, edges)
+    if not overview:
+        from .layout_details import render_details
+        details_document, details_index = render_details(displayed, nodes, edges, svg)
+        document = _preview_html(displayed, svg, metrics, detail_pages=True)
     directory = Path(os.path.abspath(directory))
     # A preview must never silently replace an archived run or follow a link
     # into another investigation. The caller normally supplies a unique path.
@@ -447,10 +494,13 @@ def export_layout(graph, directory):
              "details": directory / "details.html", "details_index": directory / "details.json"}
     temporary = paths["html"].with_name("graph.html.tmp")
     try:
+        if overview:
+            document, details_document, details_index = export_overview(displayed, nodes, edges, directory)
         save_json(paths["graph"], graph)
         save_json(paths["report"], {"run_id": graph.get("run_id"), "layout": layout,
                                   "metrics": metrics, "notice": layout_notice(graph),
-                                  "node_count": len(nodes), "edge_count": len(edges)})
+                                  "node_count": len(nodes), "edge_count": len(graph["edges"]),
+                                  "display_edge_count": len(edges)})
         paths["svg"].write_bytes(svg)
         save_json(paths["details_index"], details_index)
         paths["details"].write_text(details_document, encoding="utf-8")

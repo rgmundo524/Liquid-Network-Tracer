@@ -67,42 +67,49 @@ def _axis_range(first, last, origin, extent, step):
     return range(low, high + 1)
 
 
-def _box_cells(box, origin):
-    columns = _axis_range(box[0], box[2], origin[0], PAGE_WIDTH, PAGE_WIDTH - OVERLAP)
-    rows = _axis_range(box[1], box[3], origin[1], PAGE_HEIGHT, PAGE_HEIGHT - OVERLAP)
+def _box_cells(box, origin, geometry=None):
+    width, height, overlap = geometry or (PAGE_WIDTH, PAGE_HEIGHT, OVERLAP)
+    columns = _axis_range(box[0], box[2], origin[0], width, width - overlap)
+    rows = _axis_range(box[1], box[3], origin[1], height, height - overlap)
     if len(columns) * len(rows) > MAX_DETAIL_PAGES:
         raise _AtlasTooLarge
     return ((column, row) for row in rows for column in columns)
 
 
-def _viewport(cell, origin):
-    x = origin[0] + cell[0] * (PAGE_WIDTH - OVERLAP)
-    y = origin[1] + cell[1] * (PAGE_HEIGHT - OVERLAP)
-    return x, y, x + PAGE_WIDTH, y + PAGE_HEIGHT
+def _viewport(cell, origin, geometry=None):
+    width, height, overlap = geometry or (PAGE_WIDTH, PAGE_HEIGHT, OVERLAP)
+    x = origin[0] + cell[0] * (width - overlap)
+    y = origin[1] + cell[1] * (height - overlap)
+    return x, y, x + width, y + height
 
 
-def _segment_cells(start, end, origin):
+def _segment_cells(start, end, origin, geometry=None):
     """Enumerate the occupied strips, not a diagonal's entire bounding box."""
     pad = 14.0  # Arrowheads and the rounded-elbow control hull.
+    width, height, overlap = geometry or (PAGE_WIDTH, PAGE_HEIGHT, OVERLAP)
     for column in _axis_range(min(start[0], end[0]) - pad, max(start[0], end[0]) + pad,
-                              origin[0], PAGE_WIDTH, PAGE_WIDTH - OVERLAP):
-        x = origin[0] + column * (PAGE_WIDTH - OVERLAP)
+                              origin[0], width, width - overlap):
+        x = origin[0] + column * (width - overlap)
         low_y, high_y = sorted((start[1], end[1]))
         delta = end[0] - start[0]
         if delta:
-            fractions = sorted(((x - pad - start[0]) / delta, (x + PAGE_WIDTH + pad - start[0]) / delta))
+            fractions = sorted(((x - pad - start[0]) / delta, (x + width + pad - start[0]) / delta))
             first, last = max(0, fractions[0]), min(1, fractions[1])
             if first > last:
                 continue
             low_y, high_y = sorted((start[1] + first * (end[1] - start[1]),
                                    start[1] + last * (end[1] - start[1])))
-        for row in _axis_range(low_y - pad, high_y + pad, origin[1], PAGE_HEIGHT, PAGE_HEIGHT - OVERLAP):
-            box = _viewport((column, row), origin)
+        for row in _axis_range(low_y - pad, high_y + pad, origin[1], height, height - overlap):
+            box = _viewport((column, row), origin, geometry)
             if _segment_hits(start, end, (box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad)):
                 yield column, row
 
 
-def _activity_pages(nodes, edges, bounds, sequence):
+def _activity_pages(nodes, edges, bounds, sequence, *, geometry=None):
+    if geometry is not None and (len(geometry) != 3
+            or any(not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) for value in geometry)
+            or not 0 <= geometry[2] < min(geometry[0], geometry[1])):
+        raise ValueError('Invalid detail page geometry')
     origin = bounds[0] - PADDING, bounds[1] - PADDING
     cells = defaultdict(lambda: {"node_ids": set(), "edge_ids": set(), "caption_ids": set()})
 
@@ -112,15 +119,15 @@ def _activity_pages(nodes, edges, bounds, sequence):
             raise _AtlasTooLarge
 
     for node in nodes:
-        for cell in _box_cells(_node_box(node), origin):
+        for cell in _box_cells(_node_box(node), origin, geometry):
             add(cell, "node_ids", node["id"])
     for edge in edges:
         for start, end in zip(edge["points"], edge["points"][1:]):
-            for cell in _segment_cells(start, end, origin):
+            for cell in _segment_cells(start, end, origin, geometry):
                 add(cell, "edge_ids", edge["id"])
         if caption_text(edge):
             left, top, right, bottom = caption_box(edge, edge["points"])
-            for cell in _box_cells((left - 3, top - 3, right + 3, bottom + 3), origin):
+            for cell in _box_cells((left - 3, top - 3, right + 3, bottom + 3), origin, geometry):
                 add(cell, "caption_ids", edge["id"])
                 add(cell, "edge_ids", edge["id"])
     lookup = {node["id"]: node for node in nodes}
@@ -129,7 +136,7 @@ def _activity_pages(nodes, edges, bounds, sequence):
     labels = {cell: f"A{sequence}-{index}" for index, cell in enumerate(ordered, 1)}
     pages = []
     for cell in ordered:
-        box = _viewport(cell, origin)
+        box = _viewport(cell, origin, geometry)
         entry = {key: sorted(value) for key, value in cells[cell].items()}
         boundary_edges = []
         for identity in entry["edge_ids"]:
@@ -168,7 +175,9 @@ def _svg_view(identity, bounds, *, markup="", overview=False):
 
 def render_details(graph, nodes, edges, overview_svg):
     """Return a complete offline HTML atlas and a machine-readable page index."""
+    from .context_connectors import evidence_graph, summaries
     from .layout_preview import _escape, _fmt, _svg, drawing_bounds, layout_notice
+    evidence_edges = {edge["id"]: edge for edge in evidence_graph(graph)["edges"]}
     descriptors = activity_frames(graph)["activities"]
     node_lookup = {node["id"]: node for node in nodes}
     edge_lookup = {edge["id"]: edge for edge in edges}
@@ -255,7 +264,10 @@ def render_details(graph, nodes, edges, overview_svg):
     rows = []
     for edge in edges:
         page_links = " ".join(f'<a href="#{page}">{page}</a>' for page in edge_pages.get(edge["id"], []))
-        rows.append('<tr><td>' + _escape(edge["id"]) + '</td><td>' + _escape(caption_text(edge))
+        identity = _escape(edge["id"])
+        if edge.get("details", {}).get("context_summary", {}).get("kind") == "parallel":
+            identity = '<a href="#' + identity + '">' + identity + '</a>'
+        rows.append('<tr><td>' + identity + '</td><td>' + _escape(caption_text(edge))
                     + '</td><td>' + _escape(edge["source"]) + '<br>→ ' + _escape(edge["target"])
                     + '</td><td>' + page_links + '</td></tr>')
     members_html = []
@@ -263,10 +275,37 @@ def render_details(graph, nodes, edges, overview_svg):
         if node["kind"] != "context_group":
             continue
         records = node.get("details", {}).get("members", [])
+        inputs = [evidence_edges[key] for key in node.get("details", {}).get("input_edge_ids", [])
+                  if key in evidence_edges]
+        input_rows = ''.join('<tr><td>' + _escape(edge["id"]) + '</td><td>'
+                             + _escape(edge.get("original_source", edge["source"])) + '</td><td>'
+                             + _escape(edge.get("outpoint", "")) + '</td><td>'
+                             + _escape(edge.get("quantity", "")) + '</td></tr>' for edge in inputs)
         members_html.append('<details><summary>' + _escape(node.get("label", "Context group")) + '</summary><ul>'
                             + ''.join('<li><strong>' + _escape(member.get("id", "")) + '</strong><pre>'
                                       + _escape(member.get("label", "")) + '</pre></li>' for member in records)
-                            + '</ul><p>Full member records are preserved in graph.json.</p></details>')
+                            + '</ul><table><thead><tr><th>Original input</th><th>Address object</th>'
+                            '<th>Outpoint</th><th>Value / asset</th></tr></thead><tbody>' + input_rows
+                            + '</tbody></table><p>Full member and input records are preserved in '
+                            '<a href="graph.json">graph.json</a> and the transaction CSV.</p></details>')
+    for summary in summaries(graph):
+        proof = summary["details"]["context_summary"]
+        if proof.get("kind") != "parallel":
+            continue
+        inputs = [evidence_edges[key] for key in proof["member_edge_ids"]]
+        input_rows = ''.join('<tr><td>' + _escape(edge["id"]) + '</td><td>'
+                             + _escape(edge.get("label", "")) + '</td><td>'
+                             + _escape(edge.get("outpoint", "")) + '</td><td>'
+                             + _escape(edge.get("quantity", "")) + '</td></tr>' for edge in inputs)
+        members_html.append('<details id="' + _escape(summary["id"]) + '"><summary>'
+                            + _escape(summary["label"]) + '</summary><p>'
+                            + _escape(summary["source"]) + ' → ' + _escape(summary["target"])
+                            + '</p><p>Only context inputs between these two objects are bundled. '
+                            'Traced inputs remain separate; no combined amount is inferred.</p>'
+                            '<table><thead><tr><th>Original input</th><th>Input label</th>'
+                            '<th>Outpoint</th><th>Value / asset</th></tr></thead><tbody>' + input_rows
+                            + '</tbody></table><p>Every original input record remains in '
+                            '<a href="graph.json">graph.json</a> and the transaction CSV.</p></details>')
     page = '''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
 <title>Liquid trace · Overview and detail pages</title><style>
@@ -288,7 +327,9 @@ including connections to other branches. Empty tiles are omitted; tiles containi
     page += '<p>' + _escape(layout_notice(graph)) + '</p><nav>' + links + '</nav></header>'
     page += '<svg xmlns="http://www.w3.org/2000/svg" class="drawing-definitions" aria-hidden="true"><defs>' + definitions + '</defs></svg>'
     page += ''.join(contents)
-    page += '<section class="index" id="connection-index"><h2>Connection index</h2><p>Each original connection remains separate. '
+    page += '<section class="index" id="connection-index"><h2>Connection index</h2><p>'
+    page += ('Context summaries use counted connections. Original input records are listed below. '
+             if graph.get("context_connectors") else 'Each original connection remains separate. ')
     page += 'Page links include its route and caption. Shared boundary connections are repeated across overlapping pages.</p>'
     page += '<table><thead><tr><th>Connection</th><th>Caption</th><th>From → To</th><th>Detail pages</th></tr></thead><tbody>'
     page += ''.join(rows) + '</tbody></table>' + ''.join(members_html) + '</section></body></html>\n'

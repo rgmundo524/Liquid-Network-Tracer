@@ -73,7 +73,7 @@ class LayoutSearchTests(unittest.TestCase):
         with patch("liquid_tracer.elk_layout._worker", side_effect=worker):
             optimize_graph(graph, layout_attempts=1)
             optimize_graph(graph, layout_attempts=4)
-        self.assertEqual(observed, [(1, "balanced"), (1, "balanced"), (7, "flow_weighted"),
+        self.assertEqual(observed, [(1, "flow_weighted"), (1, "flow_weighted"), (7, "balanced"),
                                     (19, "flow_weighted"), (layout_seeds(4)[3], "flow_weighted")])
 
     def test_thousand_object_graph_keeps_all_objects_across_requested_attempts(self):
@@ -160,6 +160,7 @@ class LayoutSearchTests(unittest.TestCase):
         graph = crossing_graph()
         request, _, _ = _request_graph(graph)
         candidates = {seed: synthetic_candidate(request, [seed]) for seed in layout_seeds(2)}
+        candidates[layout_seeds(2)[0]][0]["branchBoundary"] = True
         processes = []
         for seed in layout_seeds(2):
             process = Mock(returncode=0)
@@ -168,15 +169,19 @@ class LayoutSearchTests(unittest.TestCase):
             process.poll.return_value = 0
             processes.append(process)
         events = []
+        # Keep resource coordination on its real clock; replacing the shared
+        # time.monotonic function also changes other modules.
         with patch.dict(os.environ, {"LIQUID_TRACER_ROOT": str(ROOT), "LIQUID_NODE_BIN": "/synthetic/node"}), \
                 patch("pathlib.Path.is_file", return_value=True), \
-                patch("liquid_tracer.elk_layout.time.monotonic", side_effect=[0, 5, 10, 15]), \
+                patch("liquid_tracer.elk_layout.time", monotonic=Mock(side_effect=[0, 5, 10, 15])), \
                 patch("liquid_tracer.elk_layout.subprocess.Popen", side_effect=processes):
             optimize_graph(graph, progress=events.append, layout_attempts=2)
         self.assertTrue(all(event["attempt_total"] == 2 for event in events))
         self.assertTrue(all(event["seed"] == layout_seeds(2)[event["attempt_index"] - 1] for event in events))
-        heartbeat = [event for event in events if "elapsed_seconds" in event]
+        heartbeat = [event for event in events
+                     if event.get("stage") == "calculating" and "elapsed_seconds" in event]
         self.assertEqual([event["attempt_index"] for event in heartbeat], [1, 2])
+        self.assertEqual([event["elapsed_seconds"] for event in heartbeat], [5, 5])
         self.assertEqual(events[-1]["stage"], "ready")
 
 

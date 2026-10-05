@@ -1,24 +1,33 @@
 /** Case-local role and attribution-name colors; no changes to tracing evidence. */
 import {invalidateNameColorImport, nameColorImportAction, nameColorImportFile, nameColorImportInput,
-  nameColorImportPanel, nameColorImportPending, resetNameColorImport} from './name-color-import';
+  nameColorImportPanel, nameColorImportPending, resetNameColorImport, selectNameColorImport} from './name-color-import';
 type Row = {key: string; name: string; variants: string[]; addresses: number; enabled_addresses: number; color: string | null};
 type RoleRow = {role: string; name: string; color: string | null; default_color: string};
 type Catalog = {revision: number; rows: Row[]; roles?: RoleRow[]; role_notice?: string; total: number; offset: number; limit: number; presets: [string, string][]; notice: string};
 type Context = {caseId: string; busy: boolean; render: () => void;
   post: <T>(path: string, body: unknown) => Promise<T>};
-let state = {caseId: '', open: false, query: '', offset: 0, pending: false, data: null as Catalog | null,
-  drafts: new Map<string, string>(), roleDrafts: new Map<string, string>(), message: ''};
+function empty(caseId: string) {
+  return {caseId, open: false, query: '', offset: 0, pending: false, data: null as Catalog | null,
+    drafts: new Map<string, string>(), roleDrafts: new Map<string, string>(), message: ''};
+}
+let state = empty('');
+const cases = new Map<string, typeof state>();
+export function selectNameColors(caseId: string): void {
+  if (!cases.has(caseId)) cases.set(caseId, empty(caseId));
+  state = cases.get(caseId)!;
+  selectNameColorImport(caseId);
+}
+const retained = (owner: typeof state): boolean => cases.get(owner.caseId) === owner;
 const esc = (v: unknown): string => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]!));
 const safeColor = (v: unknown): v is string => typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v);
 
 export function resetNameColors(caseId: string): void {
   resetNameColorImport(caseId);
-  state = {caseId, open: false, query: '', offset: 0, pending: false, data: null,
-    drafts: new Map(), roleDrafts: new Map(), message: ''};
+  cases.set(caseId, empty(caseId)); selectNameColors(caseId);
 }
 
 export function nameColorsPanel(caseId: string, busy: boolean): string {
-  if (state.caseId !== caseId) resetNameColors(caseId);
+  selectNameColors(caseId);
   if (!state.open) return '';
   const disabled = busy || state.pending || nameColorImportPending() ? ' disabled' : '';
   const data = state.data;
@@ -32,23 +41,24 @@ export function nameColorsPanel(caseId: string, busy: boolean): string {
     <button class="btn" data-action="name-colors-role-save" data-color-index="${i}"${disabled}>Save color</button>
     <button class="btn" data-action="name-colors-role-clear" data-color-index="${i}"${disabled}>Reset to default</button></td></tr>`;
   }).join('')}</tbody></table></div>
-  <div class="panel-head"><h3>Imported name colors</h3><a class="btn" href="/api/cases/${esc(encodeURIComponent(caseId))}/input-exports/name-colors" download>Export saved CSV</a></div><p class="address-note">${esc(data?.notice || 'Loading saved names...')}</p>
+  <div class="panel-head"><h3>Name color palette</h3><a class="btn" href="/api/cases/${esc(encodeURIComponent(caseId))}/input-exports/name-colors" download>Export saved CSV</a></div><p class="address-note">${esc(data?.notice || 'Loading saved names...')}</p>
   <p class="address-note">Export includes all saved name color assignments across every page. Unsaved edits and graph-role colors are excluded. Empty exports contain column headers; large exports download as a ZIP of CSV parts.</p>
-  ${nameColorImportPanel(caseId, busy || state.pending)}
+  <div class="form-actions"><button class="btn" data-action="input-import-open"${disabled}>Import CSV files</button></div>
+  <details id="advanced-name-colors"><summary>Advanced imports: paste name colors or import JSON</summary>${nameColorImportPanel(caseId, busy || state.pending)}</details>
   <label class="field"><span>Search names (case-insensitive)</span><input id="name-colors-query" maxlength="256" value="${esc(state.query)}"${disabled}/></label>
   <div class="form-actions"><button class="btn" data-action="name-colors-load"${disabled}>Search / refresh</button></div>
   <div class="table-wrap"><table><thead><tr><th>Name</th><th>Addresses</th><th>Color</th><th>Actions</th></tr></thead><tbody>${(data?.rows || []).map((row, i) => {
     const color = state.drafts.get(row.key) ?? row.color ?? '';
-    return `<tr><td>${esc(row.name)}<small class="muted">${row.variants.length > 1 ? '<br>' + esc(row.variants.join(', ')) : ''}</small></td><td>${row.addresses}<small class="muted"><br>${row.enabled_addresses} active</small></td><td><input type="color" id="name-colors-picker-${i}" aria-label="Choose color for ${esc(row.name)}" value="${safeColor(color) ? color : '#d1d5db'}"${disabled}/>
+    return `<tr><td>${esc(row.name)}<small class="muted">${row.variants.length > 1 ? '<br>' + esc(row.variants.join(', ')) : ''}</small></td><td>${row.addresses}<small class="muted"><br>${row.addresses === 0 ? 'Unused in this investigation' : row.enabled_addresses + ' active'}</small></td><td><input type="color" id="name-colors-picker-${i}" aria-label="Choose color for ${esc(row.name)}" value="${safeColor(color) ? color : '#d1d5db'}"${disabled}/>
     <input id="name-colors-hex-${i}" aria-label="Hex color for ${esc(row.name)}" placeholder="Default" maxlength="7" value="${esc(color)}"${disabled}/><br><small>${row.color ? 'Saved: ' + esc(row.color) : 'No name color assigned'}</small></td><td>
     <button class="btn" data-action="name-colors-save" data-color-index="${i}"${disabled}>Save color</button>
     <button class="btn" data-action="name-colors-clear" data-color-index="${i}"${disabled}>Clear assignment</button></td></tr>`;
   }).join('')}</tbody></table></div>
-  ${data && !data.total ? '<p>No named assessments yet. Graph-role colors can still be assigned above.</p>' : ''}
+  ${data && !data.total ? '<p>No named assessments or saved name colors yet. Import a color palette now; matching address attributions will use it when added.</p>' : ''}
   <div class="form-actions"><span>${data?.total || 0} distinct names. Page ${Math.floor(state.offset / 100) + 1}.</span>
   <button class="btn" data-action="name-colors-prev"${disabled || state.offset === 0 ? ' disabled' : ''}>Previous</button>
   <button class="btn" data-action="name-colors-next"${disabled || !data || state.offset + 100 >= data.total ? ' disabled' : ''}>Next</button></div>
-  <p class="address-note">Name assignments also apply to future imports. Selected seed addresses retain their configured seed color. Blank restores the applicable default. Borders remain unchanged.</p>
+  <p class="address-note">Unused colors remain saved for future matching address attributions. Reuse the same CSV in other investigations to keep colors consistent. Selected seed addresses retain their configured seed color. Blank restores the applicable default. Borders remain unchanged.</p>
   <p role="status">${esc(state.message)}</p></div></section>`;
 }
 
@@ -74,18 +84,19 @@ export async function nameColorsFile(element: HTMLInputElement, render: () => vo
 }
 
 export async function nameColorsAction(action: string, context: Context, element?: HTMLElement): Promise<boolean> {
+  if (!action.startsWith('name-color-import-') && !action.startsWith('name-colors-')) return false;
+  selectNameColors(context.caseId);
   if (action.startsWith('name-color-import-')) {
     const owner = state;
     return nameColorImportAction(action, {...context, busy: context.busy || owner.pending,
       refresh: async () => {
         const catalog = await context.post<Catalog>(`/api/cases/${encodeURIComponent(context.caseId)}/name-colors`,
           {query: owner.query, offset: owner.offset, limit: 100});
-        if (owner === state) {owner.data = catalog; owner.drafts.clear();}
+        if (retained(owner)) {owner.data = catalog; owner.drafts.clear();}
       }});
   }
   if (!action.startsWith('name-colors-')) return false;
   if (context.busy || state.pending || nameColorImportPending()) return true;
-  if (state.caseId !== context.caseId) resetNameColors(context.caseId);
   if (action === 'name-colors-close') {state.open = false; context.render(); return true;}
   const owner = state;
   const path = `/api/cases/${encodeURIComponent(context.caseId)}/name-colors`;
@@ -113,7 +124,7 @@ export async function nameColorsAction(action: string, context: Context, element
       owner.drafts.clear(); owner.roleDrafts.clear();
     }
     const catalog = await context.post<Catalog>(path, {query: owner.query, offset: owner.offset, limit: 100});
-    if (owner === state) state.data = catalog;
+    if (retained(owner)) owner.data = catalog;
   } catch (error) {
     owner.message = error instanceof Error ? error.message : 'Could not save colors. Refresh and try again.';
   } finally {

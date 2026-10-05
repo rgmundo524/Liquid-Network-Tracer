@@ -17,8 +17,8 @@ from unittest.mock import patch
 from liquid_tracer.common import TraceError, read_json, save_json
 from liquid_tracer.investigations import (DEFAULTS, create_investigation, list_investigations,
                                          load_settings, read_case, save_settings, update_case)
-from liquid_tracer.menu import (_OfflineCalculation, _command, _lookup_reports, _seed_values,
-                                _trace_arguments, create_app, run_menu)
+from liquid_tracer.menu import (SECRET_ACCESS_REASON, _OfflineCalculation, _command, _lookup_reports, _seed_values,
+                                _trace_arguments, _trace_budget_summary, create_app, run_menu)
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -80,9 +80,32 @@ finally:
                         "LIQUID_SECRET_PROVIDER": "protonpass", "LIQUID_SECRET_PROFILE": "development"}, clear=True):
             command = _command(arguments, live=True)
             self.assertEqual(command, ["secretspec", "--file", str(PROJECT / "secretspec.toml"), "run",
-                             "--provider", "protonpass", "--profile", "development", "--",
+                             "--provider", "protonpass", "--profile", "development",
+                             "--reason", SECRET_ACCESS_REASON, "--",
                              sys.executable, "-m", "liquid_tracer", *arguments])
             self.assertEqual(_command(arguments), [sys.executable, "-m", "liquid_tracer", *arguments])
+
+    def test_live_command_preserves_nonblank_reason_override_and_falls_back_for_blank(self):
+        arguments = ["credentials-check"]
+        for configured, expected in (("Check the selected account.", "Check the selected account."),
+                                     ("  Check the selected account.  ", "Check the selected account."),
+                                     ("", SECRET_ACCESS_REASON), (" \t\n", SECRET_ACCESS_REASON)):
+            with self.subTest(reason=configured), patch.dict(os.environ, {"SECRETSPEC_REASON": configured}, clear=True):
+                command = _command(arguments, live=True)
+                self.assertEqual(command[command.index("--reason") + 1], expected)
+                self.assertLess(command.index("--reason"), command.index("--"))
+                self.assertEqual(_command(arguments), [sys.executable, "-m", "liquid_tracer", *arguments])
+
+    def test_default_reason_excludes_investigation_paths_and_transaction_hashes(self):
+        case = "/investigations/private case name"
+        txid = "abcdef0123456789" * 4
+        arguments = ["trace", "--case", case, "--seeds", txid + ":0"]
+        with patch.dict(os.environ, {}, clear=True):
+            command = _command(arguments, live=True)
+        reason = command[command.index("--reason") + 1]
+        self.assertEqual(reason, "Authenticate the user-selected Liquid Tracer action with Blockstream or Miro.")
+        self.assertNotIn(case, reason)
+        self.assertNotIn(txid, reason)
 
     def test_live_command_uses_pinned_executable_over_host_path(self):
         arguments = ["credentials-check"]
@@ -119,6 +142,26 @@ finally:
                 self.assertRaisesRegex(TraceError, "fixture path is not configured"):
             _trace_arguments(Path("saved-case"), metadata, DEFAULTS)
 
+    def test_saved_finite_trace_preferences_are_unlimited_until_budgets_are_enabled(self):
+        settings = {key: value for key, value in DEFAULTS.items() if key != "budget_limits_enabled"}
+        settings.update(max_transactions=2, max_outpoints=3, max_requests=4, max_seconds=5)
+        original = copy.deepcopy(settings)
+        metadata = {"seeds": ["a" * 64 + ":0"]}
+        for flag, expected in ((None, (0, 0, 0, 0)), (False, (0, 0, 0, 0)), (True, (2, 3, 4, 5))):
+            configured = dict(settings)
+            if flag is not None:
+                configured["budget_limits_enabled"] = flag
+            with self.subTest(flag=flag):
+                arguments, live = _trace_arguments(Path("saved-case"), metadata, configured)
+                self.assertTrue(live)
+                self.assertEqual(arguments[arguments.index("--hops") + 1], str(settings["hops"]))
+                for key, value in zip(("max-transactions", "max-outpoints", "max-requests", "max-seconds"), expected):
+                    self.assertEqual(arguments[arguments.index("--" + key) + 1], str(value))
+        self.assertEqual(settings, original)
+        self.assertEqual(_trace_budget_summary(settings), "Run budgets: unlimited. Optional budgets are off.")
+        self.assertIn("unlimited transactions", _trace_budget_summary(dict(settings,
+                      budget_limits_enabled=True, max_transactions=0)))
+
     def test_nonterminal_menu_does_not_load_the_ui_or_credentials(self):
         with patch("sys.stdin.isatty", return_value=False), patch("liquid_tracer.menu.create_app") as make_app, \
                 contextlib.redirect_stderr(io.StringIO()) as error:
@@ -153,6 +196,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.temp.name) / "investigations with spaces"
         self.environment = patch.dict(os.environ, {"LIQUID_TRACER_ROOT": str(PROJECT),
             "LIQUID_SECRET_PROVIDER": "protonpass", "LIQUID_SECRET_PROFILE": "development",
+            "SECRETSPEC_REASON": "",
             "LIQUID_SECRETSPEC_BIN": "/nix/store/test-secretspec/bin/secretspec",
             "LIQUID_CASE_DIR": "/unrelated/environment/case", "LIQUID_MIRO_BOARD": "UNRELATED="})
         self.environment.start()
@@ -291,10 +335,10 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         ]}
 
         def local_report(command, **kwargs):
-            self.assertEqual(command[:9], ["/nix/store/test-secretspec/bin/secretspec", "--file",
+            self.assertEqual(command[:11], ["/nix/store/test-secretspec/bin/secretspec", "--file",
                              str(PROJECT / "secretspec.toml"), "run", "--provider", "protonpass",
-                             "--profile", "development", "--"])
-            self.assertEqual(command[9:15], [sys.executable, "-m", "liquid_tracer", "inspect-tx", "--txid", txid])
+                             "--profile", "development", "--reason", SECRET_ACCESS_REASON, "--"])
+            self.assertEqual(command[11:17], [sys.executable, "-m", "liquid_tracer", "inspect-tx", "--txid", txid])
             self.assertNotIn("--fixture", command)
             self.assertNotIn("capture_output", kwargs)
             self.assertNotIn("stdout", kwargs)
@@ -346,10 +390,10 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         report_paths = []
 
         def local_report(command, **kwargs):
-            self.assertEqual(command[:9], ["/nix/store/test-secretspec/bin/secretspec", "--file",
+            self.assertEqual(command[:11], ["/nix/store/test-secretspec/bin/secretspec", "--file",
                 str(PROJECT / "secretspec.toml"), "run", "--provider", "protonpass",
-                "--profile", "development", "--"])
-            self.assertEqual(command[9:15], [sys.executable, "-m", "liquid_tracer", "inspect-txs",
+                "--profile", "development", "--reason", SECRET_ACCESS_REASON, "--"])
+            self.assertEqual(command[11:17], [sys.executable, "-m", "liquid_tracer", "inspect-txs",
                                            "--txids", ",".join(txids)])
             self.assertNotIn("capture_output", kwargs)
             self.assertNotIn("stdout", kwargs)
@@ -455,6 +499,29 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertEqual(app.screen.case, case)
 
+    async def test_run_settings_shortcut_and_color_editor_preserve_form_edits(self):
+        from textual.widgets import Input
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run") as process:
+            async with app.run_test(size=(110, 55)) as pilot:
+                case = await self.new_case(app, pilot)
+                await self.click(app, pilot, "#run")
+                self.assertFalse(app.screen.query("#max_transactions"))
+                await self.click(app, pilot, "#form-settings")
+                form = app.screen
+                form.query_one("#hops", Input).value = "6"
+                await self.click(app, pilot, "#form-colors")
+                await pilot.press("escape")
+                await pilot.pause()
+                self.assertIs(app.screen, form)
+                self.assertEqual(form.query_one("#hops", Input).value, "6")
+                await self.click(app, pilot, "#submit")
+                self.assertEqual(app.screen.case, case)
+                self.assertEqual(read_case(case)["run_defaults"]["hops"], 6)
+                await self.click(app, pilot, "#run")
+                self.assertEqual(app.screen.query_one("#hops", Input).value, "6")
+                process.assert_not_called()
+
     async def test_arrow_buttons_and_enter_work_without_taking_over_form_controls(self):
         from textual.widgets import Button, Checkbox, Input, Select, TextArea
         app = create_app(self.root)
@@ -492,6 +559,8 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(seeds.cursor_location, (1, 2))
                 self.assertIs(app.focused, seeds)
 
+                await self.click(app, pilot, "#cancel")
+                await self.click(app, pilot, "#settings")
                 connector = app.screen.query_one("#connector-style", Select)
                 connector.focus()
                 await pilot.press("enter", "down", "enter")
@@ -517,15 +586,24 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
         with patch("liquid_tracer.menu.subprocess.run") as process:
             async with app.run_test(size=(80, 24)) as pilot:
                 case = await self.new_case(app, pilot, board="")
-                for selector in ("#mermaid", "#csv", "#elk-preview", "#layout"):
+                for selector in ("#mermaid", "#csv", "#elk-preview", "#layout", "#workflow-plot"):
                     self.assertTrue(app.screen.query_one(selector, Button).disabled)
                 run = app.screen.query_one("#run", Button)
                 run.focus()
                 await pilot.press("right")
                 self.assertEqual(app.focused.id, "review")
                 await pilot.press("left", "down")
+                self.assertEqual(app.focused.id, "workflow-boards")
+                await pilot.press("down")
                 self.assertEqual(app.focused.id, "preview")
                 await pilot.press("down")
+                self.assertEqual(app.focused.id, "pegouts")
+                self.assertFalse(app.focused.disabled)
+                await pilot.press("down")
+                self.assertEqual(app.focused.id, "addresses-review")
+                await pilot.press("down")
+                self.assertEqual(app.focused.id, "name-colors")
+                await pilot.press("left")
                 self.assertEqual(app.focused.id, "addresses-import")
                 await pilot.press("down")
                 self.assertEqual(app.focused.id, "change-outputs")
@@ -605,7 +683,8 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(restarted.screen.case, case)
                 snapshot = {p.relative_to(case): p.read_bytes() for p in case.rglob("*") if p.is_file()}
                 await self.click(restarted, pilot, "#preview")
-                self.assertEqual(restarted.screen.query_one("#board", Input).value, "DEMO=")
+                self.assertEqual(restarted.screen.metadata["miro_board"], "DEMO=")
+                self.assertFalse(restarted.screen.query("#board"))
                 await self.click(restarted, pilot, "#submit")
                 await self.finish_action(restarted, pilot)
                 self.assertEqual(snapshot, {p.relative_to(case): p.read_bytes() for p in case.rglob("*") if p.is_file()})
@@ -618,7 +697,7 @@ class TextualWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 state = read_json(case / "runs" / second / "trace.json")
                 self.assertEqual(state["parent_run"], first)
                 self.assertEqual(state["limits"]["max_hops"], 3)
-                self.assertEqual(read_case(case)["run_defaults"]["hops"], 2)
+                self.assertEqual(read_case(case)["run_defaults"]["hops"], 1)
                 self.assertEqual(original, {p.relative_to(first_path): p.read_bytes() for p in first_path.rglob("*") if p.is_file()})
         self.assertEqual(len(commands), 3)
         self.assertTrue(all(command[command.index("--case") + 1] == str(case) for command in commands))
@@ -896,43 +975,67 @@ finally:
                 self.assertEqual(app.screen.query_one("#layout_attempts", Input).value, "25")
                 app.screen.query_one("#layout_attempts", Input).value = "75"
                 app.screen.query_one("#max_requests", Input).value = "12"
+                self.assertFalse(app.screen.query_one("#budget-limits-enabled", Checkbox).value)
                 self.assertFalse(app.screen.query_one("#include-fees", Checkbox).value)
                 app.screen.query_one("#include-fees", Checkbox).value = True
+                self.assertFalse(app.screen.query_one("#color-attribution-arrows", Checkbox).value)
+                app.screen.query_one("#color-attribution-arrows", Checkbox).value = True
                 self.assertFalse(app.screen.query_one("#group-context-inputs", Checkbox).value)
                 app.screen.query_one("#group-context-inputs", Checkbox).value = True
                 self.assertEqual(app.screen.query_one("#hub-addresses", TextArea).text, "")
                 app.screen.query_one("#hub-addresses", TextArea).text = f" {hub_address}\n{hub_address} "
+                self.assertEqual(app.screen.query_one("#center-name", Input).value, "")
+                app.screen.query_one("#center-name", Input).value = "  Treasury Group  "
                 self.assertEqual(app.screen.query_one("#connector-style", Select).value, "straight")
                 app.screen.query_one("#connector-style", Select).value = "curved"
                 await self.click(app, pilot, "#submit")
                 self.assertEqual(load_settings(self.root)["connector_style"], "curved")
                 self.assertEqual(load_settings(self.root)["hops"], 3)
+                self.assertIs(load_settings(self.root)["budget_limits_enabled"], False)
                 self.assertEqual(load_settings(self.root)["layout_attempts"], 75)
                 self.assertIs(load_settings(self.root)["include_fees"], True)
+                self.assertIs(load_settings(self.root)["color_attribution_arrows"], True)
                 self.assertIs(load_settings(self.root)["group_context_inputs"], True)
                 self.assertEqual(load_settings(self.root)["hub_addresses"], [hub_address])
+                self.assertEqual(load_settings(self.root)["center_name"], "Treasury Group")
                 case = await self.new_case(app, pilot)
                 self.assertEqual(read_case(case)["run_defaults"]["max_requests"], 12)
                 self.assertEqual(read_case(case)["run_defaults"]["layout_attempts"], 75)
                 self.assertEqual(read_case(case)["run_defaults"]["connector_style"], "curved")
                 self.assertIs(read_case(case)["run_defaults"]["include_fees"], True)
+                self.assertIs(read_case(case)["run_defaults"]["color_attribution_arrows"], True)
                 self.assertIs(read_case(case)["run_defaults"]["group_context_inputs"], True)
                 self.assertEqual(read_case(case)["run_defaults"]["hub_addresses"], [hub_address])
+                self.assertEqual(read_case(case)["run_defaults"]["center_name"], "Treasury Group")
+                self.assertIn("Center named group: Treasury Group", str(app.screen.query_one("#case-summary", Static).render()))
                 self.assertIn("Transaction fee flows: included", str(app.screen.query_one("#case-summary", Static).render()))
                 self.assertIn("Isolated context inputs: grouped", str(app.screen.query_one("#case-summary", Static).render()))
+                self.assertIn("Color arrows by attribution: on", str(app.screen.query_one("#case-summary", Static).render()))
                 await self.click(app, pilot, "#run")
+                self.assertFalse(app.screen.query("#color-attribution-arrows"))
+                self.assertIs(app.screen.read_limits()["color_attribution_arrows"], True)
                 self.assertIs(app.screen.read_limits()["group_context_inputs"], True)
                 self.assertEqual(app.screen.read_limits()["layout_attempts"], 75)
                 self.assertFalse(app.screen.query("#layout_attempts"))
                 self.assertEqual(app.screen.read_limits()["hub_addresses"], [hub_address])
                 self.assertFalse(app.screen.query("#hub-addresses"))
+                self.assertFalse(app.screen.query("#center-name"))
+                self.assertEqual(app.screen.read_limits()["center_name"], "Treasury Group")
                 await self.click(app, pilot, "#cancel")
                 await self.click(app, pilot, "#case-settings")
+                self.assertFalse(app.screen.query_one("#budget-limits-enabled", Checkbox).value)
+                app.screen.query_one("#budget-limits-enabled", Checkbox).value = True
+                app.screen.query_one("#max_transactions", Input).value = "0"
+                app.screen.query_one("#max_seconds", Input).value = "0"
                 self.assertTrue(app.screen.query_one("#include-fees", Checkbox).value)
+                self.assertTrue(app.screen.query_one("#color-attribution-arrows", Checkbox).value)
+                app.screen.query_one("#color-attribution-arrows", Checkbox).value = False
                 self.assertTrue(app.screen.query_one("#group-context-inputs", Checkbox).value)
                 app.screen.query_one("#group-context-inputs", Checkbox).value = False
                 self.assertEqual(app.screen.query_one("#hub-addresses", TextArea).text, hub_address)
                 app.screen.query_one("#hub-addresses", TextArea).text = ""
+                self.assertEqual(app.screen.query_one("#center-name", Input).value, "Treasury Group")
+                app.screen.query_one("#center-name", Input).value = ""
                 self.assertEqual(app.screen.query_one("#connector-style", Select).value, "curved")
                 app.screen.query_one("#connector-style", Select).value = "elbowed"
                 app.screen.query_one("#include-fees", Checkbox).value = False
@@ -945,13 +1048,20 @@ finally:
                 self.assertEqual(saved["name"], "Renamed investigation")
                 self.assertEqual(saved["miro_board"], "UPDATED=")
                 self.assertEqual(saved["run_defaults"]["max_requests"], 8)
+                self.assertIs(saved["run_defaults"]["budget_limits_enabled"], True)
+                self.assertEqual(saved["run_defaults"]["max_transactions"], 0)
+                self.assertEqual(saved["run_defaults"]["max_seconds"], 0)
                 self.assertEqual(saved["run_defaults"]["layout_attempts"], 100)
                 self.assertEqual(load_settings(self.root)["layout_attempts"], 75)
                 self.assertEqual(saved["run_defaults"]["connector_style"], "elbowed")
                 self.assertEqual(load_settings(self.root)["connector_style"], "curved")
                 self.assertIs(saved["run_defaults"]["include_fees"], False)
+                self.assertIs(saved["run_defaults"]["color_attribution_arrows"], False)
+                self.assertIs(load_settings(self.root)["color_attribution_arrows"], True)
                 self.assertIs(saved["run_defaults"]["group_context_inputs"], False)
                 self.assertEqual(saved["run_defaults"]["hub_addresses"], [])
+                self.assertEqual(saved["run_defaults"]["center_name"], "")
+                self.assertEqual(load_settings(self.root)["center_name"], "Treasury Group")
                 self.assertEqual(load_settings(self.root)["hub_addresses"], [hub_address])
                 self.assertIs(load_settings(self.root)["group_context_inputs"], True)
                 self.assertIn("Transaction fee flows: hidden", str(app.screen.query_one("#case-summary", Static).render()))
@@ -966,12 +1076,13 @@ finally:
                 await pilot.pause()
                 await self.click(restarted, pilot, "#case-settings")
                 self.assertFalse(restarted.screen.query_one("#include-fees", Checkbox).value)
+                self.assertFalse(restarted.screen.query_one("#color-attribution-arrows", Checkbox).value)
                 self.assertFalse(restarted.screen.query_one("#group-context-inputs", Checkbox).value)
                 self.assertEqual(restarted.screen.query_one("#connector-style", Select).value, "elbowed")
                 self.assertEqual(restarted.screen.query_one("#layout_attempts", Input).value, "100")
                 process.assert_not_called()
 
-    async def test_new_case_fee_checkbox_and_legacy_settings_ignore_later_global_defaults(self):
+    async def test_new_case_inherits_defaults_and_legacy_settings_ignore_later_changes(self):
         from textual.widgets import Checkbox, Input, Static
         case = create_investigation(self.root, "Legacy defaults")
         metadata = read_case(case)
@@ -983,9 +1094,10 @@ finally:
         with patch("liquid_tracer.menu.subprocess.run") as process:
             async with app.run_test(size=(110, 55)) as pilot:
                 await self.click(app, pilot, "#new")
-                self.assertTrue(app.screen.query_one("#include-fees", Checkbox).value)
-                self.assertEqual(app.screen.query_one("#hops", Input).value, "9")
-                app.screen.query_one("#include-fees", Checkbox).value = False
+                self.assertTrue(app.screen.settings["include_fees"])
+                self.assertEqual(app.screen.settings["hops"], 9)
+                self.assertFalse(app.screen.query("#include-fees"))
+                self.assertFalse(app.screen.query("#hops"))
                 await self.click(app, pilot, "#cancel")
                 await self.click(app, pilot, "#continue")
                 await pilot.press("enter")
@@ -998,6 +1110,30 @@ finally:
                 await self.click(app, pilot, "#cancel")
                 process.assert_not_called()
                 self.assertEqual((case / "case.json").read_bytes(), original)
+
+    async def test_address_count_refresh_applies_only_enabled_budgets(self):
+        from liquid_tracer.cli import main
+        fixture = PROJECT / "tests/data/synthetic-api.json"
+        case = create_investigation(self.root, "Address count budgets", fixture=str(fixture),
+                                    run_defaults={"max_requests": 4, "max_seconds": 5})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["trace", "--case", str(case), "--fixture", str(fixture),
+                                   "--seeds-file", str(PROJECT / "tests/data/synthetic-seeds.txt"), "--hops", "0"]), 0)
+        app = create_app(self.root)
+        async with app.run_test(size=(110, 55)) as pilot:
+            app.created(case)
+            await pilot.pause()
+            with patch.object(app.screen, "perform") as perform:
+                for enabled, limits in ((False, (0, 0)), (True, (4, 5))):
+                    update_case(case, {"run_defaults": dict(read_case(case)["run_defaults"],
+                                                          budget_limits_enabled=enabled)})
+                    await self.click(app, pilot, "#address-counts")
+                    arguments, live = perform.call_args.args[0]
+                    self.assertFalse(live)
+                    self.assertEqual(arguments[arguments.index("--max-requests") + 1], str(limits[0]))
+                    self.assertEqual(arguments[arguments.index("--max-seconds") + 1], str(limits[1]))
+        self.assertEqual(read_case(case)["run_defaults"]["max_requests"], 4)
+        self.assertEqual(read_case(case)["run_defaults"]["max_seconds"], 5)
 
     async def test_organize_requires_a_saved_board_and_completed_run(self):
         from textual.widgets import Button
@@ -1032,7 +1168,8 @@ finally:
                 await pilot.pause()
                 self.assertFalse(app.screen.query_one("#layout", Button).disabled)
                 await self.click(app, pilot, "#layout")
-                self.assertEqual(app.screen.query_one("#board", Input).value, "DEMO=")
+                self.assertEqual(app.screen.metadata["miro_board"], "DEMO=")
+                self.assertFalse(app.screen.query("#board"))
                 self.assertEqual(app.focused.id, "cancel")
                 self.assertIn("replaces their current positions", str(app.screen.query_one("#layout-notice", Static).render()))
                 self.assertIn("hidden", str(app.screen.query_one("#fee-status", Static).render()))
@@ -1054,9 +1191,10 @@ finally:
                 process.assert_called_once()
                 suspend.assert_called_once()
                 self.assertEqual(process.call_args.args[0], ["/nix/store/test-secretspec/bin/secretspec", "--file",
-                    str(PROJECT / "secretspec.toml"), "run", "--provider", "protonpass", "--profile", "development", "--",
+                    str(PROJECT / "secretspec.toml"), "run", "--provider", "protonpass", "--profile", "development",
+                    "--reason", SECRET_ACCESS_REASON, "--",
                     sys.executable, "-m", "liquid_tracer", "miro-sync", "--case", str(case), "--run", "latest",
-                    "--board", "DEMO=", "--max-new-items", "750", "--reorganize"])
+                    "--board", "DEMO=", "--max-new-items", "0", "--reorganize"])
                 for field in ("capture_output", "stdout", "stderr"):
                     self.assertNotIn(field, process.call_args.kwargs)
                 self.assertIn("Miro graph synced and reorganized", str(app.screen.query_one("#action-status", Static).render()))
@@ -1149,7 +1287,7 @@ finally:
         def save_created_board(command, **kwargs):
             self.assertEqual(command, ["/nix/store/test-secretspec/bin/secretspec", "--file",
                 str(PROJECT / "secretspec.toml"), "run", "--provider", "protonpass",
-                "--profile", "development", "--", sys.executable, "-m", "liquid_tracer",
+                "--profile", "development", "--reason", SECRET_ACCESS_REASON, "--", sys.executable, "-m", "liquid_tracer",
                 "miro-create-board", "--case", str(case), "--name", selected_name,
                 "--visibility", "team", "--team-id", "SYNTHETIC-TEAM"])
             self.assertNotIn("capture_output", kwargs)
@@ -1197,7 +1335,8 @@ finally:
                 self.assertIn("https://miro.com/app/board/CREATED=/",
                               str(restarted.screen.query_one("#case-summary", Static).render()))
                 await self.click(restarted, pilot, "#preview")
-                self.assertEqual(restarted.screen.query_one("#board", Input).value, "CREATED=")
+                self.assertEqual(restarted.screen.metadata["miro_board"], "CREATED=")
+                self.assertFalse(restarted.screen.query("#board"))
                 await pilot.press("enter")
                 await pilot.pause()
                 process.assert_not_called()
@@ -1223,7 +1362,7 @@ finally:
                 suspend.assert_called_once()
                 command = process.call_args.args[0]
                 self.assertEqual(command[0], "/nix/store/test-secretspec/bin/secretspec")
-                self.assertEqual(command[12:], ["miro-create-board", "--case", str(case), "--name",
+                self.assertEqual(command[14:], ["miro-create-board", "--case", str(case), "--name",
                                                "Synthetic rejected board", "--visibility", "private"])
                 self.assertNotIn("capture_output", process.call_args.kwargs)
                 self.assertFalse(app.busy)

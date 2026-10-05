@@ -29,7 +29,7 @@ def change_output_screen(base, button, case):
             with VerticalScroll(classes="form-panel"):
                 yield Label("Change outputs", classes="title")
                 yield Static(NOTICE, markup=False)
-                yield button("Import change outputs", id="change-output-import")
+                yield button("Import CSV files", id="change-output-import")
                 yield button("Export saved CSV", id="change-output-export")
                 yield Static("", id="change-output-export-status", markup=False)
                 yield Input(placeholder="Search saved transaction IDs", id="change-output-search")
@@ -213,8 +213,8 @@ def change_output_screen(base, button, case):
                 if action == "change-output-back":
                     self.action_back()
                 elif action == "change-output-import":
-                    from .change_output_import_menu import change_output_import_screen
-                    self.app.push_screen(change_output_import_screen(base, button, case))
+                    from .input_import_menu import input_import_screen
+                    self.app.push_screen(input_import_screen(base, button, case))
                 elif action in ("change-output-find", "change-output-prev", "change-output-next"):
                     self.page_offset = (max(0, self.page_offset - 100) if action == "change-output-prev" else
                                         self.page_offset + 100 if action == "change-output-next" else 0)

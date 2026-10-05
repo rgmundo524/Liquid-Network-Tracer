@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from liquid_tracer.common import TraceError
 from liquid_tracer.investigations import create_investigation, read_case, update_case
-from liquid_tracer.menu import create_app
+from liquid_tracer.menu import SECRET_ACCESS_REASON, create_app
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -31,7 +31,7 @@ class CompactionMenuTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.temp.name) / "cases"
         fixture = PROJECT / "tests" / "data" / "synthetic-api.json"
         self.case = create_investigation(self.root, "Compaction fixture", board="SYNTHETIC-BOARD=",
-                                         fixture=str(fixture), run_defaults={"max_new_items": 321})
+                                         fixture=str(fixture), run_defaults={"budget_limits_enabled": True, "max_new_items": 321})
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(main(["trace", "--case", str(self.case), "--fixture", str(fixture),
                                    "--seeds-file", str(PROJECT / "tests" / "data" / "synthetic-seeds.txt"),
@@ -43,6 +43,7 @@ class CompactionMenuTests(unittest.IsolatedAsyncioTestCase):
         self.recovery = {"pending_count": 0, "can_confirm_empty": False}
         self.environment = patch.dict(os.environ, {"LIQUID_TRACER_ROOT": str(PROJECT),
             "LIQUID_SECRET_PROVIDER": "protonpass", "LIQUID_SECRET_PROFILE": "development",
+            "SECRETSPEC_REASON": "",
             "LIQUID_SECRETSPEC_BIN": "/nix/store/test-secretspec/bin/secretspec"})
         self.environment.start()
         self.addCleanup(self.environment.stop)
@@ -142,10 +143,10 @@ class CompactionMenuTests(unittest.IsolatedAsyncioTestCase):
         suspend.assert_called_once()
         process.assert_called_once()
         command = process.call_args.args[0]
-        self.assertEqual(command[:9], ["/nix/store/test-secretspec/bin/secretspec", "--file",
+        self.assertEqual(command[:11], ["/nix/store/test-secretspec/bin/secretspec", "--file",
                                       str(PROJECT / "secretspec.toml"), "run", "--provider", "protonpass",
-                                      "--profile", "development", "--"])
-        self.assertEqual(command[9:], [sys.executable, "-m", "liquid_tracer", "miro-sync", "--case", str(self.case),
+                                      "--profile", "development", "--reason", SECRET_ACCESS_REASON, "--"])
+        self.assertEqual(command[11:], [sys.executable, "-m", "liquid_tracer", "miro-sync", "--case", str(self.case),
                                      "--run", self.run_id, "--compact-preview", self.preview_id,
                                      "--reorganize", "--max-new-items", "321"])
         self.assertNotIn("capture_output", process.call_args.kwargs)
@@ -177,6 +178,24 @@ class CompactionMenuTests(unittest.IsolatedAsyncioTestCase):
                 screen.update_summary()
                 self.assertTrue(screen.query_one("#compact-apply", Button).disabled)
         process.assert_not_called()
+
+    async def test_apply_ignores_saved_item_cap_when_optional_budgets_are_off(self):
+        from textual.widgets import Checkbox, Static
+        update_case(self.case, {"run_defaults": dict(read_case(self.case)["run_defaults"], budget_limits_enabled=False)})
+        self.saved_preview = self.preview_id
+        app = create_app(self.root)
+        with patch("liquid_tracer.menu.subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as process, \
+                patch.object(app, "suspend", side_effect=contextlib.nullcontext):
+            async with app.run_test(size=(115, 60)) as pilot:
+                await self.open_case(app, pilot)
+                await self.click(app, pilot, "#compact-apply")
+                self.assertTrue(any("New item budget: unlimited" in str(widget.render())
+                                    for widget in app.screen.query(Static)))
+                app.screen.query_one("#compact-reviewed", Checkbox).value = True
+                await self.click(app, pilot, "#submit")
+        command = process.call_args.args[0]
+        self.assertEqual(command[command.index("--max-new-items") + 1], "0")
+        self.assertEqual(read_case(self.case)["run_defaults"]["max_new_items"], 321)
 
     async def test_board_change_or_new_pending_creation_rejects_apply_without_credentials(self):
         from textual.widgets import Checkbox, Static

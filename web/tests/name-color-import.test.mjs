@@ -36,7 +36,7 @@ beforeEach(() => {
   reset('case A');
 });
 
-test('preview is read-only; apply requires checkbox and submits the exact reviewed payload', async () => {
+test('preview is read-only; Apply is the sole approval and and submits the exact reviewed payload', async () => {
   const calls = []; let refreshes = 0;
   const ctx = context(async (path, payload) => {
     calls.push({path, payload});
@@ -51,9 +51,7 @@ test('preview is read-only; apply requires checkbox and submits the exact review
   assert.equal(calls.length, 1);
   assert.equal(calls[0].path, '/api/cases/case%20A/name-color-import');
   assert.deepEqual(calls[0].payload, {text: 'Name,Color\nExample Exchange,#00AAbb\n', format: 'auto', policy: 'keep'});
-  await apply(ctx);
-  assert.equal(calls.length, 1);
-  edit('approved', '', true);
+  assert.doesNotMatch(panel('case A', false), /name-color-import-approved/);
   await apply(ctx);
   assert.deepEqual(calls[1].payload, {...calls[0].payload, approve_plan: 'review-hash'});
   assert.equal(refreshes, 1);
@@ -66,11 +64,9 @@ for (const [id, value, checked] of [['text', 'new contents', false], ['format', 
   test(`changing ${id} invalidates both review and approval`, async () => {
     let calls = 0;
     const ctx = context(async () => {calls += 1; return makeReview();});
-    await open(ctx); await preview(ctx); edit('approved', '', true);
+    await open(ctx); await preview(ctx);
     edit(id, value, checked);
     assert.equal(nodes.get('#name-color-import-apply').disabled, true);
-    assert.equal(nodes.get('#name-color-import-approved').checked, false);
-    assert.equal(nodes.get('#name-color-import-approved').disabled, true);
     await apply(ctx);
     assert.equal(calls, 1);
     assert.doesNotMatch(panel('case A', false), /unique names:/);
@@ -81,7 +77,7 @@ test('invalid review displays errors safely and cannot be approved or applied', 
   let calls = 0;
   const ctx = context(async () => {calls += 1; return makeReview({valid: false, approval_sha256: null,
     errors: [{row: 2, message: '<script>unknown name</script>'}]});});
-  await open(ctx); await preview(ctx); edit('approved', '', true); await apply(ctx);
+  await open(ctx); await preview(ctx); await apply(ctx);
   const html = panel('case A', false);
   assert.equal(calls, 1);
   assert.match(html, /&lt;script&gt;unknown name&lt;\/script&gt;/);
@@ -125,22 +121,23 @@ test('busy or pending handlers do not issue requests or double-apply', async () 
   const response = deferred();
   const ctx = context(async () => {calls += 1; return calls === 1 ? makeReview() : response.promise;});
   await preview({...ctx, busy: true}); assert.equal(calls, 0);
-  await preview(ctx); edit('approved', '', true);
+  await preview(ctx);
   const work = apply(ctx);
   await apply(ctx); await preview(ctx);
   assert.equal(calls, 2);
   response.resolve({changed: 1, revision: 3}); await work;
 });
 
-test('an apply response from a previous case cannot refresh the active case', async () => {
+test('an apply response refreshes its owner while leaving the active case untouched', async () => {
   const response = deferred(); let refreshes = 0;
   const ctx = context(async (_path, payload) => 'approve_plan' in payload ? response.promise : makeReview());
   ctx.refresh = async () => {refreshes += 1;};
-  await open(ctx); await preview(ctx); edit('approved', '', true);
+  await open(ctx); await preview(ctx);
   const work = apply(ctx); reset('case B');
   response.resolve({changed: 1}); await work;
-  assert.equal(refreshes, 0);
+  assert.equal(refreshes, 1);
   assert.doesNotMatch(panel('case B', false), /Saved/);
+  assert.match(panel('case A', false), /Saved 1 name color assignment/);
 });
 
 test('stale plan errors remove approval and require a new preview', async () => {
@@ -148,7 +145,7 @@ test('stale plan errors remove approval and require a new preview', async () => 
     if ('approve_plan' in payload) throw new Error('Colors changed. Preview again.');
     return makeReview();
   });
-  await open(ctx); await preview(ctx); edit('approved', '', true); await apply(ctx);
+  await open(ctx); await preview(ctx); await apply(ctx);
   assert.match(panel('case A', false), /Colors changed\. Preview again\./);
   assert.doesNotMatch(panel('case A', false), /unique names:/);
   assert.equal(pending(), false);
@@ -157,7 +154,7 @@ test('stale plan errors remove approval and require a new preview', async () => 
 test('a refresh failure preserves the successful import result', async () => {
   const ctx = context(async (_path, payload) => 'approve_plan' in payload ? {changed: 1, revision: 3} : makeReview());
   ctx.refresh = async () => {throw new Error('Connection interrupted.');};
-  await open(ctx); await preview(ctx); edit('approved', '', true); await apply(ctx);
+  await open(ctx); await preview(ctx); await apply(ctx);
   assert.match(panel('case A', false), /Saved 1 name color assignment/);
   assert.match(panel('case A', false), /color list could not refresh: Connection interrupted/);
 });
@@ -214,4 +211,25 @@ test('replacement preview includes clear actions and paginates large imports', a
   await action('name-color-import-next', ctx);
   assert.match(panel('case A', false), /Rows 101–101 of 101/);
   assert.match(panel('case A', false), />Name 100</);
+});
+
+test('unused name colors can be reviewed and applied with zero matching addresses', async () => {
+  const calls = [];
+  const ctx = context(async (_path, payload) => {
+    calls.push(payload);
+    return payload.approve_plan ? {changed: 1, revision: 1} : makeReview({changes: [
+      {row: 2, name: 'Unknown Service', key: 'unknown service', color: '#bdbdbd',
+        previous: null, action: 'add', addresses: 0},
+    ]});
+  });
+  await open(ctx); edit('text', 'Name,Color\nUnknown Service,#bdbdbd\n');
+  await preview(ctx);
+  const html = panel('case A', false);
+  assert.match(html, /Unknown Service/);
+  assert.match(html, /0<br><small>Unused in this investigation/);
+  assert.doesNotMatch(html, /id="name-color-import-apply"[^>]* disabled/);
+  await apply(ctx);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].approve_plan, 'review-hash');
+  assert.match(panel('case A', false), /Saved 1 name color assignment/);
 });

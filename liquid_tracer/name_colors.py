@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 from .common import TraceError, now, save_json
-from .services import _text, load_services
+from .services import _text, effective_services, load_services
 
 COLOR_PRESETS = (
     ("Magenta", "#f0abfc"), ("Violet", "#c4b5fd"), ("Blue", "#93c5fd"),
@@ -15,6 +15,7 @@ COLOR_PRESETS = (
     ("Gray", "#d1d5db"),
 )
 NOTICE = ("Colors are assigned to names, not confidence. Matching ignores capitalization; "
+          "colors with no matching addresses are saved for later use without creating attributions. "
           "display spelling and address identity are unchanged. Selected seeds retain their configured seed color. "
           "Without an assigned color, the normal unspent/candidate/context color applies. "
           "Saving is local; regenerate previews or sync Miro to update the graph. No trace is started.")
@@ -22,7 +23,10 @@ NOTICE = ("Colors are assigned to names, not confidence. Matching ignores capita
 
 def name_key(value):
     # A saved casefold key may be longer than its original 120-character name.
-    return _text(value, "Attribution name", 360, required=True).casefold()
+    key = _text(value, "Attribution name", 360, required=True).casefold()
+    if len(key) > 360:
+        raise TraceError("Normalized attribution name must contain 1 to 360 characters")
+    return key
 
 
 def color_value(value):
@@ -65,7 +69,7 @@ def name_color_catalog(case, *, query="", offset=0, limit=100):
     if (not isinstance(query, str) or len(query) > 256 or type(offset) is not int or offset < 0
             or type(limit) is not int or not 1 <= limit <= 100):
         raise TraceError("Choose a short name search and a page of 1 to 100 names")
-    settings = load_services(case)
+    settings = effective_services(case)
     colors = settings.get("name_colors", {})
     query = query.strip().casefold()
     groups = _names(settings)
@@ -115,8 +119,6 @@ def set_name_colors(case, updates, *, expected_revision):
             settings = load_services(case)
             if settings["revision"] != expected_revision:
                 raise TraceError("Assessments or colors changed; refresh the name color menu before saving")
-            if set(normalized) - _names(settings).keys():
-                raise TraceError("Import or save the attribution name before assigning its color")
             before = settings.get("name_colors", {})
             after = dict(before)
             for key, value in normalized.items():
@@ -175,3 +177,27 @@ def color_text(color):
     linear = [v / 12.92 if v <= .04045 else ((v + .055) / 1.055) ** 2.4 for v in channels]
     luminance = sum(v * w for v, w in zip(linear, (.2126, .7152, .0722)))
     return "#000000" if luminance > .179 else "#ffffff"
+
+
+def apply_attribution_arrow_colors(nodes, edges):
+    """Color adjacent Liquid address links using resolved name assignments.
+
+    Node role colors never become attribution colors: in particular, a seed
+    keeps its seed fill while its arrows can show its assigned name color.
+    The edge's evidential role, identity and underlying input/output stay intact.
+    Resolve before any context grouping replaces displayed address endpoints.
+    """
+    colors = {}
+    for key, node in nodes.items():
+        details = node.get("details", {})
+        if (node.get("kind") != "address" or details.get("network") != "liquid"
+                or details.get("name_color_conflict")):
+            continue
+        assigned = {color_value(value) for value in details.get("name_colors", {}).values()}
+        if len(assigned) == 1:
+            colors[key] = assigned.pop()
+    for edge in edges:
+        assigned = {colors[key] for key in (edge["source"], edge["target"]) if key in colors}
+        if len(assigned) == 1:
+            edge["color"] = assigned.pop()
+            edge["color_source"] = "name"

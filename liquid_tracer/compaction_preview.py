@@ -12,7 +12,7 @@ from .common import TraceError, canonical, digest, read_json, save_json
 from .investigations import read_case, validate_settings
 from .layout_preview import _preview_html, export_layout, render_svg
 from .miro import make_plan, validate_plan
-from .services import load_services
+from .services import effective_services
 from .layout_search import normalize_layout_attempts
 from .layout_search_reporting import layout_search_warning
 
@@ -25,8 +25,9 @@ OPTIONAL_FILES = frozenset({"details.html", "details.json"})
 def _selection(options):
     if not isinstance(options, dict):
         raise TraceError("Invalid compact-preview graph options; create the preview again")
-    settings = validate_settings({key: options[key] for key in ("group_context_inputs", "hub_addresses") if key in options})
-    return {key: settings[key] for key in ("group_context_inputs", "hub_addresses")}
+    fields = ("group_context_inputs", "hub_addresses", "color_attribution_arrows", "center_name")
+    settings = validate_settings({key: options[key] for key in fields if key in options})
+    return {key: settings[key] for key in fields}
 
 
 def _saved_attempts(options):
@@ -44,6 +45,10 @@ def _check_selection(case, meta):
     saved = _selection(meta.get("graph_options", {}))
     current = _selection(read_case(case).get("run_defaults", {}))
     if saved != current:
+        if saved["color_attribution_arrows"] != current["color_attribution_arrows"]:
+            raise TraceError("Attribution arrow coloring changed since this preview; create a new compact preview before applying it")
+        if saved["center_name"] != current["center_name"]:
+            raise TraceError("Centered name group changed since this preview; create a new compact preview before applying it")
         raise TraceError("Context grouping or branch hubs changed since this preview; create a new compact preview before applying it")
 
 
@@ -57,7 +62,7 @@ def _hash_file(path):
 
 
 def service_fingerprint(case):
-    settings = load_services(case)
+    settings = effective_services(case)
     return digest(canonical({key: value for key, value in settings.items() if key != "history"}))
 
 
@@ -221,7 +226,8 @@ def _inline(svg, prefix):
 
 
 def export_compaction(before, after, directory, *, archive_sha256, service_sha256):
-    result = export_layout(after, directory)
+    # This product supplies its own before/after page and fixed manifest.
+    result = export_layout(after, directory, section_overview=False)
     directory = Path(result["directory"])
     try:
         report = after["layout"]["compaction"]

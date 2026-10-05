@@ -54,9 +54,15 @@ class WebImportTests(unittest.TestCase):
         _, case = self.create(); path, _ = self.server.case(case['id'])
         route = '/api/cases/' + case['id'] + '/address-import'
         self.assertEqual(self.request(route, {'text': A}, headers={'X-Liquid-CSRF': 'wrong'})[0], 403)
-        self.server.active_job = 'busy'
-        try: self.assertEqual(self.request(route, {'text': A})[0], 409)
-        finally: self.server.active_job = None
+        job = test_web.synthetic_running_job(case['id'])
+        self.server.jobs[job['id']] = job
+        before = load_services(path)
+        try:
+            preview = self.success(route, {'text': A})
+            self.assertEqual(self.request(route, {'text': A, 'approve_plan': preview['approval_sha256']})[0], 409)
+            self.assertEqual(load_services(path), before)
+        finally:
+            self.server.jobs.pop(job['id'])
         reviewed = self.success(route, {'text': A}); set_service(path, B)
         self.assertEqual(self.request(route, {'text': A, 'approve_plan': reviewed['approval_sha256']})[0], 400)
         self.assertNotIn(A, load_services(path)['rules'])
@@ -85,6 +91,7 @@ class MenuImportTests(unittest.IsolatedAsyncioTestCase):
     async def open_import(self, app, pilot):
         app.created(self.case); await pilot.pause()
         await self.click(app, pilot, '#addresses-import')
+        await self.click(app, pilot, '#input-import-advanced-attributions')
         return app.screen
 
     async def test_paste_preview_requires_approval_then_applies_offline(self):
@@ -96,9 +103,8 @@ class MenuImportTests(unittest.IsolatedAsyncioTestCase):
                 screen.query_one('#import-text', TextArea).text = A + '\n' + B
                 await pilot.pause(); await self.click(app, pilot, '#import-preview')
                 self.assertEqual(screen.query_one('#import-rows', DataTable).row_count, 2)
-                self.assertTrue(screen.query_one('#import-apply', Button).disabled)
+                self.assertFalse(screen.query_one('#import-apply', Button).disabled)
                 self.assertFalse((self.case / 'services.json').exists())
-                screen.query_one('#import-approved', Checkbox).value = True
                 await pilot.pause(); await self.click(app, pilot, '#import-apply')
                 self.assertEqual(len(load_services(self.case)['rules']), 2)
                 self.assertIn('Saved 2', str(screen.query_one('#import-summary', Static).render()))
@@ -112,7 +118,6 @@ class MenuImportTests(unittest.IsolatedAsyncioTestCase):
             screen = await self.open_import(app, pilot)
             screen.query_one('#import-file', Input).value = str(path)
             await pilot.pause(); await self.click(app, pilot, '#import-preview')
-            screen.query_one('#import-approved', Checkbox).value = True
             await pilot.pause(); path.write_text('address,name\n' + B + ',Changed\n')
             await self.click(app, pilot, '#import-apply')
             self.assertIn('changed', str(screen.query_one('#import-error', Static).render()))

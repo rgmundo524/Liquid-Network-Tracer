@@ -14,9 +14,11 @@ from .miro_frames import activity_frames
 from .graph_markers import node_border
 from .services import confidence_value
 from .attribution_presentation import display_name, attribution_reference
-from .name_colors import apply_name_colors, color_text
+from .name_colors import apply_name_colors, apply_attribution_arrow_colors, color_text, color_value
+from .edge_labels import caption_text
+from .graph_preparation import LabelLookup
 
-PRESENTATION_VERSION = 20
+PRESENTATION_VERSION = 25
 # Both renderers and their legends use this palette. Node colors describe the
 # displayed role, not ownership of an address or allocation of stolen value.
 PALETTE = {
@@ -40,34 +42,92 @@ NODE_CSV_FIELDS = ("id", "kind", "label", "url", "color", "details", "role",
 def legend_lines(graph=None):
     from .role_colors import validate_role_colors
     colors = validate_role_colors((graph or {}).get("service_controls", {}).get("role_colors", {}))
+    all_saved_connections = ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
+                             and (graph or {}).get("connections", {}).get("connection_scope") == "all_saved")
+    shortest_connections = ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
+                            and (graph or {}).get("connections", {}).get("connection_scope") == "shortest")
+    limited_connections = ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
+                           and (graph or {}).get("connections", {}).get("connection_scope") == "hop_limited")
     def name(key):
         return colors.get(key, PALETTE[key][0])
-    return [
+    arrows = ("Arrows: assigned name colors identify links directly entering or leaving that Liquid address; "
+              "thicker = traced UTXO links, thinner = context only. Other links retain their default colors. "
+              "Colors do not extend through downstream addresses or establish ownership."
+              if (graph or {}).get("graph_options", {}).get("color_attribution_arrows") else
+              f"Arrows: thicker {name('traced_edge').lower()} = traced UTXO links; thinner {name('context_edge').lower()} = context only.")
+    lines = [
         f"Squares: {name('starting_transaction').lower()} = provided starting transactions; {name('transaction').lower()} = subsequent hops. Starting role takes priority.",
         f"{name('event')} diamonds: events. Transaction inputs enter on the left; outputs leave on the right.",
         f"Circles: {name('seed').lower()} = selected seed outputs; {name('candidate').lower()} = reachable candidate outputs.",
         f"Circles: {name('address').lower()} = context. Optional name colors match case-insensitively; confidence never selects a color.",
         f"Color priority: selected seed {name('seed').lower()} > assigned name color > unspent {name('unspent_endpoint').lower()} > candidate {name('candidate').lower()} > context {name('address').lower()}. Shared seed addresses retain the seed color.",
         f"{name('unspent_endpoint')} circles: traced branch ends at a UTXO observed unspent. Unchecked or hop-limited outputs do not qualify.",
-        f"Arrows: thicker {name('traced_edge').lower()} = traced UTXO links; thinner {name('context_edge').lower()} = context only.",
+        arrows,
         "Optional context rectangles summarize isolated input addresses; each input remains a separate arrow. Full members stay in local exports; a summary does not imply common ownership.",
-        "Captions: vin/vout number · amount asset. ?? = not publicly available. Known amounts are in base units.",
-        "STOP TRACING: an explicit address boundary, independent of confidence. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards.",
+        "Captions: vin/vout number · amount asset. ?? = not publicly available. L-BTC amounts use whole-token units (100,000,000 base units = 1 L-BTC); other assets use base units.",
+        ("Collection stop: retained attribution only; does not limit this saved-data view. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards."
+         if all_saved_connections or limited_connections or shortest_connections else "STOP TRACING: an explicit address boundary, independent of confidence. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards."),
         "Thick red border: INPUT MERGE = distinct starting lineages meet in a transaction; shared-address receipts from distinct branches also highlight the receiving address and all participating senders. Neither proves ownership or value allocation.",
         "TX count inside circles: confirmed + mempool transactions at last lookup; ?? = unavailable. Not the number of visible arrows.",
         "Unspent refers to tracked outputs at their last check, not all funds or inactivity at that address. Arrows do not allocate stolen value.",
     ]
+    if all_saved_connections:
+        lines.append("Starter connections use all verified saved paths, including unconfirmed spends, without stop rules, attribution hop limits or a plot hop cutoff. No additional data is fetched.")
+    if shortest_connections:
+        lines.append("Starter connections show one shortest verified saved route per connected ordered pair of starting transactions. "
+                     "Distances count ordinary transaction steps; equal-length routes use a stable choice. "
+                     "Their union is not a minimum-size connecting tree. Longer alternative routes are omitted. "
+                     "Attribution stop rules and hop limits are ignored, with no plot hop cutoff. "
+                     "Saved unconfirmed spends remain eligible. No additional data is fetched.")
+    if (graph or {}).get("connections", {}).get("includes_all_starters"):
+        lines.append("All selected starting transactions remain visible, including those without a qualifying "
+                     "connection to another starter. Their local context does not establish a traced connection.")
+    if limited_connections:
+        maximum = graph["connections"]["max_hops"]
+        lines.append(f"Starter connections include paths of at most {maximum} transaction steps from each selected starter to another. "
+                     "Named groups do not reset this limit. Attribution stops and hop limits are ignored; "
+                     "verified saved unconfirmed spends remain eligible. No additional data is fetched.")
+    if ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
+            and (graph or {}).get("connections", {}).get("transaction_io") == "complete"):
+        lines.append(("Every input and output of each connecting transaction is included, including fees. "
+                      if graph.get("include_fees") else
+                      "Every input and non-fee output of each connecting transaction is included. "
+                      "Fee flows are hidden; their source evidence is retained. ") +
+                     "Thinner context arrows and unfollowed branch outputs do not establish additional starter connections.")
+    return lines
 
 
-def edge_color(role):
+def edge_color(edge):
+    """Resolve safe display color while accepting legacy role-only callers."""
+    if isinstance(edge, dict):
+        if edge.get("color") is not None:
+            return color_value(edge["color"])
+        role = edge.get("role", "")
+    else:
+        role = edge
     return COLORS["context_edge" if role.startswith("context") else "traced_edge"]
+
+
+def edge_marker_id(edge):
+    color = edge_color(edge)
+    suffix = ("context" if color == COLORS["context_edge"] else
+              "traced" if color == COLORS["traced_edge"] else color[1:])
+    return "arrow-" + suffix
 
 
 def graph_quantity(output):
     """Compact public quantity without inferring hidden assets or values."""
     value, asset = output.get("value"), output.get("asset")
+    is_lbtc = isinstance(asset, str) and asset.lower() == LBTC
     amount = "??" if value is None else str(value) + " base units"
-    name = "L-BTC" if asset == LBTC else (short(asset) if asset else "??")
+    if is_lbtc and type(value) is int:
+        # Integer arithmetic preserves every satoshi, including values larger
+        # than a floating-point number can represent exactly.
+        whole, fraction = divmod(abs(value), 100_000_000)
+        amount = ("-" if value < 0 else "") + str(whole)
+        if fraction:
+            amount += "." + f"{fraction:08d}".rstrip("0")
+    name = "L-BTC" if is_lbtc else (short(asset) if asset else "??")
     return amount + " " + name
 
 
@@ -117,9 +177,53 @@ def _unspent_endpoints(state):
                  or (isinstance(item.get("spend_observation_id"), str) and item["spend_observation_id"].strip()))}
 
 
-def build_graph(state, merge_addresses=True, include_fees=False, *, group_context_inputs=False, hub_addresses=None):
+def _reference_fields(item, enabled):
+    """Describe a reached UTXO without assigning hops to context occurrences."""
+    depth = (item or {}).get("trace_scope_depth")
+    if not enabled or type(depth) is not int or depth < 0:
+        return {}
+    return {"seed_depth": item.get("depth"), "reference_hops": depth}
+
+
+def build_graph(state, merge_addresses=True, include_fees=False, *, group_context_inputs=False, hub_addresses=None,
+                color_attribution_arrows=None, center_name=None, edge_ids=None,
+                respect_attribution_hops=True, respect_stops=True, resolve_saved_inputs=False,
+                saved_transactions=None, initial_layout=True):
+    """Build display nodes, optionally limited to exact input/output edges.
+
+    Apply a path's edge selection before shared-address aggregation so excluded
+    context cannot contribute occurrences, labels, or display priority. Original
+    transaction evidence and vin/vout indices remain intact.
+    """
+    from .investigations import validate_settings
+    if type(initial_layout) is not bool:
+        raise TraceError("Initial layout refinement must be enabled or disabled")
+    if type(respect_attribution_hops) is not bool:
+        raise TraceError("Attribution hop limits must be respected or explicitly ignored for graph lineage")
+    if type(respect_stops) is not bool:
+        raise TraceError("Stop-tracing rules must be respected or explicitly ignored for graph lineage")
+    if type(resolve_saved_inputs) is not bool:
+        raise TraceError("Saved input resolution must be enabled or disabled")
+    if saved_transactions is not None and not isinstance(saved_transactions, dict):
+        raise TraceError("Saved input evidence must be a transaction mapping")
+    # A filtered view may need metadata from an excluded funding transaction.
+    # Resolve its exact output without adding that transaction to the graph or
+    # altering the original vin data retained for CSV evidence verification.
+    from .saved_inputs import input_evidence
+    input_transactions = input_evidence(state, saved_transactions) if resolve_saved_inputs else {}
+    if edge_ids is not None:
+        edge_ids = frozenset(edge_ids)
+    if center_name is None:
+        center_name = state.get("graph_options", {}).get("center_name", "")
+    center_name = validate_settings({"center_name": center_name})["center_name"]
+    if color_attribution_arrows is None:
+        color_attribution_arrows = state.get("graph_options", {}).get("color_attribution_arrows", False)
+    if type(color_attribution_arrows) is not bool:
+        raise TraceError("Attribution arrow colors must be enabled or disabled")
     nodes, edges, fee_items = {}, [], {}
+    reference_name = state.get("hop_reference_name", "")
     occurrence_keys = defaultdict(set)
+    labels_for = LabelLookup(state["labels"])
     unspent_endpoints = _unspent_endpoints(state)
     starting_transactions = {seed.rsplit(":", 1)[0] for seed in state["seeds"]}
     ranks, cycle_groups = transaction_ranks(state["transactions"])
@@ -139,14 +243,15 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
         addr = output.get("scriptpubkey_address")
         kind = output_kind(output)
         tracked = state["outputs"].get(key) if network == "liquid" else None
-        matches = match_labels(state["labels"], key, output) if network == "liquid" else []
+        reference = _reference_fields(tracked, reference_name and kind != "fee")
+        matches = labels_for(key, output) if network == "liquid" else []
         if kind != "spendable":
             label = "PEG-OUT REQUEST" if kind == "pegout" else ("FEE" if kind == "fee" else "UNSPENDABLE")
             peg = output.get("pegout") or {}
             destination = peg.get("scriptpubkey_address")
             label += "\n" + (short_address(destination) if destination else "vout " + key.rsplit(":", 1)[-1])
             return add_node("event:" + key, "event", label, column,
-                            {"outpoint": key, "output": output, "trace": tracked})
+                            {"outpoint": key, "output": output, "trace": tracked, **reference})
         # Display identity is independent of the UTXO evidence. Never deduplicate
         # by a shortened label, and never collapse unknown addresses together.
         # Network separation is explicit; the enclosing namespace fixes source.
@@ -172,7 +277,8 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
         # attributed output. Its role and label must not depend on visit order.
         if _ADDRESS_PRIORITY[role] >= _ADDRESS_PRIORITY[node.get("role", "address")]:
             node["role"], node["color"] = role, COLORS[role]
-        occurrence = {"outpoint": key, "output": public_fields(output), "trace": tracked, "labels": matches}
+        occurrence = {"outpoint": key, "output": public_fields(output), "trace": tracked, "labels": matches,
+                      **reference}
         fingerprint = canonical(occurrence)
         if fingerprint not in occurrence_keys[node_id]:
             occurrence_keys[node_id].add(fingerprint)
@@ -183,15 +289,32 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
         tx = record["data"]
         column = 2 * ranks[txid] + 1
         role = "starting_transaction" if txid in starting_transactions else "transaction"
+        details = {"transaction": tx, "observation_id": record["observation_id"]}
+        hop_label = "hop " + str(record["depth"])
+        if reference_name:
+            details["seed_depth"] = record["depth"]
+            reference_hops = record.get("reference_hops")
+            if type(reference_hops) is int and reference_hops >= 0:
+                details["reference_hops"] = reference_hops
+                hop_label = "hop " + str(reference_hops)
+            else:
+                # A retained boundary transaction may have no reachable output.
+                # Its seed distance would misstate this selected hop measure.
+                hop_label = "Boundary inspection"
         txnode = add_node("tx:" + txid, "transaction",
-                          "TX\n" + short(txid) + "\n" + transaction_date(tx) + "\nhop " + str(record["depth"]),
-                          column, {"transaction": tx, "observation_id": record["observation_id"]},
+                          "TX\n" + short(txid) + "\n" + transaction_date(tx) + "\n" + hop_label,
+                          column, details,
                           None if simulated else explorer + "/tx/" + txid, COLORS[role])
         nodes[txnode]["role"] = role
         for index, vin in enumerate(tx["vin"]):
+            if edge_ids is not None and f"in:{txid}:{index}" not in edge_ids:
+                continue
             key = f"{vin.get('txid', txid)}:{vin.get('vout', index)}"
             network = "bitcoin" if vin.get("is_pegin") else "liquid"
             prevout = vin.get("prevout") or {}
+            if resolve_saved_inputs:
+                from .saved_inputs import saved_input_output
+                prevout = saved_input_output(input_transactions, vin)
             if vin.get("is_coinbase"):
                 input_node = add_node("coinbase:" + txid + ":" + str(index), "event", "COINBASE", column - 1, vin)
             else:
@@ -204,6 +327,8 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
                           "details": {"vin": vin, "validated_trace_link": link if traced else None}})
         for index, output in enumerate(tx["vout"]):
             key = f"{txid}:{index}"
+            if edge_ids is not None and "out:" + key not in edge_ids:
+                continue
             if output_kind(output) == "fee":
                 fee_items["event:" + key] = {"endpoint": "shapes", "txid": txid, "vout": index}
                 fee_items["out:" + key] = {"endpoint": "connectors", "source": txnode, "target": "event:" + key}
@@ -215,7 +340,8 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
             role = "seed_output" if key in state["seeds"] else ("candidate_output" if key in state["outputs"] else "context_output")
             edges.append({"id": "out:" + key, "source": txnode, "target": output_node,
                           "role": role, "outpoint": key, "label": "vout " + str(index),
-                          "quantity": graph_quantity(output), "details": public_fields(output)})
+                          "quantity": graph_quantity(output), "details": {**public_fields(output),
+                              **_reference_fields(state["outputs"].get(key), reference_name and output_kind(output) != "fee")}})
 
     # Aggregate shared labels once, not once for each input/output occurrence.
     # A highly reused service address must not make rendering quadratic.
@@ -231,9 +357,9 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
         parts = names + [node["label"]]
         limits = sorted({m["hop_limit"] for m in records if m.get("hop_limit") is not None})
         if limits and not any(m.get("stop") is True for m in records):
-            parts.append("Hop limit: " + str(min(limits)))
+            parts.append(("Hop limit: " if respect_attribution_hops else "Display hop limit: ") + str(min(limits)))
         if any(m.get("stop") is True for m in records):
-            parts.append("STOP TRACING")
+            parts.append("STOP TRACING" if respect_stops else "Collection stop (not applied here)")
         node["attribution_reference"] = attribution_reference(node["id"])
         parts.append(node["attribution_reference"])
         node["label"] = "\n".join(parts)
@@ -249,9 +375,14 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
     name_colors = state.get("service_controls", {}).get("name_colors", {})
     apply_name_colors(nodes.values(), name_colors,
                       role_colors=state.get("service_controls", {}).get("role_colors", {}))
+    if color_attribution_arrows:
+        apply_attribution_arrow_colors(nodes, edges)
     for node in nodes.values():
         node["text_color"] = color_text(node["color"])
-    layout = arrange(nodes, edges, state["transactions"], fee_items)
+    # Group summaries retain original member geometry in their details. Keep
+    # those historical records stable for semantic preview fingerprints.
+    layout = arrange(nodes, edges, state["transactions"], fee_items,
+                     refine=initial_layout or group_context_inputs)
     layout["cycle_groups"] = cycle_groups
     mode = "merged" if merge_addresses else "outpoint_occurrences"
     graph = {"schema_version": 2, "presentation_version": PRESENTATION_VERSION,
@@ -262,7 +393,9 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
             "address_mode": mode,
             "connector_attachment": "transaction_sides_v1",
             "include_fees": bool(include_fees),
-            "graph_options": {"include_fees": bool(include_fees)},
+            "graph_options": {"include_fees": bool(include_fees),
+                              "color_attribution_arrows": color_attribution_arrows,
+                              "center_name": center_name},
             "fee_items": fee_items, "layout": layout,
             "notice": "UTXO reachability, not allocation of stolen value. Consult the legend for context and traced roles. "
                       "?? marks amounts or assets not available from public data. "
@@ -270,6 +403,11 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
                        "shared addresses do not establish value allocation or common ownership."
                        if merge_addresses else "Legacy view: separate outpoint occurrences."),
             "nodes": list(nodes.values()), "edges": edges}
+    if resolve_saved_inputs:
+        graph["graph_options"]["resolve_saved_inputs"] = True
+    if reference_name:
+        graph["hop_reference_name"] = reference_name
+        graph["run"]["hop_reference_name"] = reference_name
     if "service_controls" in state:
         # A refreshed preview may use current investigator designations over an
         # older archived run. Record that presentation snapshot independently.
@@ -280,12 +418,12 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
         node["starting_transaction_index"] = entry["index"]
         node["label"] = node["label"].replace("TX\n", f"Starting TX {entry['index']}\n", 1)
     from .convergence import annotate_branch_interactions
-    annotate_branch_interactions(graph, state)
+    annotate_branch_interactions(graph, state, respect_attribution_hops=respect_attribution_hops,
+                                 respect_stops=respect_stops)
     from .address_counts import annotate
     annotate(graph, state)
     from .change_layout import annotate_changes
     annotate_changes(graph, state)
-    from .investigations import validate_settings
     selected_hubs = validate_settings({"hub_addresses": [] if hub_addresses is None else hub_addresses})["hub_addresses"]
     if selected_hubs:
         graph["graph_options"]["hub_addresses"] = selected_hubs
@@ -392,8 +530,11 @@ def _svg_edge_route(start, end):
 
 
 def svg_graph(graph):
+    from .context_connectors import display_graph
+    graph = display_graph(graph)
     import textwrap
     from .connector_styles import stroke_width
+    from .legend import legend_rows, legend_notes
 
     lookup = {n["id"]: n for n in graph["nodes"]}
     routes = [(edge, _svg_edge_route(lookup[edge["source"]], lookup[edge["target"]]))
@@ -405,26 +546,52 @@ def svg_graph(graph):
     bounds += [point for _, (_, _, points) in routes for point in points]
     min_x = min(0, min((x for x, _ in bounds), default=0) - 30)
     width = max(1100, max((x for x, _ in bounds), default=500) + 80) - min_x
-    # The legend must fit a small export as well as a full investigation.
-    # Wrapping it cannot alter graph geometry or hide the complete text.
-    legend_chars = max(20, min(140, int((min_x + width - 80) / 8)))
-    legend = [part for line in legend_lines(graph) for part in textwrap.wrap(line, legend_chars)]
-    header_top = min((y for _, y in bounds), default=160) - max(170, 24 + len(legend) * 18 + 30)
+    # Keep a compact, readable key even when the investigation spans miles of
+    # canvas. Wrapping names and definitions never changes evidence geometry.
+    legend_width = min(1060, min_x + width - 80)
+    column_width = legend_width / 2
+    row_chars = max(20, int((column_width - 60) / 8))
+    legend = []
+    column_heights = [0, 0]
+    for index, row in enumerate(legend_rows(graph)):
+        column = index % 2
+        labels = textwrap.wrap(row["label"], row_chars) or [""]
+        definitions = textwrap.wrap(row["description"], row_chars) or [""]
+        legend.append((row, column, column_heights[column], labels, definitions))
+        column_heights[column] += (len(labels) + len(definitions)) * 18 + 14
+    notes = [part for note in legend_notes(graph)
+             for part in textwrap.wrap(note, max(20, int(legend_width / 8)))]
+    notes_top = 42 + max(column_heights) + 8
+    header_top = min((y for _, y in bounds), default=160) - (notes_top + len(notes) * 18 + 40)
     min_y = min(0, header_top - 30)
     height = max((y for _, y in bounds), default=300) + 50 - min_y
+    markers = {edge_marker_id(edge): edge_color(edge) for edge in graph["edges"]}
+    marker_defs = "".join(f'<marker id="{key}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="{color}"/></marker>'
+                          for key, color in sorted(markers.items()))
     chunks = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{min_x} {min_y} {width} {height}" width="{width}" height="{height}">',
-        '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/></marker></defs>',
+        '<defs>' + marker_defs + '</defs>',
         f'<rect x="{min_x}" y="{min_y}" width="{width}" height="{height}" fill="#fff"/>',
         '<g font-family="Arial, sans-serif">',
         f'<text x="40" y="{header_top}" font-size="24" font-weight="bold">Liquid UTXO trace' + (' · SYNTHETIC DATA' if graph["simulated"] else '') + '</text>']
-    chunks.extend(f'<text x="40" y="{header_top + 24 + index * 18}" font-size="13">{html.escape(line)}</text>'
-                  for index, line in enumerate(legend))
+    for row, column, offset, labels, definitions in legend:
+        x, y = 40 + column * column_width, header_top + 42 + offset
+        chunks.append(f'<g class="legend-row" data-legend-key="{html.escape(row["key"], quote=True)}">'
+                      f'<circle cx="{x + 10}" cy="{y - 5}" r="10" fill="{row["color"]}" stroke="#64748b"/>')
+        for index, line in enumerate(labels + definitions):
+            weight = ' font-weight="bold"' if index < len(labels) else ''
+            chunks.append(f'<text x="{x + 30}" y="{y + index * 18}" font-size="13"{weight}>{html.escape(line)}</text>')
+        chunks.append('</g>')
+    chunks.extend(f'<text class="legend-note" x="40" y="{header_top + notes_top + index * 18}" font-size="13" fill="#475569">{html.escape(line)}</text>'
+                  for index, line in enumerate(notes))
     for edge, (path, (label_x, label_y), _) in routes:
         context = edge["role"].startswith("context")
-        color = edge_color(edge["role"])
-        chunks.append(f'<g class="edge {"context" if context else "tracked"}" data-edge-key="{html.escape(edge["id"], quote=True)}"><title>{html.escape(edge["outpoint"] + " | " + edge["quantity"])}</title>'
-            f'<path d="{path}" fill="none" stroke="{color}" stroke-width="{stroke_width(edge["role"])}" marker-end="url(#arrow)"/>'
-            f'<text x="{label_x}" y="{label_y-10}" text-anchor="middle" font-size="11" fill="{color}">{html.escape(edge["label"])}</text></g>')
+        color = edge_color(edge)
+        caption = (f'<text x="{label_x}" y="{label_y-10}" text-anchor="middle" font-size="11" fill="{color}">{html.escape(edge["label"])}</text>'
+                   if caption_text(edge) else '')
+        title = " | ".join(value for value in (edge["label"], edge.get("outpoint"), edge["quantity"]) if value)
+        chunks.append(f'<g class="edge {"context" if context else "tracked"}" data-edge-key="{html.escape(edge["id"], quote=True)}"><title>{html.escape(title)}</title>'
+            f'<path d="{path}" fill="none" stroke="{color}" stroke-width="{stroke_width(edge["role"])}" marker-end="url(#{edge_marker_id(edge)})"/>'
+            f'{caption}</g>')
     for node in graph["nodes"]:
         x, y, fill = node["x"], node["y"], node["color"]
         node_width, node_height = node["width"], node["height"]
@@ -493,18 +660,27 @@ def export_run(store, state, destination, merge_addresses=True, offline_preview=
         "miro_board": state.get("investigation", {}).get("miro_board"),
         "note": "Board selection recorded at trace time. Subsequent publication details are in the case's miro/reports directory.",
     })
-    graph = build_graph(state, merge_addresses, state.get("graph_options", {}).get("include_fees", False))
+    from .plot_scope import project_collected_full_scope
+    display_state = project_collected_full_scope(state)
+    graph = build_graph(display_state, merge_addresses, state.get("graph_options", {}).get("include_fees", False))
     save_json(destination / "graph.json", graph)
     if offline_preview:
         svg = svg_graph(graph)
         (destination / "graph.svg").write_text(svg, encoding="utf-8")
         (destination / "graph.html").write_text(html_graph(graph, svg), encoding="utf-8")
     from .transaction_csv import write_transaction_csv
-    write_transaction_csv(destination / "transactions.csv", graph, state)
+    # Full-run accounting includes every collected transaction, independently
+    # of the narrower graph's attribution display limits.
+    same_scope = (display_state is state or all(display_state[key].keys() == state[key].keys()
+                                                for key in ("transactions", "outputs", "links")))
+    accounting_graph = (graph if same_scope else
+                        build_graph(state, merge_addresses, state.get("graph_options", {}).get("include_fees", False)))
+    write_transaction_csv(destination / "transactions.csv", accounting_graph, state)
     write_csv(destination / "nodes.csv", node_csv_rows(graph), NODE_CSV_FIELDS)
     write_csv(destination / "edges.csv", graph["edges"],
         ["id", "source", "target", "role", "outpoint", "label", "quantity", "details"])
     rows, events, inputs = [], [], []
+    reference_name = state.get("hop_reference_name", "")
     for txid, record in state["transactions"].items():
         tx = record["data"]
         for index, output in enumerate(tx["vout"]):
@@ -513,6 +689,7 @@ def export_run(store, state, destination, merge_addresses=True, offline_preview=
             rows.append({"outpoint": key, "txid": txid, "vout": index,
                          "depth": item.get("depth"), "trace_status": item.get("status", "context_only"),
                          "kind": output_kind(output), **public_fields(output),
+                         **_reference_fields(item, reference_name and output_kind(output) != "fee"),
                          "observation_id": record["observation_id"], "labels": match_labels(state["labels"], key, output)})
             if output_kind(output) != "spendable":
                 events.append({"txid": txid, "index": index, "kind": output_kind(output), "data": output,
@@ -526,14 +703,17 @@ def export_run(store, state, destination, merge_addresses=True, offline_preview=
                     events.append({"txid": txid, "index": index, "kind": kind, "data": vin,
                                    "observation_id": record["observation_id"]})
     write_csv(destination / "outputs.csv", rows, ["outpoint", "txid", "vout", "depth", "trace_status", "kind",
-        "scriptpubkey_address", "scriptpubkey", "scriptpubkey_type", "value", "valuecommitment", "asset", "assetcommitment", "pegout", "labels", "observation_id"])
+        "scriptpubkey_address", "scriptpubkey", "scriptpubkey_type", "value", "valuecommitment", "asset", "assetcommitment", "pegout", "labels", "observation_id"]
+        + (["reference_hops"] if reference_name else []))
     write_csv(destination / "inputs.csv", inputs, ["txid", "vin", "previous_txid", "previous_vout", "is_pegin", "is_coinbase",
         "scriptpubkey_address", "scriptpubkey", "value", "valuecommitment", "asset", "assetcommitment", "observation_id"])
     write_csv(destination / "spends.csv", state["links"].values(), ["outpoint", "spending_txid", "vin", "hop", "relationship", "observation_id", "spending_tx_observation_id"])
     write_csv(destination / "events.csv", events, ["txid", "index", "kind", "data", "observation_id"])
     frontier = [item for item in state["outputs"].values() if item["status"] not in TERMINAL]
     save_json(destination / "frontier.json", frontier)
-    write_csv(destination / "frontier.csv", frontier, ["outpoint", "depth", "status", "labels", "spend_observation_id", "observed_spend"])
+    frontier_rows = [{**item, **_reference_fields(item, reference_name)} for item in frontier] if reference_name else frontier
+    write_csv(destination / "frontier.csv", frontier_rows, ["outpoint", "depth", "status", "labels", "spend_observation_id", "observed_spend"]
+        + (["reference_hops"] if reference_name else []))
     evidence = destination / "evidence"
     evidence.mkdir(exist_ok=True)
     metadata = []

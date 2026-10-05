@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from liquid_tracer.address_counts import (addresses, ensure_counts, _transaction_counts,
-    count_credentials_required, public_count_report)
+    count_credentials_required, public_count_report, fetch_counts)
 from liquid_tracer.api import Esplora, ENTERPRISE
 from liquid_tracer.cli import (main, saved_graph, layout_preview_run, mermaid_run,
     compact_preview_run, sync_run, verify_export, csv_run)
@@ -122,17 +122,25 @@ class AutomaticCountsTests(unittest.TestCase):
             self.assertTrue(labels); self.assertFalse(any("??" in text for text in labels))
         self.assertEqual(before, self.snapshot())
 
-    def test_starter_connections_fetches_only_addresses_in_its_selected_view(self):
+    def test_starter_connections_uses_saved_counts_without_fetching(self):
         self.trace(legacy=True)
-        result = preview_connections(self.case, max_hops=1)
+        fetch_counts(self.case)
+        with patch.object(Esplora, "get", side_effect=AssertionError("Saved connections are offline")):
+            result = preview_connections(self.case, max_hops=1)
         graph, _ = reviewed_connections(self.case, result["preview_id"])
         self.check_counts(graph)
         visible = {n["details"]["address"] for n in graph["nodes"] if n["kind"] == "address"}
-        self.assertEqual(set(read_json(self.case/"address-counts.json")["counts"]), visible)
-        self.assertEqual(result["address_counts"]["total"], len(visible))
-        with patch.object(Esplora, "get", side_effect=AssertionError("Empty chart is offline")):
-            result = preview_connections(self.case, max_hops=0)
+        self.assertTrue(visible.issubset(read_json(self.case/"address-counts.json")["counts"]))
         self.assertIsNone(result["address_counts"])
+        with patch.object(Esplora, "get", side_effect=AssertionError("Saved connections are offline")):
+            again = preview_connections(self.case, max_hops=0)
+        self.assertIsNone(again["address_counts"])
+        # New connection previews search all saved evidence, including when a
+        # legacy caller supplies zero as the old per-preview hop limit.
+        again_graph, _ = reviewed_connections(self.case, again["preview_id"])
+        self.assertEqual({node["id"] for node in graph["nodes"]},
+                         {node["id"] for node in again_graph["nodes"]})
+        self.check_counts(again_graph)
 
     def test_read_only_and_csv_and_miro_dry_run_do_not_fetch(self):
         self.trace(legacy=True)
@@ -143,7 +151,8 @@ class AutomaticCountsTests(unittest.TestCase):
 
     def test_budget_exhaustion_reports_missing_and_next_chart_resumes_automatically(self):
         self.trace(legacy=True)
-        update_case(self.case, {"run_defaults": {**read_case(self.case)["run_defaults"], "max_requests": 2}})
+        update_case(self.case, {"run_defaults": {**read_case(self.case)["run_defaults"], "max_requests": 2,
+                                                   "budget_limits_enabled": True}})
         result = layout_preview_run(self.case)
         report = result["address_counts"]
         self.assertEqual(report["fetched"], 2)
@@ -208,6 +217,16 @@ class StatisticsFailureTests(unittest.TestCase):
         report.update(stop_reason="secret-token", errors=[{"address":"private", "reason":"secret"}], notice="secret")
         cleaned = public_count_report(report)
         self.assertNotIn("secret", json.dumps(cleaned)); self.assertNotIn("private", json.dumps(cleaned))
+        report.update(concurrency_mode="auto", peak_workers=32, worker_limit=64, elapsed_seconds=12.5, observed_rps=49.0)
+        cleaned = public_count_report(report)
+        self.assertEqual({key: cleaned[key] for key in ("concurrency_mode", "peak_workers", "worker_limit",
+            "elapsed_seconds", "observed_rps")}, {"concurrency_mode": "auto", "peak_workers": 32,
+            "worker_limit": 64, "elapsed_seconds": 12.5, "observed_rps": 49.0})
+        report.update(concurrency_mode="secret-token", peak_workers=True, worker_limit=65,
+                      elapsed_seconds=float("inf"), observed_rps=float("nan"))
+        cleaned = public_count_report(report)
+        self.assertFalse(any(key in cleaned for key in ("concurrency_mode", "peak_workers", "worker_limit",
+            "elapsed_seconds", "observed_rps")))
 
 
 class CountJobRoutesTests(unittest.TestCase):

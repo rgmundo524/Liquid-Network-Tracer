@@ -53,6 +53,31 @@ class BoardRebuildTests(unittest.TestCase):
     def rebuild(self, **options):
         return rebuild_board(self.case, source_board="old_board=", transport=self.remote, **options)
 
+    def test_deleted_rebuild_target_is_not_relinked_from_complete_receipt(self):
+        from liquid_tracer.board_deletion import delete_board
+        from liquid_tracer.investigation_boards import list_boards
+
+        result = self.rebuild()
+        record = next(item for item in list_boards(self.case) if item["board_id"] == result["board_id"])
+        delete_board(self.case, record["id"], result["board_id"], transport=Mock(return_value=(204, {}, b"")))
+        update_case(self.case, {"miro_board": "old_board="})
+        with self.assertRaisesRegex(TraceError, "deleted"):
+            self.rebuild()
+        self.assertEqual(read_case(self.case)["miro_board"], "old_board=")
+        self.assertEqual(self.remote.call_count, 1)
+
+    def test_uncertain_source_deletion_blocks_rebuild_before_layout(self):
+        from liquid_tracer.board_deletion import delete_board
+        from liquid_tracer.investigation_boards import list_boards
+
+        record = next(item for item in list_boards(self.case) if item["board_id"] == "old_board=")
+        with self.assertRaisesRegex(TraceError, "did not confirm"):
+            delete_board(self.case, record["id"], "old_board=", transport=Mock(return_value=(404, {}, b"")))
+        with self.assertRaisesRegex(TraceError, "did not confirm"):
+            self.rebuild()
+        self.remote.assert_not_called()
+        self.refresh.assert_not_called()
+
     def test_cli_dispatch_pins_source_and_one_off_budget(self):
         with patch("liquid_tracer.cli.rebuild_board", return_value={"board_id": "new_board="}) as call, \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -92,6 +117,32 @@ class BoardRebuildTests(unittest.TestCase):
                     self.rebuild()
         self.refresh.assert_not_called()
         self.remote.assert_not_called()
+
+    def test_rebuild_uses_current_attribution_arrow_preference(self):
+        update_case(self.case, {"run_defaults": {"color_attribution_arrows": True}})
+        self.rebuild()
+        self.assertTrue(self.refresh.call_args.kwargs["color_attribution_arrows"])
+
+    def test_unlimited_default_rebuild_preflights_large_plan_and_positive_budget_rejects_before_create(self):
+        from liquid_tracer.miro import make_plan, sync
+        from tests.test_unlimited_miro_items import large_graph
+
+        value = large_graph(read_case(self.case)["case_id"])
+        value["run_id"] = self.run
+        value["namespace"] = self.plan["namespace"]
+        self.refresh.return_value = make_plan(value)
+        def checked(*args, **kwargs):
+            if kwargs.get("dry_run"):
+                return sync(*args, **kwargs)
+            return {"created": len(args[0]["shapes"])}
+        self.sync.side_effect = checked
+        with self.assertRaisesRegex(TraceError, "above max-items=750"):
+            self.rebuild(max_new_items=750)
+        self.remote.assert_not_called()
+        result = self.rebuild()
+        self.assertTrue(result["created"])
+        self.assertGreater(len(self.sync.call_args.args[0]["shapes"]), 750)
+        self.assertEqual(self.sync.call_args.kwargs["max_items"], 0)
 
     def test_missing_token_invalid_options_and_stale_source_never_create(self):
         with patch.dict(os.environ, {}, clear=True), self.assertRaisesRegex(TraceError, "MIRO_ACCESS_TOKEN"):

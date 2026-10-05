@@ -20,10 +20,13 @@ from .branch_layout import BRANCH_LAYOUT_VERSION
 from .layout_search import LAYOUT_SEARCH_VERSION, layout_seeds, normalize_layout_attempts
 from .layout_search_reporting import public_search_counts
 from .render_runtime import RENDERER_FAILURE_CODES
+from .trace_layout import TRACE_LAYOUT_VERSION
 
 _NODE_GEOMETRY = frozenset({"x", "y"})
 _EDGE_GEOMETRY = frozenset({"attachment", "route", "connector_shape", "routing_exception", "label_layout"})
 _FILES = ("graph.json", "layout-report.json", "graph.svg", "graph.html")
+_SECTION_SEARCH_FIELDS = frozenset({"section_layout_version", "section_count", "section_worker_count",
+                                    "max_section_nodes", "max_worker_ports"})
 
 
 def _fingerprint(graph):
@@ -33,6 +36,10 @@ def _fingerprint(graph):
                 if key not in {"nodes", "edges", "layout", "connector_attachment", "graph_options"}}
     metadata["graph_options"] = {key: value for key, value in graph.get("graph_options", {}).items()
                                  if key not in {"connector_style", "layout_attempts"}}
+    if "context_connectors" in metadata:
+        metadata["context_connectors"] = {**metadata["context_connectors"], "summaries": [
+            {key: value for key, value in edge.items() if key not in _EDGE_GEOMETRY}
+            for edge in metadata["context_connectors"].get("summaries", [])]}
     result.update(canonical(metadata))
     for field, excluded in (("nodes", _NODE_GEOMETRY), ("edges", _EDGE_GEOMETRY)):
         result.update(b"\0" + field.encode() + b"\0")
@@ -73,9 +80,27 @@ def _complete_search(search, metrics, attempts):
     # the current machine to have the same CPU count or memory allowance.
     workers = search.get("worker_count", 1)
     retries = search.get("memory_retry_count", 0)
-    if (type(workers) is not int or not 1 <= workers <= min(64, attempts)
-            or type(retries) is not int or not 0 <= retries <= attempts
-            or (search["execution"] == "sequential" and (workers != 1 or retries != 0))
+    sectioned = bool(_SECTION_SEARCH_FIELDS & search.keys())
+    if sectioned:
+        from .trace_sections import SECTION_LAYOUT_VERSION
+        # A seed is a full assembled layout. Its independent section jobs can
+        # outnumber seeds, and each section may retry once after memory pressure.
+        # Validate these fields as a unit: partial/newer metadata is not proof
+        # that a completed bounded search can be reused by this implementation.
+        if (any(type(search.get(key)) is not int for key in _SECTION_SEARCH_FIELDS)
+                or search["section_layout_version"] != SECTION_LAYOUT_VERSION
+                or not 1 <= search["section_count"]
+                or not 0 <= search["section_worker_count"] <= search["section_count"]
+                or not 1 <= search["max_section_nodes"] <= 128
+                or not 0 <= search["max_worker_ports"] <= 1024):
+            return False
+        worker_limit = max(1, search["section_worker_count"])
+        retry_limit = attempts * search["section_worker_count"]
+    else:
+        worker_limit, retry_limit = attempts, attempts
+    if (type(workers) is not int or not 1 <= workers <= min(64, worker_limit)
+            or type(retries) is not int or not 0 <= retries <= retry_limit
+            or (search["execution"] == "sequential" and (workers != 1 or (retries != 0 and not sectioned)))
             or (search["execution"] == "parallel" and workers < 2)):
         return False
     if "peak_rss_mb" in search and (type(search["peak_rss_mb"]) is not int
@@ -119,6 +144,7 @@ def reusable_elk_preview(graph, directory, connector_style="straight", progress=
     Invalid/incomplete optional previews are ignored, not used as a fallback
     layout. The caller runs the selected ELK engine normally when none matches.
     """
+    from .context_connectors import display_graph
     attempts = normalize_layout_attempts(
         graph.get("graph_options", {}).get("layout_attempts") if layout_attempts is None else layout_attempts)
     expected_search = {"version": LAYOUT_SEARCH_VERSION, "attempt_count": attempts,
@@ -149,6 +175,14 @@ def reusable_elk_preview(graph, directory, connector_style="straight", progress=
             saved = read_json(path / "graph.json")
             layout = saved.get("layout", {})
             search = layout.get("search", {})
+            trace = graph.get("graph_options", {}).get("layout_style") == "trace"
+            sectioned = bool(_SECTION_SEARCH_FIELDS & search.keys())
+            if (trace and (layout.get("trace_layout", {}).get("version") != TRACE_LAYOUT_VERSION
+                           or layout.get("trace_layout", {}).get("enabled") is not True)):
+                continue
+            if sectioned and (not trace or type(search.get("section_count")) is not int
+                              or not 1 <= search["section_count"] <= len(saved["nodes"])):
+                continue
             if (layout.get("algorithm") != ALGORITHM or layout.get("version") != ELK_VERSION
                     or layout.get("edge_labels", {}).get("version") != LABEL_LAYOUT_VERSION
                     or layout.get("input_order", {}).get("version") != INPUT_ORDER_VERSION
@@ -162,10 +196,18 @@ def reusable_elk_preview(graph, directory, connector_style="straight", progress=
                     or saved.get("graph_options", {}).get("layout_attempts") != attempts
                     or _fingerprint(saved) != expected):
                 continue
+            # Older curved previews forced routing exceptions to elbowed pipes.
+            # Recalculate those layouts without invalidating other appearances.
+            displayed = display_graph(saved)
+            if connector_style == "curved" and any(edge.get("connector_shape") != "curved"
+                                                   for edge in displayed["edges"]):
+                continue
             report = read_json(path / "layout-report.json")
             if (report.get("run_id") != run_id or report.get("layout") != layout
                     or report.get("node_count") != len(saved["nodes"])
-                    or report.get("edge_count") != len(saved["edges"])):
+                    or report.get("edge_count") != len(saved["edges"])
+                    or (saved.get("context_connectors")
+                        and report.get("display_edge_count") != len(displayed["edges"]))):
                 continue
             _validate_graph(saved, connector_style)
             _geometry(saved)

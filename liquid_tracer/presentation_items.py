@@ -1,4 +1,4 @@
-"""Retirement and historical compatibility for former Miro cards and badges.
+"""Miro legend pages and historical compatibility for former cards and badges.
 
 These objects never enter ELK, UTXO traversal or activity connectivity. Logical
 identities and dedicated proofs let sync retire only its own obsolete items.
@@ -12,7 +12,9 @@ BADGE_SIZE = 24.0
 
 
 def proof(kind, host, page=0):
-    if kind not in ("convergence", "attribution", "address_count") or not isinstance(host, str) or not host or type(page) is not int or page < 0:
+    if (kind not in ("convergence", "attribution", "address_count", "legend")
+            or not isinstance(host, str) or not host or type(page) is not int or page < 0
+            or kind == "legend" and (host != "legend" or page < 1)):
         raise TraceError("Invalid presentation annotation identity")
     key = PREFIX + kind + ":" + digest((host + ":" + str(page)).encode())
     return {"schema_version": 1, "key": key, "kind": kind, "host": host, "page": page}
@@ -73,6 +75,9 @@ def validate_items(plan):
                 if any(not math.isclose(float(body["position"][axis]), value, abs_tol=1e-7)
                        for axis, value in zip(("x", "y"), expected)):
                     raise ValueError
+            if item["kind"] == "legend":
+                if shapes["legend"]["body"]["data"]["shape"] != "rectangle":
+                    raise ValueError
         except (KeyError, TypeError, ValueError):
             raise TraceError("Invalid presentation annotation proof") from None
     if any(e[side] in catalog for e in plan["connectors"] for side in ("source", "target")):
@@ -105,12 +110,16 @@ def place_badges(plan, state, remote, removed, reorganize, placement):
     if not catalog and not old_items:
         return placement(plan, state, remote, removed, reorganize)
     ordinary = {**plan, "shapes": [item for item in plan["shapes"] if item["key"] not in catalog]}
-    plain_state = {**state, "items": {key: item for key, item in state["items"].items() if key not in old_items}}
+    fixed_pages = {key for key, item in state["items"].items()
+                   if not reorganize and key not in removed
+                   and (item.get("presentation_proof") or {}).get("kind") == "legend"}
+    plain_state = {**state, "items": {key: item for key, item in state["items"].items()
+                                     if key not in old_items or key in fixed_pages}}
     positions, shift = placement(ordinary, plain_state, remote, removed, reorganize)
     shapes = {item["key"]: item["body"] for item in plan["shapes"]}
     # The register is a generated annotation column, not part of the ELK graph.
     # Refit it around actual managed graph positions, including moved hosts.
-    boxes = []
+    boxes, occupied = [], []
     for key in (set(shapes) | set(remote)) - catalog.keys() - old_items - set(removed):
         if key in remote and state["items"].get(key, {}).get("endpoint") != "shapes":
             continue
@@ -121,8 +130,17 @@ def place_badges(plan, state, remote, removed, reorganize, placement):
         x, y, w, h = _bounds(body, key)
         x, y = positions.get(key, (x, y))
         boxes.append((x + w / 2, y - h / 2))
+        occupied.append((x, y, w, h))
+    # Ordinary sync preserves an analyst's placement of existing legend pages.
+    # Reserve those positions before placing any newly needed overflow page.
+    if not reorganize:
+        for key, item in catalog.items():
+            if item["kind"] == "legend" and key in remote and key not in removed:
+                from .miro import _bounds
+                occupied.append(_bounds(remote[key], key))
     right = max((box[0] for box in boxes), default=200)
     top = min((box[1] for box in boxes), default=0)
+    legend_right = -math.inf
     for key in sorted(catalog, key=lambda key: (catalog[key]["kind"], catalog[key]["host"], catalog[key]["page"])):
         item = catalog[key]
         host = item["host"]
@@ -134,6 +152,34 @@ def place_badges(plan, state, remote, removed, reorganize, placement):
         elif item["kind"] == "address_count":
             from .address_counts import position
             positions[key] = position(remote.get(host, shapes[host]), positions.get(host))
+        elif item["kind"] == "legend":
+            from .miro import _bounds, _overlap
+            if key in remote and not reorganize:
+                x, y, width, height = _bounds(remote[key], key)
+                positions[key] = (x, y)
+                legend_right = max(legend_right, x + width / 2)
+                continue
+            host_body = remote.get(host, shapes[host])
+            host_geometry = {**host_body["geometry"], **note_geometry(shapes[host], remote.get(host))}
+            hx, hy, hw, hh = _bounds({**host_body, "geometry": host_geometry}, host)
+            hx, hy = positions.get(host, (hx, hy))
+            page_body = remote.get(key, shapes[key])
+            page_geometry = {**page_body["geometry"], **note_geometry(shapes[key], remote.get(key))}
+            _, _, width, height = _bounds({**page_body, "geometry": page_geometry}, key)
+            from .legend_miro import PAGE_GAP
+            x = max(hx + hw / 2, legend_right) + PAGE_GAP + width / 2
+            y = hy + hh / 2 - height / 2
+            # Use actual dimensions when reorganizing: an enlarged primary or
+            # overflow page must not overlap its neighbor at the old spacing.
+            # Other managed shapes may also have moved into the legend row.
+            for _ in range(len(occupied) + 1):
+                hits = [box for box in occupied if _overlap((x, y, width, height), box)]
+                if not hits:
+                    break
+                x = max(box[0] + box[2] / 2 + PAGE_GAP + width / 2 for box in hits)
+            positions[key] = (x, y)
+            legend_right = x + width / 2
+            occupied.append((*positions[key], width, height))
         else:
             geometry = note_geometry(shapes[key], remote.get(key))
             from .miro import _bounds

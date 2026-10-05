@@ -129,10 +129,24 @@ class InputExportWebTests(unittest.TestCase):
         self.assertEqual(self.snapshot(case), before)
 
     def test_download_is_available_while_a_worker_is_running(self):
-        _, route = self.prepare()
-        with patch.object(self.server, "ensure_idle", side_effect=AssertionError("Read-only download")), \
-                patch.object(self.server, "start_job", side_effect=AssertionError("No worker")):
-            self.assertEqual(self.request(route + "all")[0], 200)
+        case, route = self.prepare()
+        self.populate(case)
+        before = self.snapshot(case)
+        job = test_web.synthetic_running_job(route.split('/')[3])
+        self.server.jobs[job['id']] = job
+        try:
+            with patch.object(self.server, "ensure_case_idle", side_effect=AssertionError("Read-only download")), \
+                    patch.object(self.server, "start_job", side_effect=AssertionError("No worker")):
+                code, data, _ = self.request(route + "all")
+                self.assertEqual(code, 200)
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                for name in ("attributions.csv", "name-colors.csv", "change-outputs.csv"):
+                    self.assertEqual(len(self.rows(archive.read(name))), 120)
+            self.assertEqual(self.snapshot(case), before)
+            self.assertEqual(self.server.jobs, {job['id']: job})
+            self.assertEqual(job['status'], 'running')
+        finally:
+            self.server.jobs.pop(job['id'])
 
 
 if __name__ == "__main__":

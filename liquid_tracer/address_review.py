@@ -15,7 +15,7 @@ from .address_activity import inspect_address, validate_address
 from .api import ENTERPRISE, Esplora, Limits
 from .common import TraceError, canonical, digest, read_json, save_json
 from .investigations import read_case
-from .services import load_services, rule_fields
+from .services import effective_services, rule_fields
 from .store import Store
 
 
@@ -139,7 +139,7 @@ def list_addresses(case, run_id="latest", query="", offset=0, limit=25, suspecte
         raise TraceError("Use a bounded address search and a page size from 1 to 100")
     case = Path(case).resolve()
     selected, counts, source = _run_catalog(case, run_id)
-    services, index = load_services(case), _index(case)
+    services, index = effective_services(case), _index(case)
     addresses = set(counts) | set(services["rules"]) | set(index["addresses"])
     needle = query.strip().casefold()
     addresses = sorted(address for address in addresses
@@ -162,10 +162,10 @@ def list_addresses(case, run_id="latest", query="", offset=0, limit=25, suspecte
 def inspect_case_address(case, address, *, run_id="latest", max_pages=5, max_requests=10, max_seconds=60, transport=None):
     """Refresh one address under explicit budgets and the case's trace lock."""
     case, address = Path(case), validate_address(address)
-    if (type(max_pages) is not int or max_pages < 1 or type(max_requests) is not int or max_requests < 1
+    if (type(max_pages) is not int or max_pages < 1 or type(max_requests) is not int or max_requests < 0
             or isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float))
-            or not math.isfinite(max_seconds) or max_seconds <= 0):
-        raise TraceError("Address review page, request and time limits must be positive")
+            or not math.isfinite(max_seconds) or max_seconds < 0):
+        raise TraceError("Address review needs a positive page limit and non-negative request/time limits; zero budgets are unlimited")
     metadata = read_case(case)
     with (case / "trace.lock").open("a") as lock:
         try:

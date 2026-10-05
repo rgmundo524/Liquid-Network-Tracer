@@ -160,11 +160,10 @@ class WebAddressTests(unittest.TestCase):
                              ("services", {"address": "SYNTHETIC-safe", "enabled": True}),
                              ("actions", {"action": "address-inspect", "address": "SYNTHETIC-safe"})):
             self.assertEqual(self.request(route + "/" + suffix, body, headers={"X-Liquid-CSRF": "wrong"})[0], 403)
-            self.server.active_job = "synthetic-busy"
-            try:
-                self.assertEqual(self.request(route + "/" + suffix, body)[0], 409)
-            finally:
-                self.server.active_job = None
+            with patch.dict(self.server.jobs, {"f" * 32: test_web.synthetic_running_job(case["id"])}):
+                # Catalog reads remain available while this case is working.
+                expected = 200 if suffix in ("addresses", "address") else 409
+                self.assertEqual(self.request(route + "/" + suffix, body)[0], expected)
         for body in ({"limit": 0}, {"limit": 101}, {"limit": True}, {"offset": -1}, {"offset": 1.5},
                      {"suspected_only": "yes"}, {"query": "x" * 257}, {"run_id": "../../private"}):
             self.assertEqual(self.request(route + "/addresses", body)[0], 400, body)

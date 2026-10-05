@@ -5,6 +5,7 @@ filesystem paths, API credentials, or a SecretSpec provider configuration.
 """
 
 import argparse
+import errno
 import json
 import math
 import mimetypes
@@ -20,23 +21,27 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from .common import TraceError, read_json
+from .common import TraceError, parse_outpoint, read_json
 from .inspection import parse_transaction_hashes
-from .investigations import (create_investigation, default_root, load_settings,
-                             read_case, save_settings, update_case, validate_settings)
+from .investigations import (create_investigation, default_root, effective_run_settings, load_settings,
+                             read_case, save_collection_reference, save_plot_settings, save_settings, update_case,
+                             validate_blockchain, validate_settings, generation_settings)
 from .menu import _command, _environment, _lookup_reports, _project, _seed_values, _trace_arguments
 from .progress import public_progress
+from .performance import public_performance
+from .job_resources import PARALLEL_ACTIONS, conflicts, job_resources
 from .layout_search import MAX_LAYOUT_ATTEMPTS, normalize_layout_attempts
 from .layout_search_reporting import public_search_counts
 
 MAX_BODY = 64 * 1024
+DEFAULT_PORT = 4321
 CASE_ID = re.compile(r"[0-9a-f]{32}")
 RUN_ID = re.compile(r"[a-zA-Z0-9]{16}")
 FRAME_REVIEW_ID = re.compile(r"[0-9a-f]{64}")
 MIRO_ITEM_ID = re.compile(r"[a-zA-Z0-9_][a-zA-Z0-9_-]{0,199}")
-ARTIFACT_DIR = re.compile(r"[a-zA-Z0-9]{16}-(?:csv|mermaid|elk|compact|connections)-[0-9a-f]{8}")
+ARTIFACT_DIR = re.compile(r"[a-zA-Z0-9]{16}-(?:csv|mermaid|elk|compact|connections|pegouts|plots)-[0-9a-f]{8}")
 COMPACTION_DIR = re.compile(r"[a-zA-Z0-9]{16}-compact-[0-9a-f]{8}")
 LEGACY_EXPORT_NAMES = {"nodes.csv", "edges.csv", "inputs.csv", "outputs.csv", "spends.csv",
                        "events.csv", "frontier.csv", "export.json", "SHA256SUMS"}
@@ -49,17 +54,105 @@ COMPACTION_NAMES = LAYOUT_NAMES | {"before.html", "before.svg", "before.json", "
 LAYOUT_ALGORITHMS = ("elk_layered_v1", "dependency_layers_v1")
 FALLBACK_REASONS = ("size_limit", "timeout", "mermaid_size_limit", "mermaid_timeout")
 from .connections import FILES as CONNECTION_NAMES, LEGACY_FILES as LEGACY_CONNECTION_NAMES, preview_files
-CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact", "connections"}
+CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact", "connections", "pegouts", "pegouts-preview", "plot",
+                       "scope-analyze"}
+ACTIVE_JOB_STATUSES = {"running", "cancelling"}
+MAX_FAILURE_RESULT_BYTES = 256 * 1024
+
+
+def plot_html_request(parts):
+    from .plots import PREVIEW_ID
+    return bool(len(parts) == 5 and parts[0] == "files" and CASE_ID.fullmatch(parts[1])
+                and parts[2] == "previews" and PREVIEW_ID.fullmatch(parts[3])
+                and parts[4] == "graph.html")
+
+
+def read_edit_conflicts(path):
+    """Read only the known, bounded worker diagnostic from a failed result."""
+    from .miro_conflicts import public_report
+
+    try:
+        if not path.is_file() or path.is_symlink() or path.stat().st_size > MAX_FAILURE_RESULT_BYTES:
+            return None
+        report = read_json(path)
+        if (not isinstance(report, dict) or "result" not in report or report.get("ok") is not False
+                or report.get("result") is not None):
+            return None
+        return public_report(report.get("edit_conflicts"))
+    except (OSError, ValueError, TypeError, RecursionError):
+        return None
+
+
+def collected_hops(state):
+    """Deepest recorded transaction hop, not a promise of complete coverage.
+
+    Only transaction records in the saved trace count. Prefetched responses,
+    co-input context, and an uncollected frontier do not establish hop coverage.
+    Historical snapshots need no migration; an unknown depth stays unknown.
+    """
+    transactions = state.get("transactions")
+    if not isinstance(transactions, dict) or not transactions:
+        return None
+    from .group_hops import reference_name
+    named = bool(reference_name(state))
+    maximum = None
+    for transaction in transactions.values():
+        field = "reference_hops" if named else "depth"
+        if named and isinstance(transaction, dict) and field in transaction and transaction[field] is None:
+            continue  # Inspected boundary transactions do not establish in-range coverage.
+        depth = transaction.get(field) if isinstance(transaction, dict) else None
+        if type(depth) is not int or not 0 <= depth <= 2 ** 53 - 1:
+            return None
+        maximum = max(maximum or 0, depth)
+    return maximum
+
+
+def public_pegout_search(summary):
+    """Expose the saved query and outcome, never archive paths or API errors."""
+    from .pegouts import SEARCH_ID
+    from .pegout_paths import validate_query
+
+    identity = summary.get("search_id", summary.get("id"))
+    if not isinstance(identity, str) or not SEARCH_ID.fullmatch(identity):
+        raise TraceError("Invalid peg-out search identifier")
+    query = summary.get("query", summary)
+    if not isinstance(query, dict) or ("txid" in query) == ("seeds" in query):
+        raise TraceError("Invalid saved peg-out query")
+    origin = "seeds" if "seeds" in query else "txid"
+    fields = {key: query.get(key) for key in (origin, "min_hops", "max_hops")}
+    if validate_query(**fields) != fields:
+        raise TraceError("Invalid saved peg-out query")
+    value = {"id": identity, "search_id": identity, **fields}
+    for key in ("status", "stop_reason"):
+        field = summary.get(key)
+        if field is None or isinstance(field, str) and re.fullmatch(r"[a-z_]{1,64}", field):
+            value[key] = field
+    for key in ("match_count", "transaction_count"):
+        field = summary.get(key)
+        if type(field) is int and 0 <= field <= 2 ** 53 - 1:
+            value[key] = field
+    for key in ("resumable", "recoverable", "complete", "partial"):
+        if type(summary.get(key)) is bool:
+            value[key] = summary[key]
+    created = summary.get("created_at")
+    if isinstance(created, str) and re.fullmatch(r"[0-9TtZz:+. -]{10,40}", created):
+        value["created_at"] = created
+    return value
 
 
 def public_graph_options(options):
     if not isinstance(options, dict):
         return None
     try:
-        settings = validate_settings({key: options[key] for key in ("group_context_inputs", "hub_addresses") if key in options})
+        settings = validate_settings({key: options[key] for key in ("group_context_inputs", "hub_addresses", "center_name", "color_attribution_arrows") if key in options})
     except TraceError:
         return None
-    result = {key: settings[key] for key in ("group_context_inputs", "hub_addresses")}
+    result = {key: settings[key] for key in ("group_context_inputs", "hub_addresses", "center_name", "color_attribution_arrows")}
+    if "layout_style" in options:
+        try:
+            result["layout_style"] = validate_settings({"layout_style": options["layout_style"]})["layout_style"]
+        except TraceError:
+            return None
     # Old artifacts did not record a search budget. Do not claim the current
     # default was used to calculate those saved coordinates.
     if "layout_attempts" in options:
@@ -77,7 +170,8 @@ def public_service(rule):
     if not isinstance(rule, dict):
         return None
     from .services import rule_fields, notes_for
-    return {key: rule[key] for key in ("address", "name", "enabled", "created_at", "updated_at") if key in rule} | rule_fields(rule) | {"notes": notes_for(rule)}
+    return {key: rule[key] for key in ("address", "name", "enabled", "created_at", "updated_at",
+        "attribution_origin", "shared_library_id", "shared_revision") if key in rule} | rule_fields(rule) | {"notes": notes_for(rule)}
 
 
 
@@ -305,12 +399,13 @@ def handoff_terminal(process, live):
     return fd, previous
 
 
-def restore_terminal(terminal):
+def restore_terminal(terminal, *, strict=False):
     if terminal is not None:
         try:
             os.tcsetpgrp(*terminal)
         except OSError:
-            pass
+            if strict:
+                raise
 
 
 class LocalServer(ThreadingHTTPServer):
@@ -324,8 +419,15 @@ class LocalServer(ThreadingHTTPServer):
         self.jobs = {}
         self.active_job = None
         self.job_lock = threading.RLock()
-        self.process = None
+        self.pending_seed_edits = set()
+        self.processes = {}
+        self.job_threads = {}
+        # Only credential entry owns the shared terminal. Once web_worker has
+        # its credentials it detaches stdin and runs independently of this gate.
+        self.credential_lock = threading.Lock()
         self.closing = False
+        # Retain the latest thread for callers that joined a single action;
+        # lifecycle and shutdown always use job_threads instead.
         self.job_thread = None
         super().__init__(("127.0.0.1", port), Handler)
         self.origin = "http://127.0.0.1:" + str(self.server_port)
@@ -347,20 +449,27 @@ class LocalServer(ThreadingHTTPServer):
         if not self.root.is_dir():
             return []
         return sorted(path for path in self.root.iterdir()
-                      if path.is_dir() and not path.is_symlink()
+                      if path.name != ".shared-collection" and path.is_dir() and not path.is_symlink()
                       and (path / "case.json").is_file() and not (path / "case.json").is_symlink())
 
     def case_summary(self, case, metadata, detail=False):
+        from .board_write_guard import visible_board
         summary = {"id": metadata["case_id"], "name": metadata.get("name") or case.name,
+                   "blockchain": validate_blockchain(metadata.get("blockchain", "liquid")),
                    "created_at": metadata.get("created_at"), "latest_run": metadata.get("latest_run"),
-                   "fixture": bool(metadata.get("fixture")), "miro_board": metadata.get("miro_board"),
-                   "run_defaults": validate_settings(metadata.get("run_defaults", {})),
+                   "fixture": bool(metadata.get("fixture")), "miro_board": visible_board(case, metadata.get("miro_board")),
+                   "run_defaults": generation_settings(metadata.get("run_defaults", {})),
                    "seed_count": len(metadata["seeds"]) if isinstance(metadata.get("seeds"), list) else 0,
                    "status": "Not started"}
         runs = []
         directory = safe_path(case, ["runs"])
         if directory.is_dir():
-            for path in directory.iterdir():
+            # Case lists expose only the selected snapshot. Historical and
+            # projected plot archives can be large; load them only for detail.
+            latest = summary["latest_run"]
+            paths = (directory.iterdir() if detail else
+                     [directory / latest] if isinstance(latest, str) and RUN_ID.fullmatch(latest) else [])
+            for path in paths:
                 if not RUN_ID.fullmatch(path.name) or path.is_symlink() or not path.is_dir():
                     continue
                 try:
@@ -372,6 +481,8 @@ class LocalServer(ThreadingHTTPServer):
                         continue
                     if state.get("run_id") != path.name or state.get("case_id") != metadata["case_id"]:
                         continue
+                    if isinstance(state.get("collection_source"), dict) and state["collection_source"].get("kind") == "shared":
+                        continue  # A sealed plot source is separate from this case's collection history.
                     stats = state.get("stats", {})
                     if not isinstance(stats, dict):
                         continue
@@ -379,6 +490,29 @@ class LocalServer(ThreadingHTTPServer):
                            "stop_reason": state.get("stop_reason"), "created_at": state.get("started_at"),
                            "transaction_count": stats.get("transactions_cumulative", len(state.get("transactions", {}))),
                            "frontier_count": stats.get("frontier_count", 0)}
+                    seeds = state.get("seeds")
+                    if detail and isinstance(seeds, list) and all(isinstance(seed, str) for seed in seeds):
+                        try:
+                            # A selected snapshot owns its starting outputs, including
+                            # older CLI cases without seeds in investigation metadata.
+                            run["seeds"] = [f"{txid}:{index}" for txid, index in
+                                            sorted(set(map(parse_outpoint, seeds)))]
+                        except (TraceError, ValueError):
+                            # An unavailable seed list must not hide the saved run or
+                            # turn into a misleading partially validated selection.
+                            pass
+                    performance = public_performance(state.get("performance"))
+                    if performance:
+                        run["performance"] = performance
+                    limits = state.get("limits", {})
+                    if isinstance(limits, dict) and type(limits.get("max_hops")) is int:
+                        run["max_hops"] = limits["max_hops"]
+                    from .group_hops import reference_name
+                    if reference_name(state):
+                        run["hop_reference_name"] = reference_name(state)
+                    depth = collected_hops(state)
+                    if depth is not None:
+                        run["collected_hops"] = depth
                     runs.append(run)
                     if path.name == summary["latest_run"]:
                         summary["status"] = run["status"]
@@ -391,8 +525,13 @@ class LocalServer(ThreadingHTTPServer):
             from .cli import miro_recovery_status
             from .board_rebuild import rebuild_status
 
+            summary["seeds"] = list(metadata["seeds"]) if isinstance(metadata.get("seeds"), list) else []
             summary["runs"] = sorted(runs, key=lambda run: (run.get("created_at") or "", run["id"]), reverse=True)
             summary["artifacts"] = self.saved_artifacts(case, metadata, {run["id"] for run in runs})
+            summary["pegout_searches"] = self.pegout_searches(case)
+            from .workflow_api import case_workflow
+            summary.update(case_workflow(case))
+            summary["shared_collection"] = self.shared_collection_summary(case)
             summary["miro_recovery"] = miro_recovery_status(case)
             try:
                 rebuild = rebuild_status(case)
@@ -404,6 +543,64 @@ class LocalServer(ThreadingHTTPServer):
                     if key in {"status", "previous_board_id", "board_id", "run_id", "name", "notice"}
                     and isinstance(value, str)}
         return summary
+
+    def shared_collection_summary(self, case):
+        from .shared_collection import read_summary
+        try:
+            return read_summary(self.root, case=case)
+        except (TraceError, OSError, ValueError, TypeError, KeyError):
+            return {"name": "Shared collection", "compatible": False,
+                    "reason": "Shared collection is unavailable. Restore its saved files before continuing.",
+                    "seeds": [], "seed_count": 0, "members": [], "runs": []}
+
+    def pegout_artifact(self, case, preview_id):
+        from .pegouts import reviewed_pegouts, preview_files as pegout_files
+        from .plot_csv import csv_links
+        from .layout_overview import NAVIGATION_NAME
+
+        graph, _ = reviewed_pegouts(case, preview_id)
+        directory = safe_path(case, ["previews", preview_id])
+        identity = read_case(case)["case_id"]
+        product = {"preview_id": preview_id, "downloads": []}
+        for name in sorted(pegout_files(directory)):
+            if NAVIGATION_NAME.fullmatch(name):
+                continue
+            path = safe_path(case, ["previews", preview_id, name])
+            if not path.is_file():
+                continue
+            url = "/files/" + identity + "/previews/" + quote(preview_id) + "/" + quote(name)
+            product["downloads"].append({"name": name, "url": url})
+            if name == "graph.html":
+                product["preview_url"] = url
+        product["downloads"] = [item for item in product["downloads"] if not item["name"].endswith(".csv")]
+        product["downloads"].extend(csv_links(identity, preview_id))
+        product.update(public_graph_options(graph.get("graph_options", {})) or {})
+        layout = graph.get("layout", {})
+        metrics = public_layout_metrics(layout.get("metrics")) if isinstance(layout, dict) else None
+        if metrics is not None:
+            product["layout_metrics"] = metrics
+        return product
+
+    def pegout_searches(self, case):
+        from .pegouts import list_pegout_searches
+
+        searches = []
+        for summary in list_pegout_searches(case):
+            try:
+                item = public_pegout_search(summary)
+            except (TraceError, ValueError, TypeError, AttributeError):
+                continue
+            if summary.get("preview_id"):
+                try:
+                    item["artifact"] = self.pegout_artifact(case, summary["preview_id"])
+                except (TraceError, RequestError, OSError, ValueError, TypeError, KeyError):
+                    pass  # Search evidence remains resumable when a preview is stale.
+            elif summary.get("export_preview_id"):
+                from .plot_csv import csv_links
+                item["artifact"] = {"preview_id": summary["export_preview_id"],
+                    "downloads": csv_links(read_case(case)["case_id"], summary["export_preview_id"])}
+            searches.append(item)
+        return searches
 
     def saved_artifacts(self, case, metadata, runs):
         """Rediscover complete local products without relying on browser memory.
@@ -474,8 +671,20 @@ class LocalServer(ThreadingHTTPServer):
                     exposed_names = selected_names | LAYOUT_DETAIL_NAMES if kind in ("elk", "compact") else selected_names
                     product = self.artifact_links(case, [folder, directory.name], exposed_names)
                     product["include_fees"] = fees
+                    if kind != "csv":
+                        display_options = public_graph_options(options)
+                        if display_options is None:
+                            continue
+                        product.update(display_options)
                     if kind == "connections":
                         report = info["connections"]
+                        from .workflow_api import public_starter_summary
+                        product.update(public_starter_summary(report))
+                        if report.get("connection_scope") in ("all_saved", "hop_limited", "shortest"):
+                            product["connection_scope"] = report["connection_scope"]
+                        if report.get("transaction_io") == "complete":
+                            product["transaction_io"] = "complete"
+                            product["context_edge_count"] = report["context_edge_count"]
                         product.update(preview_id=directory.name, max_hops=report["max_hops"],
                                        connection_count=report["connection_count"], connection_status=report["status"])
                         layout = info.get("layout")
@@ -489,10 +698,6 @@ class LocalServer(ThreadingHTTPServer):
                                 or not isinstance(layout, dict) or layout.get("algorithm") not in LAYOUT_ALGORITHMS):
                             continue
                         product["connector_style"] = style
-                        display_options = public_graph_options(options)
-                        if display_options is None:
-                            continue
-                        product.update(display_options)
                         product.update(public_rendering_metadata({
                             "layout_algorithm": layout.get("algorithm"),
                             "fallback_reason": layout.get("fallback_reason")}))
@@ -518,9 +723,12 @@ class LocalServer(ThreadingHTTPServer):
         return artifacts
 
     def artifact_links(self, case, relative, names):
+        from .layout_overview import NAVIGATION_NAME
         product = {"downloads": []}
         case_id = read_case(case)["case_id"]
         for name in sorted(names):
+            if NAVIGATION_NAME.fullmatch(name):
+                continue
             parts = [*relative, name]
             if self.artifact(case, parts).is_file():
                 url = "/files/" + case_id + "/" + "/".join(map(quote, parts))
@@ -533,37 +741,125 @@ class LocalServer(ThreadingHTTPServer):
         cases = []
         for case in self.case_paths():
             try:
-                cases.append(self.case_summary(case, read_case(case)))
+                from .investigation_views import overview
+                cases.append(overview(case, read_case(case), detail=False))
             except (TraceError, OSError, ValueError, RequestError):
                 continue
+        with self.job_lock:
+            active = [dict(job) for job in self.jobs.values()
+                      if job["status"] in ACTIVE_JOB_STATUSES]
         return {"csrf": self.csrf, "settings": load_settings(self.root),
-                "cases": cases, "active_job": self.active_job}
+                "cases": cases, "active_job": active[0]["id"] if active else None,
+                "active_jobs": active}
 
-    def ensure_idle(self):
-        if self.active_job:
-            raise RequestError("An action is already running. Wait for it to finish.", 409)
+    def ensure_open(self):
         if self.closing:
             raise RequestError("The local server is shutting down.", 503)
 
+    def ensure_case_idle(self, case_id):
+        """Admission is serialized with both quick mutations and job creation."""
+        self.ensure_open()
+        if case_id in getattr(self, "pending_seed_edits", set()):
+            raise RequestError("Starting outputs are being saved. Try again after the save finishes.", 409)
+        if case_id is not None:
+            for job in self.jobs.values():
+                if (job.get("case_id") == case_id and job["status"] in ACTIVE_JOB_STATUSES
+                        and job.get("resource_kind") != "shared_collection"):
+                    raise RequestError("This investigation already has an active action (" + job["action"]
+                                       + "). Wait for it to finish before changing it. "
+                                       "Other investigations remain available.", 409)
+
+    def save_case_seeds(self, case, identity, body):
+        from .seed_settings import SeedEditConflict, save_seeds
+
+        if set(body) != {"seeds", "expected_revision"}:
+            raise RequestError("Saving starting outputs requires outputs and the current revision only.")
+        # Keep admission atomic without holding the jobs lock during file I/O.
+        with self.job_lock:
+            self.ensure_case_idle(identity)
+            if any(job["status"] in ACTIVE_JOB_STATUSES and job.get("resource_kind") == "shared_collection"
+                   for job in self.jobs.values()):
+                raise RequestError("Shared collection is active. Save starting outputs after it finishes.", 409)
+            self.pending_seed_edits.add(identity)
+        try:
+            return save_seeds(case, body["seeds"], expected_revision=body["expected_revision"])
+        except SeedEditConflict as error:
+            raise RequestError(str(error), 409) from None
+        except TraceError as error:
+            raise RequestError(str(error)) from None
+        finally:
+            with self.job_lock:
+                self.pending_seed_edits.discard(identity)
+
+    def trim_jobs(self):
+        # An unusually busy server may have more than 128 active jobs. Never
+        # discard their cancellation controls or their eventual results.
+        completed = sorted(
+            (identity for identity, job in self.jobs.items()
+             if job["status"] not in ACTIVE_JOB_STATUSES),
+            key=lambda identity: self.jobs[identity].get("finished_at", self.jobs[identity].get("started_at", 0)))
+        for identity in completed[:-128]:
+            del self.jobs[identity]
+
+    def ensure_resources_available(self, case_id, resource):
+        self.ensure_open()
+        pending = getattr(self, "pending_seed_edits", set())
+        if case_id in pending or (pending and resource["resource_kind"] == "shared_collection"):
+            raise RequestError("Starting outputs are being saved. Start this action after the save finishes.", 409)
+        requested = {"case_id": case_id, **resource}
+        for job in self.jobs.values():
+            if job["status"] in ACTIVE_JOB_STATUSES and conflicts(job, requested):
+                scope = ("Miro board" if resource["resource_kind"] == "board"
+                         else "shared collection" if resource["resource_kind"] == "shared_collection"
+                         else "collection" if resource["resource_kind"] == "collection"
+                         else "investigation")
+                raise RequestError("This " + scope + " already has an active action (" + job["action"]
+                                   + "). Independent collection, saved plots and other boards remain available.", 409)
+
     def start_job(self, arguments, *, action, live=False, case=None, txids=None):
-        self.ensure_idle()
         case_id = read_case(case)["case_id"] if case is not None else None
+        with self.job_lock:
+            return self._start_job(arguments, action=action, live=live, case=case,
+                                   case_id=case_id, txids=txids)
+
+    def _start_job(self, arguments, *, action, live, case, case_id, txids):
+        resource = job_resources(arguments, action, case)
+        self.ensure_resources_available(case_id, resource)
         identity = secrets.token_hex(16)
         self.jobs[identity] = {"id": identity, "status": "running", "action": action,
                                "case_id": case_id, "live": bool(live),
+                               **resource, "execution_state": "starting",
                                "started_at": time.time(),
                                "cancellable": action in CANCELLABLE_ACTIONS,
-                               "message": ("Working. Check the launching terminal if Proton Pass needs to unlock."
-                                           if live else "Preparing the graph and checking missing address counts…"
+                               "message": ("Preparing to delete the confirmed investigation's local files."
+                                           if action == "investigation-delete" else
+                                           "Preparing to delete the confirmed Miro board. Check the launching terminal if Proton Pass needs to unlock."
+                                           if action == "board-delete" else
+                                           "Generating the layout and syncing Miro. Check the launching terminal if Proton Pass needs to unlock."
+                                           if action == "plot-sync" else
+                                           "Reading the Miro board before arranging new objects. Check the launching terminal if Proton Pass needs to unlock."
+                                           if live and action == "plot" else
+                                           "Working. Check the launching terminal if Proton Pass needs to unlock."
+                                           if live else "Preparing saved-data scope analysis…"
+                                           if action == "scope-analyze" else "Plotting saved collection data…" if action == "plot"
+                                           else "Preparing the graph and checking missing address counts…"
                                            if action in CANCELLABLE_ACTIONS else "Working with saved local evidence…")}
-        self.active_job = identity
+        if self.active_job is None:
+            self.active_job = identity
         # Keep a bounded history for tabs that remain open. Evidence persists in
         # the case, independently of this transient browser job history.
-        while len(self.jobs) > 128:
-            self.jobs.pop(next(iter(self.jobs)))
+        self.trim_jobs()
         self.job_thread = threading.Thread(target=self.run_job,
             args=(identity, arguments, action, live, case, txids), daemon=True)
-        self.job_thread.start()
+        self.job_threads[identity] = self.job_thread
+        try:
+            self.job_thread.start()
+        except Exception:
+            self.job_threads.pop(identity, None)
+            self.jobs.pop(identity, None)
+            self.active_job = next((key for key, job in self.jobs.items()
+                                    if job["status"] in ACTIVE_JOB_STATUSES), None)
+            raise
         return dict(self.jobs[identity])
 
     def cancel_job(self, identity):
@@ -571,14 +867,15 @@ class LocalServer(ThreadingHTTPServer):
         if not CASE_ID.fullmatch(identity) or identity not in self.jobs:
             raise RequestError("Job unavailable. Refresh the page to review active work.", 404)
         job = self.jobs[identity]
-        if self.active_job != identity or job["status"] not in ("running", "cancelling"):
+        if job["status"] not in ACTIVE_JOB_STATUSES:
             raise RequestError("This action has already finished. Refresh the investigation.", 409)
         if job["action"] not in CANCELLABLE_ACTIONS:
             raise RequestError("Only chart preparation and layout calculations can be canceled here.", 409)
         if job["status"] == "cancelling":
             return dict(job)
         # If completion already won, leave its result available to the browser.
-        if self.process is not None and self.process.poll() is not None:
+        process = self.processes.get(identity)
+        if process is not None and process.poll() is not None:
             job["cancellable"] = False
             return dict(job)
         job.update(status="cancelling", cancellable=False,
@@ -588,11 +885,31 @@ class LocalServer(ThreadingHTTPServer):
     def run_job(self, identity, arguments, action, live, case, txids):
         terminal = None
         process = None
+        credential_gate = False
+        edit_conflicts = None
+        completion = None
         try:
             with tempfile.TemporaryDirectory(prefix="liquid-web-job-") as directory:
                 request, result = Path(directory) / "request.json", Path(directory) / "result.json"
-                request.write_text(json.dumps({"arguments": arguments}), encoding="utf-8")
+                payload = {"arguments": arguments}
+                if live:
+                    payload.update(terminal_handoff=True, server_pid=os.getpid())
+                request.write_text(json.dumps(payload), encoding="utf-8")
                 request.chmod(0o600)
+                if live:
+                    with self.job_lock:
+                        working_message = self.jobs[identity]["message"]
+                        self.jobs[identity]["message"] = "Waiting for another action to finish unlocking credentials in the launching terminal…"
+                        self.jobs[identity]["execution_state"] = "credentials_wait"
+                    while not credential_gate:
+                        with self.job_lock:
+                            self.ensure_open()
+                            if self.jobs[identity]["status"] == "cancelling":
+                                raise JobCancelled
+                        credential_gate = self.credential_lock.acquire(timeout=.25)
+                    with self.job_lock:
+                        self.jobs[identity]["message"] = working_message
+                        self.jobs[identity]["execution_state"] = "credentials"
                 options = {"process_group": 0} if live else {"start_new_session": True}
                 # Inherit the terminal. Provider prompts and diagnostics are not
                 # captured into browser-readable job output.
@@ -603,9 +920,12 @@ class LocalServer(ThreadingHTTPServer):
                         raise JobCancelled
                     process = subprocess.Popen(worker_command(request, result, live), cwd=_project(),
                                                env=_environment(), **options)
-                    self.process = process
+                    self.processes[identity] = process
+                    if not live:
+                        self.jobs[identity]["execution_state"] = "working"
                 terminal = handoff_terminal(process, live)
                 progress_path = Path(directory) / "progress.json"
+                credentials_ready = Path(directory) / "credentials-ready"
                 while True:
                     with self.job_lock:
                         cancelling = self.jobs[identity]["status"] == "cancelling"
@@ -615,6 +935,20 @@ class LocalServer(ThreadingHTTPServer):
                         if cancelling:
                             raise JobCancelled
                         raise RuntimeError("Server is shutting down")
+                    if credential_gate and credentials_ready.is_file():
+                        # The authenticated worker has detached stdin and is
+                        # waiting. Restore the terminal before acknowledging it
+                        # or letting the next provider prompt for credentials.
+                        restore_terminal(terminal, strict=True)
+                        terminal = None
+                        acknowledgement = Path(directory) / "credentials-ack"
+                        with acknowledgement.open("x", encoding="ascii") as stream:
+                            os.chmod(acknowledgement, 0o600)
+                            stream.write("ready\n")
+                        self.credential_lock.release()
+                        credential_gate = False
+                        with self.job_lock:
+                            self.jobs[identity]["execution_state"] = "working"
                     try:
                         status = process.wait(timeout=.25)
                     except subprocess.TimeoutExpired:
@@ -624,42 +958,66 @@ class LocalServer(ThreadingHTTPServer):
                         break
                 restore_terminal(terminal)
                 terminal = None
+                # A failed provider or an injected worker without the private
+                # handshake can exit directly. It still relinquishes its gate.
+                if credential_gate:
+                    self.credential_lock.release()
+                    credential_gate = False
                 with self.job_lock:
                     if self.jobs[identity]["status"] == "cancelling":
                         raise JobCancelled
                 if status != 0:
+                    edit_conflicts = read_edit_conflicts(result)
                     raise RuntimeError("CLI action failed")
                 report = read_json(result)
                 if report.get("ok") is not True or not isinstance(report.get("result"), dict):
                     raise RuntimeError("Invalid action result")
+                if action == "investigation-delete" and report["result"].get("case_id") != self.jobs[identity]["case_id"]:
+                    raise RuntimeError("Deletion result does not match the confirmed investigation")
                 value = self.public_result(report["result"], action, case, txids)
-            with self.job_lock:
-                self.jobs[identity].update(status="succeeded", cancellable=False,
-                    message=(("Frame recovery complete. Choose Create / update Miro frames to resume."
+            completion = dict(status="succeeded", cancellable=False,
+                    message=(("Investigation removed. Some local files could not be deleted; check the launching terminal for cleanup details."
+                              if value.get("cleanup_pending") else "Investigation and its local files deleted.")
+                             if action == "investigation-delete" else
+                             ("Frame recovery complete. Choose Create / update Miro frames to resume."
                               if value.get("resume_action") == "miro-frames" else
                               "Frame recovery complete. Finish Sync to Miro, then create or update frames.") if action == "miro-frame-recover"
                              else "Frame review ready. Inspect the linked board before choosing a recovery." if action == "miro-frame-review"
                              else "Recovery complete. Choose Sync to Miro to resume." if action == "miro-recover"
                              else "Action completed."), result=value)
         except JobCancelled:
-            with self.job_lock:
-                self.jobs[identity].update(status="canceled", cancellable=False,
-                    message="Calculation canceled. Saved investigation runs are unchanged.")
+            completion = dict(status="canceled", cancellable=False,
+                              message="Calculation canceled. Saved investigation runs are unchanged.")
         except Exception as error:
             print("Local UI action failed: " + str(error), file=sys.stderr)
-            with self.job_lock:
-                self.jobs[identity].update(status="failed", cancellable=False, message=(
+            completion = dict(status="failed", cancellable=False, message=(
+                    "Miro sync stopped because generated objects differ from their last-synced values. "
+                    "Open the linked objects and review the differences below."
+                    if edit_conflicts is not None else
+                    "Investigation deletion did not finish. Refresh the investigation list and check the launching terminal for details."
+                    if action == "investigation-delete" else
+                    "Plot and sync stopped. Check the launching terminal and the saved board status. "
+                    "Resume the saved layout if publication already started."
+                    if action == "plot-sync" else
                     "Action failed. Check the launching terminal for credential, API, or saved-file errors. "
                     "Review the investigation before retrying a live action."))
+            if edit_conflicts is not None:
+                completion["edit_conflicts"] = edit_conflicts
         finally:
             try:
                 stop_worker(process)
             finally:
                 restore_terminal(terminal)
+                if credential_gate:
+                    self.credential_lock.release()
                 with self.job_lock:
-                    if self.active_job == identity:
-                        self.process = None
-                        self.active_job = None
+                    self.processes.pop(identity, None)
+                    self.job_threads.pop(identity, None)
+                    if completion is not None:
+                        self.jobs[identity].update(completion, finished_at=time.time())
+                    self.active_job = next((key for key, job in self.jobs.items()
+                                            if job["status"] in ACTIVE_JOB_STATUSES), None)
+                    self.trim_jobs()
 
     def read_progress(self, identity, path):
         try:
@@ -674,6 +1032,42 @@ class LocalServer(ThreadingHTTPServer):
             pass
 
     def public_result(self, result, action, case, txids):
+        if action == "investigation-delete":
+            # The worker has removed the directory; no case reads are valid here.
+            identity, name = result.get("case_id"), result.get("name")
+            if (not isinstance(identity, str) or not CASE_ID.fullmatch(identity)
+                    or not isinstance(name, str) or not 1 <= len(name) <= 120
+                    or any(ord(char) < 32 or ord(char) == 127 for char in name)
+                    or result.get("deleted") is not True or type(result.get("cleanup_pending")) is not bool):
+                raise RequestError("Invalid investigation deletion result")
+            return {key: result[key] for key in ("case_id", "name", "deleted", "cleanup_pending")}
+        if action == "shared-trace":
+            summary = self.shared_collection_summary(case)
+            run_id = result.get("run_id")
+            if (not isinstance(run_id, str) or not RUN_ID.fullmatch(run_id)
+                    or run_id not in {run["id"] for run in summary.get("runs", [])}):
+                raise RequestError("Shared collection result does not match a saved snapshot.")
+            value = {"run_id": run_id, "data_source": "shared", "shared_collection": summary}
+            for key in ("status", "stop_reason"):
+                if result.get(key) is None or isinstance(result.get(key), str):
+                    value[key] = result.get(key)
+            performance = public_performance(result.get("performance"))
+            if performance:
+                value["performance"] = performance
+            from .address_counts import public_count_report
+            counts = public_count_report(result.get("address_counts"))
+            if counts is not None:
+                value["address_counts"] = counts
+            return value
+        if action in ("plot", "plot-sync", "board-create", "board-create-sync", "board-link", "board-sync", "board-delete",
+                      "scope-analyze"):
+            from .workflow_api import workflow_result
+            return workflow_result(case, result, action)
+        if action in ("pegouts", "pegouts-preview"):
+            value = public_pegout_search(result)
+            if result.get("preview_id"):
+                value["artifact"] = self.pegout_artifact(case, result["preview_id"])
+            return value
         if action in ("miro-frame-review", "miro-frame-recover"):
             from .cli import board_id
 
@@ -725,7 +1119,7 @@ class LocalServer(ThreadingHTTPServer):
                   "created", "reused", "name", "visibility", "new_shapes", "new_connectors", "new_frames",
                   "mapped_frames", "frames_to_remove",
                   "mapped_shapes", "mapped_connectors", "new_items", "updated", "deleted", "moved",
-                  "reattached", "dry_run", "reorganize", "presentation_refreshed", "fee_items_to_remove",
+                  "reattached", "dry_run", "reorganize", "presentation_refreshed", "fee_items_to_remove", "run_notes_to_remove",
                   "existing_items", "items", "runs", "max_items", "remote_preflight_required"}
         value = {key: item for key, item in result.items()
                  if key in fields and (item is None or isinstance(item, (str, int, float, bool)))}
@@ -758,11 +1152,14 @@ class LocalServer(ThreadingHTTPServer):
         if isinstance(result.get("stats"), dict):
             value["stats"] = {key: item for key, item in result["stats"].items()
                               if isinstance(item, (int, float)) and not isinstance(item, bool)}
+        performance = public_performance(result.get("performance"))
+        if performance:
+            value["performance"] = performance
         if result.get("connector_style") in ("straight", "curved", "elbowed"):
             value["connector_style"] = result["connector_style"]
         options = result.get("graph_options", {})
         if isinstance(options, dict):
-            options = {**options, **{key: result[key] for key in ("group_context_inputs", "hub_addresses", "layout_attempts") if key in result}}
+            options = {**options, **{key: result[key] for key in ("group_context_inputs", "hub_addresses", "center_name", "layout_attempts", "color_attribution_arrows") if key in result}}
             display_options = public_graph_options(options)
             if display_options is not None:
                 value.update({key: item for key, item in display_options.items() if key in options})
@@ -786,6 +1183,13 @@ class LocalServer(ThreadingHTTPServer):
                 from .connections import reviewed_connections
                 graph, _ = reviewed_connections(case, directory.name)
                 report = graph["connections"]
+                from .workflow_api import public_starter_summary
+                value.update(public_starter_summary(report))
+                if report.get("connection_scope") in ("all_saved", "hop_limited", "shortest"):
+                    value["connection_scope"] = report["connection_scope"]
+                if report.get("transaction_io") == "complete":
+                    value["transaction_io"] = "complete"
+                    value["context_edge_count"] = report["context_edge_count"]
                 value.update(preview_id=directory.name, max_hops=report["max_hops"],
                              connection_count=report["connection_count"], connection_status=report["status"])
             if action == "compact":
@@ -804,15 +1208,39 @@ class LocalServer(ThreadingHTTPServer):
 
     @staticmethod
     def artifact(case, parts):
+        if len(parts) == 3 and parts[0] == "analyses":
+            from .scope_analysis import verified_analysis_file
+            return verified_analysis_file(case, parts[1], parts[2])
         if len(parts) != 3 or parts[0] not in ("previews", "exports") or not ARTIFACT_DIR.fullmatch(parts[1]):
             raise RequestError("File not found", 404)
         kind = parts[1].split("-")[1]
         if (parts[0] == "exports") != (kind == "csv"):
             raise RequestError("File not found", 404)
+        if kind in ("pegouts", "plots"):
+            from .layout_overview import verified_navigation_file
+            if kind == "plots":
+                from .plots import reviewed_plot as review, plot_files as files
+            else:
+                from .pegouts import reviewed_pegouts as review, preview_files as files
+
+            directory = safe_path(case, parts[:2])
+            if parts[2] not in files(directory):
+                raise RequestError("File not found", 404)
+            navigation = verified_navigation_file(directory, parts[2])
+            if navigation is not None:
+                return navigation
+            review(case, parts[1])
+            return safe_path(case, parts)
         expected = {"mermaid": PREVIEW_NAMES, "csv": EXPORT_NAMES | LEGACY_EXPORT_NAMES, "elk": LAYOUT_NAMES,
                     "compact": COMPACTION_NAMES, "connections": CONNECTION_NAMES | LEGACY_CONNECTION_NAMES}[kind]
         if kind in ("elk", "compact", "connections"):
             expected = expected | LAYOUT_DETAIL_NAMES
+            from .layout_overview import navigation_files, verified_navigation_file
+            directory = safe_path(case, parts[:2])
+            navigation = navigation_files(directory)
+            expected = expected | navigation
+            if navigation and parts[2] in navigation | {"graph.html", "details.html", "details.json"} and kind in ("compact", "connections"):
+                return verified_navigation_file(directory, parts[2])
         if parts[2] not in expected:
             raise RequestError("File not found", 404)
         return safe_path(case, parts)
@@ -831,6 +1259,97 @@ class LocalServer(ThreadingHTTPServer):
         from .cli import miro_recovery_status, resolve_latest, run_path, verify_export
 
         action = body.get("action")
+        if action == "investigation-delete":
+            if (set(body) != {"action", "confirm_name"} or not isinstance(body.get("confirm_name"), str)
+                    or body["confirm_name"] != metadata.get("name")):
+                raise RequestError("Type the investigation's exact current name to confirm deletion.")
+            arguments = ["investigation-delete", "--investigations-dir", str(self.root), "--case", str(case),
+                         "--case-id", metadata["case_id"], "--confirm-name=" + body["confirm_name"]]
+            return self.start_job(arguments, action=action, live=False, case=case)
+        if action not in PARALLEL_ACTIONS:
+            self.ensure_case_idle(metadata["case_id"])
+        if action in ("plot", "plot-sync", "board-create", "board-create-sync", "board-link", "board-sync", "board-delete",
+                      "scope-analyze"):
+            from .workflow_api import workflow_action
+            return workflow_action(self, case, metadata, body)
+        if action == "shared-trace":
+            from .shared_collection import prepare_collection
+            mode = body.get("mode")
+            required = {"action", "mode", "hops"} | ({"case_ids"} if mode == "collect" else {"run_id"})
+            if mode not in ("collect", "continue") or not required <= set(body) or set(body) - required - {"hop_reference_name"}:
+                raise RequestError("Choose shared collection or continuation, a hop allowance, and its seed scope.")
+            settings = validate_settings({**metadata.get("run_defaults", {}), "hops": body["hops"],
+                "hop_reference_name": body.get("hop_reference_name", metadata.get("run_defaults", {}).get("hop_reference_name", ""))})
+            resource = job_resources(["shared-collect", "--case", str(case)], action, case)
+            self.ensure_resources_available(metadata["case_id"], resource)
+            members = body.get("case_ids")
+            if mode == "collect" and (not isinstance(members, list) or not members or len(members) > 100
+                    or any(not isinstance(identity, str) or not CASE_ID.fullmatch(identity) for identity in members)
+                    or metadata["case_id"] not in members):
+                raise RequestError("Choose up to 100 open investigations, including this investigation.")
+            resume = body.get("run_id") if mode == "continue" else None
+            if mode == "continue" and (not isinstance(resume, str) or not RUN_ID.fullmatch(resume)):
+                raise RequestError("Choose the latest shared collection snapshot to continue.")
+            prepared = prepare_collection(case, members, hops=settings["hops"], resume=resume,
+                                          hop_reference_name=settings["hop_reference_name"])
+            arguments = ["shared-collect", "--case", str(case), "--request", prepared["request_id"]]
+            return self.start_job(arguments, action=action, live=prepared["live"], case=case)
+        if action in ("pegouts", "pegouts-preview", "miro-pegouts"):
+            from .pegouts import SEARCH_ID, reviewed_pegouts
+            from .cli import board_id
+
+            live = action == "pegouts" and not bool(metadata.get("fixture"))
+            if action == "pegouts":
+                arguments = ["pegouts", "--case", str(case)]
+                if "resume" in body:
+                    if set(body) != {"action", "resume"}:
+                        raise RequestError("Resume uses the saved peg-out origin and hop range.")
+                    identity = body.get("resume")
+                    if not isinstance(identity, str) or not SEARCH_ID.fullmatch(identity):
+                        raise RequestError("Choose a saved peg-out search to resume.")
+                    if not safe_path(case, ["pegouts", identity]).is_dir():
+                        raise RequestError("Peg-out search not found.")
+                    arguments.extend(["--resume", identity])
+                else:
+                    if set(body) not in ({"action", "min_hops", "max_hops"},
+                                         {"action", "txid", "min_hops", "max_hops"}):
+                        raise RequestError("Choose a hop range and, optionally, a different starting transaction.")
+                    if "txid" in body:
+                        txid = body["txid"]
+                        if not isinstance(txid, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", txid.strip()):
+                            raise RequestError("Enter one transaction hash containing 64 hexadecimal characters.")
+                        arguments.extend(["--txid", txid.strip().lower()])
+                    else:
+                        from .pegout_paths import validate_query
+                        if not metadata.get("seeds"):
+                            raise RequestError("This investigation has no saved seed UTXOs. Select seed outputs or use a different starting transaction.")
+                        validate_query(seeds=metadata.get("seeds"))
+                    lower, upper = body.get("min_hops"), body.get("max_hops")
+                    if (type(lower) is not int or type(upper) is not int
+                            or not 0 <= lower <= upper <= 2147483647):
+                        raise RequestError("Enter whole-number hops from 0 to 2147483647, with minimum no greater than maximum.")
+                    arguments.extend(["--min-hops", str(lower), "--max-hops", str(upper)])
+            elif action == "pegouts-preview":
+                identity = body.get("search_id")
+                if set(body) != {"action", "search_id"} or not isinstance(identity, str) or not SEARCH_ID.fullmatch(identity):
+                    raise RequestError("Choose a saved peg-out search to preview.")
+                if not safe_path(case, ["pegouts", identity]).is_dir():
+                    raise RequestError("Peg-out search not found.")
+                arguments = ["pegouts-preview", "--case", str(case), "--search", identity]
+            else:
+                if set(body) != {"action", "preview_id", "board", "confirm_pegouts"} or body.get("confirm_pegouts") is not True:
+                    raise RequestError("Review the peg-out snapshot and confirm publication to a separate Miro board.")
+                graph, _ = reviewed_pegouts(case, body.get("preview_id"))
+                if not graph.get("nodes"):
+                    raise RequestError("This peg-out snapshot has no matching paths to publish.")
+                target = board_id(body.get("board"))
+                if metadata.get("miro_board") and target == board_id(metadata["miro_board"]):
+                    raise RequestError("Choose a separate Miro board; the full-trace board is protected.")
+                settings = validate_settings(metadata.get("run_defaults", {}))
+                arguments = ["pegouts-publish", "--case", str(case), "--preview", body["preview_id"],
+                             "--board", target, "--max-items", str(effective_run_settings(settings)["max_new_items"])]
+                live = True
+            return self.start_job(arguments, action=action, live=live, case=case)
         if action in ("miro-frame-review", "miro-frame-recover"):
             if action == "miro-frame-review":
                 if set(body) != {"action"}:
@@ -874,14 +1393,34 @@ class LocalServer(ThreadingHTTPServer):
             raise RequestError("Frame creation uses the selected saved run and linked board only.")
         if action == "miro-rebuild" and set(body) != {"action", "run_id", "source_board", "name", "max_new_items"}:
             raise RequestError("Rebuilding uses a saved run, the reviewed source board, a name and a new-item budget only.")
-        settings = validate_settings(body.get("settings", metadata.get("run_defaults", {})))
+        settings = generation_settings(body.get("settings", metadata.get("run_defaults", {})))
         selected = body.get("run_id", "latest")
         live = False
         if action == "trace":
             if selected != "latest":
                 raise RequestError("Continue from the latest saved run.")
+            if "hops" in body:
+                if "settings" in body:
+                    raise RequestError("Choose a run hop allowance or legacy settings, not both.")
+                settings = validate_settings({**settings, "hops": body["hops"]})
+            if "hop_reference_name" in body:
+                if "settings" in body:
+                    raise RequestError("Choose a hop origin or legacy settings, not both.")
+                settings = validate_settings({**settings, "hop_reference_name": body["hop_reference_name"]})
             arguments, live = _trace_arguments(case, metadata, settings)
-            update_case(case, {"run_defaults": settings})
+            if "--resume" in arguments:
+                # A job can wait for credentials while another server finishes
+                # collection. Bind this continuation to the reviewed parent.
+                arguments[arguments.index("--resume") + 1] = metadata["latest_run"]
+            self.ensure_resources_available(metadata["case_id"], job_resources(arguments, action, case))
+            # Current UI actions use saved defaults and a one-run hop allowance.
+            # Keep explicit legacy API settings compatible without rewriting
+            # defaults every time an ordinary run is started.
+            if "settings" in body:
+                self.ensure_case_idle(metadata["case_id"])
+                update_case(case, {"run_defaults": settings})
+            elif "hop_reference_name" in body:
+                save_collection_reference(case, settings["hop_reference_name"])
         elif action == "connections":
             from .connections import validate_hops
             hops = validate_hops(body.get("connection_hops", 10))
@@ -903,14 +1442,15 @@ class LocalServer(ThreadingHTTPServer):
             if metadata.get("miro_board") and target == board_id(metadata["miro_board"]):
                 raise RequestError("Choose a separate Miro board; the full-trace board is protected.")
             arguments = ["connections-publish", "--case", str(case), "--preview", preview_id,
-                         "--board", target, "--max-items", str(settings["max_new_items"])]
+                         "--board", target, "--max-items", str(effective_run_settings(settings)["max_new_items"])]
             live = bool(graph["nodes"])
         elif action == "address-counts":
             selected = resolve_latest(case, selected)
             safe_path(case, ["runs", selected, "trace.json"])
             verify_export(run_path(case, selected))
             arguments = ["address-counts", "--case", str(case), "--run", selected,
-                         "--max-requests", str(settings["max_requests"]), "--max-seconds", str(settings["max_seconds"])]
+                         "--max-requests", str(effective_run_settings(settings)["max_requests"]),
+                         "--max-seconds", str(effective_run_settings(settings)["max_seconds"])]
             live = not bool(metadata.get("fixture"))
         elif action == "address-inspect":
             from .address_activity import validate_address
@@ -940,6 +1480,8 @@ class LocalServer(ThreadingHTTPServer):
             budget = body.get("max_new_items")
             if type(budget) is not int or not 0 <= budget <= 2 ** 53 - 1:
                 raise RequestError("Enter a nonnegative whole-number budget for all shapes and connections.")
+            if not settings["budget_limits_enabled"]:
+                budget = 0
             arguments = ["miro-rebuild-board", "--case", str(case), "--run", selected,
                          "--source-board", source, "--name", name, "--max-new-items", str(budget)]
             live = True
@@ -987,7 +1529,7 @@ class LocalServer(ThreadingHTTPServer):
                     raise RequestError("Create or link a Miro board in investigation settings first.")
                 command = "miro-frames" if action == "miro-frames" else "miro-sync"
                 arguments = [command, "--case", str(case), "--run", selected,
-                             "--board", metadata["miro_board"], "--max-new-items", str(settings["max_new_items"])]
+                             "--board", metadata["miro_board"], "--max-new-items", str(effective_run_settings(settings)["max_new_items"])]
                 if action == "miro-frames":
                     if miro_recovery_status(case)["pending_count"]:
                         raise RequestError("Recover the pending Miro items before creating or updating frames.")
@@ -1023,15 +1565,27 @@ class LocalServer(ThreadingHTTPServer):
     def server_close(self):
         with self.job_lock:
             self.closing = True
+            threads = list(self.job_threads.values())
         # The job thread owns process termination. A second SIGTERM from this
         # thread could interrupt cleanup and orphan a renderer in its own group.
-        if self.job_thread is not None:
-            self.job_thread.join()
+        for thread in threads:
+            # A failed thread start has already removed its entry. The ident
+            # guard also accommodates callers that replace Thread.start.
+            if thread.ident is not None and thread is not threading.current_thread():
+                thread.join()
         super().server_close()
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "LiquidLocal"
+
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError):
+            # A tab can close while reading a request or sending an error reply.
+            # Its connection is gone; background jobs have their own lifetime.
+            self.close_connection = True
 
     def log_message(self, format, *args):
         # Do not log case identifiers, transaction hashes, or request bodies.
@@ -1055,7 +1609,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise RequestError("Send an application/json request.", 415)
 
     def send(self, status, data, content_type="application/json; charset=utf-8", *, preview=False, download=None,
-             explorer_links=False):
+             explorer_links=False, preview_navigation=False):
         raw = json.dumps(data).encode("utf-8") if content_type.startswith("application/json") and not isinstance(data, bytes) else data
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -1065,6 +1619,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         preview_sandbox = "sandbox allow-popups allow-popups-to-escape-sandbox" if explorer_links else "sandbox"
+        if preview_navigation:
+            # Static, script-free section pages must retain their origin for
+            # relative links to pass the server's Fetch Metadata checks.
+            # Scripts, forms, embedding and network requests remain forbidden.
+            preview_sandbox += " allow-same-origin"
         self.send_header("Content-Security-Policy", (
             preview_sandbox + "; default-src 'none'; img-src data:; style-src 'unsafe-inline'; frame-ancestors 'self'"
             if preview else "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
@@ -1102,41 +1661,158 @@ class Handler(BaseHTTPRequestHandler):
             self.connection.settimeout(10)
             self.security(mutation)
             parsed = urlsplit(self.path)
-            if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+            if parsed.scheme or parsed.netloc or parsed.fragment:
                 raise RequestError("Route not found", 404)
             parts = unquote(parsed.path).strip("/").split("/")
+            query = {}
+            if parsed.query and not mutation and plot_html_request(parts) and parsed.query == "download=1":
+                query["download"] = True
+            elif parsed.query:
+                if mutation or len(parts) != 4 or parts[:2] != ["api", "cases"] or parts[3] != "plots":
+                    raise RequestError("Route not found", 404)
+                try:
+                    if len(parsed.query) > 1024:
+                        raise ValueError
+                    values = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=2)
+                    if set(values) != {"cursor"} or len(values["cursor"]) != 1 or not values["cursor"][0]:
+                        raise ValueError
+                    query["cursor"] = values["cursor"][0]
+                except ValueError:
+                    raise RequestError("Invalid saved-preview cursor") from None
             if mutation:
                 # Only reviewed import routes accept larger, bounded text bodies.
                 is_import = (len(parts) == 4 and parts[:2] == ["api", "cases"]
-                             and parts[3] in ("address-import", "name-color-import", "change-output-import"))
-                body = self.body(4 * 1024 * 1024 if is_import else MAX_BODY)
+                             and parts[3] in ("address-import", "name-color-import", "change-output-import", "input-import"))
+                is_import = is_import or parts == ["api", "shared-attributions", "import"]
+                # Three CSVs may each contain 512 KiB; JSON escaping can expand
+                # their representation. Individual source limits still apply.
+                import_limit = 12 * 1024 * 1024 if is_import and parts[-1] == "input-import" else 4 * 1024 * 1024
+                body = self.body(import_limit if is_import else MAX_BODY)
+                attribution_read = (len(parts) == 4 and parts[:2] == ["api", "cases"]
+                    and parts[3] in {"addresses", "address", "name-colors"}
+                    and self.read_only_case_request(parts[3], body))
+                if len(parts) == 4 and parts[:2] == ["api", "cases"] and parts[3] == "seeds":
+                    result, status = self.post(parts, body)
+                    self.send(status, result)
+                    return
+                if (parts == ["api", "endpoint-exports"]
+                        or parts[:2] == ["api", "shared-attributions"] or attribution_read):
+                    # Library imports serialize on their own file lock. Reads
+                    # and immutable exports must not hold the job lock over I/O.
+                    with self.server.job_lock:
+                        self.server.ensure_open()
+                    result, status = self.post(parts, body)
+                    self.send(status, result)
+                    return
                 with self.server.job_lock:
                     if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "cancel":
                         result, status = self.server.cancel_job(parts[2]), 202
                     else:
-                        self.server.ensure_idle()
+                        self.server.ensure_open()
+                        if (len(parts) == 4 and parts[:2] == ["api", "cases"]
+                                and parts[3] != "actions"
+                                and not self.read_only_case_request(parts[3], body)):
+                            self.server.ensure_case_idle(parts[2])
                         result, status = self.post(parts, body)
                 self.send(status, result)
             else:
-                self.get(parts)
+                self.get(parts, query)
+        except (BrokenPipeError, ConnectionResetError):
+            # Do not log a browser disconnect as an action failure or attempt
+            # another response on the same closed connection.
+            self.close_connection = True
         except RequestError as error:
             self.send(error.status, {"error": error.message})
         except (TraceError, OSError, ValueError, KeyError, TypeError) as error:
             print("Local UI request failed: " + str(error), file=sys.stderr)
             self.send(400, {"error": "Request could not be completed. Check the entered values and saved investigation; details are in the launching terminal."})
 
-    def get(self, parts):
+    def get(self, parts, query=None):
         if parts == ["api", "session"]:
             self.send(200, self.server.session())
+        elif parts == ["api", "shared-attributions", "export"]:
+            from .shared_attributions import export_library
+            product = export_library(self.server.root)
+            self.send(200, product["data"], product["content_type"], download=product["filename"])
+        elif len(parts) == 4 and parts[:2] == ["api", "cases"] and parts[3] == "shared-attributions":
+            from .services import shared_attribution_status
+            case, _ = self.server.case(parts[2])
+            self.send(200, shared_attribution_status(case))
+        elif len(parts) == 4 and parts[:2] == ["api", "cases"] and parts[3] == "seeds":
+            from .seed_settings import seed_settings
+            case, metadata = self.server.case(parts[2])
+            self.send(200, seed_settings(case, metadata))
+        elif parts == ["api", "jobs"]:
+            with self.server.job_lock:
+                jobs = [dict(job) for job in self.server.jobs.values()]
+            self.send(200, {"jobs": jobs})
         elif len(parts) == 3 and parts[:2] == ["api", "cases"]:
             case, metadata = self.server.case(parts[2])
             self.send(200, self.server.case_summary(case, metadata, detail=True))
+        elif len(parts) == 4 and parts[:2] == ["api", "cases"] and parts[3] in {
+                "overview", "collection", "workflow", "boards", "history", "shared-collection"}:
+            from . import investigation_views
+            case, metadata = self.server.case(parts[2])
+            section = parts[3]
+            if section == "overview":
+                result = investigation_views.overview(case, metadata)
+            elif section == "collection":
+                result = investigation_views.collection(case, metadata)
+            elif section == "shared-collection":
+                result = investigation_views.shared_collection(self.server.root, case, metadata)
+            elif section == "workflow":
+                from .workflow_api import case_workflow
+                result = {**case_workflow(case, lightweight=True), "sections": {"workflow": "ready"}}
+            elif section == "boards":
+                result = investigation_views.boards(case)
+            else:
+                # Legacy artifacts are only inspected when History is opened.
+                collection = investigation_views.collection(case, metadata, history=True)
+                runs = {run["id"] for run in collection["runs"] if not run.get("summary_pending")}
+                result = {"runs": collection["runs"], "artifacts": self.server.saved_artifacts(case, metadata, runs),
+                          "pegout_searches": self.server.pegout_searches(case),
+                          "sections": {"history": collection["sections"]["collection"]}}
+            self.send(200, result)
+        elif len(parts) == 5 and parts[:2] == ["api", "cases"] and parts[3] in {"collection", "shared-collection"}:
+            from . import investigation_views
+            case, metadata = self.server.case(parts[2])
+            if not RUN_ID.fullmatch(parts[4]):
+                raise RequestError("Choose a saved collection run")
+            result = (investigation_views.collection(case, metadata, parts[4]) if parts[3] == "collection" else
+                      investigation_views.shared_collection(self.server.root, case, metadata, parts[4]))
+            self.send(200, result)
+        elif len(parts) == 4 and parts[:2] == ["api", "cases"] and parts[3] == "analyses":
+            from .workflow_api import analysis_summaries
+            case, _ = self.server.case(parts[2])
+            self.send(200, analysis_summaries(case))
+        elif len(parts) == 5 and parts[:2] == ["api", "cases"] and parts[3] == "analyses":
+            from .scope_analysis import read_analysis
+            from .workflow_api import public_analysis
+            case, _ = self.server.case(parts[2])
+            self.send(200, public_analysis(case, read_analysis(case, parts[4])))
+        elif len(parts) == 4 and parts[:2] == ["api", "cases"] and parts[3] == "plots":
+            from .workflow_api import plot_summary_page
+            case, _ = self.server.case(parts[2])
+            self.send(200, plot_summary_page(case, (query or {}).get("cursor")))
+        elif len(parts) == 6 and parts[:2] == ["api", "cases"] and parts[3] == "plots" and parts[5] == "summary":
+            from .workflow_api import plot_summary
+            case, _ = self.server.case(parts[2])
+            try:
+                result = plot_summary(case, parts[4])
+            except (TraceError, OSError, ValueError, TypeError, KeyError):
+                raise RequestError("Saved preview is unavailable", 404) from None
+            self.send(200, result)
+        elif len(parts) == 5 and parts[:2] == ["api", "cases"] and parts[3] == "plots":
+            from .workflow_api import selected_plot
+            case, _ = self.server.case(parts[2])
+            self.send(200, selected_plot(case, parts[4]))
         elif len(parts) == 3 and parts[:2] == ["api", "jobs"]:
             with self.server.job_lock:
                 job = self.server.jobs.get(parts[2])
                 if job is None:
                     raise RequestError("Job unavailable. Refresh the investigation to review saved runs.", 404)
-                self.send(200, dict(job))
+                job = dict(job)
+            self.send(200, job)
         elif len(parts) == 5 and parts[:2] == ["api", "cases"] and parts[3] == "input-exports":
             if parts[4] not in {"attributions", "name-colors", "change-outputs", "all"}:
                 raise RequestError("Input export not found", 404)
@@ -1144,47 +1820,125 @@ class Handler(BaseHTTPRequestHandler):
             case, _ = self.server.case(parts[2])
             product = build_input_export(case, parts[4])
             self.send(200, product["data"], product["content_type"], download=product["filename"])
+        elif len(parts) == 6 and parts[:2] == ["api", "cases"] and parts[3] == "plot-exports":
+            from .plot_csv import CSV_NAMES, build_plot_csv
+            if parts[5] not in CSV_NAMES:
+                raise RequestError("Plot export not found", 404)
+            case, _ = self.server.case(parts[2])
+            try:
+                product = build_plot_csv(case, parts[4], parts[5])
+            except TraceError as error:
+                raise RequestError(str(error)) from None
+            self.send(200, product["data"], product["content_type"], download=product["filename"])
         elif len(parts) == 5 and parts[0] == "files":
             case, _ = self.server.case(parts[1])
             path = self.server.artifact(case, parts[2:])
             if not path.is_file():
                 raise RequestError("File not found", 404)
             content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-            self.send(200, path.read_bytes(), content_type, preview=path.suffix in (".html", ".svg"),
-                      download=None if path.suffix == ".html" else path.name,
-                      explorer_links=parts[3].split("-")[1] in ("elk", "compact", "connections") and path.suffix in (".html", ".svg"))
+            from .layout_overview import navigation_files
+            navigation = navigation_files(path.parent) if path.suffix == ".html" else frozenset()
+            raw = path.read_bytes()
+            download_original = bool(plot_html_request(parts) and (query or {}).get("download"))
+            toolbar = bool(plot_html_request(parts) and not download_original)
+            if toolbar:
+                from .preview_toolbar import add_preview_toolbar
+                raw = add_preview_toolbar(raw, parts[1], parts[3])
+            self.send(200, raw, content_type, preview=path.suffix in (".html", ".svg"),
+                      download=path.name if download_original or path.suffix != ".html" else None,
+                      preview_navigation=bool(toolbar or navigation and path.name in navigation | {"graph.html", "details.html"}),
+                      explorer_links=(parts[2] == "analyses" or parts[3].split("-")[1] in ("elk", "compact", "connections", "pegouts", "plots")) and path.suffix in (".html", ".svg"))
         else:
+            if parts and parts[0] in {"api", "files"}:
+                raise RequestError("Page not found", 404)
             path = safe_path(self.server.assets, ["index.html"] if parts == [""] else parts)
             if not path.is_file():
                 raise RequestError("Page not found", 404)
             self.send(200, path.read_bytes(), mimetypes.guess_type(path.name)[0] or "application/octet-stream")
 
+    @staticmethod
+    def read_only_case_request(route, body):
+        # These POST routes accept searches or reviewed input previews for their
+        # bounded JSON bodies. Reading a case never reserves its job slot.
+        if route in ("addresses", "address", "address-merge-preview"):
+            return True
+        if route in ("change-outputs", "name-colors"):
+            return set(body) <= {"query", "offset", "limit"}
+        if route in ("address-import", "name-color-import", "change-output-import", "input-import"):
+            return "approve_plan" not in body
+        return False
+
     def post(self, parts, body):
+        if parts == ["api", "shared-attributions"]:
+            from .shared_attributions import catalog
+            if set(body) - {"query", "offset", "limit"}:
+                raise RequestError("Shared attributions accept a search and pagination only")
+            try:
+                return catalog(self.server.root, query=body.get("query", ""),
+                    offset=body.get("offset", 0), limit=body.get("limit", 100)), 200
+            except TraceError as error:
+                raise RequestError(str(error)) from None
+        if parts == ["api", "shared-attributions", "import"]:
+            from .shared_attributions import apply_import, preview_import
+            if set(body) - {"text", "format", "policy", "approve_plan"}:
+                raise RequestError("Shared attribution import accepts uploaded text, format, policy and approval only; not file paths")
+            options = {"format": body.get("format", "auto"), "policy": body.get("policy", "keep")}
+            try:
+                result = (apply_import(self.server.root, body.get("text"),
+                    approval_sha256=body["approve_plan"], **options) if "approve_plan" in body
+                    else preview_import(self.server.root, body.get("text"), **options))
+            except TraceError as error:
+                raise RequestError(str(error)) from None
+            return result, 200
+        if parts == ["api", "endpoint-exports"]:
+            from .combined_endpoint_csv import build_combined_endpoint_csv
+            if set(body) != {"investigations"}:
+                raise RequestError("Endpoint export accepts open investigation selections only")
+            try:
+                return build_combined_endpoint_csv(body["investigations"], self.server.case), 200
+            except TraceError as error:
+                raise RequestError(str(error)) from None
         if parts == ["api", "settings"]:
             return {"settings": save_settings(self.server.root, body.get("settings"))}, 200
+        if parts in (["api", "lookup"], ["api", "cases"]):
+            try:
+                blockchain = validate_blockchain(body.get("blockchain", "liquid"))
+            except TraceError as error:
+                raise RequestError(str(error)) from None
         if parts == ["api", "lookup"]:
-            if set(body) - {"txids", "source"}:
-                raise RequestError("Transaction lookup accepts transaction IDs only; not fixture files or custom arguments.")
+            if set(body) - {"txids", "source", "blockchain"}:
+                raise RequestError("Transaction lookup accepts transaction IDs and a supported blockchain only; not fixture files or custom arguments.")
             if body.get("source", "live") != "live":
                 raise RequestError("New transaction lookups use live Liquid data.")
             txids = parse_transaction_hashes(body.get("txids"))
             arguments = ["inspect-txs", "--txids", ",".join(txids)]
             return self.server.start_job(arguments, action="lookup", live=True, txids=txids), 202
         if parts == ["api", "cases"]:
-            if set(body) - {"name", "seeds", "board", "settings", "source"}:
-                raise RequestError("New investigations accept a name, starting outputs, board and settings only; not fixture files.")
+            if set(body) - {"name", "seeds", "board", "settings", "source", "blockchain"}:
+                raise RequestError("New investigations accept a name, blockchain, starting outputs, board and settings only; not fixture files.")
             if body.get("source", "live") != "live":
                 raise RequestError("New investigations use live Liquid data.")
             seeds = body.get("seeds")
             if not isinstance(seeds, list) or not seeds or any(not isinstance(seed, str) for seed in seeds):
                 raise RequestError("Select at least one starting output.")
             normalized = _seed_values(" ".join(seeds))
-            settings = validate_settings(body.get("settings", load_settings(self.server.root)))
+            settings = generation_settings(body.get("settings", load_settings(self.server.root)))
             case = create_investigation(self.server.root, body.get("name"), seeds=normalized,
-                board=body.get("board") or None, run_defaults=settings)
-            return self.server.case_summary(case, read_case(case), detail=True), 201
+                board=body.get("board") or None, run_defaults=settings, blockchain=blockchain)
+            from .investigation_views import overview
+            return overview(case, read_case(case)), 201
         if len(parts) == 4 and parts[:2] == ["api", "cases"]:
             case, metadata = self.server.case(parts[2])
+            if parts[3] == "seeds":
+                return self.server.save_case_seeds(case, metadata["case_id"], body), 200
+            if parts[3] == "shared-attributions":
+                from .services import set_shared_attributions
+                if set(body) != {"enabled", "expected_revision"}:
+                    raise RequestError("Choose shared attribution use and supply the current revision")
+                try:
+                    return set_shared_attributions(case, body["enabled"], expected_revision=body["expected_revision"]), 200
+                except TraceError as error:
+                    raise RequestError(str(error)) from None
             if parts[3] == "change-outputs":
                 from .change_outputs import catalog, set_change_output
 
@@ -1205,6 +1959,17 @@ class Handler(BaseHTTPRequestHandler):
                         notes=body.get("notes", ""), expected_revision=revision), 200
                 except TraceError as error:
                     raise RequestError(str(error)) from None
+            if parts[3] == "input-import":
+                from .input_import import apply_import, preview_import
+
+                if set(body) - {"files", "approve_plan"}:
+                    raise RequestError("CSV import accepts uploaded files and approval only; not file paths.")
+                try:
+                    result = (apply_import(case, body.get("files"), approval_sha256=body["approve_plan"])
+                              if "approve_plan" in body else preview_import(case, body.get("files")))
+                except TraceError as error:
+                    raise RequestError(str(error)) from None
+                return result, 200
             if parts[3] == "change-output-import":
                 from .change_output_import import apply_import, preview_import
 
@@ -1258,11 +2023,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self.server.address_merge_preview(case), 200
             if parts[3] in ("addresses", "address", "services"):
                 return self.address_request(parts[3], case, body), 200
+            if parts[3] == "plot-settings":
+                if set(body) != {"settings"}:
+                    raise RequestError("Saving plot settings requires only a settings object.")
+                try:
+                    updated = save_plot_settings(case, body["settings"])
+                except TraceError as error:
+                    raise RequestError(str(error)) from None
+                from .investigation_views import overview
+                return overview(case, updated), 200
             if parts[3] == "settings":
                 updates = {"name": body.get("name", metadata.get("name")),
                            "miro_board": body.get("board", metadata.get("miro_board")) or None,
                            "run_defaults": body.get("settings", metadata.get("run_defaults", {}))}
-                return self.server.case_summary(case, update_case(case, updates), detail=True), 200
+                from .investigation_views import overview
+                return overview(case, update_case(case, updates)), 200
             if parts[3] == "actions":
                 return self.server.action(case, metadata, body), 202
         raise RequestError("Route not found", 404)
@@ -1270,7 +2045,7 @@ class Handler(BaseHTTPRequestHandler):
     def address_request(self, route, case, body):
         from .address_activity import validate_address
         from .address_review import list_addresses, saved_activity
-        from .services import load_services, set_service
+        from .services import effective_services, set_service
 
         if route == "addresses":
             selected = body.get("run_id", "latest")
@@ -1296,7 +2071,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(selected, str) or (selected != "latest" and not RUN_ID.fullmatch(selected)):
                 raise RequestError("Choose a saved run for this address review.")
             activity = saved_activity(case, address, run_id=selected)
-            service = load_services(case)["rules"].get(address)
+            service = effective_services(case)["rules"].get(address)
             return {"address": address, "service": public_service(service),
                     "activity": public_address_activity(activity) if activity else None}
         if type(body.get("enabled")) is not bool:
@@ -1313,15 +2088,32 @@ def _interrupt(*_):
     raise KeyboardInterrupt
 
 
+def _open_server(root, assets, port=None):
+    """Bind before choosing a URL; another instance may win any candidate port."""
+    if port is not None:
+        return LocalServer(root, assets, port)
+    for candidate in range(DEFAULT_PORT, min(DEFAULT_PORT + 32, 65536)):
+        try:
+            return LocalServer(root, assets, candidate)
+        except OSError as error:
+            if error.errno != errno.EADDRINUSE:
+                raise
+    # Let the OS atomically select a free loopback port if the usual range is full.
+    return LocalServer(root, assets, 0)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Open the local Astro investigation interface")
     parser.add_argument("--root", type=Path, default=default_root(), help="Existing investigation directory")
     parser.add_argument("--assets", type=Path, default=_project() / "web" / "dist", help="Built Astro assets")
-    parser.add_argument("--port", type=int, default=4321, help="Loopback port (default: 4321)")
+    parser.add_argument("--port", type=int, help="Use this exact loopback port (default: first available from 4321)")
     parser.add_argument("--no-open", action="store_true", help="Print the URL without opening a browser")
     args = parser.parse_args(argv)
-    if not 1 <= args.port <= 65535:
+    if args.port is not None and not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")
+    # Pin this server to one immutable build even if another launcher publishes
+    # a newer web/dist symlink while it is running.
+    args.assets = args.assets.expanduser().resolve()
     if not (args.assets / "index.html").is_file():
         parser.error("Astro assets are missing. Start with liquid-web in the devenv shell to build them.")
     # The server remains alive while an interactive provider temporarily owns
@@ -1330,7 +2122,9 @@ def main(argv=None):
     previous_term = signal.signal(signal.SIGTERM, _interrupt)
     server = None
     try:
-        server = LocalServer(args.root, args.assets, args.port)
+        server = _open_server(args.root, args.assets, args.port)
+        if args.port is None and server.server_port != DEFAULT_PORT:
+            print("The default port is busy; this instance is using port " + str(server.server_port) + ".", flush=True)
         print("Liquid Network Tracer: " + server.origin, flush=True)
         print("Keep this terminal open. Proton Pass prompts for live actions appear here.", flush=True)
         if not args.no_open:

@@ -22,10 +22,16 @@
     LIQUID_CASE_DIR = "${config.devenv.root}/cases/current";
     LIQUID_SECRET_PROVIDER = "protonpass";
     LIQUID_SECRET_PROFILE = "development";
-    # Chosen operating rate for the paid endpoint, shared across fetch workers.
-    # This is an actual target, not an advertised Blockstream quota.
-    LIQUID_BLOCKSTREAM_ENTERPRISE_RPS = "49";
-    # A verified allowance in LIQUID_BLOCKSTREAM_API_RPS overrides this target
+    # Share the desktop Secret Service keyring across terminal sessions.
+    PROTON_PASS_KEY_PROVIDER = "keyring";
+    PROTON_PASS_LINUX_KEYRING = "dbus";
+    # Discover throughput from successful responses and provider backoff,
+    # shared across local workers and instances. A number selects a fixed rate.
+    LIQUID_BLOCKSTREAM_ENTERPRISE_RPS = "auto";
+    # Trace fetches adapt to latency and available resources, up to 64 workers.
+    # Set 1 for serial fetching or 1..64 as an explicit concurrency ceiling.
+    LIQUID_TRACE_WORKERS = "auto";
+    # A verified allowance in LIQUID_BLOCKSTREAM_API_RPS overrides auto mode
     # and applies 5% headroom to that allowance instead.
     LIQUID_SECRETSPEC_BIN = "${pkgs.secretspec}/bin/secretspec";
     SECRETSPEC_PROTONPASS_CLI_PATH = "${pkgs.proton-pass-cli}/bin/pass-cli";
@@ -33,12 +39,12 @@
     # local files and never needs API credentials or a separate server.
     LIQUID_MERMAID_BIN = "${pkgs.mermaid-cli}/bin/mmdc";
     LIQUID_NODE_BIN = "${pkgs.nodejs_24}/bin/node";
-    # Total V8 old-space allowance, shared by concurrent ELK workers. Mermaid
+    # Per-layout V8 old-space ceiling within the shared ELK resource pool. Mermaid
     # uses the allowance for one renderer. Auto uses 90% of available RAM,
     # accounting for Linux cgroup limits; a number sets total MiB explicitly.
     LIQUID_RENDER_HEAP_MB = "auto";
     # Auto measures the first ELK attempt, then sizes parallel batches from
-    # peak RAM with 2x headroom, available CPUs and the shared memory budget.
+    # peak RAM with 2x headroom and CPU/memory shares across active instances.
     # Set 1 for serial execution or 1..64 as an explicit concurrency ceiling.
     LIQUID_ELK_WORKERS = "auto";
   };
@@ -60,12 +66,9 @@
     description = "Install the locked local ELK layout dependency when needed";
     exec = ''
       set -euo pipefail
-      cd "$LIQUID_TRACER_ROOT/layout"
-      layout_lock_hash="$(sha256sum package.json package-lock.json | sha256sum | cut -d ' ' -f 1)"
-      if [ ! -f node_modules/.liquid-lock ] || [ "$(cat node_modules/.liquid-lock)" != "$layout_lock_hash" ]; then
-        ${pkgs.nodejs_24}/bin/npm ci --ignore-scripts --no-audit --no-fund
-        printf '%s\n' "$layout_lock_hash" > node_modules/.liquid-lock
-      fi
+      export PYTHONPATH="$LIQUID_TRACER_ROOT''${PYTHONPATH:+:$PYTHONPATH}"
+      exec ${config.languages.python.package}/bin/python3 -m liquid_tracer.web_build layout \
+        --root "$LIQUID_TRACER_ROOT" --npm "${pkgs.nodejs_24}/bin/npm"
     '';
   };
 
@@ -73,14 +76,9 @@
     description = "Install locked Astro dependencies when needed and build the local UI";
     exec = ''
       set -euo pipefail
-      liquid-layout-setup
-      cd "$LIQUID_TRACER_ROOT/web"
-      web_lock_hash="$(sha256sum package.json package-lock.json | sha256sum | cut -d ' ' -f 1)"
-      if [ ! -f node_modules/.liquid-lock ] || [ "$(cat node_modules/.liquid-lock)" != "$web_lock_hash" ]; then
-        ${pkgs.nodejs_24}/bin/npm ci --no-audit --no-fund
-        printf '%s\n' "$web_lock_hash" > node_modules/.liquid-lock
-      fi
-      exec ${pkgs.nodejs_24}/bin/npm run build
+      export PYTHONPATH="$LIQUID_TRACER_ROOT''${PYTHONPATH:+:$PYTHONPATH}"
+      exec ${config.languages.python.package}/bin/python3 -m liquid_tracer.web_build web \
+        --root "$LIQUID_TRACER_ROOT" --npm "${pkgs.nodejs_24}/bin/npm"
     '';
   };
 
@@ -100,8 +98,14 @@
   scripts.liquid-live = {
     description = "Load API credentials at runtime, then run liquid-trace";
     exec = ''
+      secret_access_reason="''${SECRETSPEC_REASON:-}"
+      case "$secret_access_reason" in
+        *[![:space:]]*) ;;
+        *) secret_access_reason="Authenticate the user-selected Liquid Tracer action with Blockstream or Miro." ;;
+      esac
       exec "$LIQUID_SECRETSPEC_BIN" --file "$LIQUID_TRACER_ROOT/secretspec.toml" run \
         --provider "$LIQUID_SECRET_PROVIDER" --profile "$LIQUID_SECRET_PROFILE" \
+        --reason "$secret_access_reason" \
         -- liquid-trace "$@"
     '';
   };
@@ -129,10 +133,16 @@
           exit 2
           ;;
       esac
+      secret_access_reason="''${SECRETSPEC_REASON:-}"
+      case "$secret_access_reason" in
+        *[![:space:]]*) ;;
+        *) secret_access_reason="Store API credentials for Liquid Tracer's Blockstream and Miro operations." ;;
+      esac
       printf 'Provider: %s; profile: %s\n' "$LIQUID_SECRET_PROVIDER" "$LIQUID_SECRET_PROFILE"
       for credential_name in "''${credential_names[@]}"; do
         "$LIQUID_SECRETSPEC_BIN" --file "$LIQUID_TRACER_ROOT/secretspec.toml" set "$credential_name" \
-          --provider "$LIQUID_SECRET_PROVIDER" --profile "$LIQUID_SECRET_PROFILE"
+          --provider "$LIQUID_SECRET_PROVIDER" --profile "$LIQUID_SECRET_PROFILE" \
+          --reason "$secret_access_reason"
       done
       printf '%s\n' 'Credentials saved. Use liquid-live for authenticated commands.'
     '';

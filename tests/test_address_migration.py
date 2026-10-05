@@ -112,6 +112,8 @@ class AddressMigrationTests(unittest.TestCase):
             record = state['items'][key]
             self.assertEqual(record['source'], entry['logical']['source'])
             self.assertEqual(record['target'], entry['logical']['target'])
+            original_evidence = self.state['items'][key]['context_evidence']
+            self.assertEqual(record['context_evidence'], {**original_evidence, **entry['logical']})
             remote = self.remote.items[record['id']]
             self.assertEqual(remote['startItem']['id'], entry['after']['source'])
             self.assertEqual(remote['endItem']['id'], entry['after']['target'])
@@ -124,6 +126,16 @@ class AddressMigrationTests(unittest.TestCase):
         self.assertEqual(self.new.get('presentation_items', {}), {})
         self.assertEqual(after['new_connectors'], 0)
         self.assert_archive_intact()
+
+    def test_changed_connector_creation_evidence_blocks_conversion_before_network(self):
+        state = load_state(self.path)
+        key = next(key for key, record in state['items'].items() if record['endpoint'] == 'connectors')
+        state['items'][key]['context_evidence']['outpoint'] = 'changed:0'
+        from liquid_tracer.miro_state import _write_snapshot
+        _write_snapshot(self.path, json.dumps(state))
+        with self.assertRaisesRegex(TraceError, 'connector evidence'):
+            self.apply()
+        self.assertEqual(self.remote.calls, [])
 
     def test_manual_duplicate_content_blocks_all_writes(self):
         plan = self.preview()['plan']

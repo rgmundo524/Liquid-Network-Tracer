@@ -179,7 +179,7 @@ def _create(receipt, path, transport):
     return target
 
 
-def rebuild_board(case, run_id="latest", source_board=None, name=None, max_new_items=750, progress=None,
+def rebuild_board(case, run_id="latest", source_board=None, name=None, max_new_items=0, progress=None,
                   transport=http):
     """Create once per source board; retry the same frozen graph on its replacement.
 
@@ -187,15 +187,16 @@ def rebuild_board(case, run_id="latest", source_board=None, name=None, max_new_i
     A later intentional rebuild supplies the currently linked replacement as its
     source. No DELETE is sent and no source mapping is changed.
     """
-    from .cli import (board_id, branch_hubs, connector_appearance, context_input_grouping, include_fee_flows,
+    from .cli import (attribution_arrow_coloring, board_id, branch_hubs, connector_appearance, context_input_grouping, include_fee_flows,
                       layout_search_attempts, refresh_presentation, resolve_latest, run_path, verify_export)
-    from .services import load_services
+    from .services import effective_services
+    from .board_deletion import assert_board_writable, board_write_lock
 
     case = Path(case)
     metadata = read_case(case)
     source = board_id(source_board)
     if type(max_new_items) is not int or max_new_items < 0:
-        raise TraceError("--max-new-items must be a nonnegative integer")
+        raise TraceError("--max-new-items must be a nonnegative integer (0 means unlimited new items)")
     if name is not None:
         board_options(name)
     directory = _directory(case, source)
@@ -204,7 +205,7 @@ def rebuild_board(case, run_id="latest", source_board=None, name=None, max_new_i
     created = False
     # One lock protects settings, source identity, creation receipts and linking.
     # Use sync directly: sync_run would recursively acquire this same case lock.
-    with _locks(case):
+    with _locks(case), board_write_lock(case, source):
         metadata = read_case(case)
         active = rebuild_status(case)
         if active and active["status"] == "unavailable":
@@ -224,6 +225,7 @@ def rebuild_board(case, run_id="latest", source_board=None, name=None, max_new_i
                              "then start a new rebuild from the linked replacement board")
         if receipt and receipt.get("board_id"):
             target = receipt["board_id"]
+            assert_board_writable(case, target)
             try:
                 plan = read_json(plan_path)
                 validate_plan(plan)
@@ -234,9 +236,10 @@ def rebuild_board(case, run_id="latest", source_board=None, name=None, max_new_i
                 raise TraceError("The saved board rebuild plan is missing or invalid. Restore it before resuming; "
                                  "no additional board will be created") from None
             if receipt["status"] == "complete":
-                if current != target:
-                    save_json(case / "case.json", {**metadata, "miro_board": target})
-                return {**receipt["result"], "created": False, "reused": True}
+                with board_write_lock(case, target):
+                    if current != target:
+                        save_json(case / "case.json", {**metadata, "miro_board": target})
+                    return {**receipt["result"], "created": False, "reused": True}
         else:
             _token()  # Avoid an expensive layout when board creation cannot run.
             resolved = receipt["run_id"] if receipt else resolve_latest(case, run_id)
@@ -249,9 +252,10 @@ def rebuild_board(case, run_id="latest", source_board=None, name=None, max_new_i
             count_report = {}
             plan = refresh_presentation(
                 archived, archive / "trace.json", include_fee_flows(metadata), connector_appearance(metadata),
-                progress=progress, service_settings=load_services(case), preview_directory=case / "previews",
+                progress=progress, service_settings=effective_services(case), preview_directory=case / "previews",
                 fetch_address_counts=True, count_report=count_report,
                 group_context_inputs=context_input_grouping(metadata), hub_addresses=branch_hubs(metadata),
+                color_attribution_arrows=attribution_arrow_coloring(metadata),
                 layout_attempts=layout_search_attempts(metadata))
             # A fresh board needs every shape and connector. Check the full item
             # budget and sync invariants before even recording a POST intent.
@@ -278,7 +282,8 @@ def rebuild_board(case, run_id="latest", source_board=None, name=None, max_new_i
         # Validate resumability and budget before changing the current board link.
         sync(plan, target, state_path, max_items=max_new_items, dry_run=True)
         try:
-            save_json(case / "case.json", {**metadata, "miro_board": target})
+            with board_write_lock(case, target):
+                save_json(case / "case.json", {**metadata, "miro_board": target})
         except OSError:
             raise TraceError("The new board is saved but linking it failed. Retry this same rebuild to reuse the saved board") from None
         receipt.update(status="syncing")

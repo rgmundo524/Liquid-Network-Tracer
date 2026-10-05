@@ -20,7 +20,9 @@ MAX_ROWS = 5000
 MAX_ERRORS = 50
 FORMATS = {"auto", "csv", "json"}
 FIELDS = {"name", "color"}
-NOTICE = ("Import attribution names first. Matching ignores capitalization; one color applies to all "
+NOTICE = ("Reuse this palette across investigations. Colors for names without matching addresses are saved "
+          "for later use; importing colors does not create address attributions. "
+          "Matching ignores capitalization; one color applies to all "
           "addresses with that name. Blank or null colors request the default; choose replace to clear "
           "an existing assignment. Selected seeds retain their configured seed color. "
           "This saves local name colors only, preserving attribution evidence and graph role colors. "
@@ -145,11 +147,6 @@ def _plan(settings, parsed, policy):
     counts = {"add": 0, "replace": 0, "clear": 0, "unchanged": 0, "keep": 0}
     for entry in parsed["rows"]:
         key, color = entry["key"], entry["color"]
-        if key not in groups:
-            if len(errors) < MAX_ERRORS:
-                errors.append({"row": entry["row"], "message": "Unknown attribution name; import or save "
-                               "the attribution name before assigning its color"})
-            continue
         previous = colors.get(key)
         if previous == color:
             action = "unchanged"
@@ -160,7 +157,8 @@ def _plan(settings, parsed, policy):
         else:
             action = "clear" if color is None else "replace"
         counts[action] += 1
-        changes.append({**entry, "previous": previous, "action": action, "addresses": groups[key]["addresses"]})
+        changes.append({**entry, "previous": previous, "action": action,
+                        "addresses": groups[key]["addresses"] if key in groups else 0})
     valid = not errors
     approval = digest(canonical({"kind": "name_color_import", "case_id": settings["case_id"],
         "settings_sha256": digest(canonical(settings)), "source_sha256": parsed["source_sha256"],

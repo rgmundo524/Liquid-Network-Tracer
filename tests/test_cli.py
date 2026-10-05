@@ -26,7 +26,13 @@ class CliIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.case = Path(self.temp.name) / "case"
+        root = Path(self.temp.name)
+        isolated = {"XDG_CACHE_HOME": str(root / "cache"), "XDG_STATE_HOME": str(root / "state")}
+        isolated.update({name: os.environ[name] for name in ("LIQUID_RENDER_HEAP_MB", "LIQUID_ELK_WORKERS")
+                         if name in os.environ})
+        self.enterContext(patch.dict(os.environ, isolated))
+        self.enterContext(patch.dict(NODE_ENV, isolated))
+        self.case = root / "case"
         self.project = Path(__file__).resolve().parents[1]
         self.base = ["trace", "--case", str(self.case), "--fixture", str(self.project / "tests/data/synthetic-api.json")]
 
@@ -91,7 +97,8 @@ class CliIntegrationTests(unittest.TestCase):
             saved = read_json(Path(first["directory"]) / "trace.json")["fetch_options"]
             self.assertEqual(saved, {"workers": 2, "advertised_rps": 10.0,
                                     "effective_rps": 9.5, "rate_limit_source": "advertised",
-                                    "min_interval": 0.0, "fixture": True})
+                                    "min_interval": 0.0, "min_interval_explicit": False,
+                                    "fixture": True})
             second = self.start("--hops", "0", "--api-rate-limit", "20", "--api-workers", "1")
             saved = read_json(Path(second["directory"]) / "trace.json")["fetch_options"]
             self.assertEqual((saved["advertised_rps"], saved["effective_rps"], saved["workers"]), (20.0, 19.0, 1))
@@ -267,7 +274,7 @@ class CliIntegrationTests(unittest.TestCase):
             status, output, errors = self.invoke(["miro-sync", "--case", str(self.case),
                                                  "--board", "https://miro.com/app/board/SAVED%3D/"])
         self.assertEqual(status, 0, errors)
-        self.assertEqual(read_json(self.case / "case.json"), {**metadata, "miro_board": "SAVED="})
+        self.assertEqual(read_json(self.case / "case.json"), {**metadata, "blockchain": "liquid", "miro_board": "SAVED="})
         report = json.loads(output)
         self.assertEqual(report["board_id"], "SAVED=")
         self.assertEqual(report["board_url"], "https://miro.com/app/board/SAVED%3D/")
@@ -337,14 +344,25 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual((self.case / "case.json").read_bytes(), metadata)
 
     def test_local_sync_validation_does_not_replace_saved_board(self):
-        self.start("--hops", "1")
+        first = self.start("--hops", "1")
         metadata = read_json(self.case / "case.json")
         save_json(self.case / "case.json", {**metadata, "miro_board": "ORIGINAL="})
-        snapshot = {str(p.relative_to(self.case)): digest(p.read_bytes()) for p in self.case.rglob("*") if p.is_file()}
-        status, _, errors = self.invoke(["miro-sync", "--case", str(self.case), "--board", "REPLACEMENT=", "--max-new-items", "0"])
+        before_metadata = (self.case / "case.json").read_bytes()
+        archive = Path(first["directory"])
+        snapshot = {str(p.relative_to(archive)): digest(p.read_bytes()) for p in archive.rglob("*") if p.is_file()}
+        adapter = functools.partial(real_sync, token="synthetic-test-token",
+                                    transport=lambda *args: self.fail("Budget rejection must precede remote calls"))
+        with patch("liquid_tracer.cli.sync", adapter):
+            # Zero is unlimited; use a positive cap below this graph's size.
+            status, _, errors = self.invoke(["miro-sync", "--case", str(self.case), "--board", "REPLACEMENT=", "--max-new-items", "1"])
         self.assertEqual(status, 1)
         self.assertIn("above max-items", errors)
-        self.assertEqual(snapshot, {str(p.relative_to(self.case)): digest(p.read_bytes()) for p in self.case.rglob("*") if p.is_file()})
+        self.assertEqual((self.case / "case.json").read_bytes(), before_metadata)
+        self.assertEqual(snapshot, {str(p.relative_to(archive)): digest(p.read_bytes()) for p in archive.rglob("*") if p.is_file()})
+        # Live preparation retains its completed layout for the next attempt.
+        preview, = (self.case / "previews").glob("*-elk-*")
+        self.assertTrue(all((preview / name).is_file() for name in ("graph.html", "graph.json", "graph.svg", "layout-report.json")))
+        self.assertFalse((self.case / "miro").exists())
 
     def test_run_snapshot_uses_current_case_settings_on_continuation(self):
         first = self.start("--hops", "1")
