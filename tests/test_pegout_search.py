@@ -527,7 +527,7 @@ class PegoutSearchTests(unittest.TestCase):
             result = self.search()
         self.assertEqual(result["status"], "error")
         self.assertEqual(self.state(result)["errors"], ["Explorer HTTP 503"])
-        self.assertIn("Peg-out search: Explorer HTTP 503", stderr.getvalue())
+        self.assertIn("Endpoint search: Explorer HTTP 503", stderr.getvalue())
         self.assertEqual(result["match_count"], 0)
 
     def test_search_progress_phases_and_callback_failure_do_not_lose_results(self):

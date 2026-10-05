@@ -1,5 +1,6 @@
 """Shared, presentation-only color key for Miro and local graph previews."""
 
+from .networks import blockchain, is_primary
 import html
 
 from .name_colors import color_value, validate_name_colors
@@ -46,11 +47,13 @@ def legend_rows(graph=None):
     rows = [{"key": "role:" + role, "color": colors.get(role, PALETTE[role][1]),
              "label": label, "description": description}
             for role, label, description in _ROLES]
+    if blockchain(graph) == "bitcoin":
+        next(row for row in rows if row["key"] == "role:event")["description"] = "Unspendable outputs and other events."
     palette = validate_name_colors(settings.get("name_colors", {}))
     names = {}
     for node in graph.get("nodes", []):
         details = node.get("details", {})
-        if node.get("kind") != "address" or details.get("network") != "liquid":
+        if node.get("kind") != "address" or not is_primary(node, graph):
             continue
         assigned = validate_name_colors(details.get("name_colors", {}))
         for assessment in details.get("address_attributions", []):
@@ -86,7 +89,8 @@ def legend_notes(graph=None):
         ("Named arrows color only links directly entering or leaving that address; other arrows use the defaults."
          if arrows else "Arrows use the traced and context colors shown above."),
         "Thick red borders mark branch convergence. Colors and links do not prove ownership or allocate value.",
-        "L-BTC amounts use L-BTC units: 100,000,000 base units = 1 L-BTC. Other assets use base units.",
+        ("Bitcoin amounts use BTC units: 100,000,000 satoshis = 1 BTC." if blockchain(graph) == "bitcoin" else
+         "L-BTC amounts use L-BTC units: 100,000,000 base units = 1 L-BTC. Other assets use base units."),
         ("?? = not publicly available. Collection stop labels remain visible but do not limit this saved-data view."
          if all_saved_connections or limited_connections or shortest_connections else "?? = not publicly available. STOP TRACING = an explicit address boundary."),
     ]
@@ -146,10 +150,12 @@ def legend_notes(graph=None):
         report = graph.get("pegouts", {})
         query = report.get("query") if isinstance(report, dict) else None
         if not isinstance(query, dict):
-            raise TraceError("Peg-out legend requires its reviewed search query")
+            raise TraceError("Endpoint legend requires its reviewed search query")
         query = validate_query(query.get("txid"), query.get("min_hops"), query.get("max_hops"),
                                seeds=query.get("seeds"), include_unspent=query.get("include_unspent", False),
                                include_unspendable=query.get("include_unspendable", False),
+                               include_attributed_stops=query.get("include_attributed_stops", False),
+                               blockchain=blockchain(graph),
                                include_context=query.get("include_context", False),
                                hop_reference_name=query.get("hop_reference_name", ""),
                                transaction_io=query.get("transaction_io"),
@@ -166,13 +172,17 @@ def legend_notes(graph=None):
                          "Unknown amounts or assets do not count toward the target. Other context outputs are not counted. "
                          "This is an exploration cutoff, not an allocation of stolen funds.")
         complete_io = query.get("transaction_io") == "complete"
+        # Existing Liquid snapshots recompute their publication plan; retain
+        # their original legend text and ordering unless the new endpoint mode is used.
+        endpoint_search = blockchain(graph) == "bitcoin" or query.get("include_attributed_stops", False)
+        search_label = "Endpoint" if endpoint_search else "Peg-out"
         if "seeds" in query:
             count = len({seed.split(":")[0] for seed in query["seeds"]})
-            origin = (f"Peg-out search: {len(query['seeds'])} selected seed UTXO(s) "
+            origin = (f"{search_label} search: {len(query['seeds'])} selected seed UTXO(s) "
                       f"from {count} starting transaction(s).")
             hop_zero = "Each starting transaction is hop 0."
         else:
-            origin = "Peg-out search origin: " + query["txid"]
+            origin = search_label + " search origin: " + query["txid"]
             hop_zero = "The origin is hop 0."
         if query.get("hop_reference_name"):
             hop_zero = ("Selected outputs in the named group reset their own path to hop 0; "
@@ -188,8 +198,10 @@ def legend_notes(graph=None):
              "or add endpoint matches. Combined path edges can also form routes outside the selected range."
              if complete_io or query.get("include_context") else
              "Only qualifying paths are plotted. Their combined edges can also form routes outside the selected range."),
-            "Peg-out diamonds are Liquid requests, not confirmation of Bitcoin payouts.",
-            coverage + "Stopped, unconfirmed or unsearched branches may contain undiscovered peg-outs; no result does not prove absence.",
+            *(["Peg-out diamonds are Liquid requests, not confirmation of Bitcoin payouts."]
+              if blockchain(graph) == "liquid" else []),
+            coverage + "Stopped, unconfirmed or unsearched branches may contain undiscovered "
+            + ("endpoints" if endpoint_search else "peg-outs") + "; no result does not prove absence.",
         ])
         if query.get("attribution_hop_limits") == "ignore":
             notes.append("Attribution CSV hop limits are ignored for these paths. Explicit stop-tracing rules "
@@ -209,13 +221,18 @@ def legend_notes(graph=None):
         elif query.get("include_context"):
             notes.append("Context includes other input addresses and spendable sibling outputs of displayed transactions. "
                          "It does not expand the trace to their earlier or later transactions.")
-        if query.get("include_unspent") or query.get("include_unspendable"):
-            endpoints = ["peg-out requests"]
+        if query.get("include_unspent") or query.get("include_unspendable") or query.get("include_attributed_stops"):
+            endpoints = ["peg-out requests"] if blockchain(graph) == "liquid" else []
             if query.get("include_unspent"):
                 endpoints.append("unspent UTXOs")
             if query.get("include_unspendable"):
                 endpoints.append("provably unspendable outputs")
+            if query.get("include_attributed_stops"):
+                endpoints.append("explicit attribution stops")
             notes.append("Selected endpoints: " + ", ".join(endpoints) + ". The same hop range and trace boundaries apply to each.")
+            if query.get("include_attributed_stops"):
+                notes.append("Attributed endpoints use enabled explicit stop-tracing rules. A name alone does not stop "
+                             "tracing or establish ownership. A tracing boundary does not establish that its output is unspent.")
             if query.get("include_unspent"):
                 notes.append("Unspent means observed unspent in the selected saved run, not a live balance. "
                              "Unchecked and hop-limited outputs do not qualify.")

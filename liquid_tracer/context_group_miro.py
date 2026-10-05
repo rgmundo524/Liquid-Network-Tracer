@@ -5,6 +5,7 @@ UTXO evidence survive; remote IDs may change. The ordinary sync deletion and
 creation journals make interrupted replacements resumable without blind POSTs.
 """
 
+from .networks import blockchain, is_primary
 import copy
 import math
 
@@ -39,7 +40,7 @@ def catalog(graph):
         members = {}
         for member in details["members"]:
             info = member.get("details", {})
-            if member["kind"] != "address" or info.get("network") != "liquid" or not info.get("address"):
+            if member["kind"] != "address" or not is_primary(member, graph) or not info.get("address"):
                 raise TraceError("Context summary contains an unproven address; regenerate the export")
             members[member["id"]] = {"address": info["address"],
                                       "width": member["width"], "height": member["height"]}

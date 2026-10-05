@@ -21,11 +21,11 @@ from .common import TraceError, canonical, digest, now, read_json, save_json
 from .investigations import read_case
 from .miro_state import load_state, journal_path
 
-GOALS = {"full": "Full trace", "connections": "Starter connections", "pegouts": "Peg-outs"}
+GOALS = {"full": "Full trace", "connections": "Starter connections", "pegouts": "Endpoints"}
 RECORD_ID = re.compile(r"board-[0-9a-f]{32}\Z")
 UNCERTAIN = ("Miro board creation outcome is uncertain. Inspect your Miro boards and link the created "
              "board to this pending board entry. No additional board will be created automatically.")
-ADDRESS_LAYOUT_GOALS = {"pegouts": "Paths to peg-outs", "connections": "Starter connections"}
+ADDRESS_LAYOUT_GOALS = {"pegouts": "Paths to endpoints", "connections": "Starter connections"}
 
 
 def _address_mode_notice(goal):
@@ -532,7 +532,7 @@ def _check_unfinished_creation(case):
 
 
 def generate_and_sync(case, goal, run_id="latest", min_hops=0, max_hops=10, *, include_unspent=False,
-                      include_unspendable=False, include_context=False, layout_mode="fresh",
+                      include_unspendable=False, include_context=False, include_attributed_stops=False, layout_mode="fresh",
                       board_record_id=None, name=None, team_id=None, max_items=0, token=None,
                       transport=http, interval=.02, progress=None, workers=4, layout_settings=None,
                       data_source="investigation", dataset_id=None, connection_scope="all_saved",
@@ -580,7 +580,8 @@ def generate_and_sync(case, goal, run_id="latest", min_hops=0, max_hops=10, *, i
             progress({"phase": "building_plan", "completed": 0, "total": 1})
         plot = preview_plot(case, goal, run_id, min_hops, max_hops, include_unspent=include_unspent,
                             include_unspendable=include_unspendable, include_context=include_context,
-                            layout_mode=layout_mode, board_record_id=board_record_id, token=token,
+                            include_attributed_stops=include_attributed_stops, layout_mode=layout_mode,
+                            board_record_id=board_record_id, token=token,
                             transport=transport, interval=interval, progress=progress, workers=workers,
                             data_source=data_source, dataset_id=dataset_id,
                             connection_scope=connection_scope, pegout_lbtc_limit=pegout_lbtc_limit,

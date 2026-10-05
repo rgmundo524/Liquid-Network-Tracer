@@ -10,6 +10,7 @@ from pathlib import Path
 from . import __version__
 from .common import (HEX64, StopRun, TraceError, digest, match_labels, now,
                      output_kind, parse_outpoint, save_json)
+from .networks import blockchain as normalize_blockchain
 from .services import ServiceScope, is_service_stop
 from .performance import public_api_rate
 from .progress import report_progress
@@ -20,7 +21,10 @@ TERMINAL = {"spent", "fee", "pegout", "provably_unspendable"}
 COLLECTION_POLICY = {"schema_version": 1, "attribution_hop_limits": "ignore", "stop_tracing": "respect"}
 
 
-def new_state(seeds, source, limits, labels, parent=None, case_id=None):
+def new_state(seeds, source, limits, labels, parent=None, case_id=None, *, blockchain="liquid"):
+    chain = normalize_blockchain(blockchain)
+    if parent is not None and normalize_blockchain(parent) != chain:
+        raise TraceError("Continuation must use the same blockchain")
     state = copy.deepcopy(parent) if parent else {
         "schema_version": 1, "seeds": sorted(set(seeds)), "transactions": {},
         "outputs": {}, "links": {}, "observations": [], "source": source,
@@ -30,6 +34,7 @@ def new_state(seeds, source, limits, labels, parent=None, case_id=None):
         raise TraceError("Continuation must use the same API source (or identical fixture)")
     if case_id and state.get("case_id") and state["case_id"] != case_id:
         raise TraceError("The resumed run belongs to a different case")
+    state["blockchain"] = chain
     state["case_id"] = case_id or state.get("case_id") or uuid.uuid4().hex
     state.pop("collection_recovery", None)  # This audit belongs to its original sealed run.
     state.update({"run_id": uuid.uuid4().hex[:16], "parent_run": parent["run_id"] if parent else None,
@@ -69,6 +74,9 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
     stops, the run's global hop ceiling and its request/resource budgets.
     """
     limits.validate()
+    chain = normalize_blockchain(state)
+    if normalize_blockchain(getattr(api, "blockchain", chain)) != chain:
+        raise TraceError("Explorer blockchain does not match the saved trace")
     started = time.monotonic()
     fetch_wait_seconds = 0.
     checkpoint_writer = TraceCheckpoint()
@@ -311,7 +319,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
                     or item["vout"] >= len(transaction["vout"])):
                 return False
             output = transaction["vout"][item["vout"]]
-            return (output_kind(output) == "spendable" and scope.permits(item, output)
+            return (output_kind(output, chain) == "spendable" and scope.permits(item, output)
                     and not any(label.get("stop") for label in match_labels(labels, item["outpoint"], output))
                     and (include_unconfirmed or transaction["status"]["confirmed"]))
 
@@ -426,7 +434,7 @@ def trace(api, state, limits, checkpoint, include_unconfirmed=False, only=None, 
                 save()
                 continue
             report_hop(depth)
-            kind = output_kind(output)
+            kind = output_kind(output, chain)
             current["labels"] = match_labels(labels, key, output)
             if kind != "spendable":
                 current["status"] = kind

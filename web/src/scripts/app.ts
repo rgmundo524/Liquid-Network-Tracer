@@ -161,8 +161,8 @@ type Plot = StarterCoverage & {
   hop_reference_name?: string;
   created_at: string; status: string; node_count: number; edge_count: number; display_edge_count?: number; transaction_count: number;
   match_count?: number; connection_count?: number; source_max_hops?: number; source_run_status?: string;
-  query?: {hop_basis?: "original_seeds"; include_unspent?: boolean; include_unspendable?: boolean; include_context?: boolean; transaction_io?: "complete"; attribution_hop_limits?: "ignore"; connection_scope?: ConnectionScope; pegout_lbtc_limit?: string};
-  endpoint_count?: number; endpoint_counts?: {pegout: number; unspent: number; unspendable: number};
+  query?: {hop_basis?: "original_seeds"; include_unspent?: boolean; include_unspendable?: boolean; include_attributed_stops?: boolean; include_context?: boolean; transaction_io?: "complete"; attribution_hop_limits?: "ignore"; connection_scope?: ConnectionScope; pegout_lbtc_limit?: string};
+  endpoint_count?: number; endpoint_counts?: {pegout: number; unspent: number; unspendable: number; attributed_stop?: number};
   pegout_lbtc_summary?: PegoutLbtcSummary;
   pegout_limit_summary?: PegoutLimitSummary;
   context_edge_count?: number;
@@ -220,6 +220,7 @@ type Output = {
 type Report = { txid: string; outputs: Output[] };
 type CountReport = { known: number; total: number; remaining: number; failed: number; stop_reason?: string | null };
 type Result = RenderingMetadata & StarterCoverage & {
+  blockchain?: string;
   node_count?: number;
   edge_count?: number;
   performance?: CollectionPerformance;
@@ -317,7 +318,7 @@ type ActiveJob = {
   cancelling: boolean;
   status: Job["status"];
   generation?: number;
-  lookupTxids?: string;
+  lookupTxids?: string; lookupBlockchain?: string;
   outcome?: Job;
   outcomeError?: string;
 };
@@ -355,7 +356,7 @@ const state = {
     query: "", suspectedOnly: false, data: null as AddressPage | null,
     selected: null as AddressRow | null, loading: false,
     name: "", notes: "", enabled: false, pasted: "",
-    confidence: "suspected", source: "Investigator designation", observedAt: "", stopTracing: true, hopLimit: "",
+    confidence: "suspected", source: "Investigator designation", observedAt: "", stopTracing: false, hopLimit: "",
   },
   jobs: new Map<string, ActiveJob>(),
   error: "",
@@ -383,7 +384,7 @@ let discoveringJobs = false;
 const dismissedJobs = new Set<string>();
 let tasksOpen = false;
 let dialogAction = "";
-let sharedDialog: {caseId: string; mode: "collect" | "continue"; runId?: string} | null = null;
+let sharedDialog: {caseId: string; mode: "collect" | "continue"; runId?: string; caseIds?: string[]} | null = null;
 let dialogMergeApproval = "";
 let dialogPreviewId = "";
 let dialogRebuild: { caseId: string; sourceBoard: string; runId: string; budgetLimitsEnabled: boolean } | null = null;
@@ -394,7 +395,7 @@ let dialogDeleteBoard: {caseId: string; recordId: string; boardId: string; name:
 let submitting = false;
 let pageGeneration = 0;
 let viewRevision = 0;
-let workflowDraft = {caseId: "", dataSource: "investigation" as "investigation" | "shared", sharedRun: "", datasetId: "", goal: "full" as PlotGoal, minHops: "0", maxHops: "10", hopBasis: "original_seeds" as "original_seeds" | "configured", connectionScope: "hop_limited" as ConnectionScope, connectionMaxHops: "10", pegoutLimitEnabled: false, pegoutLbtcLimit: "", includeUnspent: false, includeUnspendable: false, layoutMode: "fresh" as PlotLayoutMode, layoutBoard: "", plot: "", board: "", boardPlot: "", boardGoal: "full" as PlotGoal, boardName: "", savedBoardName: "", linkedBoardName: "", boardUrl: ""};
+let workflowDraft = {caseId: "", dataSource: "investigation" as "investigation" | "shared", sharedRun: "", datasetId: "", goal: "full" as PlotGoal, minHops: "0", maxHops: "10", hopBasis: "original_seeds" as "original_seeds" | "configured", connectionScope: "hop_limited" as ConnectionScope, connectionMaxHops: "10", pegoutLimitEnabled: false, pegoutLbtcLimit: "", includeUnspent: true, includeUnspendable: true, includeAttributedStops: true, layoutMode: "fresh" as PlotLayoutMode, layoutBoard: "", plot: "", board: "", boardPlot: "", boardGoal: "full" as PlotGoal, boardName: "", savedBoardName: "", linkedBoardName: "", boardUrl: ""};
 let pegoutDraft = {caseId: "", custom: false, txid: "", minHops: "0", maxHops: "10", selected: "", board: "", approved: ""};
 const pegoutDrafts = new Map<string, typeof pegoutDraft>();
 type InvestigationView = {
@@ -496,7 +497,7 @@ function endpointExportNotice(): string {
     : error ? "Endpoint export could not be completed"
     : result!.included.length ? `Exported ${result!.endpoint_count} endpoint row${result!.endpoint_count === 1 ? "" : "s"} from ${result!.included.length} investigation${result!.included.length === 1 ? "" : "s"}`
     : "No saved endpoint traces to export";
-  return `<div class="endpoint-export-notice${error ? " error" : ""}" role="status"><div><strong>${esc(title)}</strong><p>${esc(pending ? `Reading saved traces for ${caseCount} open investigation${caseCount === 1 ? "" : "s"}…` : error || (result!.included.length ? "Shared endpoints remain separate rows for each investigation." : "Generate a Paths to peg-outs plot for the selected snapshots, then export again."))}</p>${result ? `<details${result.skipped.length ? " open" : ""}><summary>Included ${result.included.length} · Skipped ${result.skipped.length}</summary><ul>${result.included.map(item => `<li>${esc(item.name)}: ${item.endpoint_count} endpoint row${item.endpoint_count === 1 ? "" : "s"} · ${item.collection_source?.kind === "shared" ? `shared snapshot ${esc(item.collection_source.run_id)}` : `run ${esc(item.run_id)}`}</li>`).join("")}${result.skipped.map(item => `<li>${esc(item.name)}: skipped. ${esc(item.reason)}</li>`).join("")}</ul></details>` : ""}</div>${!pending ? `<button class="dismiss" data-action="dismiss-endpoint-export" aria-label="Dismiss endpoint export status">${icon("close")}</button>` : ""}</div>`;
+  return `<div class="endpoint-export-notice${error ? " error" : ""}" role="status"><div><strong>${esc(title)}</strong><p>${esc(pending ? `Reading saved traces for ${caseCount} open investigation${caseCount === 1 ? "" : "s"}…` : error || (result!.included.length ? "Shared endpoints remain separate rows for each investigation." : "Generate a Paths to endpoints plot for the selected snapshots, then export again."))}</p>${result ? `<details${result.skipped.length ? " open" : ""}><summary>Included ${result.included.length} · Skipped ${result.skipped.length}</summary><ul>${result.included.map(item => `<li>${esc(item.name)}: ${item.endpoint_count} endpoint row${item.endpoint_count === 1 ? "" : "s"} · ${item.collection_source?.kind === "shared" ? `shared snapshot ${esc(item.collection_source.run_id)}` : `run ${esc(item.run_id)}`}</li>`).join("")}${result.skipped.map(item => `<li>${esc(item.name)}: skipped. ${esc(item.reason)}</li>`).join("")}</ul></details>` : ""}</div>${!pending ? `<button class="dismiss" data-action="dismiss-endpoint-export" aria-label="Dismiss endpoint export status">${icon("close")}</button>` : ""}</div>`;
 }
 
 async function exportOpenEndpoints(): Promise<void> {
@@ -631,7 +632,9 @@ const outputValue = (output: Output): string =>
 const liquidBitcoinAsset =
   "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d";
 const outputAsset = (asset?: string): string =>
-  asset === liquidBitcoinAsset ? "L-BTC" : asset ? short(asset, 10) : "??";
+  asset === liquidBitcoinAsset ? "L-BTC" : asset ? short(asset, 10) : state.draft.blockchain === "bitcoin" ? "BTC" : "??";
+const blockchainName = (value?: string): string => value === "bitcoin" ? "Bitcoin" : "Liquid";
+const blockchainExplorer = (value?: string): string => `https://blockstream.info${value === "bitcoin" ? "" : "/liquid"}`;
 const formatDate = (value?: string): string => {
   if (!value) return "Saved locally";
   const parsed = new Date(value);
@@ -784,7 +787,7 @@ function graphFields(settings: Settings, suggest = false, goal: PlotGoal = "full
     <fieldset class="layout-fields fee-flow-fields"><legend>Transaction fees</legend>
     ${check("include_fees", "Include transaction fee flows", "Off by default for every plot type. Include fees above the graph and in its transaction CSV; saved evidence always retains fee data.")}</fieldset>
     <fieldset class="layout-fields full-trace-fields"${disabled(goal === "connections")}><legend>Branch hubs</legend>
-    ${hubAddressFields(settings)}</fieldset>${goal !== "full" ? `<p class="small muted">${goal === "pegouts" ? "Peg-out layouts show every transaction input and non-fee output. The fee option also includes transaction fee flows." : "Starter connection layouts show every transaction input and non-fee output. The fee option also includes transaction fee flows."} Separate branch hubs apply to Full trace and Paths to peg-outs.</p>` : ""}`;
+    ${hubAddressFields(settings)}</fieldset>${goal !== "full" ? `<p class="small muted">${goal === "pegouts" ? "Endpoint layouts show every transaction input and non-fee output. The fee option also includes transaction fee flows." : "Starter connection layouts show every transaction input and non-fee output. The fee option also includes transaction fee flows."} Separate branch hubs apply to Full trace and Paths to endpoints.</p>` : ""}`;
 }
 
 function traceSummary(settings: Settings): string {
@@ -824,7 +827,7 @@ async function suggestHopReferenceNames(): Promise<void> {
 }
 
 function hubAddressFields(settings: Settings): string {
-  return `<div class="settings-divider"></div><label class="field"><span>Separate branch hubs</span><textarea name="hub_addresses" class="mono" rows="4" spellcheck="false" placeholder="One full Liquid address per line">${esc(settings.hub_addresses.join("\n"))}</textarea><small>Group branches at high-activity or shared addresses. Trace layout places a hub after its first entry from the starting flow, with later returns looping back. Spending transactions line up vertically when other inputs allow; their outputs branch to the right. Each address keeps one identity and all connections. Tracing stays the same.</small></label>`;
+  return `<div class="settings-divider"></div><label class="field"><span>Separate branch hubs</span><textarea name="hub_addresses" class="mono" rows="4" spellcheck="false" placeholder="One full address per line">${esc(settings.hub_addresses.join("\n"))}</textarea><small>Group branches at high-activity or shared addresses. Trace layout places a hub after its first entry from the starting flow, with later returns looping back. Spending transactions line up vertically when other inputs allow; their outputs branch to the right. Each address keeps one identity and all connections. Tracing stays the same.</small></label>`;
 }
 
 function centerNameFields(settings: Settings, suggest = false): string {
@@ -1038,7 +1041,7 @@ function cancelCaseOpening(): void {
 }
 
 function render(focus = false): void {
-  selectSharedAttributions(state.page === "settings" ? null : state.activeCase?.id || null);
+  selectSharedAttributions(state.page === "settings" ? null : state.activeCase?.id || null, state.page === "settings" ? undefined : state.activeCase?.blockchain);
   const previousPreviews = document.querySelector<HTMLElement>(".preview-library");
   if (previousPreviews?.dataset.caseId) previewLibraryState(previousPreviews.dataset.caseId).scrollTop = previousPreviews.scrollTop;
   const tabScroll = document.querySelector(".investigation-tab-list")?.scrollLeft || 0;
@@ -1086,12 +1089,12 @@ function render(focus = false): void {
 function dashboard(): string {
   const traced = state.cases.filter((item) => !!item.latest_run).length;
   const linked = state.cases.filter((item) => !!item.miro_board).length;
-  return `<div class="page-heading"><div><div class="eyebrow">Your local workspace</div><h1 id="page-title" tabindex="-1">Investigations</h1><p>Trace selected outputs through bounded, documented runs.</p></div>${button("New investigation", "new", "plus", "primary")}</div><div class="stats-grid"><div class="stat"><div><div class="stat-label">Investigations</div><div class="stat-value">${state.cases.length.toString().padStart(2, "0")}</div><div class="stat-note">Saved on this computer</div></div><span class="stat-icon">${icon("folder")}</span></div><div class="stat"><div><div class="stat-label">Investigations with runs</div><div class="stat-value">${traced.toString().padStart(2, "0")}</div><div class="stat-note">Bounded, recorded traces</div></div><span class="stat-icon">${icon("layers")}</span></div><div class="stat"><div><div class="stat-label">Linked Miro boards</div><div class="stat-value">${linked.toString().padStart(2, "0")}</div><div class="stat-note">Editable graph workspaces</div></div><span class="stat-icon">${icon("board")}</span></div></div><section class="panel"><div class="panel-head"><div><h2>Saved investigations</h2><p>Pick up where you left off, with every run kept intact.</p></div>${button("Refresh", "refresh", "refresh", "ghost small")}</div>${state.cases.length ? `<div class="table-wrap"><table><thead><tr><th>Investigation</th><th>Source</th><th>Latest run</th><th>Miro board</th><th><span class="sr-only">Open</span></th></tr></thead><tbody>${state.cases.map((item) => `<tr><td><div class="case-cell"><span class="case-icon">${icon("folder")}</span><div><button class="case-title" data-case="${esc(item.id)}"${disabled(isCaseOpening(item.id))}>${esc(item.name)}</button><span class="small muted">${esc(formatDate(item.created_at))}</span></div></div></td><td><span class="badge ${item.fixture ? "purple" : ""}">${item.fixture ? "Synthetic data" : "Live Liquid"}</span></td><td>${item.latest_run ? `<span class="mono">${esc(short(item.latest_run, 8))}</span><div class="small muted">${esc(human(item.status || "saved"))}</div>` : '<span class="small muted">Ready for first run</span>'}</td><td><span class="badge ${item.miro_board ? "" : "gray"}">${item.miro_board ? "Linked" : "Not linked"}</span></td><td>${button("Open", "open-case", "arrow", "ghost small", isCaseOpening(item.id), `data-id="${esc(item.id)}" aria-label="Open ${esc(item.name)}"`)}</td></tr>`).join("")}</tbody></table></div><div class="table-footer"><span>${state.cases.length} investigation${state.cases.length === 1 ? "" : "s"}</span><span>Saved runs are shared with the terminal interface</span></div>` : `<div class="empty-state"><div class="empty-icon">${icon("folder")}</div><h2>Start with a transaction</h2><p>Create an investigation, choose the outputs to follow, and run a trace with a clear stopping point.</p>${button("Create your first investigation", "new", "plus", "primary")}</div>`}</section><div class="info-grid"><div class="info-card">${icon("graph")}<div><h3>A clear path from evidence to graph</h3><p>Select starting UTXOs, run a bounded trace, then explore locally with Mermaid or add the result to your Miro board.</p></div></div><div class="info-card secondary">${icon("shield")}<div><h3>Credentials stay behind the scenes</h3><p>Live actions use SecretSpec and Proton Pass through your terminal. No API keys are entered in this interface.</p></div></div></div>`;
+  return `<div class="page-heading"><div><div class="eyebrow">Your local workspace</div><h1 id="page-title" tabindex="-1">Investigations</h1><p>Trace selected outputs through bounded, documented runs.</p></div>${button("New investigation", "new", "plus", "primary")}</div><div class="stats-grid"><div class="stat"><div><div class="stat-label">Investigations</div><div class="stat-value">${state.cases.length.toString().padStart(2, "0")}</div><div class="stat-note">Saved on this computer</div></div><span class="stat-icon">${icon("folder")}</span></div><div class="stat"><div><div class="stat-label">Investigations with runs</div><div class="stat-value">${traced.toString().padStart(2, "0")}</div><div class="stat-note">Bounded, recorded traces</div></div><span class="stat-icon">${icon("layers")}</span></div><div class="stat"><div><div class="stat-label">Linked Miro boards</div><div class="stat-value">${linked.toString().padStart(2, "0")}</div><div class="stat-note">Editable graph workspaces</div></div><span class="stat-icon">${icon("board")}</span></div></div><section class="panel"><div class="panel-head"><div><h2>Saved investigations</h2><p>Pick up where you left off, with every run kept intact.</p></div>${button("Refresh", "refresh", "refresh", "ghost small")}</div>${state.cases.length ? `<div class="table-wrap"><table><thead><tr><th>Investigation</th><th>Source</th><th>Latest run</th><th>Miro board</th><th><span class="sr-only">Open</span></th></tr></thead><tbody>${state.cases.map((item) => `<tr><td><div class="case-cell"><span class="case-icon">${icon("folder")}</span><div><button class="case-title" data-case="${esc(item.id)}"${disabled(isCaseOpening(item.id))}>${esc(item.name)}</button><span class="small muted">${esc(formatDate(item.created_at))}</span></div></div></td><td><span class="badge ${item.fixture ? "purple" : ""}">${item.fixture ? `Synthetic data · ${blockchainName(item.blockchain)}` : `Live ${blockchainName(item.blockchain)}`}</span></td><td>${item.latest_run ? `<span class="mono">${esc(short(item.latest_run, 8))}</span><div class="small muted">${esc(human(item.status || "saved"))}</div>` : '<span class="small muted">Ready for first run</span>'}</td><td><span class="badge ${item.miro_board ? "" : "gray"}">${item.miro_board ? "Linked" : "Not linked"}</span></td><td>${button("Open", "open-case", "arrow", "ghost small", isCaseOpening(item.id), `data-id="${esc(item.id)}" aria-label="Open ${esc(item.name)}"`)}</td></tr>`).join("")}</tbody></table></div><div class="table-footer"><span>${state.cases.length} investigation${state.cases.length === 1 ? "" : "s"}</span><span>Saved runs are shared with the terminal interface</span></div>` : `<div class="empty-state"><div class="empty-icon">${icon("folder")}</div><h2>Start with a transaction</h2><p>Create an investigation, choose the outputs to follow, and run a trace with a clear stopping point.</p>${button("Create your first investigation", "new", "plus", "primary")}</div>`}</section><div class="info-grid"><div class="info-card">${icon("graph")}<div><h3>A clear path from evidence to graph</h3><p>Select starting UTXOs, run a bounded trace, then explore locally with Mermaid or add the result to your Miro board.</p></div></div><div class="info-card secondary">${icon("shield")}<div><h3>Credentials stay behind the scenes</h3><p>Live actions use SecretSpec and Proton Pass through your terminal. No API keys are entered in this interface.</p></div></div></div>`;
 }
 
 function newCase(): string {
   const draft = state.draft;
-  return `<div class="page-heading"><div><div class="eyebrow">Build a starting point</div><h1 id="page-title" tabindex="-1">New investigation</h1><p>Choose a blockchain and the exact outputs you want to follow.</p></div>${button("Back to investigations", "dashboard", "", "ghost")}</div><form id="new-case-form"><div class="form-grid"><div class="form-stack"><section class="panel"><div class="panel-head"><h2><span class="section-number">1</span> Investigation details</h2></div><div class="panel-body"><div class="field-row"><label class="field"><span>Investigation name</span><input name="name" maxlength="120" placeholder="e.g. Service withdrawal review" value="${esc(draft.name)}" required autocomplete="off"/></label><label class="field"><span>Blockchain</span><select name="blockchain" required${disabled(isBusy())}><option value="liquid" selected>Liquid Network</option></select></label></div><p class="small muted">Liquid Network is currently the only supported blockchain.</p></div></section><section class="panel"><div class="panel-head"><div><h2><span class="section-number">2</span> Starting outputs</h2><p>Multiple transactions can share one investigation.</p></div></div><div class="panel-body"><label class="field"><span>Transaction hashes</span><textarea name="txids" class="mono" rows="3" spellcheck="false" placeholder="Paste transaction hashes separated by commas">${esc(draft.txids)}</textarea><small>Paste up to 100 transaction hashes, separated by commas, spaces, or newlines.</small></label><div class="heading-actions">${button("Load outputs", "lookup", "search", "", isBusy())}</div><p class="small muted" style="margin-top:12px">This lookup uses your Blockstream credits. Watch the terminal for Proton Pass prompts.</p><div id="lookup-outputs">${draft.reports.length ? '<p class="small muted" style="margin-top:17px">Amounts are base units; ?? means unavailable.</p>' : ""}${draft.reports
+  return `<div class="page-heading"><div><div class="eyebrow">Build a starting point</div><h1 id="page-title" tabindex="-1">New investigation</h1><p>Choose a blockchain and the exact outputs you want to follow.</p></div>${button("Back to investigations", "dashboard", "", "ghost")}</div><form id="new-case-form"><div class="form-grid"><div class="form-stack"><section class="panel"><div class="panel-head"><h2><span class="section-number">1</span> Investigation details</h2></div><div class="panel-body"><div class="field-row"><label class="field"><span>Investigation name</span><input name="name" maxlength="120" placeholder="e.g. Service withdrawal review" value="${esc(draft.name)}" required autocomplete="off"/></label><label class="field"><span>Blockchain</span><select name="blockchain" required${disabled(isBusy())}><option value="liquid"${draft.blockchain === "liquid" ? " selected" : ""}>Liquid Network</option><option value="bitcoin"${draft.blockchain === "bitcoin" ? " selected" : ""}>Bitcoin Network</option></select></label></div><p class="small muted">The blockchain is fixed when the investigation is created. Change networks before loading and selecting outputs.</p></div></section><section class="panel"><div class="panel-head"><div><h2><span class="section-number">2</span> Starting outputs</h2><p>Multiple transactions can share one investigation.</p></div></div><div class="panel-body"><label class="field"><span>Transaction hashes</span><textarea name="txids" class="mono" rows="3" spellcheck="false" placeholder="Paste transaction hashes separated by commas">${esc(draft.txids)}</textarea><small>Paste up to 100 transaction hashes, separated by commas, spaces, or newlines.</small></label><div class="heading-actions">${button("Load outputs", "lookup", "search", "", isBusy())}</div><p class="small muted" style="margin-top:12px">This lookup uses your Blockstream credits. Watch the terminal for Proton Pass prompts.</p><div id="lookup-outputs">${draft.reports.length ? '<p class="small muted" style="margin-top:17px">Amounts are base units; ?? means unavailable.</p>' : ""}${draft.reports
     .map(
       (report, index) =>
         `<section class="output-group"><header><span>Transaction ${index + 1}</span><span class="mono" title="${esc(report.txid)}">${esc(short(report.txid, 15))}</span></header>${report.outputs
@@ -1424,7 +1427,7 @@ function csvDownloads(artifact: Artifact | undefined, saved: boolean, includeFee
 const plotGoals: {id: PlotGoal; name: string; description: string}[] = [
   {id: "full", name: "Full trace", description: "Reachable transactions and traced branches within the selected analysis scope."},
   {id: "connections", name: "Starter connections", description: "Connect your starting transactions using shortest routes, a hop limit, or all saved paths."},
-  {id: "pegouts", name: "Paths to peg-outs", description: "Paths to peg-out requests, optionally including unspent UTXOs and unspendable outputs."},
+  {id: "pegouts", name: "Paths to endpoints", description: "Paths to unspent UTXOs, unspendable outputs, and attributed stops. Liquid also includes peg-out requests."},
 ];
 
 function goalName(goal: string): string {
@@ -1436,7 +1439,7 @@ const workflowDrafts = new Map<string, typeof workflowDraft>();
 function currentWorkflow(detail: Case): typeof workflowDraft {
   if (workflowDraft.caseId !== detail.id) {
     if (workflowDraft.caseId) workflowDrafts.set(workflowDraft.caseId, workflowDraft);
-    workflowDraft = workflowDrafts.get(detail.id) || {caseId: detail.id, dataSource: "investigation", sharedRun: "", datasetId: "", goal: "full", minHops: "0", maxHops: "10", hopBasis: "original_seeds" as "original_seeds" | "configured", connectionScope: "hop_limited" as ConnectionScope, connectionMaxHops: "10", pegoutLimitEnabled: false, pegoutLbtcLimit: "", includeUnspent: false, includeUnspendable: false, layoutMode: "fresh" as PlotLayoutMode, layoutBoard: "", plot: investigationViews.get(detail.id)?.selectedPreview || "", board: "", boardPlot: "", boardGoal: "full", boardName: "", savedBoardName: "", linkedBoardName: "", boardUrl: ""};
+    workflowDraft = workflowDrafts.get(detail.id) || {caseId: detail.id, dataSource: "investigation", sharedRun: "", datasetId: "", goal: "full", minHops: "0", maxHops: "10", hopBasis: "original_seeds" as "original_seeds" | "configured", connectionScope: "hop_limited" as ConnectionScope, connectionMaxHops: "10", pegoutLimitEnabled: false, pegoutLbtcLimit: "", includeUnspent: true, includeUnspendable: true, includeAttributedStops: true, layoutMode: "fresh" as PlotLayoutMode, layoutBoard: "", plot: investigationViews.get(detail.id)?.selectedPreview || "", board: "", boardPlot: "", boardGoal: "full", boardName: "", savedBoardName: "", linkedBoardName: "", boardUrl: ""};
   }
   return workflowDraft;
 }
@@ -1530,7 +1533,7 @@ function forgetInvestigation(caseId: string): void {
     state.selectedRun = "latest";
     state.addressReview = {query: "", suspectedOnly: false, data: null, selected: null, loading: false,
       name: "", notes: "", enabled: false, pasted: "", confidence: "suspected", source: "Investigator designation",
-      observedAt: "", stopTracing: true, hopLimit: ""};
+      observedAt: "", stopTracing: false, hopLimit: ""};
     if (["case", "case-settings", "addresses"].includes(state.page)) {
       state.page = "dashboard"; history.replaceState(null, "", location.pathname);
     }
@@ -1593,7 +1596,7 @@ function chosenBoardPlot(detail: Case, board: InvestigationBoard): Plot | undefi
 }
 
 const plotLayoutDrafts = new Map<string, LayoutSettings>();
-type LayoutFormDraft = Pick<typeof workflowDraft, "dataSource" | "sharedRun" | "datasetId" | "goal" | "minHops" | "maxHops" | "hopBasis" | "connectionScope" | "connectionMaxHops" | "pegoutLimitEnabled" | "pegoutLbtcLimit" | "includeUnspent" | "includeUnspendable"> & {settings: LayoutSettings};
+type LayoutFormDraft = Pick<typeof workflowDraft, "dataSource" | "sharedRun" | "datasetId" | "goal" | "minHops" | "maxHops" | "hopBasis" | "connectionScope" | "connectionMaxHops" | "pegoutLimitEnabled" | "pegoutLbtcLimit" | "includeUnspent" | "includeUnspendable" | "includeAttributedStops"> & {settings: LayoutSettings};
 const layoutFormDrafts = new Map<string, Map<string, LayoutFormDraft>>();
 
 function layoutDraftKey(detail: Case): string {
@@ -1610,7 +1613,7 @@ function saveDestinationDraft(detail: Case): void {
   drafts.set(key, {dataSource: draft.dataSource, sharedRun: draft.sharedRun, datasetId: draft.datasetId, goal: draft.goal, minHops: draft.minHops, maxHops: draft.maxHops, hopBasis: draft.hopBasis,
     connectionScope: draft.connectionScope, connectionMaxHops: draft.connectionMaxHops,
     pegoutLimitEnabled: draft.pegoutLimitEnabled, pegoutLbtcLimit: draft.pegoutLbtcLimit,
-    includeUnspent: draft.includeUnspent, includeUnspendable: draft.includeUnspendable,
+    includeUnspent: draft.includeUnspent, includeUnspendable: draft.includeUnspendable, includeAttributedStops: draft.includeAttributedStops,
     settings: currentLayoutSettings(detail)});
 }
 
@@ -1629,7 +1632,7 @@ function selectLayoutDestination(detail: Case, mode: PlotLayoutMode, board?: Inv
     connectionMaxHops: plot.goal === "connections" ? String(plot.max_hops ?? 10) : draft.connectionMaxHops,
     pegoutLimitEnabled: plot.goal === "pegouts" && Boolean(plot.query?.pegout_lbtc_limit),
     pegoutLbtcLimit: plot.goal === "pegouts" ? plot.query?.pegout_lbtc_limit || "" : "",
-    includeUnspent: Boolean(plot.query?.include_unspent), includeUnspendable: Boolean(plot.query?.include_unspendable),
+    includeUnspent: Boolean(plot.query?.include_unspent), includeUnspendable: Boolean(plot.query?.include_unspendable), includeAttributedStops: Boolean(plot.query?.include_attributed_stops),
     settings: selectLayoutSettings({...defaults, ...detail.run_defaults, ...plot.layout_settings, layout_style: plot.layout_settings?.layout_style ?? "standard"})} : undefined);
   if (restored) {
     const {settings, ...query} = restored;
@@ -1681,8 +1684,9 @@ async function persistPlotLayoutSettings(detail: Case): Promise<boolean> {
 }
 
 function plotEndpointScope(plot: Plot): string {
-  return ["Peg-outs", ...(plot.query?.include_unspent ? ["unspent UTXOs"] : []),
-    ...(plot.query?.include_unspendable ? ["unspendable outputs"] : [])].join(" + ");
+  return [...(state.activeCase?.blockchain === "bitcoin" ? [] : ["Peg-outs"]), ...(plot.query?.include_unspent ? ["unspent UTXOs"] : []),
+    ...(plot.query?.include_unspendable ? ["unspendable outputs"] : []),
+    ...(plot.query?.include_attributed_stops ? ["attributed stops"] : [])].join(" + ");
 }
 
 function plotEndpointLabel(plot: Plot | undefined): string {
@@ -1737,7 +1741,7 @@ function plotEndpointSummary(plot: Plot | undefined): string {
   }
   if (plot?.goal !== "pegouts") return "";
   const counts = plot.endpoint_counts;
-  const matches = counts ? `${counts.pegout} peg-out requests · ${counts.unspent} unspent UTXOs · ${counts.unspendable} unspendable outputs`
+  const matches = counts ? `${state.activeCase?.blockchain === "bitcoin" ? "" : `${counts.pegout} peg-out requests · `}${counts.unspent} unspent UTXOs · ${counts.unspendable} unspendable outputs${counts.attributed_stop !== undefined ? ` · ${counts.attributed_stop} attributed stops` : ""}`
     : plot.match_count === undefined ? "" : `${plot.match_count} peg-out requests`;
   const contextCount = (plot.query?.transaction_io === "complete" || plot.query?.include_context) && plot.context_edge_count !== undefined
     ? ` ${plot.context_edge_count} context connections, excluded from endpoint counts.` : "";
@@ -1828,19 +1832,20 @@ function connectionHopFields(draft: typeof workflowDraft): string {
 }
 
 function pegoutLimitFields(draft: typeof workflowDraft): string {
-  if (draft.goal !== "pegouts") return "";
+  if (draft.goal !== "pegouts" || state.activeCase?.blockchain === "bitcoin") return "";
   return `<fieldset class="layout-fields"${disabled(draftBusy())}><legend>Peg-out selection</legend><label class="field"><span>Selection mode</span><select id="workflow-pegout-mode"><option value="all"${!draft.pegoutLimitEnabled ? " selected" : ""}>All matching peg-outs</option><option value="cumulative"${draft.pegoutLimitEnabled ? " selected" : ""}>Stop at cumulative L-BTC amount</option></select></label>${draft.pegoutLimitEnabled ? `<label class="field"><span>Cumulative L-BTC target</span><input id="workflow-pegout-lbtc-limit" type="text" inputmode="decimal" autocomplete="off" value="${esc(draft.pegoutLbtcLimit)}" placeholder="60"/><small>Positive L-BTC amount with up to 8 decimal places.</small></label><p class="small muted">Count each unique peg-out once, nearest ordinary transaction distance from a selected seed first. Equal distances use transaction ID and output index; named-group hop resets do not change this order. Include the endpoint that reaches or exceeds the target, report any overshoot, then stop.</p><p class="small muted">Hidden or unknown amounts and unidentified assets do not count toward the target. Only known L-BTC values count. Context outputs do not count, and path reachability does not establish how much stolen value reached an endpoint.</p>` : ""}</fieldset>`;
 }
 
 function plotEndpointFields(draft: typeof workflowDraft): string {
   if (draft.goal === "connections") return '<p class="artifact-note">All selected starting transactions stay visible, including those without a qualifying connection to another starter. Every included transaction shows all its inputs and non-fee outputs. Fee outputs follow the Include transaction fee flows setting. Outputs on excluded branches remain visible without continuing those branches. The transaction CSV follows the same fee choice; extra context does not add starter-pair matches.</p>';
   if (draft.goal !== "pegouts") return "";
-  return `<fieldset class="layout-fields"${disabled(draftBusy())}><legend>Additional endpoints</legend>
+  return `<fieldset class="layout-fields"${disabled(draftBusy())}><legend>Endpoint types</legend>
     <label class="check-line"><input id="workflow-include-unspent" type="checkbox"${draft.includeUnspent ? " checked" : ""}/><span>Include unspent UTXOs</span></label>
     <label class="check-line"><input id="workflow-include-unspendable" type="checkbox"${draft.includeUnspendable ? " checked" : ""}/><span>Include unspendable outputs</span></label>
-    <p class="small muted">${draft.pegoutLimitEnabled ? "Matching peg-out requests are included until the cumulative target ends the search." : "Peg-out requests are always included."} Unspent means observed unspent in the selected collection run. Unchecked outputs and outputs stopped only by a hop limit are not counted as unspent. These choices are saved with each generated layout.</p></fieldset>
-    <p class="small muted">Peg-out paths ignore attribution CSV hop_limit values. Explicit stop-tracing rules and the selected hop range still apply. If an older collection stopped at an attribution limit, continue collecting before generating the new layout.</p>
-    <p class="artifact-note">Every included transaction shows all its inputs and non-fee outputs. Fee outputs follow the Include transaction fee flows setting. Outputs on excluded branches remain visible without continuing those branches. These extra objects do not add endpoint matches or change the peg-out total.</p>`;
+    <label class="check-line"><input id="workflow-include-attributed-stops" type="checkbox"${draft.includeAttributedStops ? " checked" : ""}/><span>Include attributed stops</span></label>
+    <p class="small muted">${state.activeCase?.blockchain === "bitcoin" ? "Bitcoin has no Liquid peg-outs." : draft.pegoutLimitEnabled ? "Matching peg-out requests are included until the cumulative target ends the search." : "Peg-out requests are always included."} Attributed stops require an enabled Stop tracing rule; a name alone does not stop tracing. Unspent means observed unspent in the selected collection run. Unchecked outputs and outputs stopped only by a hop limit are not counted as unspent. These choices are saved with each generated layout.</p></fieldset>
+    <p class="small muted">Endpoint paths ignore attribution CSV hop_limit values. Explicit stop-tracing rules and the selected hop range still apply. If an older collection stopped at an attribution limit, continue collecting before generating the new layout.</p>
+    <p class="artifact-note">Every included transaction shows all its inputs and non-fee outputs. Fee outputs follow the Include transaction fee flows setting. Outputs on excluded branches remain visible without continuing those branches. These extra objects do not add endpoint matches or change the selected endpoint totals.</p>`;
 }
 
 function savedLayoutSummary(plot: Plot): string {
@@ -1850,13 +1855,25 @@ function savedLayoutSummary(plot: Plot): string {
   return `<details class="tool-details"><summary>Saved layout settings</summary><p>${settings.layout_style === "trace" ? "Trace layout" : "Standard layout"} · ${esc(human(settings.connector_style))} connectors · ${esc(settings.layout_attempts)} layout attempts · Attribution arrow colors ${settings.color_attribution_arrows ? "on" : "off"}.</p><p>Centered group: ${esc(settings.center_name || "None")}.${contextGrouping ? ` Isolated context inputs ${settings.group_context_inputs ? "grouped" : "separate"}.` : ""} Fee flows ${settings.include_fees ? "shown" : "hidden"}.${plot.goal === "full" || plot.goal === "pegouts" ? ` ${esc(settings.hub_addresses.length)} separate branch hubs.` : ""}</p></details>`;
 }
 
+function sharedCollectionMembers(detail: Case): {ids: string[]; excluded: number} {
+  const open = [...new Set([...state.openCases, detail.id])];
+  const chain = detail.blockchain || "liquid";
+  const ids = open.filter(id => id === detail.id ||
+    (state.cases.find(item => item.id === id)?.blockchain || "liquid") === chain);
+  return {ids, excluded: open.length - ids.length};
+}
+
+function sharedCollectionExclusions(excluded: number): string {
+  return excluded ? `<p class="small muted">${excluded} open investigation${excluded === 1 ? " on another blockchain is" : "s on other blockchains are"} excluded from this collection.</p>` : "";
+}
+
 function sharedCollectionPanel(detail: Case): string {
   if (!sectionReady(detail, "shared")) return sectionNotice(detail, "shared");
   const shared = detail.shared_collection;
   const latest = shared?.runs.find(run => run.id === shared.latest_run);
   const members = shared?.members || [];
-  const openIds = [...new Set([...state.openCases, detail.id])];
-  return `<section class="panel" id="shared-collection-panel"><div class="panel-head"><div><h2>Shared collection</h2><p>Collect the starting outputs from open investigations into reusable transaction evidence.</p></div><span class="badge gray">Workspace data</span></div><div class="panel-body">${shared?.dataset_id ? `<p><strong>${esc(shared.name)}</strong> · ${shared.seed_count} starting outputs · ${members.length} investigations</p><p class="small muted">${esc(members.map(member => member.name).join(", "))}</p>${latest ? `<p>Latest snapshot: <span class="mono">${esc(latest.id)}</span> · <strong>${esc(latest.collected_hops ?? "Not recorded")}</strong> hops collected · ${esc(latest.transaction_count ?? "Unknown")} transactions · ${esc(human(latest.status))}</p>` : '<p class="small muted">No shared collection snapshot yet.</p>'}${shared.policy_case_name ? `<p class="small muted">Last collection rules: ${esc(shared.policy_case_name)}.</p>` : ""}` : '<p>No shared collection yet.</p>'}${shared?.compatible === false ? `<p class="artifact-note">${esc(shared.reason || "This shared collection is incompatible with the investigation.")}</p>` : ""}<p class="small muted">Collect from open investigations starts a new shared run from the ${openIds.length} currently open investigation${openIds.length === 1 ? "" : "s"}. Continue shared data keeps the saved seed set. Both use ${esc(detail.name)}’s collection limits and explicit stop rules. Private investigation runs remain separate.</p><div class="task-actions">${button("Collect from open investigations", "shared-collect-dialog", "play", "", actionBusy("shared-trace") || shared?.compatible === false)}${shared?.latest_run ? button("Continue shared data", "shared-continue-dialog", "refresh", "", actionBusy("shared-trace") || !shared.compatible) : ""}</div></div></section>`;
+  const {ids: openIds, excluded} = sharedCollectionMembers(detail);
+  return `<section class="panel" id="shared-collection-panel"><div class="panel-head"><div><h2>Shared collection</h2><p>Collect the starting outputs from open investigations into reusable transaction evidence.</p></div><span class="badge gray">Workspace data</span></div><div class="panel-body">${shared?.dataset_id ? `<p><strong>${esc(shared.name)}</strong> · ${shared.seed_count} starting outputs · ${members.length} investigations</p><p class="small muted">${esc(members.map(member => member.name).join(", "))}</p>${latest ? `<p>Latest snapshot: <span class="mono">${esc(latest.id)}</span> · <strong>${esc(latest.collected_hops ?? "Not recorded")}</strong> hops collected · ${esc(latest.transaction_count ?? "Unknown")} transactions · ${esc(human(latest.status))}</p>` : '<p class="small muted">No shared collection snapshot yet.</p>'}${shared.policy_case_name ? `<p class="small muted">Last collection rules: ${esc(shared.policy_case_name)}.</p>` : ""}` : '<p>No shared collection yet.</p>'}${shared?.compatible === false ? `<p class="artifact-note">${esc(shared.reason || "This shared collection is incompatible with the investigation.")}</p>` : ""}<p class="small muted">Collect from open investigations starts a new shared run from the ${openIds.length} currently open ${blockchainName(detail.blockchain)} investigation${openIds.length === 1 ? "" : "s"}. Continue shared data keeps the saved seed set. Both use ${esc(detail.name)}’s collection limits and explicit stop rules. Private investigation runs remain separate.</p>${sharedCollectionExclusions(excluded)}<div class="task-actions">${button("Collect from open investigations", "shared-collect-dialog", "play", "", actionBusy("shared-trace") || shared?.compatible === false)}${shared?.latest_run ? button("Continue shared data", "shared-continue-dialog", "refresh", "", actionBusy("shared-trace") || !shared.compatible) : ""}</div></div></section>`;
 }
 
 function collectionSeedsChanged(detail: Case): boolean {
@@ -1875,7 +1892,7 @@ function plotLayoutsPanel(detail: Case, saved: boolean): string {
   saved = Boolean(plotRun);
   const unavailable = !saved || plotRun?.summary_pending || !sectionReady(detail, "workflow") || actionBusy("plot", workflowResourceBody(detail)) || draft.layoutMode === "update" && !updateLayoutBoards(detail, draft.goal).some(board => board.id === draft.layoutBoard);
   const settings = {...defaults, ...detail.run_defaults, ...currentLayoutSettings(detail)};
-  return `<section class="panel" id="plot-layouts-panel"><div class="panel-head"><div><h2>Generate a graph preview</h2><p>Choose the goal and layout, review the preview, then download it or write it to Miro.</p></div><span class="badge gray">Saved transactions</span></div><div class="panel-body">${plotDataSourceFields(detail)}<div class="plot-goals" role="group" aria-label="Plotting goal">${plotGoals.map(goal => `<button class="plot-goal${draft.goal === goal.id ? " selected" : ""}" data-action="plot-goal" data-goal="${goal.id}" aria-pressed="${draft.goal === goal.id}"${disabled(draftBusy())}><strong>${goal.name}</strong><span>${goal.description}</span></button>`).join("")}</div>${draft.goal === "pegouts" ? `<div class="field-row"><label class="field"><span>Minimum hops</span><input id="workflow-min-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.minHops)}"${disabled(draftBusy())}/></label><label class="field"><span>Maximum hops</span><input id="workflow-max-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.maxHops)}"${disabled(draftBusy())}/></label></div>` : ""}${draft.goal === "full" ? `<label class="field"><span>Maximum analysis hops</span><input id="workflow-max-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.maxHops)}"${disabled(draftBusy())}/><small>Limits this plot without changing the saved collection.</small></label>` : ""}${draft.goal !== "connections" ? `<label class="field"><span>Count analysis hops from</span><select id="workflow-hop-basis"${disabled(draftBusy())}><option value="original_seeds"${draft.hopBasis === "original_seeds" ? " selected" : ""}>Original starting transactions</option><option value="configured"${draft.hopBasis === "configured" ? " selected" : ""}>Configured collection hop reference</option></select></label>` : ""}${connectionHopFields(draft)}<p class="small muted">Collection limit: ${esc(plotRun?.max_hops ?? "not recorded")} hops.</p><p class="artifact-note">${draft.goal === "connections" ? `Starter connections searches ${draft.connectionScope === "shortest" ? "for one shortest saved route per connected ordered pair" : draft.connectionScope === "hop_limited" ? "within the selected connection hop limit" : "all saved paths"} between selected starting transactions. Attribution hop limits and stop-tracing rules are ignored; labels remain visible. No additional transactions are fetched.` : "Plotting makes no blockchain requests. A hop filter cannot reveal data beyond your collection coverage."} ${draft.goal === "connections" ? draft.connectionScope === "shortest" ? "Shortest connections searches all saved evidence without a hop cutoff. Equal-length routes use a stable choice; longer alternative routes are omitted. A missing connection may reflect missing evidence." : "Increase the connection hop limit or select All saved connections to search further. Collect more data only if the required transactions are missing." : "If a path is missing, collect more data first and generate another plot."}</p><p class="small muted">${esc(hopBasis(draft.hopBasis === "original_seeds" && draft.goal !== "connections" ? "" : plotRun?.hop_reference_name))}. ${esc(hopBasisExplanation(draft.hopBasis === "original_seeds" && draft.goal !== "connections" ? "" : plotRun?.hop_reference_name))} ${draft.goal === "connections" ? draft.connectionScope === "shortest" ? "Named groups affect displayed hop labels only. Shortest routes count ordinary transaction steps from each selected starter, through its selected outputs." : "Named groups affect displayed hop labels only. The connection limit counts ordinary transaction steps from each selected starter." : draft.hopBasis === "original_seeds" ? "The analysis ceiling counts ordinary transaction steps from the original starters (hop 0); configured attribution limits still apply to Full trace." : "Uses the selected collection run’s hop basis with current attribution rules."}</p>${draft.goal === "pegouts" ? '<p class="small muted">Only selected starting UTXOs are followed. A peg-out request does not confirm the separate Bitcoin payout.</p>' : ""}${pegoutLimitFields(draft)}${plotEndpointFields(draft)}${plotDestinationFields(detail)}<form id="plot-layout-form" data-case-id="${esc(detail.id)}"><fieldset class="layout-fields"${disabled(draftBusy())}><legend>Layout settings</legend>${graphFields(settings, true, draft.goal)}</fieldset><p class="small muted">Each generation captures this selected run, investigation rules, and layout settings. Other jobs can continue independently. Use Save layout settings to set the defaults for future layouts.</p><div class="task-actions">${button("Generate preview", "workflow-plot", "graph", "primary", unavailable)}${button("Save layout settings", "plot-settings-save", "check", "", isBusy())}</div><p class="small muted">A new-board preview works offline. An update preview reads Miro to preserve its current arrangement; credentials are retrieved through the launching terminal. Previewing does not write to Miro.</p></form>${!saved ? '<p class="artifact-note">Collect transaction data before generating a plot.</p>' : ""}</div></section>`;
+  return `<section class="panel" id="plot-layouts-panel"><div class="panel-head"><div><h2>Generate a graph preview</h2><p>Choose the goal and layout, review the preview, then download it or write it to Miro.</p></div><span class="badge gray">Saved transactions</span></div><div class="panel-body">${plotDataSourceFields(detail)}<div class="plot-goals" role="group" aria-label="Plotting goal">${plotGoals.map(goal => `<button class="plot-goal${draft.goal === goal.id ? " selected" : ""}" data-action="plot-goal" data-goal="${goal.id}" aria-pressed="${draft.goal === goal.id}"${disabled(draftBusy())}><strong>${goal.name}</strong><span>${goal.description}</span></button>`).join("")}</div>${draft.goal === "pegouts" ? `<div class="field-row"><label class="field"><span>Minimum hops</span><input id="workflow-min-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.minHops)}"${disabled(draftBusy())}/></label><label class="field"><span>Maximum hops</span><input id="workflow-max-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.maxHops)}"${disabled(draftBusy())}/></label></div>` : ""}${draft.goal === "full" ? `<label class="field"><span>Maximum analysis hops</span><input id="workflow-max-hops" type="number" min="0" max="2147483647" step="1" value="${esc(draft.maxHops)}"${disabled(draftBusy())}/><small>Limits this plot without changing the saved collection.</small></label>` : ""}${draft.goal !== "connections" ? `<label class="field"><span>Count analysis hops from</span><select id="workflow-hop-basis"${disabled(draftBusy())}><option value="original_seeds"${draft.hopBasis === "original_seeds" ? " selected" : ""}>Original starting transactions</option><option value="configured"${draft.hopBasis === "configured" ? " selected" : ""}>Configured collection hop reference</option></select></label>` : ""}${connectionHopFields(draft)}<p class="small muted">Collection limit: ${esc(plotRun?.max_hops ?? "not recorded")} hops.</p><p class="artifact-note">${draft.goal === "connections" ? `Starter connections searches ${draft.connectionScope === "shortest" ? "for one shortest saved route per connected ordered pair" : draft.connectionScope === "hop_limited" ? "within the selected connection hop limit" : "all saved paths"} between selected starting transactions. Attribution hop limits and stop-tracing rules are ignored; labels remain visible. No additional transactions are fetched.` : "Plotting makes no blockchain requests. A hop filter cannot reveal data beyond your collection coverage."} ${draft.goal === "connections" ? draft.connectionScope === "shortest" ? "Shortest connections searches all saved evidence without a hop cutoff. Equal-length routes use a stable choice; longer alternative routes are omitted. A missing connection may reflect missing evidence." : "Increase the connection hop limit or select All saved connections to search further. Collect more data only if the required transactions are missing." : "If a path is missing, collect more data first and generate another plot."}</p><p class="small muted">${esc(hopBasis(draft.hopBasis === "original_seeds" && draft.goal !== "connections" ? "" : plotRun?.hop_reference_name))}. ${esc(hopBasisExplanation(draft.hopBasis === "original_seeds" && draft.goal !== "connections" ? "" : plotRun?.hop_reference_name))} ${draft.goal === "connections" ? draft.connectionScope === "shortest" ? "Named groups affect displayed hop labels only. Shortest routes count ordinary transaction steps from each selected starter, through its selected outputs." : "Named groups affect displayed hop labels only. The connection limit counts ordinary transaction steps from each selected starter." : draft.hopBasis === "original_seeds" ? "The analysis ceiling counts ordinary transaction steps from the original starters (hop 0); configured attribution limits still apply to Full trace." : "Uses the selected collection run’s hop basis with current attribution rules."}</p>${draft.goal === "pegouts" ? `<p class="small muted">Only selected starting UTXOs are followed.${detail.blockchain === "bitcoin" ? " Public output values do not establish how much of a commingled input reached each output." : " A peg-out request does not confirm the separate Bitcoin payout."}</p>` : ""}${pegoutLimitFields(draft)}${plotEndpointFields(draft)}${plotDestinationFields(detail)}<form id="plot-layout-form" data-case-id="${esc(detail.id)}"><fieldset class="layout-fields"${disabled(draftBusy())}><legend>Layout settings</legend>${graphFields(settings, true, draft.goal)}</fieldset><p class="small muted">Each generation captures this selected run, investigation rules, and layout settings. Other jobs can continue independently. Use Save layout settings to set the defaults for future layouts.</p><div class="task-actions">${button("Generate preview", "workflow-plot", "graph", "primary", unavailable)}${button("Save layout settings", "plot-settings-save", "check", "", isBusy())}</div><p class="small muted">A new-board preview works offline. An update preview reads Miro to preserve its current arrangement; credentials are retrieved through the launching terminal. Previewing does not write to Miro.</p></form>${!saved ? '<p class="artifact-note">Collect transaction data before generating a plot.</p>' : ""}</div></section>`;
 }
 
 function combinedPlotPublication(detail: Case): string {
@@ -2083,8 +2100,8 @@ function scopeAnalysisResult(detail: Case, analysis: ScopeAnalysis, key: string)
   const source = analysis.source;
   return `<div class="scope-analysis-result"><h3>${esc(analysis.name || `Scope through hop ${analysis.max_hops}`)}</h3>
     <p>${esc(formatDate(analysis.created_at))} · ${source.data_source === "shared" ? "Shared" : "Investigation"} snapshot <span class="mono">${esc(source.run_id)}</span> · collection limit ${esc(source.collection_max_hops ?? "not recorded")}. Counts below belong to this saved analysis, not unsaved controls above.</p>
-    <div class="table-wrap" tabindex="0" aria-label="Scope cutoff comparison"><table><thead><tr><th>Through hop</th><th>Transactions</th><th>Addresses</th><th>Peg-outs</th><th>Disclosed L-BTC</th><th>Unspent</th><th>Unspendable</th><th>Open branches</th><th>Data gaps</th><th>Rule stops</th></tr></thead><tbody>${analysis.comparisons.map(row => `<tr${row.max_hops === analysis.max_hops ? ' class="selected"' : ""}>${[row.max_hops, row.transaction_count, row.address_count, row.pegout_count, row.pegout_lbtc, row.unspent_count, row.unspendable_count, row.frontier_count, row.data_gap_count, row.stopped_count].map(value => `<td>${esc(value)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>
-    <p class="small muted">Counts are unique within each cutoff and must not be added across rows. Unspent means observed unspent in that snapshot. Missing or confidential peg-out amounts and unidentified assets are excluded from the disclosed L-BTC total.</p>
+    <div class="table-wrap" tabindex="0" aria-label="Scope cutoff comparison"><table><thead><tr><th>Through hop</th><th>Transactions</th><th>Addresses</th>${detail.blockchain === "bitcoin" ? "" : "<th>Peg-outs</th><th>Disclosed L-BTC</th>"}<th>Unspent</th><th>Unspendable</th><th>Open branches</th><th>Data gaps</th><th>Rule stops</th></tr></thead><tbody>${analysis.comparisons.map(row => `<tr${row.max_hops === analysis.max_hops ? ' class="selected"' : ""}>${[row.max_hops, row.transaction_count, row.address_count, ...(detail.blockchain === "bitcoin" ? [] : [row.pegout_count, row.pegout_lbtc]), row.unspent_count, row.unspendable_count, row.frontier_count, row.data_gap_count, row.stopped_count].map(value => `<td>${esc(value)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>
+    <p class="small muted">Counts are unique within each cutoff and must not be added across rows. Unspent means observed unspent in that snapshot. ${detail.blockchain === "bitcoin" ? "Public output values do not establish allocation of traced funds after commingling." : "Missing or confidential peg-out amounts and unidentified assets are excluded from the disclosed L-BTC total."}</p>
     ${analysis.notice ? `<p class="artifact-note">${esc(analysis.notice)}</p>` : ""}
     <div class="task-actions">${button("Use this scope for plots", "scope-use", "graph", "", draftBusy() || !scopeDetails.has(key), `data-analysis="${esc(analysis.analysis_id)}" data-case-id="${esc(detail.id)}"`)}${(analysis.downloads || []).map(item => downloadLink(item, item.name === "frontiers.csv" ? "All open branches CSV" : item.name, "small")).join("")}</div>
     <p class="small muted">Copies this exact snapshot and ordinary hop limit to a new Full trace preview form. Generating remains a separate action and uses current investigation rules. Existing previews stay unchanged.</p>
@@ -2301,6 +2318,7 @@ function workflowInput(element: HTMLInputElement | HTMLSelectElement): boolean {
   else if (element.id === "workflow-board-goal" && plotGoals.some(goal => goal.id === element.value)) draft.boardGoal = element.value as PlotGoal;
   else if (element.id === "workflow-include-unspent") draft.includeUnspent = (element as HTMLInputElement).checked;
   else if (element.id === "workflow-include-unspendable") draft.includeUnspendable = (element as HTMLInputElement).checked;
+  else if (element.id === "workflow-include-attributed-stops") draft.includeAttributedStops = (element as HTMLInputElement).checked;
   else if (fields[element.id]) draft[fields[element.id]] = element.value;
   else return false;
   if (element.id === "workflow-plot-picker") persistInvestigationTabs();
@@ -2376,7 +2394,7 @@ async function workflowAction(action: string, element?: HTMLElement): Promise<bo
     }
     if (body.action === "plot-sync" && draft.layoutMode === "fresh") body.name = draft.boardName.trim() || `${detail.name} · ${goalName(draft.goal)}`.slice(0, 60);
     if (draft.goal === "pegouts") {
-      if (draft.pegoutLimitEnabled) {
+      if (draft.pegoutLimitEnabled && detail.blockchain !== "bitcoin") {
         const amount = draft.pegoutLbtcLimit.trim();
         if (!/^\d+(?:\.\d{1,8})?$/.test(amount) || !/[1-9]/.test(amount))
           throw new Error("Enter a positive L-BTC target with up to 8 decimal places, without commas or scientific notation.");
@@ -2384,6 +2402,7 @@ async function workflowAction(action: string, element?: HTMLElement): Promise<bo
       }
       if (draft.includeUnspent) body.include_unspent = true;
       if (draft.includeUnspendable) body.include_unspendable = true;
+      if (draft.includeAttributedStops) body.include_attributed_stops = true;
     }
     const form = document.querySelector<HTMLFormElement>("#plot-layout-form");
     if (form && !form.reportValidity()) return true;
@@ -2426,7 +2445,7 @@ async function workflowAction(action: string, element?: HTMLElement): Promise<bo
 }
 
 function investigationDataPanel(detail: Case): string {
-  return `<section class="panel" id="settings-data"><div class="panel-head"><div><h2>Investigation data</h2><p>Manage starting outputs, attributions, tracing stops, and change outputs here.</p></div></div><div class="panel-body"><div class="task-actions">${button("Change starting outputs", "seed-editor-open", "graph", "", isBusy())}${button("Import CSV files", "input-import-open", "plus", "primary", isBusy())}${button("Address review", "addresses", "search", "", isBusy())}${button("Change outputs", "change-outputs-open", "graph", "", isBusy())}${button("Assign colors", "name-colors-open", "", "", isBusy())}${button("Shared attributions", "shared-attributions-open", "", "", isBusy())}<a class="btn" href="/api/cases/${esc(encodeURIComponent(detail.id))}/input-exports/all" download>${icon("download")}Export input CSVs</a></div><p class="small muted">Import attributions, name colors, and change outputs together. Export input CSVs downloads all locally saved attributions, name colors, and change outputs across every page. Export inherited entries from the shared library. Unsaved edits are excluded. Imports, address assessments and color changes save separately from the settings form.</p></div></section>${seedEditorPanel(detail.id, isBusy())}${inputImportPanel(detail.id, isBusy())}${changeOutputsPanel(detail.id, isBusy())}${sharedAttributionsPanel(detail.id, isBusy())}`;
+  return `<section class="panel" id="settings-data"><div class="panel-head"><div><h2>Investigation data</h2><p>Manage starting outputs, attributions, tracing stops, and change outputs here.</p></div></div><div class="panel-body"><div class="task-actions">${button("Change starting outputs", "seed-editor-open", "graph", "", isBusy())}${button("Import CSV files", "input-import-open", "plus", "primary", isBusy())}${button("Address review", "addresses", "search", "", isBusy())}${button("Change outputs", "change-outputs-open", "graph", "", isBusy())}${button("Assign colors", "name-colors-open", "", "", isBusy())}${button("Shared attributions", "shared-attributions-open", "", "", isBusy())}<a class="btn" href="/api/cases/${esc(encodeURIComponent(detail.id))}/input-exports/all" download>${icon("download")}Export input CSVs</a></div><p class="small muted">Import attributions, name colors, and change outputs together. Export input CSVs downloads all locally saved attributions, name colors, and change outputs across every page. Export inherited entries from the shared library. Unsaved edits are excluded. Imports, address assessments and color changes save separately from the settings form.</p></div></section>${seedEditorPanel(detail.id, isBusy(), detail.blockchain)}${inputImportPanel(detail.id, isBusy())}${changeOutputsPanel(detail.id, isBusy())}${sharedAttributionsPanel(detail.id, isBusy(), detail.blockchain)}`;
 }
 
 function seedTransactionsPanel(detail: Case, run?: Run): string {
@@ -2445,7 +2464,7 @@ function seedTransactionsPanel(detail: Case, run?: Run): string {
   const count = [...transactions.values()].reduce((total, vouts) => total + vouts.size, 0);
   const rows = [...transactions].map(([txid, selected]) => {
     const hash = detail.fixture ? `<span class="mono seed-txid">${esc(txid)}</span>`
-      : `<a class="mono seed-txid" href="https://blockstream.info/liquid/tx/${txid}" target="_blank" rel="noopener noreferrer" title="Open transaction in Blockstream Explorer">${esc(txid)}</a>`;
+      : `<a class="mono seed-txid" href="${blockchainExplorer(detail.blockchain)}/tx/${txid}" target="_blank" rel="noopener noreferrer" title="Open transaction in Blockstream Explorer">${esc(txid)}</a>`;
     const vouts = [...selected].sort((a, b) => a - b).map(vout => `<span class="seed-vout">${vout}</span>`).join(" ");
     return `<tr><td>${hash}</td><td><div class="seed-vouts">${vouts}</div></td></tr>`;
   }).join("");
@@ -2453,6 +2472,7 @@ function seedTransactionsPanel(detail: Case, run?: Run): string {
 }
 
 function pegoutLbtcTotal(detail: Case, run?: Run): string {
+  if (detail.blockchain === "bitcoin") return "";
   const draft = currentWorkflow(detail), shared = draft.dataSource === "shared";
   if (!shared && !run) return "";
   const plot = detail.plots?.filter(item => item.goal === "pegouts" && (shared
@@ -2504,7 +2524,7 @@ function workspace(): string {
     + (sectionReady(detail, "workflow") ? plotDownloadsPanel(detail) : sectionNotice(detail, "workflow"));
   if (state.caseView === "collect" && !sectionReady(detail, "collection") && (!run || run.summary_pending)) content = sectionNotice(detail, "collection") + sharedCollectionPanel(detail);
   if (["plots", "boards"].includes(state.caseView) && !sectionReady(detail, "shared")) content += sectionNotice(detail, "shared");
-  return `<div class="page-heading case-heading"><div><div class="eyebrow">Investigation workspace</div><h1 id="page-title" tabindex="-1">${esc(detail.name)}</h1><div class="workspace-meta"><span class="badge ${detail.fixture ? "purple" : ""}">${detail.fixture ? "Synthetic data" : "Live Liquid"}</span><span class="badge gray">${state.caseView === "analysis" ? (sectionReady(detail, "workflow") ? `${detail.plots?.length || 0} preview${detail.plots?.length === 1 ? "" : "s"} loaded` : "Loading saved previews") : sectionReady(detail, "collection") ? `${(detail.runs || []).length} saved runs` : "Loading saved runs"}</span></div></div><div class="heading-actions">${button("Investigation settings", "case-settings", "settings", "", isBusy())}${button("Delete investigation", "investigation-delete", "", "danger", investigationDeletionBusy(detail.id))}</div></div>
+  return `<div class="page-heading case-heading"><div><div class="eyebrow">Investigation workspace</div><h1 id="page-title" tabindex="-1">${esc(detail.name)}</h1><div class="workspace-meta"><span class="badge ${detail.fixture ? "purple" : ""}">${detail.fixture ? `Synthetic data · ${blockchainName(detail.blockchain)}` : `Live ${blockchainName(detail.blockchain)}`}</span><span class="badge gray">${state.caseView === "analysis" ? (sectionReady(detail, "workflow") ? `${detail.plots?.length || 0} preview${detail.plots?.length === 1 ? "" : "s"} loaded` : "Loading saved previews") : sectionReady(detail, "collection") ? `${(detail.runs || []).length} saved runs` : "Loading saved runs"}</span></div></div><div class="heading-actions">${button("Investigation settings", "case-settings", "settings", "", isBusy())}${button("Delete investigation", "investigation-delete", "", "danger", investigationDeletionBusy(detail.id))}</div></div>
     <nav class="case-navigation" aria-label="Investigation tools">${views.map(([view, label]) => `<button type="button" class="case-nav${(state.caseView === view || view === "plots" && state.caseView === "boards") ? " active" : ""}" data-action="view-${view}"${state.caseView === view || view === "plots" && state.caseView === "boards" ? ' aria-current="page"' : ""}>${label}</button>`).join("")}</nav>
     ${last ? resultBanner(last.action, last.result) : ""}
     ${state.caseView === "analysis" ? "" : `<section class="panel"><div class="panel-head"><div><h2>${saved ? "Collected data" : "Ready to collect"}</h2><p>${saved ? "Choose the collected data used for plots and downloads." : "Your starting outputs and limits are saved."}</p></div>${saved ? `<label class="run-picker">Snapshot<select class="input" id="run-picker" aria-label="Saved run snapshot">${runOptions}</select></label>` : '<span class="badge gray">No runs yet</span>'}</div>${saved ? `<div class="run-summary"><div><span>Hops collected</span><strong${run?.collected_hops === undefined ? ' class="text-value"' : ""}>${esc(run?.summary_pending ? "Loading" : run?.collected_hops ?? "Not recorded")}</strong><span>${run?.hop_reference_name ? "Deepest collected group-relative hop" : "Deepest saved transaction hop"}</span></div><div><span>Tracked transactions</span><strong>${esc(run?.summary_pending ? "Loading" : run?.transaction_count ?? "—")}</strong></div><div><span>Unfinished branches</span><strong>${esc(run?.summary_pending ? "Loading" : run?.frontier_count ?? "—")}</strong></div><div><span>Run status</span><strong class="text-value">${esc(run?.summary_pending ? "Loading" : human(run?.status || "saved"))}</strong></div></div><div class="run-note">${icon("clock")}<span>${esc(formatDate(run?.created_at))}${run?.max_hops !== undefined ? ` · Collection hop limit: ${run.max_hops}` : ""}${run?.stop_reason ? ` · ${esc(human(run.stop_reason))}` : ""} · ${esc(hopBasis(run?.hop_reference_name))}.${run?.collected_hops !== undefined ? ` ${esc(hopBasisExplanation(run?.hop_reference_name))}` : ""}</span></div>${collectionPerformancePanel(run?.performance)}` : `<div class="empty-state" style="padding:31px 24px"><div class="empty-icon">${icon("graph")}</div><h2>${detail.seed_count ?? detail.seeds?.length ?? "Your"} starting output${(detail.seed_count ?? detail.seeds?.length) === 1 ? "" : "s"} selected</h2><p>Collect data first, or choose an available shared collection in Plots &amp; Miro.</p></div>`}${sectionReady(detail, "workflow") ? pegoutLbtcTotal(detail, run) : ""}</section>
@@ -2534,7 +2554,7 @@ function selectAddress(row: AddressRow): void {
   state.addressReview.confidence = row.service?.confidence || "suspected";
   state.addressReview.source = row.service?.source || "Investigator designation";
   state.addressReview.observedAt = row.service?.observed_at || "";
-  state.addressReview.stopTracing = row.service?.stop_tracing ?? true;
+  state.addressReview.stopTracing = row.service?.stop_tracing ?? false;
   state.addressReview.hopLimit = row.service?.hop_limit == null ? "" : String(row.service.hop_limit);
 }
 
@@ -2601,7 +2621,7 @@ function addressActivity(summary: AddressActivity | null): string {
     <div><span>General unspent outputs</span><strong>${esc(summary.unspent_output_count ?? "??")}</strong></div>
     <div><span>Confirmed unspent outputs</span><strong>${esc(summary.confirmed_unspent_output_count ?? "??")}</strong></div>
     <div><span>Mempool output change</span><strong>${delta === null ? "??" : esc(delta > 0 ? `+${delta}` : delta)}</strong></div>
-  </div><p class="address-note">General unspent outputs cover all indexed assets at this address, including outputs outside this trace. They are not an L-BTC balance. The total includes the mempool change and may change before confirmation. These are counts, not asset values.</p>
+  </div><p class="address-note">General unspent outputs cover all indexed assets at this address, including outputs outside this trace. They are not a balance of the traced funds. The total includes the mempool change and may change before confirmation. These are counts, not asset values.</p>
   <dl class="address-dates"><div><dt>${summary.history_complete ? "First confirmed activity" : "Oldest activity in reviewed history"}</dt><dd>${activityDate(first)}</dd></div>
     <div><dt>Latest confirmed activity</dt><dd>${activityDate(summary.latest_confirmed_activity)}</dd></div>
     <div><dt>Statistics observed</dt><dd>${summary.observed_at ? esc(formatDate(summary.observed_at)) : "Unavailable"}</dd></div></dl>
@@ -2623,7 +2643,7 @@ function addressReviewPage(): string {
     <form id="address-search-form"><label class="field"><span>Search address or service name</span><input name="address_query" maxlength="256" value="${esc(review.query)}"${disabled(busy)}/></label>
     <label class="check-line"><input name="suspected_only" type="checkbox"${review.suspectedOnly ? " checked" : ""}${disabled(busy)}/><span>Suspected attributions only</span></label>
     <button class="btn address-search" type="submit"${disabled(busy)}>${icon("search")}Search</button></form>
-    <form id="address-open-form" class="address-open"><label class="field"><span>Or paste an address</span><input name="pasted_address" required maxlength="200" value="${esc(review.pasted)}" placeholder="Liquid address"${disabled(busy)}/><small>You can review an address before it appears in a trace.</small></label><button class="btn" type="submit"${disabled(busy)}>Open address</button></form></div>
+    <form id="address-open-form" class="address-open"><label class="field"><span>Or paste an address</span><input name="pasted_address" required maxlength="200" value="${esc(review.pasted)}" placeholder="${state.activeCase?.blockchain === "bitcoin" ? "Bitcoin" : "Liquid"} address"${disabled(busy)}/><small>You can review an address before it appears in a trace.</small></label><button class="btn" type="submit"${disabled(busy)}>Open address</button></form></div>
     <div class="address-list" aria-live="polite">${review.loading ? '<p class="panel-body muted">Loading saved addresses…</p>' : data?.rows.length ? data.rows.map(row => `<button class="address-row${selected?.address === row.address ? " selected" : ""}" data-action="address-select" data-address="${esc(row.address)}"${disabled(busy)}><span class="mono">${esc(row.address)}</span><small>${row.service?.enabled ? `<strong>${row.service.confidence === "confirmed" ? "" : "Suspected "}${esc(row.service.name || "Unnamed address")}</strong>${row.service.attribution_origin === "shared" ? ' <span class="badge gray">Shared</span>' : ""} (${row.service.stop_tracing === false ? "continue" : "STOP TRACING"}) · ` : ""}${esc(row.run_output_count ?? 0)} outputs in saved run${row.activity ? " · Activity saved" : ""}</small></button>`).join("") : '<p class="panel-body muted">No matching addresses in this run.</p>'}</div>
     <div class="address-pagination"><span>${data?.total ? `${data.offset + 1}–${Math.min(data.offset + data.limit, data.total)} of ${data.total}` : "0 addresses"}</span><div>${button("Previous", "address-prev", "", "small", busy || !data || data.offset === 0)}${button("Next", "address-next", "", "small", busy || !data || data.offset + data.limit >= data.total)}</div></div></section>
     <div class="address-detail">${selected ? `<section class="panel"><div class="panel-head"><div><h2 id="address-detail-title" tabindex="-1">Address activity</h2><p class="mono address-full">${esc(selected.address)}</p></div>${button("Refresh activity", "address-inspect", "refresh", "", busy)}</div><div class="panel-body">${addressActivity(selected.activity)}<p class="address-note">Each refresh checks this address only, with up to 5 history pages, 10 API attempts, and 60 seconds.${detail.fixture ? " Uses the synthetic fixture." : " Uses your Blockstream credits. Proton Pass prompts appear in the launching terminal."}</p></div></section>
@@ -2729,7 +2749,13 @@ function saveDraft(): void {
   state.draft.name = String(data.get("name") || "");
   state.draft.txids = String(data.get("txids") || "");
   state.draft.seeds = String(data.get("seeds") || "");
-  state.draft.blockchain = String(data.get("blockchain") ?? state.draft.blockchain);
+  const blockchain = String(data.get("blockchain") ?? state.draft.blockchain);
+  if (blockchain !== state.draft.blockchain) {
+    state.draft.reports = []; state.draft.selected = new Set(); state.draft.seeds = "";
+    const seedsInput = form.querySelector?.<HTMLTextAreaElement>('[name="seeds"]');
+    if (seedsInput) seedsInput.value = "";
+  }
+  state.draft.blockchain = blockchain;
   state.draft.settings = readSettings(form, state.draft.settings);
 }
 
@@ -2742,7 +2768,7 @@ function pruneFinishedJobs(): void {
   for (const old of finishedJobs().slice(32)) {state.jobs.delete(old.id); dismissedJobs.add(old.id);}
 }
 
-function rememberJob(job: Job, local?: {action: string; caseId?: string; live: boolean; generation: number; viewRevision: number; lookupTxids?: string; resource_kind: JobResource["resource_kind"]; resource_key?: string | null; source_run_id?: string}): ActiveJob {
+function rememberJob(job: Job, local?: {action: string; caseId?: string; live: boolean; generation: number; viewRevision: number; lookupTxids?: string; lookupBlockchain?: string; resource_kind: JobResource["resource_kind"]; resource_key?: string | null; source_run_id?: string}): ActiveJob {
   const existing = state.jobs.get(job.id);
   if (existing) {
     // Discovery can observe a fast job before its initiating POST returns.
@@ -2762,7 +2788,7 @@ function rememberJob(job: Job, local?: {action: string; caseId?: string; live: b
     finishedAt: Number.isFinite(job.finished_at) ? job.finished_at! * 1000 : undefined,
     message: job.message || "A local action is running…", live: local?.live ?? job.live ?? true,
     progress: job.progress, cancellable: job.cancellable === true, cancelling: job.status === "cancelling",
-    status: job.status || "running", generation: local?.generation, lookupTxids: local?.lookupTxids,
+    status: job.status || "running", generation: local?.generation, lookupTxids: local?.lookupTxids, lookupBlockchain: local?.lookupBlockchain,
     outcome: ["succeeded", "failed", "canceled"].includes(job.status) ? job : undefined,
   };
   state.jobs.set(job.id, active);
@@ -3197,7 +3223,7 @@ async function openCase(id: string, previewForMiro?: string): Promise<void> {
   state.activeCase = detail;
   state.addressReview = remembered?.addressReview || { query: "", suspectedOnly: false, data: null, selected: null,
     loading: false, name: "", notes: "", enabled: false, pasted: "",
-    confidence: "suspected", source: "Investigator designation", observedAt: "", stopTracing: true, hopLimit: "" };
+    confidence: "suspected", source: "Investigator designation", observedAt: "", stopTracing: false, hopLimit: "" };
   if (importedInputEditors.has(detail.id)) resetImportedInputEditors(detail.id);
   selectInputImport(detail.id);
   selectAddressImport(detail.id);
@@ -3254,6 +3280,7 @@ async function startJob(
   const generation = pageGeneration;
   const revision = ++viewRevision;
   const lookupTxids = action === "lookup" ? state.draft.txids : undefined;
+  const lookupBlockchain = action === "lookup" ? state.draft.blockchain : undefined;
   submitting = true;
   render();
   try {
@@ -3268,7 +3295,7 @@ async function startJob(
       if (settingsDraft) settingsDraft.settings.hop_reference_name = hop_reference_name;
     }
     if (action === "board-delete" && caseId) markBoardDeletion(String(request.board_id || ""), "pending_deletion");
-    rememberJob(job, {action, caseId, live, generation, viewRevision: revision, lookupTxids, ...resource,
+    rememberJob(job, {action, caseId, live, generation, viewRevision: revision, lookupTxids, lookupBlockchain, ...resource,
       source_run_id: typeof request.run_id === "string" && request.run_id !== "latest" ? request.run_id : undefined});
     tasksOpen = true;
     if (generation === pageGeneration) {state.error = ""; dialog.close();}
@@ -3447,7 +3474,7 @@ async function pollJob(identity: string): Promise<void> {
         if (!active.live || job.live === false) {
           throw new Error("This lookup used synthetic data. Load your transaction hashes again to start a live investigation.");
         }
-        if (active.generation === pageGeneration && active.lookupTxids === state.draft.txids && state.page === "new") {
+        if (active.generation === pageGeneration && active.lookupTxids === state.draft.txids && (active.lookupBlockchain || "liquid") === state.draft.blockchain && state.page === "new") {
           applyLookupResult(result);
         } else toast("Transaction outputs are ready. Open Tasks and choose Review outputs to load them.");
       } else if (active.caseId) {
@@ -3605,6 +3632,9 @@ async function pollJob(identity: string): Promise<void> {
 }
 
 function applyLookupResult(result: Result): void {
+  const blockchain = result.blockchain === "bitcoin" ? "bitcoin" : "liquid";
+  if (state.draft.blockchain !== blockchain) state.draft.seeds = "";
+  state.draft.blockchain = blockchain;
   state.draft.reports = result.transactions || [];
   state.draft.txids = state.draft.reports.map(report => report.txid).join(", ");
   state.draft.selected = new Set();
@@ -3643,12 +3673,13 @@ function openSharedCollectionDialog(mode: "collect" | "continue"): void {
   const shared = detail.shared_collection;
   if (shared?.compatible === false || mode === "continue" && (!shared?.compatible || !shared.dataset_id || !shared.latest_run)) return;
   resetFrameRecovery();
-  sharedDialog = {caseId: detail.id, mode, runId: mode === "continue" ? shared!.latest_run : undefined};
+  const {ids, excluded} = sharedCollectionMembers(detail);
+  sharedDialog = {caseId: detail.id, mode, runId: mode === "continue" ? shared!.latest_run : undefined,
+    caseIds: mode === "collect" ? ids : undefined};
   dialogAction = "shared-trace";
   const settings = {...defaults, ...detail.run_defaults};
-  const ids = [...new Set([...state.openCases, detail.id])];
   const names = ids.map(id => state.cases.find(item => item.id === id)?.name || (id === detail.id ? detail.name : id));
-  dialog.innerHTML = `<form id="action-form"><header class="dialog-head"><div><h2>${mode === "collect" ? "Collect from open investigations" : "Continue shared data"}</h2><p>${mode === "collect" ? "Start a shared collection using the selected seed outputs of the open investigations." : "Continue the saved shared seed set and frontier. Open tabs do not change its membership."}</p></div><button type="button" class="dialog-close" data-action="close-dialog" aria-label="Close dialog">${icon("close")}</button></header><div class="dialog-body"><p>${esc(mode === "collect" ? names.join(", ") : (shared?.members || []).map(member => member.name).join(", "))}</p>${sharedDialog.runId ? `<p>Continue snapshot: <span class="mono">${esc(sharedDialog.runId)}</span></p>` : ""}<p class="artifact-note">Uses ${esc(detail.name)}’s collection limits and explicit stop-tracing rules. Attribution CSV hop limits are ignored. Each investigation later plots with its own seeds and rules.</p>${numericField(settings, "hops", mode === "collect" ? "Maximum hops" : "Additional hops", mode === "collect" ? "Maximum hop depth for this new shared collection." : "Adds to this shared snapshot’s ceiling; 0 retries eligible paths. Changing the named group sets a new maximum instead.")}${hopReferenceFields(settings, true)}${traceSummary(settings)}<p class="small muted">${detail.fixture ? "Uses the investigation’s saved synthetic source." : "Uses Blockstream API credits. Complete any credential prompt in the launching terminal."}</p></div><footer class="dialog-footer"><button type="button" class="btn" data-action="close-dialog">Cancel</button><button type="submit" class="btn primary">${mode === "collect" ? "Collect shared data" : "Continue shared data"}</button></footer></form>`;
+  dialog.innerHTML = `<form id="action-form"><header class="dialog-head"><div><h2>${mode === "collect" ? "Collect from open investigations" : "Continue shared data"}</h2><p>${mode === "collect" ? "Start a shared collection using the selected seed outputs of the open investigations on this blockchain." : "Continue the saved shared seed set and frontier. Open tabs do not change its membership."}</p></div><button type="button" class="dialog-close" data-action="close-dialog" aria-label="Close dialog">${icon("close")}</button></header><div class="dialog-body"><p>${esc(mode === "collect" ? names.join(", ") : (shared?.members || []).map(member => member.name).join(", "))}</p>${mode === "collect" ? sharedCollectionExclusions(excluded) : ""}${sharedDialog.runId ? `<p>Continue snapshot: <span class="mono">${esc(sharedDialog.runId)}</span></p>` : ""}<p class="artifact-note">Uses ${esc(detail.name)}’s collection limits and explicit stop-tracing rules. Attribution CSV hop limits are ignored. Each investigation later plots with its own seeds and rules.</p>${numericField(settings, "hops", mode === "collect" ? "Maximum hops" : "Additional hops", mode === "collect" ? "Maximum hop depth for this new shared collection." : "Adds to this shared snapshot’s ceiling; 0 retries eligible paths. Changing the named group sets a new maximum instead.")}${hopReferenceFields(settings, true)}${traceSummary(settings)}<p class="small muted">${detail.fixture ? "Uses the investigation’s saved synthetic source." : "Uses Blockstream API credits. Complete any credential prompt in the launching terminal."}</p></div><footer class="dialog-footer"><button type="button" class="btn" data-action="close-dialog">Cancel</button><button type="submit" class="btn primary">${mode === "collect" ? "Collect shared data" : "Continue shared data"}</button></footer></form>`;
   dialog.showModal();
   void suggestHopReferenceNames().catch(() => {});
 }
@@ -3824,7 +3855,7 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
     const page = state.page, caseId = page === "case-settings" ? state.activeCase?.id || null : null;
     if (page === "case-settings" && !caseId) return;
     saveSettingsDraft(); saveAddressDraft();
-    await sharedAttributionsAction(action, {caseId, busy: page === "case-settings" ? isBusy() : false,
+    await sharedAttributionsAction(action, {caseId, blockchain: caseId ? state.activeCase?.blockchain : undefined, busy: page === "case-settings" ? isBusy() : false,
       render: () => {if (state.page === page && (page !== "case-settings" || state.activeCase?.id === caseId)) render();},
       post: (path, body) => api(path, body), get: path => api(path),
       readText: async path => {
@@ -4036,6 +4067,7 @@ app.addEventListener("click", (event) => {
 app.addEventListener("change", (event) => {
   const element = event.target as HTMLInputElement | HTMLSelectElement;
   if (seedEditorInput(element as HTMLInputElement)) return;
+  if (element.name === "blockchain" && element.closest("#new-case-form")) {saveDraft(); render(); return;}
   if (element.id?.startsWith("shared-attributions-")) {
     if (!["settings", "case-settings"].includes(state.page)) return;
     if (element.id === "shared-attributions-file") {
@@ -4043,7 +4075,7 @@ app.addEventListener("change", (event) => {
       void sharedAttributionsFile(element as HTMLInputElement, () => {
         if (state.page === page && (page !== "case-settings" || state.activeCase?.id === caseId)) render();
       }, state.page === "case-settings" && isBusy()).catch(handleError);
-    } else sharedAttributionsInput(element);
+    } else {sharedAttributionsInput(element); if (element.id === "shared-attributions-blockchain") render();}
     return;
   }
   if (scopeAnalysisInput(element)) return;
@@ -4340,7 +4372,7 @@ dialog.addEventListener("submit", (event) => {
     const data = new FormData(form), captured = {...sharedDialog};
     const body: Record<string, unknown> = {action, mode: captured.mode, hops: Number(data.get("hops")),
       hop_reference_name: String(data.get("hop_reference_name") || "").trim()};
-    if (captured.mode === "collect") body.case_ids = [...new Set([...state.openCases, detail.id])];
+    if (captured.mode === "collect") body.case_ids = captured.caseIds;
     else body.run_id = captured.runId;
     void startJob(`/api/cases/${encodeURIComponent(detail.id)}/actions`, body, action, !detail.fixture, detail.id).catch(handleError);
     return;

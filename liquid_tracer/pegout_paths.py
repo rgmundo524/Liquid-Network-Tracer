@@ -7,7 +7,8 @@ any particular path.
 from collections import defaultdict, deque
 from copy import deepcopy
 
-from .common import HEX64, TraceError, output_kind, parse_outpoint
+from .common import HEX64, TraceError, match_labels, output_kind, parse_outpoint
+from .networks import blockchain as selected_blockchain
 from .hop_limits import output_budget
 from .group_hops import normalize_reference_name, reference_name
 from .trace import validate_transaction
@@ -22,41 +23,45 @@ SEED_SCOPE = SCOPE.replace("from the chosen transaction", "from the selected see
 def validate_query(txid=None, min_hops=0, max_hops=10, *, seeds=None,
                    include_unspent=False, include_unspendable=False, include_context=False,
                    hop_reference_name="", transaction_io=None, attribution_hop_limits=None, pegout_lbtc_limit=None,
-                   hop_basis="configured"):
+                   hop_basis="configured", include_attributed_stops=False, blockchain="liquid"):
+    blockchain = selected_blockchain(blockchain)
     from .plot_scope import validate_hop_basis
     validate_hop_basis(hop_basis)
     if seeds is not None:
         if txid is not None:
-            raise TraceError("Choose either selected seed outputs or one transaction for a peg-out search")
+            raise TraceError("Choose either selected seed outputs or one transaction for an endpoint search")
         if not isinstance(seeds, list) or not seeds or any(not isinstance(seed, str) for seed in seeds):
-            raise TraceError("Peg-out search requires a nonempty list of selected seed outputs")
+            raise TraceError("Endpoint search requires a nonempty list of selected seed outputs")
         normalized = sorted({f"{origin}:{index}" for origin, index in map(parse_outpoint, seeds)})
         origin = {"seeds": normalized}
     else:
         if not isinstance(txid, str) or not HEX64.fullmatch(txid.strip()):
-            raise TraceError("Peg-out search requires selected seed outputs or a 64-character transaction hash")
+            raise TraceError("Endpoint search requires selected seed outputs or a 64-character transaction hash")
         origin = {"txid": txid.strip().lower()}
     if any(type(value) is not int or not 0 <= value <= 2147483647
            for value in (min_hops, max_hops)):
-        raise TraceError("Peg-out hops must be whole numbers from 0 to 2147483647")
+        raise TraceError("Endpoint hops must be whole numbers from 0 to 2147483647")
     if min_hops > max_hops:
-        raise TraceError("Minimum peg-out hops cannot exceed maximum hops")
-    options = {"include_unspent": include_unspent, "include_unspendable": include_unspendable}
+        raise TraceError("Minimum endpoint hops cannot exceed maximum hops")
+    options = {"include_unspent": include_unspent, "include_unspendable": include_unspendable,
+               "include_attributed_stops": include_attributed_stops}
     if any(type(value) is not bool for value in options.values()):
         raise TraceError("Unspent and unspendable endpoints must be enabled or disabled")
     if type(include_context) is not bool:
         raise TraceError("Context addresses must be enabled or disabled")
     options["include_context"] = include_context
     if transaction_io not in (None, "complete"):
-        raise TraceError("Peg-out transaction I/O must use complete transaction context")
+        raise TraceError("Endpoint transaction I/O must use complete transaction context")
     if transaction_io is not None:
         options["transaction_io"] = transaction_io
     if attribution_hop_limits not in (None, "ignore"):
-        raise TraceError("Peg-out attribution hop policy must ignore per-address hop limits")
+        raise TraceError("Endpoint attribution hop policy must ignore per-address hop limits")
     if attribution_hop_limits is not None:
         options["attribution_hop_limits"] = attribution_hop_limits
     from .pegout_limit import normalize_pegout_lbtc_limit
     amount_limit = normalize_pegout_lbtc_limit(pegout_lbtc_limit)
+    if amount_limit is not None and blockchain == "bitcoin":
+        raise TraceError("A cumulative L-BTC peg-out limit is unavailable for Bitcoin endpoint traces")
     if amount_limit is not None:
         options["pegout_lbtc_limit"] = amount_limit
     name = normalize_reference_name(hop_reference_name)
@@ -71,8 +76,43 @@ def validate_query(txid=None, min_hops=0, max_hops=10, *, seeds=None,
             **{key: value for key, value in options.items() if value}}
 
 
-def _pegout(output):
+def _endpoint_state(state, query):
+    """Apply explicit endpoint boundaries without changing archived evidence.
+
+    Legacy queries keep their original label behavior. New attributed endpoint
+    queries accept only enabled labels or explicitly enabled stop-tracing rules;
+    an entity name, confidence, or zero-hop limit alone never defines a stop.
+    """
+    if not query.get("include_attributed_stops"):
+        return state
+    labels = [deepcopy(label) for label in state.get("labels", []) if label.get("enabled", True) is True]
+    for address, rule in state.get("service_controls", {}).get("rules", {}).items():
+        if rule.get("enabled") is True and rule.get("stop_tracing") is True:
+            label = {"kind": "address", "value": address, "stop": True,
+                           "entity": rule.get("name", ""), "confidence": rule.get("confidence", ""),
+                           "source": rule.get("source", ""), "observed_at": rule.get("observed_at", "")}
+            if label not in labels:
+                labels.append(label)
+    return {**state, "labels": labels}
+
+
+def _stop_attributions(state, key, output):
+    attributions = []
+    for label in match_labels(state.get("labels", []), key, output):
+        if label.get("enabled", True) is not True or label.get("stop") is not True:
+            continue
+        entry = {"name": label.get("entity", ""), "confidence": label.get("confidence", ""),
+                 "source": label.get("source", ""), "observed_at": label.get("observed_at", ""),
+                 "kind": label["kind"], "value": label["value"]}
+        if entry not in attributions:
+            attributions.append(entry)
+    return attributions
+
+
+def _pegout(output, blockchain="liquid"):
     """Accept Esplora's peg-out metadata, never generic OP_RETURN outputs."""
+    if blockchain == "bitcoin":
+        return False
     value = output.get("pegout")
     if value is None:
         return False
@@ -93,14 +133,15 @@ def _evidence(state, *, respect_attribution_hops=True):
     """Fail closed on corrupt evidence, including links excluded by stop rules."""
     forward, incoming = defaultdict(list), defaultdict(list)
     transactions, outputs = state["transactions"], state["outputs"]
+    chain = selected_blockchain(state)
     indegree = {txid: 0 for txid in transactions}
     pegouts = {}
     for txid, record in transactions.items():
         if not isinstance(txid, str) or not HEX64.fullmatch(txid) or txid != txid.lower():
-            raise TraceError("Malformed saved peg-out search transaction ID")
+            raise TraceError("Malformed saved endpoint search transaction ID")
         data = record["data"]
         validate_transaction(data, txid)
-        pegouts[txid] = [index for index, output in enumerate(data["vout"]) if _pegout(output)]
+        pegouts[txid] = [index for index, output in enumerate(data["vout"]) if _pegout(output, chain)]
         for index, vin in enumerate(data["vin"]):
             if not vin.get("is_pegin") and not vin.get("is_coinbase"):
                 incoming[f"{vin.get('txid')}:{vin.get('vout')}"].append((txid, index))
@@ -113,21 +154,21 @@ def _evidence(state, *, respect_attribution_hops=True):
                 or type(tracked["vout"]) is not int or tracked["vout"] != index
                 or tracked.get("outpoint", key) != key or index >= len(funding["vout"])
                 or type(vin) is not int or not 0 <= vin < len(spending["vin"])):
-            raise TraceError("Peg-out search requires exact saved output and input indices")
+            raise TraceError("Endpoint search requires exact saved output and input indices")
         actual = spending["vin"][vin]
         if (actual.get("is_pegin") or actual.get("is_coinbase") or parent == child
                 or actual.get("txid") != parent or type(actual.get("vout")) is not int
                 or actual["vout"] != index or incoming[key] != [(child, vin)]):
-            raise TraceError("Peg-out spend link disagrees with its saved transaction input")
+            raise TraceError("Endpoint spend link disagrees with its saved transaction input")
         output = funding["vout"][index]
-        if output_kind(output) != "spendable":
-            raise TraceError("Peg-out spend link references a non-spendable output")
+        if output_kind(output, chain) != "spendable":
+            raise TraceError("Endpoint spend link references a non-spendable output")
         prevout = actual.get("prevout")
         if prevout is not None and (not isinstance(prevout, dict) or any(
                 field in prevout and prevout[field] != output.get(field)
                 for field in ("scriptpubkey", "scriptpubkey_type", "scriptpubkey_address", "value", "valuecommitment",
                               "asset", "assetcommitment", "pegout"))):
-            raise TraceError("Peg-out spending input disagrees with its saved funding output")
+            raise TraceError("Endpoint spending input disagrees with its saved funding output")
         forward[parent].append((child, key, output_budget(state["labels"], key, output,
                                                         respect_attribution_hops=respect_attribution_hops)))
         indegree[child] += 1
@@ -141,7 +182,7 @@ def _evidence(state, *, respect_attribution_hops=True):
             if not indegree[child]:
                 ready.append(child)
     if visited != len(transactions):
-        raise TraceError("Saved UTXO spends contain a cycle; peg-out search cannot proceed")
+        raise TraceError("Saved UTXO spends contain a cycle; endpoint search cannot proceed")
     return forward, pegouts
 
 
@@ -152,6 +193,10 @@ def _paths(state, query, *, seed_distances=None, selected_endpoints=None, max_se
     by this query, including its attribution budgets and group-relative range.
     """
     try:
+        state = _endpoint_state(state, query)
+        chain = selected_blockchain(state)
+        if chain == "bitcoin" and query.get("pegout_lbtc_limit") is not None:
+            raise TraceError("A cumulative L-BTC peg-out limit is unavailable for Bitcoin endpoint traces")
         respect_attribution_hops = query.get("attribution_hop_limits") != "ignore"
         forward, pegouts = _evidence(state, respect_attribution_hops=respect_attribution_hops)
         endpoints = {txid: {index: "pegout" for index in indices} for txid, indices in pegouts.items()}
@@ -167,12 +212,18 @@ def _paths(state, query, *, seed_distances=None, selected_endpoints=None, max_se
                         or type(item["vout"]) is not int or item["vout"] != index
                         or item.get("outpoint", key) != key or index >= len(rows)):
                     raise TraceError("Unspent endpoints require exact saved output indices")
-                if output_kind(rows[index]) == "spendable":
+                if output_kind(rows[index], chain) == "spendable":
                     endpoints[txid][index] = "unspent"
         if query.get("include_unspendable"):
             for txid, record in state["transactions"].items():
                 endpoints[txid].update({index: "unspendable" for index, output in enumerate(record["data"]["vout"])
-                                       if output_kind(output) == "provably_unspendable"})
+                                       if output_kind(output, chain) == "provably_unspendable"})
+        if query.get("include_attributed_stops"):
+            for txid, record in state["transactions"].items():
+                for index, output in enumerate(record["data"]["vout"]):
+                    key = f"{txid}:{index}"
+                    if output_kind(output, chain) == "spendable" and _stop_attributions(state, key, output):
+                        endpoints[txid][index] = "attributed_stop"
         confirmed = {txid for txid, record in state["transactions"].items()
                      if state.get("include_unconfirmed", False)
                      or record["data"]["status"]["confirmed"] is True}
@@ -256,7 +307,7 @@ def _paths(state, query, *, seed_distances=None, selected_endpoints=None, max_se
             seed_distances.update({key: min(hops) for key, hops in distances.items()})
         return kept, _endpoint_matches(state, endpoints, distances), depths, {}
     except (KeyError, TypeError, ValueError, IndexError, AttributeError) as exc:
-        raise TraceError("Peg-out search needs complete, consistent saved spend evidence") from exc
+        raise TraceError("Endpoint search needs complete, consistent saved spend evidence") from exc
 
 
 def _endpoint_matches(state, endpoints, distances):
@@ -272,6 +323,9 @@ def _endpoint_matches(state, endpoints, distances):
         else:
             match["output"] = deepcopy(output)
             match["trace"] = deepcopy(state["outputs"].get(key))
+            if kind == "attributed_stop":
+                match.update(attributions=_stop_attributions(state, key, output),
+                             boundary_status="attributed_stop")
             if kind == "unspent":
                 match.update({field: deepcopy(state["outputs"][key][field])
                               for field in ("observed_spend", "spend_observation_id")})
@@ -305,15 +359,17 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
     if include_fees is not None and type(include_fees) is not bool:
         raise TraceError("Fee flows must be enabled or disabled")
     if not isinstance(query, dict):
-        raise TraceError("Choose selected seed outputs or a transaction and an inclusive peg-out hop range")
+        raise TraceError("Choose selected seed outputs or a transaction and an inclusive endpoint hop range")
     from .plot_scope import projected_hop_basis
-    state = projected_hop_basis(state, query.get("hop_basis", "configured"))
+    state = _endpoint_state(projected_hop_basis(state, query.get("hop_basis", "configured")), query)
+    chain = selected_blockchain(state)
     name = reference_name(state)
     if "hop_reference_name" in query and normalize_reference_name(query["hop_reference_name"]) != name:
-        raise TraceError("Peg-out hop reference must match the selected collection run")
+        raise TraceError("Endpoint hop reference must match the selected collection run")
     query = validate_query(query.get("txid"), query.get("min_hops", 0), query.get("max_hops", 10),
                            seeds=query.get("seeds"), include_unspent=query.get("include_unspent", False),
                            include_unspendable=query.get("include_unspendable", False),
+                           include_attributed_stops=query.get("include_attributed_stops", False), blockchain=chain,
                            include_context=query.get("include_context", False), hop_reference_name=name,
                            transaction_io=query.get("transaction_io"),
                            attribution_hop_limits=query.get("attribution_hop_limits"),
@@ -363,10 +419,10 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
                 prevout = vin.get("prevout") or {}
                 if not isinstance(prevout, dict):
                     raise TraceError("Context inputs require valid saved output metadata")
-                if complete_io or (not vin.get("is_coinbase") and output_kind(prevout) == "spendable"):
+                if complete_io or (not vin.get("is_coinbase") and output_kind(prevout, chain) == "spendable"):
                     context_edge_ids.add(f"in:{txid}:{index}")
             for index, output in enumerate(record["data"]["vout"]):
-                kind = output_kind(output)
+                kind = output_kind(output, chain)
                 if complete_io or kind == "spendable":
                     if kind == "fee" and not include_fees:
                         hidden_fee_ids.add(f"out:{txid}:{index}")
@@ -390,10 +446,21 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
                               reduced["transactions"], graph["fee_items"], refine=initial_layout)
     graph["activity_frames"] = activity_frames(graph)
     scope = SEED_SCOPE if "seeds" in query else SCOPE
+    if chain == "bitcoin":
+        origin = "selected seed outputs" if "seeds" in query else "chosen transaction"
+        scope = (f"Search scope: verified forward UTXO spends from the {origin}. "
+                 "Paused, stopped, unconfirmed or unsearched branches may contain undiscovered endpoints. "
+                 "Address reuse and other transaction inputs do not establish a path. "
+                 "Public Bitcoin output values do not allocate particular inputs to individual outputs.")
     if query.get("attribution_hop_limits") == "ignore":
         scope += (" Attribution CSV hop limits do not restrict these paths. Explicit stop-tracing rules "
                   "and the selected plot hop range still apply; only saved transactions can be displayed.")
-    extra_endpoints = query.get("include_unspent") or query.get("include_unspendable")
+    extra_endpoints = (chain == "bitcoin" or query.get("include_unspent")
+                       or query.get("include_unspendable") or query.get("include_attributed_stops"))
+    if query.get("include_attributed_stops"):
+        scope += (" Attributed endpoints require an explicit enabled stop-tracing assessment. "
+                  "A name alone does not stop tracing or prove ownership; a stop is an analytical boundary, "
+                  "not an unspent observation.")
     if query.get("include_unspent"):
         scope += (" Unspent endpoints require a saved unspent observation with no saved spending input; "
                   "this is their status at observation, not a current balance. Unchecked or bounded outputs "
@@ -433,17 +500,20 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
         graph["pegouts"]["context_edge_count"] = len(context_edge_ids)
     if extra_endpoints:
         counts = {kind: sum(match["kind"] == kind for match in endpoint_matches)
-                  for kind in ("pegout", "unspent", "unspendable")}
+                  for kind in (("pegout", "unspent", "unspendable", "attributed_stop")
+                               if query.get("include_attributed_stops") else ("pegout", "unspent", "unspendable"))}
         graph["pegouts"].update(endpoint_matches=endpoint_matches, endpoint_count=len(endpoint_matches),
                                endpoint_counts=counts)
         if not matches:
             graph["pegouts"]["status"] = "endpoints_found" if endpoint_matches else "no_endpoints_found"
     graph["graph_options"].update(view="pegout_paths", pegout_query=deepcopy(query))
-    summary = f"{len(matches)} peg-out request(s)"
+    summary = f"{len(endpoint_matches)} endpoint(s)" if chain == "bitcoin" else f"{len(matches)} peg-out request(s)"
     if query.get("include_unspent"):
         summary += f", {counts['unspent']} observed unspent UTXO(s)"
     if query.get("include_unspendable"):
         summary += f", {counts['unspendable']} unspendable output(s)"
+    if query.get("include_attributed_stops"):
+        summary += f", {counts['attributed_stop']} attributed stop(s)"
     path_notice = ("Every traced path edge belongs to a qualifying path; "
                    if include_context else "Every displayed edge belongs to a qualifying path; ")
     units = "group-relative hops" if name else "transaction hops"
@@ -452,7 +522,8 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
                        " One circle per full address per network; UTXO occurrences and connectors remain separate. "
                        + path_notice +
                        "their union may also form routes outside the selected range. "
-                       "UTXO reachability does not prove ownership or allocate confidential values.")
+                       + ("UTXO reachability does not prove ownership or allocate individual inputs to outputs."
+                          if chain == "bitcoin" else "UTXO reachability does not prove ownership or allocate confidential values."))
     if include_context and group_context_inputs:
         # Group after final filtering and arrangement so summary dimensions and
         # notices survive, while eligibility sees every displayed occurrence.

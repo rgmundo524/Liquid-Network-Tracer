@@ -27,14 +27,15 @@ FORMATS = {"auto", "csv", "json", "text"}
 NOTICE = ("Importing records your assessment, not independent verification of ownership. "
           "Addresses use the same text validation as Address review; network/checksums are not checked offline. "
           "Use the public address form shown by the trace, not a confidential-address alias. "
+          "Labels alone do not stop tracing; set stop_tracing=true to request a boundary. "
           "Active address stops apply to the first run and continuations, including seed outputs. "
           "Attribution hop limits apply to Full trace; collection and peg-out tracing ignore them. "
           "Starter connections ignores both stops and hop limits while inspecting saved evidence. "
           "No blockchain requests or Miro changes are made. Existing evidence is retained.")
 TEMPLATE = ("Address,Name,confidence,stop_tracing,hop_limit,source,notes\n"
-            "REPLACE_WITH_LIQUID_ADDRESS_1,Example Exchange,suspected,true,,Investigator research,Explain the evidence\n"
-            "REPLACE_WITH_LIQUID_ADDRESS_2,Client wallet,confirmed,false,,Client records,Continue tracing\n"
-            "REPLACE_WITH_LIQUID_ADDRESS_3,Service deposit,suspected,false,1,Investigator research,Show one consolidation hop in Full trace\n")
+            "REPLACE_WITH_ADDRESS_1,Example Exchange,suspected,true,,Investigator research,Explain the evidence\n"
+            "REPLACE_WITH_ADDRESS_2,Client wallet,confirmed,false,,Client records,Continue tracing\n"
+            "REPLACE_WITH_ADDRESS_3,Service deposit,suspected,false,1,Investigator research,Show one consolidation hop in Full trace\n")
 
 
 def read_import(path):
@@ -80,7 +81,9 @@ def _value(fields, key, default=""):
     return default if value is None or value == "" else value
 
 
-def _row(value):
+def _row(value, *, blockchain="liquid"):
+    from .networks import blockchain as network_chain
+    chain = network_chain(blockchain)
     if isinstance(value, str):
         value = {"address": value}
     if not isinstance(value, dict):
@@ -92,16 +95,16 @@ def _row(value):
             raise TraceError("Duplicate field after normalizing column names")
         if name == "kind" and item == "address":
             continue
-        if name == "network" and isinstance(item, str) and item.strip().lower() == "liquid":
+        if name == "network" and isinstance(item, str) and item.strip().lower() == chain:
             continue
         if name not in FIELDS:
-            raise TraceError("Unsupported field; use the supplied Liquid address-import template")
+            raise TraceError("Unsupported field; use the supplied address-import template for the selected network")
         fields[name] = item
     address = validate_address(fields.get("address"))
     metadata = {"confidence": _text(_value(fields, "confidence", "suspected"), "Confidence", 30).casefold(),
                 "source": _text(_value(fields, "source", "Investigator designation"), "Source", 1000, required=True),
                 "observed_at": _text(_value(fields, "observed_at"), "Observation date", 80),
-                "stop_tracing": _boolean(fields.get("stop_tracing"), "Stop tracing", True),
+                "stop_tracing": _boolean(fields.get("stop_tracing"), "Stop tracing", False),
                 "hop_limit": fields.get("hop_limit")}
     validate_rule_fields(metadata)
     return {"address": address, "name": _text(_value(fields, "name"), "Name", 120),
@@ -118,7 +121,7 @@ def _json_pairs(pairs):
     return result
 
 
-def parse_import(text, format="auto"):
+def parse_import(text, format="auto", *, blockchain="liquid"):
     """Validate the entire batch before proposing changes, including duplicate rows."""
     if not isinstance(text, str) or len(text.encode("utf-8")) > MAX_BYTES:
         raise TraceError("Address import must contain at most 512 KiB of UTF-8 text")
@@ -158,7 +161,7 @@ def parse_import(text, format="auto"):
             try:
                 if isinstance(raw, dict) and (None in raw or any(item is None for item in raw.values())):
                     raise TraceError("CSV row has a different number of fields than its header")
-                row = _row(raw)
+                row = _row(raw, blockchain=blockchain)
                 existing = accepted.get(row["address"])
                 if existing:
                     if not _same_assessment(existing["rule"], row):
@@ -217,14 +220,16 @@ def _plan(settings, parsed, policy):
 
 
 def preview_import(case, text, *, format="auto", policy="keep"):
-    return _plan(load_services(case), parse_import(text, format), policy)
+    from .investigations import read_case
+    return _plan(load_services(case), parse_import(text, format, blockchain=read_case(case)["blockchain"]), policy)
 
 
 def apply_import(case, text, *, approval_sha256, format="auto", policy="keep"):
     """Revalidate the reviewed batch under case locks, then save all rows or none."""
     if not isinstance(approval_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", approval_sha256):
         raise TraceError("Preview the import and approve its exact approval_sha256 before saving")
-    parsed = parse_import(text, format)
+    from .investigations import read_case
+    parsed = parse_import(text, format, blockchain=read_case(case)["blockchain"])
     case = Path(case)
     # Refuse writes while tracing or a compact layout uses the assessment snapshot.
     with (case / "trace.lock").open("a") as trace_lock:

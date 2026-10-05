@@ -142,7 +142,7 @@ class ChangeOutputTests(unittest.TestCase):
             report = change_outputs.transaction_lookup(self.case, X)
         self.assertEqual(report["txid"], X)
         lookup.assert_called_once_with(X, fixture=None, base_url="https://blockstream.info/liquid/api", auth="none",
-                                       max_requests=5, max_seconds=30)
+                                       blockchain="liquid", max_requests=5, max_seconds=30)
         self.assertFalse((self.case / "services.json").exists())
 
     def test_fixture_lookup_and_missing_or_changed_fixture_protection(self):

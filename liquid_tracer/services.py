@@ -9,6 +9,7 @@ from pathlib import Path
 from .address_activity import validate_address
 from .common import TraceError, match_labels, now, output_kind, read_json, save_json
 from .investigations import read_case
+from .networks import blockchain
 from .hop_limits import hop_limit_value, UNSET
 
 MANAGED_BY = "case_service_rules"
@@ -116,7 +117,7 @@ def effective_services(case):
     if not settings.get("use_shared_attributions", False):
         return settings
     from .shared_attributions import load_library
-    library = load_library(Path(case).resolve().parent)
+    library = load_library(Path(case).resolve().parent, blockchain=read_case(case)["blockchain"])
     settings = copy.deepcopy(settings)
     inherited = {address: {**copy.deepcopy(rule), "stop_tracing": False,
                           "hop_limit": None, "attribution_origin": "shared",
@@ -141,7 +142,7 @@ def shared_attribution_status(case):
     from .shared_attributions import load_library
     settings = load_services(case)
     try:
-        library = load_library(Path(case).resolve().parent)
+        library = load_library(Path(case).resolve().parent, blockchain=read_case(case)["blockchain"])
     except TraceError:
         library = None  # Keep the local opt-out available if the library needs repair.
     return _sharing_status(settings, library)
@@ -166,7 +167,7 @@ def set_shared_attributions(case, enabled, *, expected_revision):
             if settings["revision"] != expected_revision:
                 raise TraceError("Address assessments changed; review shared attribution settings again")
             try:
-                library = load_library(case.resolve().parent)
+                library = load_library(case.resolve().parent, blockchain=read_case(case)["blockchain"])
             except TraceError:
                 if enabled:
                     raise
@@ -326,7 +327,7 @@ class ServiceScope:
             return None
         output = outputs[item["vout"]]
         address = output.get("scriptpubkey_address")
-        return address if address in self.addresses and output_kind(output) == "spendable" else None
+        return address if address in self.addresses and output_kind(output, blockchain(self.state)) == "spendable" else None
 
     def _refresh_labels(self, item):
         outputs = self.state["transactions"].get(item["txid"], {}).get("data", {}).get("vout", [])

@@ -113,6 +113,11 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
     editSeeds(value, caseId = this.state.activeCase?.id) {
       listeners.input({target: {id: 'seed-editor-text', value, dataset: {caseId}}});
     },
+    changeBlockchain(value) {
+      currentForm = {id: 'new-case-form', values: {...defaults, name: this.state.draft.name, txids: this.state.draft.txids, seeds: this.state.draft.seeds, blockchain: value}, reportValidity: () => true};
+      listeners.change({target: {id: '', name: 'blockchain', value, closest: selector => selector === '#new-case-form' ? currentForm : null}});
+      currentForm = null;
+    },
     changeRun(value) {listeners.change({target: {id: "run-picker", value, closest() {return null;}}});}, get focusCount() {return focusCount;},
     chooseSharedAttributionsFile() {listeners.change({target: {id: 'shared-attributions-file', files: []}});},
     async submitService(values) {
@@ -184,7 +189,7 @@ test('startup offers an empty live investigation without fetching bundled sample
   assert.equal(view.state.draft.seeds, '');
   assert.equal(view.state.draft.blockchain, 'liquid');
   assert.match(view.newCase(), /This lookup uses your Blockstream credits/);
-  assert.match(view.newCase(), /<select name="blockchain" required><option value="liquid" selected>Liquid Network<\/option><\/select>/);
+  assert.match(view.newCase(), /<select name="blockchain" required><option value="liquid" selected>Liquid Network<\/option><option value="bitcoin">Bitcoin Network<\/option><\/select>/);
   assert.doesNotMatch(view.newCase(), /name="board"|Miro board URL or ID/);
   assert.doesNotMatch(view.newCase(), /Starting preferences/);
   view.navigate('new');
@@ -1778,13 +1783,13 @@ test('all plotting goals are visible and plot only the selected saved run withou
     view.state.selectedRun = 'older';
     await view.dispatch('view-plots');
     const html = view.workspace();
-    for (const name of ['Full trace', 'Starter connections', 'Paths to peg-outs']) assert.match(html, new RegExp(name));
+    for (const name of ['Full trace', 'Starter connections', 'Paths to endpoints']) assert.match(html, new RegExp(name));
     assert.doesNotMatch(html, /data-action="(?:trace-dialog|pegouts-start|miro-sync-dialog|workflow-board-sync)"/);
     await view.dispatch('plot-goal', {dataset: {goal}});
     workflowEdit(view, 'min-hops', '2'); workflowEdit(view, 'max-hops', '10');
     await view.dispatch('workflow-plot');
     assert.deepEqual(view.calls.at(-1), {path: '/api/cases/case1/actions', body: {
-      action: 'plot', layout_settings: layoutDefaults, layout_mode: 'fresh', goal, run_id: 'older', min_hops: goal === 'pegouts' ? 2 : 0, max_hops: 10, ...(goal === 'connections' ? {connection_scope: 'hop_limited'} : {hop_basis: 'original_seeds'})}});
+      action: 'plot', layout_settings: layoutDefaults, layout_mode: 'fresh', goal, run_id: 'older', min_hops: goal === 'pegouts' ? 2 : 0, max_hops: 10, ...(goal === 'connections' ? {connection_scope: 'hop_limited'} : {hop_basis: 'original_seeds'}), ...(goal === 'pegouts' ? {include_unspent: true, include_unspendable: true, include_attributed_stops: true} : {})}});
     assert.equal(view.state.job.live, false);
     assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 1);
   }
@@ -1872,7 +1877,7 @@ test('plot views explain missing collection, retain all goals, and reject invali
   assert.equal(view.calls.length, 1);
 });
 
-test('peg-out endpoints default off and optional booleans are submitted only for this goal', async () => {
+test('endpoint types default on and optional booleans are submitted only for this goal', async () => {
   for (const goal of ['full', 'connections', 'pegouts']) {
     for (const [includeUnspent, includeUnspendable] of [[false, false], [true, false], [false, true], [true, true]]) {
       const view = await harness(path => path.endsWith('/actions') ? {id: 'plotjob', status: 'running'} : undefined);
@@ -1880,10 +1885,10 @@ test('peg-out endpoints default off and optional booleans are submitted only for
       await view.dispatch('view-plots');
       assert.doesNotMatch(view.workspace(), /id="workflow-include-(?:unspent|unspendable)"/);
       await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
-      for (const id of ['unspent', 'unspendable']) {
+      for (const id of ['unspent', 'unspendable', 'attributed-stops']) {
         const input = view.workspace().match(new RegExp(`<input id="workflow-include-${id}"[^>]*>`))?.[0];
         assert.ok(input);
-        assert.doesNotMatch(input, /checked/);
+        assert.match(input, /checked/);
       }
       assert.match(view.workspace(), /Peg-out requests are always included/);
       assert.match(view.workspace(), /observed unspent in the selected collection run/);
@@ -1896,7 +1901,7 @@ test('peg-out endpoints default off and optional booleans are submitted only for
       assert.deepEqual(view.calls.at(-1).body, {action: 'plot', layout_settings: layoutDefaults, layout_mode: 'fresh', goal, run_id: 'saved1',
         min_hops: 0, max_hops: 10, ...(goal === 'connections' ? {connection_scope: 'hop_limited'} : {hop_basis: 'original_seeds'}),
         ...(goal === 'pegouts' && includeUnspent ? {include_unspent: true} : {}),
-        ...(goal === 'pegouts' && includeUnspendable ? {include_unspendable: true} : {})});
+        ...(goal === 'pegouts' && includeUnspendable ? {include_unspendable: true} : {}), ...(goal === 'pegouts' ? {include_attributed_stops: true} : {})});
       assert.equal(view.state.job.live, false);
       assert.equal(view.calls.filter(call => call.body).length, 1, 'endpoint choices do not update settings or collect data');
     }
@@ -1921,7 +1926,7 @@ test('endpoint drafts survive tab and goal changes without leaking into another 
   view.state.activeCase = workflowCase({id: 'other'});
   await view.dispatch('view-plots');
   await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
-  for (const id of ['unspent', 'unspendable']) assert.doesNotMatch(view.workspace(), new RegExp(`id="workflow-include-${id}"[^>]*checked`));
+  for (const id of ['unspent', 'unspendable', 'attributed-stops']) assert.match(view.workspace(), new RegExp(`id="workflow-include-${id}"[^>]*checked`));
   assert.equal(view.calls.length, 1);
 });
 
@@ -1935,7 +1940,7 @@ test('peg-out layouts describe non-fee I/O and optional fees without an optional
     assert.match(html, /Every included transaction shows all its inputs and non-fee outputs/);
     assert.match(html, /Fee outputs follow the Include transaction fee flows setting/);
     assert.match(html, /Outputs on excluded branches remain visible without continuing those branches/);
-    assert.match(html, /These extra objects do not add endpoint matches or change the peg-out total/);
+    assert.match(html, /These extra objects do not add endpoint matches or change the selected endpoint totals/);
     assert.doesNotMatch(html, /id="workflow-include-context"|Include context addresses/);
     assert.equal(view.workflowInput({id: 'workflow-include-context', checked: false}), false);
     view.workflowInput({id: 'workflow-include-unspent', checked: true});
@@ -1943,7 +1948,7 @@ test('peg-out layouts describe non-fee I/O and optional fees without an optional
     await view.dispatch('workflow-plot');
     assert.deepEqual(view.calls.at(-1).body, {action: 'plot', layout_settings: layoutDefaults, layout_mode: 'fresh', goal, run_id: 'saved1',
       min_hops: 0, max_hops: 10, ...(goal === 'connections' ? {connection_scope: 'hop_limited'} : {hop_basis: 'original_seeds'}),
-      ...(goal === 'pegouts' ? {include_unspent: true} : {})});
+      ...(goal === 'pegouts' ? {include_unspent: true, include_unspendable: true, include_attributed_stops: true} : {})});
     assert.equal(view.state.job.live, false);
     assert.equal(view.calls.filter(call => call.body).length, 1, 'display choices neither update settings nor collect data');
   }
@@ -2153,7 +2158,7 @@ test('peg-out generation captures grouped and separate context preferences for e
     const writes = view.calls.filter(call => call.body);
     assert.deepEqual(writes.map(call => call.path), ['/api/cases/case1/actions']);
     assert.deepEqual(writes[0].body, {action: 'plot', layout_mode: 'fresh', goal: 'pegouts', run_id: 'saved1', min_hops: 0,
-      max_hops: 10, hop_basis: 'original_seeds', layout_settings: {...layoutDefaults, group_context_inputs: grouped}});
+      max_hops: 10, hop_basis: 'original_seeds', include_unspent: true, include_unspendable: true, include_attributed_stops: true, layout_settings: {...layoutDefaults, group_context_inputs: grouped}});
     assert.equal(view.workflowInput({id: 'workflow-include-context', checked: false}), false);
   }
 });
@@ -2191,7 +2196,7 @@ test('collection and new peg-out controls explain attribution limits without cha
   assert.match(view.workspace(), /0 additional hops fills eligible gaps within its existing ceiling/);
   await view.dispatch('view-plots');
   await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
-  assert.match(view.workspace(), /Peg-out paths ignore attribution CSV hop_limit values/);
+  assert.match(view.workspace(), /Endpoint paths ignore attribution CSV hop_limit values/);
   assert.match(view.workspace(), /Explicit stop-tracing rules and the selected hop range still apply/);
   assert.match(view.workspace(), /id="workflow-max-hops"[^>]*value="10"/);
 });
@@ -2508,7 +2513,7 @@ test('real populated case-detail contract feeds fresh previews into create and s
   await view.dispatch('view-plots');
   assert.doesNotMatch(savedPreviewPanel(view), /<iframe/);
   assert.match(savedPreviewPanel(view), /Open preview/);
-  assert.match(view.workspace(), /Paths to peg-outs/);
+  assert.match(view.workspace(), /Paths to endpoints/);
   assert.match(view.workspace(), /Collection hop limit: 10/);
   await view.dispatch('view-boards');
   assert.match(view.workspace(), /Peg-out case board/);
@@ -2520,7 +2525,7 @@ test('real populated case-detail contract feeds fresh previews into create and s
   await view.dispatch('view-boards');
   await view.dispatch('workflow-board-create-sync');
   assert.deepEqual(view.calls.at(-1).body, {action: 'board-create-sync',
-    preview_id: detail.plots[0].preview_id, name: detail.name + ' · Paths to peg-outs'});
+    preview_id: detail.plots[0].preview_id, name: detail.name + ' · Paths to endpoints'});
 });
 
 test('interrupted sync permits its saved plot retry and excludes newer plots until recovery completes', async () => {
@@ -2919,7 +2924,7 @@ test('board update generation is bound to the selected matching goal and reads l
   assert.doesNotMatch(view.workspace().match(/<button[^>]*data-action="workflow-plot"[^>]*>/)[0], /disabled/);
   await view.dispatch('workflow-plot');
   assert.deepEqual(view.calls.at(-1).body, {action: 'plot', goal: 'pegouts', run_id: 'saved1', min_hops: 0, max_hops: 10, hop_basis: 'original_seeds',
-    layout_mode: 'update', board_record_id: 'cashouts', layout_settings: layoutDefaults});
+    layout_mode: 'update', board_record_id: 'cashouts', include_unspent: true, include_unspendable: true, include_attributed_stops: true, layout_settings: layoutDefaults});
   assert.equal(view.state.job.live, true);
 });
 
@@ -3079,7 +3084,7 @@ test('combined update binds the exact board and includes endpoint choices', asyn
   await view.dispatch('workflow-plot-sync');
   assert.deepEqual(view.calls.at(-1).body, {action: 'plot-sync', goal: 'pegouts', run_id: 'saved1',
     min_hops: 2, max_hops: 11, hop_basis: 'original_seeds', layout_mode: 'update', board_record_id: 'cashouts',
-    include_unspent: true, include_unspendable: true, layout_settings: layoutDefaults});
+    include_unspent: true, include_unspendable: true, include_attributed_stops: true, layout_settings: layoutDefaults});
   assert.equal(view.state.job.live, true);
 });
 
@@ -3951,7 +3956,7 @@ test('combined export reports missing traces without downloading an empty mislea
   await view.dispatch('export-open-endpoints');
   assert.equal(view.downloads.length, 0);
   assert.match(view.app.innerHTML, /No saved endpoint traces to export/);
-  assert.match(view.app.innerHTML, /Generate a Paths to peg-outs plot/);
+  assert.match(view.app.innerHTML, /Generate a Paths to endpoints plot/);
   assert.match(view.app.innerHTML, /Beta: skipped/);
 });
 
@@ -4114,6 +4119,28 @@ test('shared collection captures open cases once and leaves private preferences 
   assert.deepEqual(detail.seeds, [`${txid}:0`]);
   assert.equal(detail.run_defaults.hop_reference_name, '');
   assert.equal(view.state.jobs.get('shared-job').resource_kind, 'shared_collection');
+});
+
+test('shared collection filters mixed open tabs by network and retains the reviewed members', async () => {
+  for (const chain of ['bitcoin', 'liquid']) {
+    const detail = workflowCase({id: 'focus', name: 'Focused', blockchain: chain, shared_collection: sharedCollection()});
+    const view = await harness(path => path.endsWith('/actions') ? {id: 'shared', status: 'running'} : undefined);
+    view.state.activeCase = detail; view.state.page = 'case';
+    view.state.cases = [detail, workflowCase({id: 'btc', name: 'Bitcoin member', blockchain: 'bitcoin'}),
+      workflowCase({id: 'liquid', name: 'Liquid member', blockchain: 'liquid'}),
+      workflowCase({id: 'legacy', name: 'Legacy member', blockchain: undefined})];
+    view.state.openCases = ['btc', 'liquid', 'legacy', 'btc'];
+    const expected = chain === 'bitcoin' ? ['btc', 'focus'] : ['liquid', 'legacy', 'focus'];
+    assert.match(view.workspace(), new RegExp(`${expected.length} currently open ${chain === 'bitcoin' ? 'Bitcoin' : 'Liquid'} investigations`));
+    await view.dispatch('shared-collect-dialog');
+    assert.match(view.dialog.innerHTML, chain === 'bitcoin'
+      ? /2 open investigations on other blockchains are excluded/ : /1 open investigation on another blockchain is excluded/);
+    assert.match(view.dialog.innerHTML, chain === 'bitcoin' ? /Bitcoin member, Focused/ : /Liquid member, Legacy member, Focused/);
+    assert.doesNotMatch(view.dialog.innerHTML, chain === 'bitcoin' ? /Liquid member|Legacy member/ : /Bitcoin member/);
+    view.state.openCases = ['changed-after-review'];
+    await view.submitDialog({hops: '10', hop_reference_name: ''});
+    assert.deepEqual(view.calls.find(call => call.path.endsWith('/actions')).body.case_ids, expected);
+  }
 });
 
 test('continuing shared data pins its displayed run without open-tab seeds or private run', async () => {
@@ -5562,7 +5589,7 @@ for (const tab of ['plots', 'analysis']) {
     assert.ok(view.workspace().indexOf('id="preview-miro-panel"') < view.workspace().indexOf('id="workflow-plot-picker"'));
     await view.dispatch('workflow-write-miro', previewWriteControl('older'));
     assert.deepEqual(view.calls.filter(call => call.body).map(call => call.body), [
-      {action: 'board-create-sync', preview_id: 'older', name: 'Shared evidence · Paths to peg-outs'},
+      {action: 'board-create-sync', preview_id: 'older', name: 'Shared evidence · Paths to endpoints'},
     ]);
   });
 }
@@ -5762,7 +5789,7 @@ test('library selection prepares and publishes the exact chosen saved ID without
   await view.dispatch('verify-saved-plot', {dataset: {preview: 'older', caseId: 'case1'}}); await settled();
   await view.dispatch('workflow-write-miro', previewWriteControl('older'));
   assert.deepEqual(view.calls.filter(call => call.body).map(call => call.body), [
-    {action: 'board-create-sync', preview_id: 'older', name: 'Shared evidence · Paths to peg-outs'}]);
+    {action: 'board-create-sync', preview_id: 'older', name: 'Shared evidence · Paths to endpoints'}]);
 });
 
 test('completed preview metadata is immediately selected and openable while overview refresh is still pending', async () => {
@@ -5907,11 +5934,11 @@ test('stable preview numbers label cards and choices independently of sorting an
     created_at: '2026-10-03T00:00:00Z'}), pendingPreview('middle', {preview_number: 5,
     created_at: '2026-02-01T00:00:00Z'})], plots_next_cursor: 'older'});
   await view.dispatch('view-plots'); await librarySelect(view, 'middle');
-  assert.match(savedPreviewPanel(view), /<h3>Preview 12 · Paths to peg-outs/);
+  assert.match(savedPreviewPanel(view), /<h3>Preview 12 · Paths to endpoints/);
   assert.match(savedPreviewPanel(view), /<h3>Preview 5 · Selected preview/);
   assert.match(savedPreviewPanel(view), /value="middle" selected>Preview 5 ·/);
   await view.dispatch('preview-load-more', {dataset: {caseId: 'case1'}}); await settled();
-  assert.match(savedPreviewPanel(view), /<h3>Preview 1 · Paths to peg-outs/);
+  assert.match(savedPreviewPanel(view), /<h3>Preview 1 · Paths to endpoints/);
   assert.match(savedPreviewPanel(view), /<h3>Preview 5 · Selected preview/);
   assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'middle');
 });
@@ -5926,7 +5953,7 @@ test('numbered preview prepares and publishes by its immutable ID and retains it
   assert.match(savedPreviewPanel(view), /Preview 7 · Selected preview/);
   await view.dispatch('workflow-write-miro', previewWriteControl(plot.preview_id));
   assert.deepEqual(view.calls.filter(call => call.body).map(call => call.body), [{action: 'board-create-sync',
-    preview_id: 'immutable-hash', name: 'Shared evidence · Paths to peg-outs'}]);
+    preview_id: 'immutable-hash', name: 'Shared evidence · Paths to endpoints'}]);
 });
 
 test('missing or invalid preview numbers never become page-relative labels', async () => {
@@ -5935,7 +5962,7 @@ test('missing or invalid preview numbers never become page-relative labels', asy
     view.state.activeCase = workflowCase({plots: [pendingPreview('legacy', {preview_number: number,
       preview_number_notice: 'Saved preview numbering is unavailable. <retry>'})]});
     await view.dispatch('view-plots');
-    assert.match(savedPreviewPanel(view), /<h3>Saved preview · Paths to peg-outs/);
+    assert.match(savedPreviewPanel(view), /<h3>Saved preview · Paths to endpoints/);
     assert.match(savedPreviewPanel(view), /unavailable\. &lt;retry&gt;/);
     assert.doesNotMatch(savedPreviewPanel(view), /<h3>Preview \d/);
   }
@@ -6805,6 +6832,22 @@ test('shared attribution access belongs to workspace or investigation settings a
   assert.equal(view.calls.filter(call => call.body).length, 0);
 });
 
+test('new address assessments keep tracing unless the analyst explicitly enables a stop', async () => {
+  const view = await harness((path, body) => path.endsWith('/services')
+    ? {revision: 1, service: {...body, updated_at: '2026-10-05'}} : undefined);
+  view.state.activeCase = workflowCase(); view.state.page = 'addresses';
+  assert.equal(view.state.addressReview.stopTracing, false);
+  const rows = [{address: 'new-address'}, {address: 'saved-stop', service: {enabled: true, stop_tracing: true}},
+    {address: 'saved-label', service: {enabled: true, stop_tracing: false}}];
+  view.state.addressReview.data = {rows, total: rows.length, offset: 0, limit: 25};
+  for (const [address, expected] of [['saved-stop', true], ['saved-label', false], ['new-address', false]]) {
+    await view.dispatch('address-select', {dataset: {address}});
+    assert.equal(view.state.addressReview.stopTracing, expected);
+  }
+  await view.submitService({service_name: 'Example exchange', service_enabled: 'on', service_source: 'Analyst records'});
+  assert.equal(view.calls.find(call => call.path.endsWith('/services')).body.stop_tracing, false);
+});
+
 test('inherited shared assessments identify their origin and explain that saving creates a local override', async () => {
   const view = await harness();
   view.state.activeCase = workflowCase(); view.state.page = 'addresses';
@@ -7081,4 +7124,82 @@ test('saving seeds invalidates older in-flight case and session summaries so the
   await Promise.all([caseWork, sessionWork]);
   assert.deepEqual([...view.state.activeCase.seeds], [`${replacement}:1`]);
   assert.deepEqual([...view.state.cases[0].seeds], [`${replacement}:1`]);
+});
+
+test('changing the new investigation network clears stale selected outputs and direct seeds', async () => {
+  const view = await harness();
+  view.navigate('new');
+  view.state.draft.name = 'Bitcoin follow-up';
+  view.state.draft.txids = txid;
+  view.state.draft.seeds = `${txid}:2`;
+  view.state.draft.reports = [{txid, outputs: [{vout: 0, selectable: true, value: 1000}]}];
+  view.state.draft.selected.add(`${txid}:0`);
+  view.changeBlockchain('bitcoin');
+  assert.equal(view.state.draft.blockchain, 'bitcoin');
+  assert.equal(view.state.draft.reports.length, 0);
+  assert.equal(view.state.draft.selected.size, 0);
+  assert.equal(view.state.draft.seeds, '');
+  assert.equal(view.state.draft.txids, txid);
+  assert.equal(view.state.draft.name, 'Bitcoin follow-up');
+  assert.match(view.newCase(), /value="bitcoin" selected>Bitcoin Network/);
+});
+
+test('Bitcoin lookup is scoped and a late Liquid lookup cannot overwrite its output selection', async () => {
+  const view = await harness(path => path === '/api/lookup' ? {id: 'lookup-btc', status: 'running', live: true}
+    : path === '/api/jobs/lookup-btc' ? {id: 'lookup-btc', action: 'lookup', status: 'succeeded', live: true,
+      result: {blockchain: 'bitcoin', transactions: [{txid, outputs: [{vout: 0, selectable: true, value: 123456789, value_text: '123456789'}]}]}} : undefined);
+  view.navigate('new'); view.changeBlockchain('bitcoin'); view.state.draft.txids = txid;
+  await view.dispatch('lookup');
+  assert.equal(view.calls.find(call => call.path === '/api/lookup').body.blockchain, 'bitcoin');
+  await view.pollJob('lookup-btc');
+  assert.equal(view.state.draft.blockchain, 'bitcoin');
+  assert.match(view.newCase(), /123456789/); assert.match(view.newCase(), />BTC<\/span>/);
+  view.state.jobs.set('old-liquid', {id: 'old-liquid', action: 'lookup', live: true, status: 'succeeded',
+    outcome: {result: {blockchain: 'liquid', transactions: [{txid, outputs: []}]}}});
+  // Reviewing old output results explicitly restores their original network.
+  await view.dispatch('load-job-outputs', {dataset: {id: 'old-liquid'}});
+  assert.equal(view.state.draft.blockchain, 'liquid');
+});
+
+test('Bitcoin endpoint plots use BTC links, endpoint selections and no Liquid amount controls', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'btcplot', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase({blockchain: 'bitcoin'});
+  await view.dispatch('view-plots'); await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+  const html = view.workspace();
+  assert.match(html, /Live Bitcoin/);
+  assert.match(html, new RegExp(`href="https://blockstream.info/tx/${txid}"`));
+  assert.match(html, /Paths to endpoints/); assert.match(html, /attributed stops/i);
+  assert.match(html, /a name alone does not stop tracing/);
+  assert.doesNotMatch(html, /id="workflow-pegout-mode"|Cumulative L-BTC target|Peg-out LBTC total/);
+  view.currentWorkflow(view.state.activeCase).pegoutLimitEnabled = true;
+  view.currentWorkflow(view.state.activeCase).pegoutLbtcLimit = '60';
+  await view.dispatch('workflow-plot');
+  const body = view.calls.at(-1).body;
+  assert.equal(body.goal, 'pegouts');
+  assert.equal(body.include_unspent, true); assert.equal(body.include_unspendable, true);
+  assert.equal(body.include_attributed_stops, true); assert.equal(body.pegout_lbtc_limit, undefined);
+});
+
+test('old saved endpoint queries preserve disabled attributed stops when preparing board updates', async () => {
+  const old = workflowPlot('pegouts', 'oldplot', {query: {include_unspent: true}, layout_mode: 'update'});
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'update', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase({blockchain: 'bitcoin', plots: [old], boards: [workflowBoard('pegouts', 'old', {preview_id: 'oldplot'})]});
+  await view.dispatch('workflow-board-prepare', boardControl('old'));
+  assert.equal(view.currentWorkflow(view.state.activeCase).includeAttributedStops, false);
+  await view.dispatch('workflow-plot');
+  assert.equal(view.calls.at(-1).body.include_attributed_stops, undefined);
+});
+
+test('a completed lookup for another network does not automatically populate the current draft', async () => {
+  const view = await harness(path => path === '/api/lookup' ? {id: 'lookup-liquid', status: 'running', live: true}
+    : path === '/api/jobs/lookup-liquid' ? {id: 'lookup-liquid', action: 'lookup', status: 'succeeded', live: true,
+      result: {blockchain: 'liquid', transactions: [{txid, outputs: [{vout: 0, selectable: true}]}]}} : undefined);
+  view.navigate('new'); view.state.draft.txids = txid;
+  await view.dispatch('lookup');
+  // Simulate an intervening draft restoration without relying on a disabled select.
+  view.state.draft.blockchain = 'bitcoin';
+  await view.pollJob('lookup-liquid');
+  assert.equal(view.state.draft.blockchain, 'bitcoin');
+  assert.equal(view.state.draft.reports.length, 0);
+  assert.match(view.notifications.at(-1), /Review outputs/);
 });

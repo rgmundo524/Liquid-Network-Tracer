@@ -51,6 +51,25 @@ class SharedAttributionWebTests(unittest.TestCase):
             self.assertIn('attachment', response.getheader('Content-Disposition'))
         self.assertEqual(self.success('/api/jobs')['jobs'], [])
 
+    def test_shared_library_routes_keep_bitcoin_separate_from_liquid(self):
+        self.save_library()
+        text = "Address,Name,stop_tracing\nbc1qexampleaddress,Bitcoin Exchange,true\n"
+        body = {"text": text, "format": "csv", "blockchain": "bitcoin"}
+        reviewed = self.success("/api/shared-attributions/import", body)
+        self.assertTrue(reviewed["valid"])
+        self.success("/api/shared-attributions/import", {**body, "approve_plan": reviewed["approval_sha256"]})
+        bitcoin = self.success("/api/shared-attributions", {"blockchain": "bitcoin"})
+        liquid = self.success("/api/shared-attributions", {})
+        self.assertEqual([row["address"] for row in bitcoin["rows"]], ["bc1qexampleaddress"])
+        self.assertEqual([row["address"] for row in liquid["rows"]], ["SYNTHETIC-shared-address"])
+        self.assertFalse(bitcoin["rows"][0]["stop_tracing"])
+        code, data, _ = self.request("/api/shared-attributions/export?blockchain=bitcoin")
+        self.assertEqual(code, 200)
+        self.assertIn(b"bc1qexampleaddress", data)
+        self.assertNotIn(b"SYNTHETIC-shared-address", data)
+        for suffix in ("blockchain=ethereum", "blockchain=bitcoin&blockchain=liquid", "path=/tmp/x"):
+            self.assertEqual(self.request("/api/shared-attributions/export?" + suffix)[0], 400)
+
     def test_binding_rejects_stale_revision_invalid_fields_and_active_case(self):
         self.save_library()
         for body in ({'enabled': 'true', 'expected_revision': 0}, {'enabled': True},

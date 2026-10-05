@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .common import (LBTC, TraceError, canonical, digest, match_labels, output_kind,
                      public_fields, save_json)
+from .networks import blockchain, explorer_root, is_primary
 from .trace import TERMINAL
 from .layout import arrange, fee_date, transaction_ranks
 from .miro_frames import activity_frames
@@ -50,7 +51,7 @@ def legend_lines(graph=None):
                            and (graph or {}).get("connections", {}).get("connection_scope") == "hop_limited")
     def name(key):
         return colors.get(key, PALETTE[key][0])
-    arrows = ("Arrows: assigned name colors identify links directly entering or leaving that Liquid address; "
+    arrows = ("Arrows: assigned name colors identify links directly entering or leaving that address; "
               "thicker = traced UTXO links, thinner = context only. Other links retain their default colors. "
               "Colors do not extend through downstream addresses or establish ownership."
               if (graph or {}).get("graph_options", {}).get("color_attribution_arrows") else
@@ -64,7 +65,9 @@ def legend_lines(graph=None):
         f"{name('unspent_endpoint')} circles: traced branch ends at a UTXO observed unspent. Unchecked or hop-limited outputs do not qualify.",
         arrows,
         "Optional context rectangles summarize isolated input addresses; each input remains a separate arrow. Full members stay in local exports; a summary does not imply common ownership.",
-        "Captions: vin/vout number · amount asset. ?? = not publicly available. L-BTC amounts use whole-token units (100,000,000 base units = 1 L-BTC); other assets use base units.",
+        ("Captions: vin/vout number · amount asset. Bitcoin amounts use BTC units (100,000,000 satoshis = 1 BTC)."
+         if blockchain(graph) == "bitcoin" else
+         "Captions: vin/vout number · amount asset. ?? = not publicly available. L-BTC amounts use whole-token units (100,000,000 base units = 1 L-BTC); other assets use base units."),
         ("Collection stop: retained attribution only; does not limit this saved-data view. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards."
          if all_saved_connections or limited_connections or shortest_connections else "STOP TRACING: an explicit address boundary, independent of confidence. Source and notes remain in local HTML/JSON/CSV exports, not Miro cards."),
         "Thick red border: INPUT MERGE = distinct starting lineages meet in a transaction; shared-address receipts from distinct branches also highlight the receiving address and all participating senders. Neither proves ownership or value allocation.",
@@ -115,19 +118,19 @@ def edge_marker_id(edge):
     return "arrow-" + suffix
 
 
-def graph_quantity(output):
+def graph_quantity(output, blockchain="liquid"):
     """Compact public quantity without inferring hidden assets or values."""
     value, asset = output.get("value"), output.get("asset")
     is_lbtc = isinstance(asset, str) and asset.lower() == LBTC
     amount = "??" if value is None else str(value) + " base units"
-    if is_lbtc and type(value) is int:
+    if (is_lbtc or blockchain == "bitcoin") and type(value) is int:
         # Integer arithmetic preserves every satoshi, including values larger
         # than a floating-point number can represent exactly.
         whole, fraction = divmod(abs(value), 100_000_000)
         amount = ("-" if value < 0 else "") + str(whole)
         if fraction:
             amount += "." + f"{fraction:08d}".rstrip("0")
-    name = "L-BTC" if is_lbtc else (short(asset) if asset else "??")
+    name = "BTC" if blockchain == "bitcoin" else "L-BTC" if is_lbtc else (short(asset) if asset else "??")
     return amount + " " + name
 
 
@@ -228,7 +231,8 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
     starting_transactions = {seed.rsplit(":", 1)[0] for seed in state["seeds"]}
     ranks, cycle_groups = transaction_ranks(state["transactions"])
     source = state["source"]
-    explorer = "https://blockstream.info/" + ("liquidtestnet" if "liquidtestnet" in source else "liquid")
+    chain = blockchain(state)
+    explorer = explorer_root(chain, source=source)
     simulated = source.startswith("fixture://")
 
     def add_node(key, kind, label, column, details, url=None, color=None):
@@ -239,12 +243,13 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
             nodes[key]["column"] = min(nodes[key]["column"], column)
         return key
 
-    def address(key, output, column, network="liquid"):
+    def address(key, output, column, network=None):
+        network = chain if network is None else network
         addr = output.get("scriptpubkey_address")
-        kind = output_kind(output)
-        tracked = state["outputs"].get(key) if network == "liquid" else None
+        kind = output_kind(output, network)
+        tracked = state["outputs"].get(key) if network == chain else None
         reference = _reference_fields(tracked, reference_name and kind != "fee")
-        matches = labels_for(key, output) if network == "liquid" else []
+        matches = labels_for(key, output) if network == chain else []
         if kind != "spendable":
             label = "PEG-OUT REQUEST" if kind == "pegout" else ("FEE" if kind == "fee" else "UNSPENDABLE")
             peg = output.get("pegout") or {}
@@ -258,10 +263,10 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
         node_key = (network + ":address:" + addr if merge_addresses and addr
                     else network + ":outpoint:" + key)
         label = short_address(addr) if addr else "Address ??"
-        if network != "liquid":
+        if network != chain:
             label = network.upper() + "\n" + label
         role = "address"
-        if network == "liquid":
+        if network == chain:
             if key in state["outputs"]:
                 role = "candidate"
             if key in unspent_endpoints:
@@ -269,7 +274,7 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
             # Seed selection wins even for an attributed or unspent output.
             if key in state["seeds"]:
                 role = "seed"
-        url = None if simulated or not addr or network != "liquid" else explorer + "/address/" + addr
+        url = None if simulated or not addr or network != chain else explorer + "/address/" + addr
         node_id = add_node(node_key, "address", label, column,
             {"address": addr, "network": network, "occurrences": []}, url, COLORS[role])
         node = nodes[node_id]
@@ -310,38 +315,38 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
             if edge_ids is not None and f"in:{txid}:{index}" not in edge_ids:
                 continue
             key = f"{vin.get('txid', txid)}:{vin.get('vout', index)}"
-            network = "bitcoin" if vin.get("is_pegin") else "liquid"
+            network = "bitcoin" if chain == "liquid" and vin.get("is_pegin") else chain
             prevout = vin.get("prevout") or {}
             if resolve_saved_inputs:
                 from .saved_inputs import saved_input_output
-                prevout = saved_input_output(input_transactions, vin)
+                prevout = saved_input_output(input_transactions, vin, blockchain=chain)
             if vin.get("is_coinbase"):
                 input_node = add_node("coinbase:" + txid + ":" + str(index), "event", "COINBASE", column - 1, vin)
             else:
                 input_node = address(key, prevout, column - 1, network)
             link = state["links"].get(key)
-            traced = bool(link and link["spending_txid"] == txid and link["vin"] == index and network == "liquid")
+            traced = bool(link and link["spending_txid"] == txid and link["vin"] == index and network == chain)
             edges.append({"id": f"in:{txid}:{index}", "source": input_node, "target": txnode,
                           "role": "traced_input" if traced else "context_input", "outpoint": key,
-                          "label": f"vin {index}", "quantity": graph_quantity(prevout),
+                          "label": f"vin {index}", "quantity": graph_quantity(prevout, network),
                           "details": {"vin": vin, "validated_trace_link": link if traced else None}})
         for index, output in enumerate(tx["vout"]):
             key = f"{txid}:{index}"
             if edge_ids is not None and "out:" + key not in edge_ids:
                 continue
-            if output_kind(output) == "fee":
+            if output_kind(output, chain) == "fee":
                 fee_items["event:" + key] = {"endpoint": "shapes", "txid": txid, "vout": index}
                 fee_items["out:" + key] = {"endpoint": "connectors", "source": txnode, "target": "event:" + key}
                 if not include_fees:
                     continue
             output_node = address(key, output, column + 1)
-            if output_kind(output) == "fee":
+            if output_kind(output, chain) == "fee":
                 nodes[output_node]["label"] += "\n" + fee_date(tx)
             role = "seed_output" if key in state["seeds"] else ("candidate_output" if key in state["outputs"] else "context_output")
             edges.append({"id": "out:" + key, "source": txnode, "target": output_node,
                           "role": role, "outpoint": key, "label": "vout " + str(index),
-                          "quantity": graph_quantity(output), "details": {**public_fields(output),
-                              **_reference_fields(state["outputs"].get(key), reference_name and output_kind(output) != "fee")}})
+                          "quantity": graph_quantity(output, chain), "details": {**public_fields(output),
+                              **_reference_fields(state["outputs"].get(key), reference_name and output_kind(output, chain) != "fee")}})
 
     # Aggregate shared labels once, not once for each input/output occurrence.
     # A highly reused service address must not make rendering quadratic.
@@ -364,7 +369,7 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
         parts.append(node["attribution_reference"])
         node["label"] = "\n".join(parts)
     for node in nodes.values():
-        if node["kind"] != "address" or node["details"].get("network") != "liquid":
+        if node["kind"] != "address" or not is_primary(node, state):
             continue
         endpoints = sorted({item["outpoint"] for item in node["details"]["occurrences"]
                             if item["outpoint"] in unspent_endpoints})
@@ -374,9 +379,9 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
 
     name_colors = state.get("service_controls", {}).get("name_colors", {})
     apply_name_colors(nodes.values(), name_colors,
-                      role_colors=state.get("service_controls", {}).get("role_colors", {}))
+                      role_colors=state.get("service_controls", {}).get("role_colors", {}), blockchain=chain)
     if color_attribution_arrows:
-        apply_attribution_arrow_colors(nodes, edges)
+        apply_attribution_arrow_colors(nodes, edges, blockchain=chain)
     for node in nodes.values():
         node["text_color"] = color_text(node["color"])
     # Group summaries retain original member geometry in their details. Keep
@@ -385,7 +390,7 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
                      refine=initial_layout or group_context_inputs)
     layout["cycle_groups"] = cycle_groups
     mode = "merged" if merge_addresses else "outpoint_occurrences"
-    graph = {"schema_version": 2, "presentation_version": PRESENTATION_VERSION,
+    graph = {"schema_version": 2, "presentation_version": PRESENTATION_VERSION, "blockchain": chain,
             "run_id": state["run_id"], "simulated": simulated,
             "namespace": {"case_id": state["case_id"], "source": source, "address_mode": mode},
             "run": {key: state.get(key) for key in ("run_id", "parent_run", "ancestor_runs", "seeds", "started_at", "finished_at",
@@ -429,7 +434,7 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
         graph["graph_options"]["hub_addresses"] = selected_hubs
     for node in graph["nodes"]:
         details = node.get("details", {})
-        if (node["kind"] == "address" and details.get("network") == "liquid"
+        if (node["kind"] == "address" and is_primary(node, state)
                 and details.get("address") in selected_hubs):
             node["layout_hub"] = True
     from .context_groups import group_context_inputs as group_inputs
@@ -572,7 +577,7 @@ def svg_graph(graph):
         '<defs>' + marker_defs + '</defs>',
         f'<rect x="{min_x}" y="{min_y}" width="{width}" height="{height}" fill="#fff"/>',
         '<g font-family="Arial, sans-serif">',
-        f'<text x="40" y="{header_top}" font-size="24" font-weight="bold">Liquid UTXO trace' + (' · SYNTHETIC DATA' if graph["simulated"] else '') + '</text>']
+        f'<text x="40" y="{header_top}" font-size="24" font-weight="bold">{blockchain(graph).title()} UTXO trace' + (' · SYNTHETIC DATA' if graph["simulated"] else '') + '</text>']
     for row, column, offset, labels, definitions in legend:
         x, y = 40 + column * column_width, header_top + 42 + offset
         chunks.append(f'<g class="legend-row" data-legend-key="{html.escape(row["key"], quote=True)}">'
@@ -634,8 +639,8 @@ def html_graph(graph, svg):
     # JSON cannot close the script tag; all detail displays use textContent.
     encoded = json.dumps(graph, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
     return '''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Liquid UTXO trace</title><style>body{margin:0;font:14px system-ui;color:#15253b}header{padding:16px;background:#15253b;color:white}button,input{padding:8px;margin:0 5px}main{display:grid;grid-template-columns:1fr 360px;height:calc(100vh - 82px)}#canvas{overflow:auto;background:#f3f5f8}aside{padding:18px;overflow:auto;border-left:1px solid #ccc}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}svg{max-width:none}.selected{filter:drop-shadow(0 0 5px #e11d48)}a{color:#0369a1}</style>
-<header><strong>Liquid UTXO trace</strong> <input id="search" placeholder="Search address or txid"><button id="find">Find</button><button id="minus">−</button><button id="plus">+</button><button id="fit">Fit</button><label><input id="context" type="checkbox" checked>Context edges</label></header>
+<title>''' + blockchain(graph).title() + ''' UTXO trace</title><style>body{margin:0;font:14px system-ui;color:#15253b}header{padding:16px;background:#15253b;color:white}button,input{padding:8px;margin:0 5px}main{display:grid;grid-template-columns:1fr 360px;height:calc(100vh - 82px)}#canvas{overflow:auto;background:#f3f5f8}aside{padding:18px;overflow:auto;border-left:1px solid #ccc}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}svg{max-width:none}.selected{filter:drop-shadow(0 0 5px #e11d48)}a{color:#0369a1}</style>
+<header><strong>''' + blockchain(graph).title() + ''' UTXO trace</strong> <input id="search" placeholder="Search address or txid"><button id="find">Find</button><button id="minus">−</button><button id="plus">+</button><button id="fit">Fit</button><label><input id="context" type="checkbox" checked>Context edges</label></header>
 <main><div id="canvas">''' + svg + '''</div><aside><p id="notice"></p><p>Click a node to inspect full identifiers and evidence. Hover an edge for its outpoint and public quantity.</p><a id="link" target="_blank" rel="noopener noreferrer" hidden>Open explorer</a><pre id="details"></pre></aside></main>
 <script type="application/json" id="graph-data">''' + encoded + '''</script><script>
 const graph=JSON.parse(document.getElementById('graph-data').textContent),svg=document.querySelector('svg'),canvas=document.getElementById('canvas');
@@ -680,6 +685,7 @@ def export_run(store, state, destination, merge_addresses=True, offline_preview=
     write_csv(destination / "edges.csv", graph["edges"],
         ["id", "source", "target", "role", "outpoint", "label", "quantity", "details"])
     rows, events, inputs = [], [], []
+    chain = blockchain(state)
     reference_name = state.get("hop_reference_name", "")
     for txid, record in state["transactions"].items():
         tx = record["data"]
@@ -688,11 +694,11 @@ def export_run(store, state, destination, merge_addresses=True, offline_preview=
             item = state["outputs"].get(key, {})
             rows.append({"outpoint": key, "txid": txid, "vout": index,
                          "depth": item.get("depth"), "trace_status": item.get("status", "context_only"),
-                         "kind": output_kind(output), **public_fields(output),
-                         **_reference_fields(item, reference_name and output_kind(output) != "fee"),
+                         "kind": output_kind(output, chain), **public_fields(output),
+                         **_reference_fields(item, reference_name and output_kind(output, chain) != "fee"),
                          "observation_id": record["observation_id"], "labels": match_labels(state["labels"], key, output)})
-            if output_kind(output) != "spendable":
-                events.append({"txid": txid, "index": index, "kind": output_kind(output), "data": output,
+            if output_kind(output, chain) != "spendable":
+                events.append({"txid": txid, "index": index, "kind": output_kind(output, chain), "data": output,
                                "observation_id": record["observation_id"]})
         for index, vin in enumerate(tx["vin"]):
             inputs.append({"txid": txid, "vin": index, "previous_txid": vin.get("txid"), "previous_vout": vin.get("vout"),
@@ -727,7 +733,7 @@ def export_run(store, state, destination, merge_addresses=True, offline_preview=
     from .miro import make_plan
     save_json(destination / "miro-plan.json", make_plan(graph))
     (destination / "RUN.md").write_text(
-        f"# Liquid trace run {state['run_id']}\n\n"
+        f"# {blockchain(state).title()} trace run {state['run_id']}\n\n"
         f"Status: {state['status']}. Parent: {state['parent_run'] or 'none'}.\n\n"
         f"Started: {state['started_at']}. Finished: {state['finished_at']}.\n\n"
         f"Limits: `{json.dumps(state['limits'])}`\n\n"
@@ -738,7 +744,8 @@ def export_run(store, state, destination, merge_addresses=True, offline_preview=
         "A completed bounded run is not a completed investigation. API request counts include authentication and retries; they are not a count of billable credits.\n\n"
         "Each solid graph edge represents an observed input or output. Expanding all outputs establishes possible UTXO ancestry, "
         "not the amount, asset, owner, beneficiary, or allocation of stolen funds. Co-inputs are context. "
-        "A peg-out request does not independently prove a Bitcoin payout or an Avalanche deposit.\n\n"
+        + ("A peg-out request does not independently prove a Bitcoin payout or an Avalanche deposit.\n\n"
+           if blockchain(state) == "liquid" else "An attribution or stop label does not independently prove address ownership.\n\n") +
         "JSON response bytes, retrieval time, endpoint, HTTP status and SHA-256 are archived. These are API observations, "
         "not independently validated consensus proofs or raw wire transactions. Continuation retains prior observations; "
         "run a fresh trace with --tx-cache-seconds 0 to re-observe historical links after a suspected reorg.\n",

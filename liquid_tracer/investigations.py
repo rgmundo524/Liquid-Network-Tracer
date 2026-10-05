@@ -39,8 +39,8 @@ RUN_BUDGET_KEYS = frozenset({"max_transactions", "max_outpoints", "max_requests"
 
 def validate_blockchain(value):
     """Validate the chain identity independently of live or fixture data sources."""
-    if not isinstance(value, str) or value != "liquid":
-        raise TraceError("Unsupported blockchain. Only Liquid is currently available.")
+    if not isinstance(value, str) or value not in ("liquid", "bitcoin"):
+        raise TraceError("Unsupported blockchain. Choose Liquid or Bitcoin.")
     return value
 
 
@@ -68,7 +68,7 @@ def validate_settings(settings):
                     or any(not isinstance(address, str)
                            or not re.fullmatch(r"[A-Za-z0-9]{14,200}", address.strip())
                            for address in value)):
-                raise TraceError("hub_addresses must be a list of full Liquid addresses, using 14 to 200 letters or numbers each")
+                raise TraceError("hub_addresses must be a list of full blockchain addresses, using 14 to 200 letters or numbers each")
             result[key] = sorted({address.strip() for address in value})
             continue
         if key == "center_name":
@@ -264,7 +264,7 @@ def list_investigations(root):
         return []
     entries = []
     for case in root.iterdir():
-        if case.name == ".shared-collection":
+        if case.name in (".shared-collection", ".shared-collection-bitcoin"):
             continue  # Workspace evidence is selected within an investigation, not a case tab.
         if not case.is_dir() or not (case / "case.json").exists():
             continue

@@ -377,7 +377,7 @@ def verified_source_identity(archive, *, case_id, run_id, progress=None):
 
     archive = _ordinary(archive)
     manifest_sha256, inventory = _inventory(archive, require_snapshot=False)
-    binding = {"schema_version": SCHEMA_VERSION, "archive": str(archive), "case_id": case_id,
+    binding = {"schema_version": SCHEMA_VERSION, "chain_identity_version": 1, "archive": str(archive), "case_id": case_id,
                "run_id": run_id, "manifest_sha256": manifest_sha256}
     key = "source-" + digest(canonical(binding))
     directory = _cache_directory(archive)
@@ -405,7 +405,8 @@ def verified_source_identity(archive, *, case_id, run_id, progress=None):
         if (not isinstance(state, dict) or state.get("case_id") != case_id or state.get("run_id") != run_id
                 or not isinstance(state.get("source"), str) or not state["source"]):
             raise TraceError("Saved run does not match the investigation and source identity")
-        result = {"case_id": case_id, "run_id": run_id, "source": state["source"]}
+        from .networks import blockchain
+        result = {"case_id": case_id, "run_id": run_id, "source": state["source"], "blockchain": blockchain(state)}
         del state
         report_progress(progress, "loading_collection", 1, 1)
         if _inventory(archive, require_snapshot=False) != (manifest_sha256, inventory):

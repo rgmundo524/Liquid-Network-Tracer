@@ -54,8 +54,9 @@ def save_seeds(case, seeds, *, expected_revision):
             except BlockingIOError:
                 raise SeedEditConflict("Collection or another investigation operation is active. Save starting outputs after it finishes.") from None
 
-        lock_file(case.parent / ".shared-collection.lock", fcntl.LOCK_SH)
-        shared = _safe(case.parent / ".shared-collection")
+        from .shared_collection import dataset_path
+        shared = _safe(dataset_path(case))
+        lock_file(shared.with_name(shared.name + ".lock"), fcntl.LOCK_SH)
         if shared.is_dir():
             lock_file(shared / "trace.lock", fcntl.LOCK_SH)
         lock_file(case / "trace.lock", fcntl.LOCK_EX)

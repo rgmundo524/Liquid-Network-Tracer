@@ -1,10 +1,11 @@
-"""Download the two CSV views of an immutable saved peg-out trace."""
+"""Download the two CSV views of an immutable saved endpoint trace."""
 import csv
 import io
 from pathlib import Path
 
 from .common import TraceError, canonical, digest, read_json
 from .investigations import read_case
+from .networks import blockchain
 from .services import apply_service_labels
 from .transaction_csv import _text
 
@@ -23,12 +24,12 @@ def _saved_source(case, preview_id):
     from .pegouts import PREVIEW_ID as LEGACY_ID, saved_pegout_snapshot
 
     if not isinstance(preview_id, str):
-        raise TraceError("Choose a saved peg-out trace")
+        raise TraceError("Choose a saved endpoint trace")
     if PREVIEW_ID.fullmatch(preview_id):
         graph, _ = _snapshot(case, preview_id)
         report = graph["plot"]
         if report["goal"] != "pegouts":
-            raise TraceError("Endpoint tables are available for saved peg-out traces")
+            raise TraceError("Endpoint tables are available for saved endpoint traces")
         archive = _ordinary(case / "runs" / report["run_id"])
         # Check every manifest path before the shared archive verifier reads it.
         for line in _ordinary(archive / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
@@ -42,8 +43,10 @@ def _saved_source(case, preview_id):
         report = graph["pegouts"]
         archive = _ordinary(case / "pegouts" / state["run_id"])
     else:
-        raise TraceError("Choose a saved peg-out trace")
-    if (not isinstance(state, dict) or state.get("case_id") != read_case(case)["case_id"]
+        raise TraceError("Choose a saved endpoint trace")
+    metadata = read_case(case)
+    if (not isinstance(state, dict) or state.get("case_id") != metadata["case_id"]
+            or blockchain(state) != blockchain(graph) or blockchain(state) != blockchain(metadata)
             or state.get("run_id") != graph.get("run_id")
             or state.get("source") != graph.get("namespace", {}).get("source")
             or canonical(state.get("collection_source")) != canonical(report.get("collection_source"))

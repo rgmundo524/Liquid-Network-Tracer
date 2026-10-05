@@ -19,14 +19,14 @@ explicitly.
 CSV columns can appear in any order. Unrelated columns, such as a spreadsheet
 `Duplicate count`, are ignored and are not saved as attribution data. Supported
 columns still use their normal validation, including the legacy aliases and
-optional `kind=address` and `network=liquid` compatibility fields. Each recognized
+optional `kind=address` and `network` fields. A supplied network must match the investigation (liquid or bitcoin). Each recognized
 column must appear only once. JSON imports still reject unsupported fields.
 
 Only Address is required. Omitted confidence defaults to suspected; omitted
-stop_tracing defaults to true. An address-only list therefore creates suspected,
-unnamed address assessments with stopping enabled. Set Name to a useful entity
-name or alias, and set stop_tracing=false explicitly for annotation without a
-stop. Optional enabled and observed_at fields remain available for disabling an
+stop_tracing defaults to false for new imports. An address-only list therefore creates suspected,
+unnamed address assessments that continue tracing. Set Name to a useful entity
+name or alias, and set stop_tracing=true explicitly to stop at that address.
+Existing saved stopping rules retain their behavior. Optional enabled and observed_at fields remain available for disabling an
 assessment and dating supporting evidence. Imports are case-local, reviewed,
 atomic, limited to 5,000 rows / 512 KiB, and make no blockchain or Miro calls.
 

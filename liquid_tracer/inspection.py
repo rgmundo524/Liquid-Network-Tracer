@@ -3,6 +3,7 @@
 import re
 from tempfile import TemporaryDirectory
 
+from .networks import blockchain as normalize_blockchain
 from .api import ENTERPRISE, Esplora, Limits
 from .common import HEX64, StopRun, TraceError, output_kind
 from .store import Store
@@ -34,7 +35,7 @@ def parse_transaction_hashes(value):
     return result
 
 
-def transaction_outputs(txid, transaction):
+def transaction_outputs(txid, transaction, *, blockchain="liquid"):
     """Return public output fields without inferring hidden values or ownership."""
     if (not isinstance(transaction, dict)
             or not isinstance(transaction.get("txid"), str)
@@ -56,7 +57,7 @@ def transaction_outputs(txid, transaction):
         value = output.get("value")
         if value is not None and (type(value) is not int or value < 0):
             raise TraceError("Explorer response contains an invalid explicit output value")
-        kind = output_kind(output)
+        kind = output_kind(output, blockchain)
         result.append({
             "vout": index,
             "outpoint": f"{txid}:{index}",
@@ -67,11 +68,11 @@ def transaction_outputs(txid, transaction):
             "selectable": kind == "spendable",
             "reason": None if kind == "spendable" else kind,
         })
-    return {"txid": txid, "outputs": result}
+    return {"txid": txid, "outputs": result, "blockchain": normalize_blockchain(blockchain)}
 
 
-def inspect_transaction(txid, *, fixture=None, base_url=ENTERPRISE, auth="blockstream",
-                        max_requests=5, max_seconds=30):
+def inspect_transaction(txid, *, fixture=None, base_url=None, auth="blockstream",
+                        max_requests=5, max_seconds=30, blockchain="liquid"):
     """Fetch one transaction, with the same bounded authenticated client as tracing.
 
     Temporary observations only support the lookup. A later trace fetches and saves
@@ -87,20 +88,20 @@ def inspect_transaction(txid, *, fixture=None, base_url=ENTERPRISE, auth="blocks
         store = Store(directory)
         try:
             with Esplora(store, "transaction-lookup", limits, base=base_url, auth=auth,
-                         fixture=fixture, tx_cache_seconds=0) as api:
+                         fixture=fixture, tx_cache_seconds=0, blockchain=blockchain) as api:
                 try:
                     transaction, _ = api.get("/tx/" + txid)
                 except StopRun as error:
                     reasons = {"request_limit": "request limit reached", "time_limit": "time limit reached",
                                "server_retry_later": "explorer requested a later retry"}
                     raise TraceError("Transaction lookup stopped: " + reasons.get(str(error), "lookup limit reached")) from None
-                return transaction_outputs(txid, transaction)
+                return transaction_outputs(txid, transaction, blockchain=blockchain)
         finally:
             store.close()
 
 
-def inspect_transactions(txids, *, fixture=None, base_url=ENTERPRISE, auth="blockstream",
-                         max_requests=None, max_seconds=None):
+def inspect_transactions(txids, *, fixture=None, base_url=None, auth="blockstream",
+                         max_requests=None, max_seconds=None, blockchain="liquid"):
     """Inspect a batch with one client and a single finite request/time budget.
 
     Return a complete report only after every transaction is validated. The
@@ -116,7 +117,7 @@ def inspect_transactions(txids, *, fixture=None, base_url=ENTERPRISE, auth="bloc
         store = Store(directory)
         try:
             with Esplora(store, "transaction-lookup", limits, base=base_url, auth=auth,
-                         fixture=fixture, tx_cache_seconds=0) as api:
+                         fixture=fixture, tx_cache_seconds=0, blockchain=blockchain) as api:
                 fetched = api.prefetch(["/tx/" + txid for txid in txids])
                 transactions = []
                 for txid in txids:
@@ -125,7 +126,7 @@ def inspect_transactions(txids, *, fixture=None, base_url=ENTERPRISE, auth="bloc
                         if isinstance(result, (TraceError, StopRun)):
                             raise result
                         transaction, _ = result
-                        transactions.append(transaction_outputs(txid, transaction))
+                        transactions.append(transaction_outputs(txid, transaction, blockchain=blockchain))
                     except StopRun as error:
                         reasons = {"request_limit": "request limit reached", "time_limit": "time limit reached",
                                    "server_retry_later": "explorer requested a later retry"}
@@ -135,6 +136,6 @@ def inspect_transactions(txids, *, fixture=None, base_url=ENTERPRISE, auth="bloc
                         # API and output validation errors contain safe diagnostics,
                         # never server bodies, credentials, or arbitrary input text.
                         raise TraceError(f"Transaction lookup failed for {txid}: {error}") from None
-                return {"transactions": transactions}
+                return {"transactions": transactions, "blockchain": normalize_blockchain(blockchain)}
         finally:
             store.close()

@@ -8,6 +8,7 @@ from collections import defaultdict
 import heapq
 import math
 
+from .networks import blockchain
 from .common import TraceError, match_labels, output_kind
 
 UNSET = object()
@@ -173,7 +174,7 @@ class HopScope:
                 self.reachable.add(key)
                 self.depths[key] = min(depth, self.depths.get(key, depth))
                 continue
-            if (self.reference_name and output_kind(output) == "spendable"
+            if (self.reference_name and output_kind(output, blockchain(self.state)) == "spendable"
                     and output.get("scriptpubkey_address") in self.reference_addresses):
                 depth = 0
             remaining = min(remaining, self._cap(key, output))
@@ -189,11 +190,11 @@ class HopScope:
             self.depths[key] = min(viable or [d for d, _ in self.paths[key]])
             item["trace_scope_depth"] = self.depths[key]
             if self.reference_name and self.depths[key] > self.hop_ceiling:
-                kind = output_kind(output)
+                kind = output_kind(output, blockchain(self.state))
                 if kind != "spendable":
                     item["status"] = kind
                 self._hold(item, "named_group_hop_limit")
-            elif not viable and output_kind(output) == "spendable":
+            elif not viable and output_kind(output, blockchain(self.state)) == "spendable":
                 stopped = any(m.get("stop") is True for m in item["labels"])
                 reason = "suspected_service_stop" if stopped else "attribution_hop_limit"
                 if (stopped and not self.respect_attribution_hops
@@ -204,7 +205,7 @@ class HopScope:
             elif remaining > 0:
                 admitted.add(key)
             link = self.state["links"].get(key)
-            if (remaining > 0 and link and output_kind(output) == "spendable"
+            if (remaining > 0 and link and output_kind(output, blockchain(self.state)) == "spendable"
                     and (not self.reference_name or depth <= self.hop_ceiling)):
                 for child in self.by_tx[link["spending_txid"]]:
                     heapq.heappush(queue, (depth + 1, child, remaining - 1))

@@ -5,6 +5,7 @@ receipts by exact address *after* lineage propagation, without feeding the union
 back into any UTXO. Neither signal establishes value allocation or ownership.
 """
 
+from .networks import blockchain, is_primary
 from collections import defaultdict, deque
 
 from .common import TraceError, output_kind
@@ -61,7 +62,7 @@ def _lineage_analysis(state, catalog, *, _layout=None, respect_attribution_hops=
     def allowed(key):
         item = outputs[key]
         output = transactions[item["txid"]]["data"]["vout"][item["vout"]]
-        return (output_kind(output) == "spendable" and (not respect_stops or
+        return (output_kind(output, blockchain(state)) == "spendable" and (not respect_stops or
                 (output.get("scriptpubkey_address") not in stop_addresses
                  and (respect_attribution_hops or not any(target in stop_targets for target in (
                      ("outpoint", key), ("script", output.get("scriptpubkey")),
@@ -171,7 +172,7 @@ def branch_interactions(state, catalog, *, _layout=None, respect_attribution_hop
             raise TraceError("Address convergence requires an exact saved output")
         output = outputs[vout]
         address = output.get("scriptpubkey_address")
-        if (output_kind(output) != "spendable" or not isinstance(address, str)
+        if (output_kind(output, blockchain(state)) != "spendable" or not isinstance(address, str)
                 or not address):
             continue
         receipts[address].append((key, txid, vout, bits))
@@ -186,7 +187,7 @@ def branch_interactions(state, catalog, *, _layout=None, respect_attribution_hop
         # intersection. There must be different observed incoming origin sets.
         if len(groups) < 2 or combined.bit_count() < 2:
             continue
-        address_key = "liquid:address:" + address
+        address_key = blockchain(state) + ":address:" + address
         indices = _numbers(combined)
         by_sender = defaultdict(list)
         rows = []
@@ -196,7 +197,7 @@ def branch_interactions(state, catalog, *, _layout=None, respect_attribution_hop
             rows.append(row)
             by_sender["tx:" + txid].append(row)
         addresses[address_key] = {
-            "address_key": address_key, "network": "liquid", "address": address,
+            "address_key": address_key, "network": blockchain(state), "address": address,
             "starting_transaction_indices": indices,
             "receipts": rows,
             "basis": "Different starting lineages have recorded receipts at this exact address; "
@@ -241,7 +242,7 @@ def _branch_structure(graph, catalog, lineages):
         bits = 0
         if node["kind"] == "transaction":
             bits = lineages["transactions"].get(key, 0)
-        elif node["kind"] == "address" and node.get("details", {}).get("network") == "liquid":
+        elif node["kind"] == "address" and is_primary(node, graph):
             for occurrence in node["details"].get("occurrences", []):
                 bits |= outputs.get(occurrence["outpoint"], 0)
         elif node["kind"] == "event":
@@ -283,8 +284,8 @@ def annotate_branch_interactions(graph, state, *, respect_attribution_hops=True,
                 node["address_interactions"] = result["senders"][key]
                 node["details"]["address_interactions"] = node["address_interactions"]
                 types.append("shared_address_sender")
-        elif kind == "address" and node["details"].get("network") == "liquid":
-            address_key = "liquid:address:" + (node["details"].get("address") or "")
+        elif kind == "address" and is_primary(node, graph):
+            address_key = blockchain(graph) + ":address:" + (node["details"].get("address") or "")
             record = result["addresses"].get(address_key)
             if record:
                 # All legacy occurrences also share this summary. Full receipts

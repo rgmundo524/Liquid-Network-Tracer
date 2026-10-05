@@ -123,22 +123,22 @@ class InvestigationTests(unittest.TestCase):
         self.assertEqual(before, {str(path.relative_to(case)): path.read_bytes() for path in case.rglob("*") if path.is_file()})
 
     def test_unsupported_or_malformed_blockchains_fail_before_creating_case(self):
-        for blockchain in ("bitcoin", "ethereum", "fixture", "live", "Liquid", " liquid ", "", None, True, [], {}):
-            with self.subTest(blockchain=blockchain), self.assertRaisesRegex(TraceError, "Only Liquid"):
+        for blockchain in ("ethereum", "fixture", "live", "Liquid", " liquid ", "", None, True, [], {}):
+            with self.subTest(blockchain=blockchain), self.assertRaisesRegex(TraceError, "Choose Liquid or Bitcoin"):
                 create_investigation(self.root, "Unsupported chain", blockchain=blockchain)
             self.assertFalse(self.root.exists())
 
     def test_invalid_stored_blockchain_is_rejected_without_rewriting_metadata(self):
         case = create_investigation(self.root, "Invalid chain")
-        for blockchain in ("bitcoin", None, [], {}):
+        for blockchain in ("ethereum", None, [], {}):
             with self.subTest(blockchain=blockchain):
                 metadata = read_json(case / "case.json")
                 metadata["blockchain"] = blockchain
                 save_json(case / "case.json", metadata)
                 before = (case / "case.json").read_bytes()
-                with self.assertRaisesRegex(TraceError, "Only Liquid"):
+                with self.assertRaisesRegex(TraceError, "Choose Liquid or Bitcoin"):
                     read_case(case)
-                self.assertIn("Only Liquid", list_investigations(self.root)[0][1]["error"])
+                self.assertIn("Choose Liquid or Bitcoin", list_investigations(self.root)[0][1]["error"])
                 self.assertEqual((case / "case.json").read_bytes(), before)
 
     def test_distinct_investigations_survive_restart_and_preserve_metadata(self):

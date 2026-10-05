@@ -7,36 +7,42 @@ type Review = {valid: boolean; approval_sha256: string | null; counts: Record<st
   changes: {row: number; action: string; rule: Rule; previous: Rule | null}[];
   errors?: {row?: number; message: string}[]; notice?: string; duplicate_rows?: number;
   ignored_controls?: {stop_tracing?: number; hop_limit?: number}};
-type Context = {caseId: string | null; busy: boolean; render: () => void;
+type Context = {caseId: string | null; blockchain?: string; busy: boolean; render: () => void;
   post: <T>(path: string, body: unknown) => Promise<T>; get: <T>(path: string) => Promise<T>;
   readText: (path: string) => Promise<{text: string; contentType: string}>;
   refresh?: (scope: 'library' | 'case') => Promise<void>};
 const MAX_BYTES = 512 * 1024, PAGE_SIZE = 50;
-const TEMPLATE = 'Address,Name,confidence,source,notes,observed_at,enabled\nREPLACE_WITH_LIQUID_ADDRESS,Example Exchange,suspected,Investigator research,Explain the evidence,,true\n';
+const TEMPLATE = 'Address,Name,confidence,source,notes,observed_at,enabled\nREPLACE_WITH_ADDRESS,Example Exchange,suspected,Investigator research,Explain the evidence,,true\n';
 const BASE = '/api/shared-attributions';
 const esc = (value: unknown): string => String(value ?? '').replace(/[&<>"']/g,
   c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]!));
 const off = (value: boolean): string => value ? ' disabled' : '';
-function empty(caseId: string | null) {
-  return {caseId, open: false, pending: false, query: '', offset: 0, catalog: null as Catalog | null,
+function empty(caseId: string | null, blockchain = "liquid") {
+  return {caseId, blockchain, open: false, pending: false, query: '', offset: 0, catalog: null as Catalog | null,
     catalogVersion: 0, sharing: null as Sharing | null, enabled: false,
     sharingReview: null as (Sharing & {requested: boolean}) | null, sharingVersion: 0,
     text: '', filename: '', format: 'auto', policy: 'keep', review: null as Review | null,
     reviewOffset: 0, version: 0, message: ''};
 }
 let state = empty(null);
-const drafts = new Map<string | null, typeof state>();
-export function selectSharedAttributions(caseId: string | null): void {
-  if (!drafts.has(caseId)) drafts.set(caseId, empty(caseId));
-  state = drafts.get(caseId)!;
+const drafts = new Map<string, typeof state>();
+let workspaceBlockchain = 'liquid';
+const draftKey = (caseId: string | null, blockchain: string): string => `${caseId || 'workspace'}:${blockchain}`;
+export function selectSharedAttributions(caseId: string | null, blockchain?: string): void {
+  const chain = blockchain === 'bitcoin' ? 'bitcoin' : blockchain === 'liquid' ? 'liquid' : caseId ? 'liquid' : workspaceBlockchain;
+  const key = draftKey(caseId, chain);
+  if (!drafts.has(key)) drafts.set(key, empty(caseId, chain));
+  state = drafts.get(key)!;
 }
 export function resetSharedAttributions(caseId: string | null): void {
-  drafts.set(caseId, empty(caseId)); selectSharedAttributions(caseId);
+  for (const [key, draft] of drafts) if (draft.caseId === caseId) drafts.delete(key);
+  if (!caseId) workspaceBlockchain = 'liquid';
+  selectSharedAttributions(caseId);
 }
 export function sharedAttributionsPending(caseId: string | null = state.caseId): boolean {
-  return drafts.get(caseId)?.pending ?? false;
+  return [...drafts.values()].some(draft => draft.caseId === caseId && draft.pending);
 }
-const retained = (owner: typeof state): boolean => drafts.get(owner.caseId) === owner;
+const retained = (owner: typeof state): boolean => drafts.get(draftKey(owner.caseId, owner.blockchain)) === owner;
 function invalidate(owner = state): void {
   owner.version++; owner.review = null; owner.reviewOffset = 0; owner.message = '';
   if (owner !== state) return;
@@ -57,6 +63,10 @@ function invalidateSharing(owner = state): void {
 }
 export function sharedAttributionsInput(element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement): boolean {
   if (!element?.id?.startsWith('shared-attributions-') || element.id === 'shared-attributions-file') return false;
+  if (element.id === 'shared-attributions-blockchain') {
+    if (state.caseId || state.pending || !['liquid', 'bitcoin'].includes(element.value)) return true;
+    workspaceBlockchain = element.value; selectSharedAttributions(null); state.open = true; return true;
+  }
   if (element.id === 'shared-attributions-query') {
     state.query = element.value; state.offset = 0; state.catalogVersion++; return true;
   }
@@ -112,14 +122,17 @@ function sharingPanel(locked: boolean): string {
     <div id="shared-attributions-use-review" aria-live="polite">${reviewed ? `<div class="alert warning"><div><strong>${reviewed.requested ? 'Enable shared attributions' : 'Stop using shared attributions'} for this investigation?</strong><p>${reviewed.requested ? `${esc(reviewed.shared_count)} shared entries will be available. ${esc(reviewed.local_overrides)} local overrides take precedence.` : 'Future work will use only this investigation’s local assessments.'} Saved runs and previews keep their captured inputs. Local tracing controls and colors stay unchanged.</p></div></div>` : ''}</div>
     <div class="form-actions"><button type="button" class="btn primary" id="shared-attributions-use-apply" data-action="shared-attributions-use-apply"${off(locked || !reviewed)}>Apply reviewed sharing choice</button></div></section>`;
 }
-export function sharedAttributionsPanel(caseId: string | null, busy: boolean): string {
-  selectSharedAttributions(caseId);
+export function sharedAttributionsPanel(caseId: string | null, busy: boolean, blockchain?: string): string {
+  selectSharedAttributions(caseId, blockchain);
   if (!state.open) return '';
   const locked = busy || state.pending, catalog = state.catalog, review = state.review;
   return `<section class="panel" id="shared-attributions-panel" aria-labelledby="shared-attributions-title"><div class="panel-head"><div><h2 id="shared-attributions-title" tabindex="-1">Shared attributions</h2><p>Reuse address names and assessment evidence across investigations that opt in.</p></div><button type="button" class="btn" data-action="shared-attributions-close">Close</button></div><div class="panel-body">
     <p class="address-note">Editing this workspace library affects future work in every investigation that uses it. New generations capture the current shared entries; saved runs and previews remain unchanged. Each investigation must enable sharing separately.</p>
     ${sharingPanel(locked)}
-    <h3>Workspace library</h3><div class="form-actions"><a class="btn" href="${BASE}/export" download>Export shared CSV</a></div>
+    <h3>Workspace library</h3>
+    ${caseId ? `<p>${state.blockchain === 'bitcoin' ? 'Bitcoin' : 'Liquid'} attribution library</p>` : `<label class="field"><span>Blockchain</span><select id="shared-attributions-blockchain"${off(locked)}><option value="liquid"${state.blockchain === 'liquid' ? ' selected' : ''}>Liquid Network</option><option value="bitcoin"${state.blockchain === 'bitcoin' ? ' selected' : ''}>Bitcoin Network</option></select></label>`}
+    <p class="small muted">Libraries are separate for each blockchain. Names do not enable tracing stops automatically.</p>
+    <div class="form-actions"><a class="btn" href="${BASE}/export?blockchain=${state.blockchain}" download>Export shared CSV</a></div>
     <p class="small muted">Exports include every shared entry, including disabled entries. Large exports download as a ZIP of CSV parts.</p>
     <label class="field"><span>Search shared attributions</span><input id="shared-attributions-query" maxlength="256" value="${esc(state.query)}"${off(locked)}/></label>
     <div class="form-actions"><button type="button" class="btn" data-action="shared-attributions-load"${off(locked)}>Search / refresh</button></div>
@@ -145,7 +158,7 @@ async function load(owner: typeof state, context: Context): Promise<void> {
   const version = owner.catalogVersion, sharingVersion = owner.sharingVersion;
   const query = owner.query, offset = owner.offset;
   const results = await Promise.allSettled([
-    context.post<Catalog>(BASE, {query, offset, limit: PAGE_SIZE}),
+    context.post<Catalog>(BASE, {query, offset, limit: PAGE_SIZE, blockchain: owner.blockchain}),
     owner.caseId ? context.get<Sharing>(`/api/cases/${encodeURIComponent(owner.caseId)}/shared-attributions`) : Promise.resolve(null),
   ]);
   if (!retained(owner)) return;
@@ -168,7 +181,7 @@ async function refresh(context: Context, scope: 'library' | 'case', owner: typeo
 }
 export async function sharedAttributionsAction(action: string, context: Context): Promise<boolean> {
   if (!action.startsWith('shared-attributions-')) return false;
-  selectSharedAttributions(context.caseId);
+  selectSharedAttributions(context.caseId, context.blockchain);
   const owner = state;
   if (action === 'shared-attributions-close') {
     owner.open = false; invalidate(owner); invalidateSharing(owner); owner.catalogVersion++; context.render(); return true;
@@ -229,7 +242,7 @@ export async function sharedAttributionsAction(action: string, context: Context)
       }
     } else {
       checkText(owner.text);
-      const payload = {text: owner.text, format: owner.format, policy: owner.policy,
+      const payload = {text: owner.text, format: owner.format, policy: owner.policy, blockchain: owner.blockchain,
         ...(action === 'shared-attributions-apply' ? {approve_plan: owner.review!.approval_sha256} : {})};
       if (action === 'shared-attributions-preview') {
         const review = await context.post<Review>(BASE + '/import', payload);
@@ -237,7 +250,7 @@ export async function sharedAttributionsAction(action: string, context: Context)
       } else {
         const result = await context.post<{changed: number; revision: number; notice?: string}>(BASE + '/import', payload);
         // Other views may hold a review of the same library. Keep their drafts, but require fresh approval.
-        for (const draft of drafts.values()) {invalidate(draft); invalidateSharing(draft); draft.catalogVersion++; draft.catalog = null;}
+        for (const draft of drafts.values()) {if (draft.blockchain !== owner.blockchain) continue; invalidate(draft); invalidateSharing(draft); draft.catalogVersion++; draft.catalog = null;}
         if (retained(owner)) {
           owner.message = `Saved ${result.changed} shared attribution changes. They apply to future work in opted-in investigations. Saved runs and previews remain unchanged.`;
           await refresh(context, 'library', owner);

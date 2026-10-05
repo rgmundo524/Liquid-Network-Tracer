@@ -17,6 +17,7 @@ from .common import TraceError, canonical, digest, output_kind, parse_outpoint, 
 from .group_hops import normalize_reference_name
 from .investigations import read_case
 from .progress import report_progress
+from .networks import blockchain, default_api
 
 
 def _project(state, seeds, case_id, hop_reference_name):
@@ -70,7 +71,7 @@ def _project(state, seeds, case_id, hop_reference_name):
         if item.get("status") in {"suspected_service_stop", "analyst_stop", "held_behind_service",
                                   "attribution_hop_limit", "named_group_hop_limit"}:
             item["status"] = "not_observed"
-        kind = output_kind(transactions[txid]["data"]["vout"][index])
+        kind = output_kind(transactions[txid]["data"]["vout"][index], blockchain(state))
         if kind != "spendable":
             item["status"] = kind
         elif key in selected_links and item.get("status") != "spent":
@@ -98,14 +99,14 @@ def _project(state, seeds, case_id, hop_reference_name):
     input_transactions = input_evidence(result)
     addresses = {output.get("scriptpubkey_address") for record in result["transactions"].values()
                  for output in [*record["data"]["vout"],
-                                *(saved_input_output(input_transactions, vin) for vin in record["data"]["vin"])]}
+                                *(saved_input_output(input_transactions, vin, blockchain=blockchain(state)) for vin in record["data"]["vin"])]}
     result["address_tx_counts"] = {key: value for key, value in result.get("address_tx_counts", {}).items()
                                    if key in addresses}
     result["stats"] = {"requests_this_run": 0, "outpoints_examined_this_run": 0,
                        "new_transactions_this_run": 0, "transactions_cumulative": len(tx_depths),
                        "outputs_cumulative": len(depths),
                        "frontier_count": sum(key not in selected_links and
-                                             output_kind(transactions[item["txid"]]["data"]["vout"][item["vout"]]) == "spendable"
+                                             output_kind(transactions[item["txid"]]["data"]["vout"][item["vout"]], blockchain(state)) == "spendable"
                                              for key, item in selected_outputs.items())}
     return result
 
@@ -185,7 +186,6 @@ def _copy_observations(state, archive, destination, manifest_names, *, snapshot=
 @contextmanager
 def _shared_index(case, metadata, run_id, dataset_id, progress):
     """Validate source compatibility without reloading a saved private trace."""
-    from .api import ENTERPRISE
     from .cli import run_path
     from .shared_collection import pin_shared_run, _dataset_metadata, _safe
     from .snapshot_index import open_snapshot_index, verified_source_identity
@@ -194,11 +194,13 @@ def _shared_index(case, metadata, run_id, dataset_id, progress):
     shared = _dataset_metadata(dataset)
     fixture = metadata.get("fixture")
     configured = "fixture://" + digest(canonical(read_json(_safe(fixture)))) if fixture else None
-    source = configured or ENTERPRISE
+    source = configured or default_api(metadata)
     if metadata.get("latest_run"):
         private_run = metadata["latest_run"]
         private = verified_source_identity(run_path(case, private_run), case_id=metadata["case_id"],
                                            run_id=private_run, progress=progress)
+        if blockchain(private) != blockchain(metadata):
+            raise TraceError("The private collection belongs to a different blockchain")
         source = private.get("source")
         if not isinstance(source, str) or not source:
             raise TraceError("Saved collection has no API source identity")
@@ -210,7 +212,8 @@ def _shared_index(case, metadata, run_id, dataset_id, progress):
         raise TraceError("Shared collection requires the same blockchain and API source or identical fixture")
     with open_snapshot_index(run_path(dataset, selected), case_id=shared["case_id"],
                              run_id=selected, source=shared["source"], progress=progress) as snapshot:
-        if snapshot.metadata.get("shared_collection", {}).get("dataset_id") != shared["case_id"]:
+        if (snapshot.metadata.get("shared_collection", {}).get("dataset_id") != shared["case_id"]
+                or blockchain(snapshot.metadata) != blockchain(shared)):
             raise TraceError("Shared run does not match the dataset identity")
         yield snapshot
 

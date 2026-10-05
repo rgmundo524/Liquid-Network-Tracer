@@ -13,6 +13,7 @@ from email.utils import parsedate_to_datetime
 from http.client import HTTPException
 
 from .common import StopRun, TraceError, canonical, read_json
+from .networks import blockchain as normalize_blockchain, default_api
 from .explorer_quota import LocalExplorerQuota, SharedExplorerQuota
 from .explorer_http import ExplorerHTTP, ExplorerRequestTimeout, TransientExplorerConnection, network_failure
 
@@ -167,11 +168,12 @@ class _RetryWindow:
 
 
 class Esplora:
-    def __init__(self, store, run_id, limits, base=ENTERPRISE, auth="blockstream",
+    def __init__(self, store, run_id, limits, base=None, auth="blockstream",
                  fixture=None, tx_cache_seconds=86400, min_interval=None, transport=http,
-                 workers=8, advertised_rps=None, adaptive_workers=False, shared_quota=None):
+                 workers=8, advertised_rps=None, adaptive_workers=False, shared_quota=None, *, blockchain="liquid"):
         self.store, self.run_id = store, run_id
-        self.base = base.rstrip("/")
+        self.blockchain = normalize_blockchain(blockchain)
+        self.base = (default_api(self.blockchain) if base is None else base).rstrip("/")
         self.budget = Budget(limits)
         self.transport = transport
         self.auth = auth
@@ -227,8 +229,10 @@ class Esplora:
                 raise TraceError("API base must be HTTPS without credentials, query, or fragment")
             if auth == "blockstream" and parsed.hostname != "enterprise.blockstream.info":
                 raise TraceError("Blockstream credentials can only be sent to enterprise.blockstream.info")
-            if parsed.hostname in ("enterprise.blockstream.info", "blockstream.info") and parsed.path not in ("/liquid/api", "/liquidtestnet/api"):
-                raise TraceError("Use a Liquid or Liquid testnet API path, not the Bitcoin API")
+            paths = (("/liquid/api", "/liquidtestnet/api") if self.blockchain == "liquid" else
+                     ("/api", "/testnet/api", "/testnet4/api", "/signet/api"))
+            if parsed.hostname in ("enterprise.blockstream.info", "blockstream.info") and parsed.path not in paths:
+                raise TraceError("API path must match the investigation blockchain: " + self.blockchain)
         if not math.isfinite(self.min_interval) or not math.isfinite(tx_cache_seconds) or self.min_interval < 0 or tx_cache_seconds < 0:
             raise TraceError("Interval and cache duration cannot be negative")
         if self.min_interval_explicit and self.api_rate_mode == "adaptive":

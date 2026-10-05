@@ -197,7 +197,7 @@ class LocalWebTests(unittest.TestCase):
         txid = synthetic_txid()
         with patch.object(self.server, "start_job", return_value={"id": "synthetic"}) as start:
             self.success("/api/lookup", {"txids": txid, "blockchain": "liquid"}, 202)
-            self.assertEqual(start.call_args.args[0], ["inspect-txs", "--txids", txid])
+            self.assertEqual(start.call_args.args[0], ["inspect-txs", "--txids", txid, "--blockchain", "liquid"])
             self.assertTrue(start.call_args.kwargs["live"])
         info = self.success("/api/cases", {"name": "Liquid without board", "seeds": [txid + ":0"],
                                            "blockchain": "liquid"}, 201)
@@ -214,17 +214,69 @@ class LocalWebTests(unittest.TestCase):
         self.assertEqual(legacy["miro_board"], "LEGACY=")
         self.assertEqual(legacy["blockchain"], "liquid")
 
+    def test_bitcoin_lookup_and_investigation_preserve_the_selected_chain(self):
+        txid = synthetic_txid()
+        with patch.object(self.server, "start_job", return_value={"id": "synthetic"}) as start:
+            self.success("/api/lookup", {"txids": txid, "blockchain": "bitcoin"}, 202)
+            self.assertEqual(start.call_args.args[0], ["inspect-txs", "--txids", txid, "--blockchain", "bitcoin"])
+        info = self.success("/api/cases", {"name": "Bitcoin follow-up", "seeds": [txid + ":0"],
+                                           "blockchain": "bitcoin"}, 201)
+        path, metadata = self.server.case(info["id"])
+        self.assertEqual(metadata["blockchain"], "bitcoin")
+        self.assertEqual(self.success("/api/cases/" + info["id"])["blockchain"], "bitcoin")
+        self.assertEqual(self.success("/api/session")["cases"][0]["blockchain"], "bitcoin")
+        self.assertEqual(read_json(path / "case.json")["blockchain"], "bitcoin")
+
+    def test_case_input_routes_derive_chain_without_workspace_library_arguments(self):
+        txid = synthetic_txid()
+        for chain in ("liquid", "bitcoin"):
+            with self.subTest(blockchain=chain):
+                info = self.success("/api/cases", {"name": chain + " inputs", "seeds": [txid + ":0"],
+                    "blockchain": chain}, 201)
+                path, metadata = self.server.case(info["id"])
+                if chain == "liquid":
+                    metadata.pop("blockchain")
+                    save_json(path / "case.json", metadata)
+                prefix = "/api/cases/" + info["id"]
+                self.assertEqual(self.success(prefix + "/change-outputs", {"query": ""})["total"], 0)
+                self.assertEqual(self.success(prefix + "/name-colors", {"query": ""})["total"], 0)
+                address = "bc1qexampleaddress" if chain == "bitcoin" else "ex1qexampleaddress"
+                imports = [
+                    ("address-import", "Address,Name,stop_tracing\n" + address + ",Example service,false\n"),
+                    ("name-color-import", "Name,Color\nExample service,#336699\n"),
+                    ("change-output-import", "Txid,ChangeVout,Notes\n" + txid + ",0,Reviewed change\n"),
+                ]
+                for route, csv in imports:
+                    body = {"text": csv, "format": "csv"}
+                    reviewed = self.success(prefix + "/" + route, body)
+                    self.assertTrue(reviewed["valid"], reviewed)
+                    self.success(prefix + "/" + route, {**body, "approve_plan": reviewed["approval_sha256"]})
+                    self.assertEqual(self.request(prefix + "/" + route, {**body, "blockchain": chain})[0], 400)
+                changes = self.success(prefix + "/change-outputs", {"query": txid})
+                self.assertEqual(changes["rows"][0]["vout"], 0)
+                colors = self.success(prefix + "/name-colors", {"query": "Example service"})
+                self.assertEqual(colors["total"], 1)
+                self.assertEqual(self.server.case(info["id"])[1].get("blockchain", "liquid"), chain)
+
+    def test_lookup_result_retains_chain_for_later_output_review(self):
+        txid = synthetic_txid()
+        report = {"blockchain": "bitcoin", "transactions": [{"txid": txid, "outputs": [
+            {"vout": 0, "outpoint": txid + ":0", "selectable": True, "address": "bc1qexample", "value": 123456789}]}]}
+        result = self.server.public_result(report, "lookup", None, [txid])
+        self.assertEqual(result["blockchain"], "bitcoin")
+        self.assertEqual(result["transactions"][0]["outputs"][0]["value_text"], "123456789")
+
     def test_unsupported_blockchain_never_starts_lookup_or_creates_case(self):
         txid = synthetic_txid()
         with patch.object(self.server, "start_job") as start, \
                 patch("liquid_tracer.web.create_investigation") as create:
-            for blockchain in ("bitcoin", "ethereum", "fixture", "live", "Liquid", " liquid ", "", None, True, [], {}):
+            for blockchain in ("ethereum", "fixture", "live", "Liquid", " liquid ", "", None, True, [], {}):
                 for route, body in (("/api/lookup", {"txids": txid}),
                                     ("/api/cases", {"name": "Unsupported", "seeds": [txid + ":0"]})):
                     with self.subTest(blockchain=blockchain, route=route):
                         code, response, _ = self.request(route, {**body, "blockchain": blockchain})
                         self.assertEqual(code, 400)
-                        self.assertIn("Only Liquid", response["error"])
+                        self.assertIn("Unsupported blockchain", response["error"])
             start.assert_not_called()
             create.assert_not_called()
         self.assertFalse(self.server.root.exists())
@@ -250,7 +302,7 @@ class LocalWebTests(unittest.TestCase):
             for source in ({}, {"source": "live"}):
                 with self.subTest(source=source):
                     self.success("/api/lookup", {"txids": txid, **source}, 202)
-                    self.assertEqual(start.call_args.args[0], ["inspect-txs", "--txids", txid])
+                    self.assertEqual(start.call_args.args[0], ["inspect-txs", "--txids", txid, "--blockchain", "liquid"])
                     self.assertTrue(start.call_args.kwargs["live"])
                     info = self.success("/api/cases", {
                         "name": "Live investigation", "seeds": [txid + ":0"], **source}, 201)
@@ -419,7 +471,7 @@ class LocalWebTests(unittest.TestCase):
                 patch.dict(os.environ, {"BLOCKSTREAM_CLIENT_SECRET": "SYNTHETIC-NEVER-EXPOSE"}):
             self.success("/api/lookup", {"source": "live", "txids": txid}, 202)
             self.assertTrue(start.call_args.kwargs["live"])
-            self.assertEqual(start.call_args.args[0], ["inspect-txs", "--txids", txid])
+            self.assertEqual(start.call_args.args[0], ["inspect-txs", "--txids", txid, "--blockchain", "liquid"])
             self.assertNotIn("SYNTHETIC-NEVER-EXPOSE", json.dumps(self.success("/api/session")))
         with patch.dict(os.environ, {"LIQUID_SECRETSPEC_BIN": "/synthetic/secretspec", "LIQUID_SECRET_PROFILE": "development",
                                     "LIQUID_SECRET_PROVIDER": "protonpass", "SECRETSPEC_REASON": ""}):

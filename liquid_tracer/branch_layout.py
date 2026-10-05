@@ -5,6 +5,7 @@ external input context. These are soft layout preferences, never ownership
 claims or changes to the graph's evidence. ELK still routes every connection.
 """
 
+from .networks import blockchain, is_primary
 import math
 from collections import defaultdict
 from .hub_layout import hub_layout_view, hub_plan
@@ -41,7 +42,7 @@ def edge_priorities(graph):
         source, target = nodes[edge["source"]], nodes[edge["target"]]
         vin = edge.get("details", {}).get("vin", {})
         if (source["kind"] != "address" or target["kind"] != "transaction"
-                or source.get("details", {}).get("network", "liquid") != "liquid"
+                or not is_primary(source, graph)
                 or vin.get("is_pegin") or vin.get("is_coinbase")):
             continue
         for previous in producers.get((edge["source"], edge.get("outpoint")), ()):

@@ -50,8 +50,8 @@ test('workspace library browse and pagination use bounded read-only queries and 
   assert.match(html, /Evidence &amp; notes/);
   assert.doesNotMatch(html, /<script>|Use in this investigation/);
   edit('query', 'Exchange'); await act('load', ctx); await act('next', ctx);
-  assert.deepEqual(calls.map(call => call.body), [{query: '', offset: 0, limit: 50},
-    {query: 'Exchange', offset: 0, limit: 50}, {query: 'Exchange', offset: 50, limit: 50}]);
+  assert.deepEqual(calls.map(call => call.body), [{query: '', offset: 0, limit: 50, blockchain: 'liquid'},
+    {query: 'Exchange', offset: 0, limit: 50, blockchain: 'liquid'}, {query: 'Exchange', offset: 50, limit: 50, blockchain: 'liquid'}]);
   await act('prev', ctx); assert.equal(calls.at(-1).body.offset, 0);
   assert.ok(calls.every(call => call.path === BASE));
 });
@@ -70,8 +70,8 @@ test('import requires review and submits only the exact approved text, format, a
   assert.match(html, /including enabled state, evidence fields, and blank values/);
   await act('apply', ctx);
   const imports = calls.filter(call => call.path.endsWith('/import'));
-  assert.deepEqual(imports.map(call => call.body), [{text: csv, format: 'csv', policy: 'replace'},
-    {text: csv, format: 'csv', policy: 'replace', approve_plan: 'exact-plan'}]);
+  assert.deepEqual(imports.map(call => call.body), [{text: csv, format: 'csv', policy: 'replace', blockchain: 'liquid'},
+    {text: csv, format: 'csv', policy: 'replace', blockchain: 'liquid', approve_plan: 'exact-plan'}]);
   assert.deepEqual(refreshes, ['library']);
   assert.match(panel(null, false), /Saved 2 shared attribution changes/);
   await act('apply', ctx); assert.equal(calls.filter(call => call.path.endsWith('/import')).length, 2);
@@ -224,4 +224,33 @@ test('pending or busy imports cannot double-submit and saved results survive a v
   assert.match(panel(null, false), /Saved 1 shared attribution changes/);
   assert.match(panel(null, false), /View could not refresh: view failed/);
   assert.equal(pending(null), false);
+});
+
+test('workspace network switch isolates import approvals and sends Bitcoin library scope', async () => {
+  const calls = [];
+  const ctx = context({post: async (path, body) => {calls.push({path, body}); return path === BASE ? catalog() : review();}});
+  await act('open', ctx); edit('text', csv); await act('preview', ctx);
+  edit('blockchain', 'bitcoin');
+  assert.match(panel(null, false), /value="bitcoin" selected/);
+  assert.match(panel(null, false), /export\?blockchain=bitcoin/);
+  assert.doesNotMatch(panel(null, false), /Review shared library changes/);
+  await act('apply', ctx);
+  assert.equal(calls.some(call => call.body.approve_plan), false);
+  await act('load', ctx); edit('text', csv); await act('preview', ctx);
+  assert.equal(calls.at(-1).body.blockchain, 'bitcoin');
+  assert.equal(calls.at(-2).body.blockchain, 'bitcoin');
+  edit('blockchain', 'liquid');
+  assert.match(panel(null, false), /Review shared library changes/);
+});
+
+test('Bitcoin case sharing uses its fixed network and cannot switch to a Liquid library', async () => {
+  const calls = [], ctx = context({caseId: 'case B', blockchain: 'bitcoin',
+    post: async (path, body) => {calls.push({path, body}); return catalog();}});
+  await act('open', ctx);
+  assert.equal(calls[0].body.blockchain, 'bitcoin');
+  assert.match(panel('case B', false, 'bitcoin'), /Bitcoin attribution library/);
+  assert.doesNotMatch(panel('case B', false, 'bitcoin'), /id="shared-attributions-blockchain"/);
+  edit('blockchain', 'liquid');
+  await act('load', ctx);
+  assert.equal(calls.at(-1).body.blockchain, 'bitcoin');
 });

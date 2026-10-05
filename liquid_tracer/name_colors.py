@@ -1,5 +1,6 @@
 """Case-local, case-insensitive attribution-name colors, independent of tracing."""
 
+from .networks import blockchain, is_primary
 import copy
 import fcntl
 import re
@@ -136,7 +137,7 @@ def set_name_colors(case, updates, *, expected_revision):
             return {"changed": changed, "revision": settings["revision"], "notice": NOTICE}
 
 
-def apply_name_colors(nodes, colors, *, role_colors=None):
+def apply_name_colors(nodes, colors, *, role_colors=None, blockchain="liquid"):
     """Resolve display colors once per shared node, never by confidence.
 
     Conflicting colors on independent assessments do not silently choose one
@@ -148,7 +149,7 @@ def apply_name_colors(nodes, colors, *, role_colors=None):
     nodes = list(nodes)
     apply_role_colors(nodes, {} if role_colors is None else role_colors)
     for node in nodes:
-        if node["kind"] != "address" or node["details"].get("network") != "liquid":
+        if node["kind"] != "address" or not is_primary(node, blockchain):
             continue
         matches = {}
         for assessment in node["details"].get("address_attributions", []):
@@ -179,7 +180,7 @@ def color_text(color):
     return "#000000" if luminance > .179 else "#ffffff"
 
 
-def apply_attribution_arrow_colors(nodes, edges):
+def apply_attribution_arrow_colors(nodes, edges, *, blockchain="liquid"):
     """Color adjacent Liquid address links using resolved name assignments.
 
     Node role colors never become attribution colors: in particular, a seed
@@ -190,7 +191,7 @@ def apply_attribution_arrow_colors(nodes, edges):
     colors = {}
     for key, node in nodes.items():
         details = node.get("details", {})
-        if (node.get("kind") != "address" or details.get("network") != "liquid"
+        if (node.get("kind") != "address" or not is_primary(node, blockchain)
                 or details.get("name_color_conflict")):
             continue
         assigned = {color_value(value) for value in details.get("name_colors", {}).values()}

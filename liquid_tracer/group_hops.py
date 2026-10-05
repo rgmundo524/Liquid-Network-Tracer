@@ -2,6 +2,7 @@
 
 from collections import defaultdict, deque
 
+from .networks import blockchain
 from .common import TraceError, output_kind, parse_outpoint
 
 
@@ -103,7 +104,7 @@ def refresh_reference_hops(state, scope=None):
         record = state["transactions"].get(item["txid"])
         if record is None or not 0 <= item["vout"] < len(record["data"]["vout"]):
             continue
-        if output_kind(record["data"]["vout"][item["vout"]]) == "fee":
+        if output_kind(record["data"]["vout"][item["vout"]], blockchain(state)) == "fee":
             continue
         depth = scope.depth(item) if scope is not None else item.get("trace_scope_depth")
         if type(depth) is int and depth <= ceiling:

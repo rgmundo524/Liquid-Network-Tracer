@@ -6,6 +6,7 @@ remain unchanged. Trace layout anchors hubs after their first seed-connected
 deposit; other inputs retain their ordinary transaction dependencies.
 """
 
+from .networks import blockchain, is_primary
 from collections import defaultdict, deque
 from statistics import median
 
@@ -75,7 +76,7 @@ def hub_plan(graph):
     nodes = {node["id"]: node for node in graph["nodes"] if node["id"] not in fees}
     hubs = {key for key, node in nodes.items()
             if node["kind"] == "address" and node.get("layout_hub") is True
-            and node.get("details", {}).get("network", "liquid") == "liquid"}
+            and is_primary(node, graph)}
     plan = {"columns": {}, "cut_inputs": set(), "hubs": sorted(hubs), "roots": {}}
     if not hubs:
         return plan

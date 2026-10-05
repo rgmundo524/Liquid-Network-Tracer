@@ -226,7 +226,8 @@ class TransactionInspectionTests(unittest.TestCase):
         with patch("liquid_tracer.inspection.Esplora", side_effect=client), \
                 patch("urllib.request.build_opener", side_effect=AssertionError("Unexpected network")):
             result = inspect_transactions(", ".join(txids + [txids[0].upper()]), fixture=self.fixture_path)
-        self.assertEqual(list(result), ["transactions"])
+        self.assertEqual(list(result), ["transactions", "blockchain"])
+        self.assertEqual(result["blockchain"], "liquid")
         self.assertEqual([item["txid"] for item in result["transactions"]], txids)
         self.assertEqual([item["outputs"][0]["outpoint"] for item in result["transactions"]],
                          [txid + ":0" for txid in txids])

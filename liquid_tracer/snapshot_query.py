@@ -1,3 +1,4 @@
+from .networks import blockchain
 """Read only the indexed shared evidence needed by one investigation plot.
 
 Topology has been validated when the index was built. Searches use its small
@@ -159,7 +160,7 @@ def select_snapshot(index, seeds, *, max_hops=None, connection_scope=None, progr
                 # Keep global negative evidence even if the spending body is
                 # outside this view. Otherwise stale unspent observations can
                 # turn a truncated boundary into a false endpoint.
-                if output_kind(raw) == "spendable" and item.get("status") != "spent":
+                if output_kind(raw, blockchain(index.metadata)) == "spendable" and item.get("status") != "spent":
                     item["status"] = "spent_in_saved_evidence"
                 if link["spending_txid"] in selected:
                     links[key] = deepcopy(link)
@@ -177,7 +178,7 @@ def select_snapshot(index, seeds, *, max_hops=None, connection_scope=None, progr
             raw = vin.get("prevout") or {}
             if parent in context and not (vin.get("is_coinbase") or vin.get("is_pegin")):
                 from .saved_inputs import saved_input_output
-                raw = saved_input_output(context, vin)
+                raw = saved_input_output(context, vin, blockchain=blockchain(index.metadata))
             if raw.get("scriptpubkey_address"):
                 addresses.add(raw["scriptpubkey_address"])
     state = deepcopy(index.metadata)

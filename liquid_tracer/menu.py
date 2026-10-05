@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from .common import LBTC, TraceError, parse_outpoint, read_json
+from .networks import blockchain, default_api
 from .investigations import (create_investigation, default_root, effective_run_settings, list_investigations,
                              load_settings, read_case, save_settings, update_case, validate_settings)
 
@@ -117,17 +118,20 @@ def _seed_values(value):
     return sorted({f"{txid}:{index}" for txid, index in map(parse_outpoint, values)})
 
 
-def _lookup_reports(report, txids):
+def _lookup_reports(report, txids, *, expected_blockchain=None):
     """Validate the complete lookup before offering any output for selection."""
     invalid = "Output lookup returned an invalid transaction report. No outputs were changed."
     if not isinstance(report, dict):
         raise TraceError(invalid)
+    chain = blockchain(report)
+    if expected_blockchain is not None and chain != blockchain(expected_blockchain):
+        raise TraceError("Output lookup returned a different blockchain. No outputs were changed.")
     reports = [report] if len(txids) == 1 else report.get("transactions")
     if not isinstance(reports, list) or len(reports) != len(txids):
         raise TraceError(invalid)
     for txid, transaction in zip(txids, reports):
         if (not isinstance(transaction, dict) or transaction.get("txid") != txid
-                or not isinstance(transaction.get("outputs"), list)):
+                or not isinstance(transaction.get("outputs"), list) or blockchain(transaction) != chain):
             raise TraceError(invalid)
         for index, output in enumerate(transaction["outputs"]):
             if (not isinstance(output, dict) or type(output.get("vout")) is not int
@@ -143,6 +147,16 @@ def _lookup_reports(report, txids):
     return reports
 
 
+def _output_cells(output, chain="liquid"):
+    """Display explicit values without inferring assets for confidential outputs."""
+    value, asset = output.get("value"), output.get("asset")
+    if blockchain(chain) == "bitcoin":
+        from .export import graph_quantity
+        return (graph_quantity(output, "bitcoin") if value is not None else "??", "BTC")
+    return (str(value) + " base units" if value is not None else "??",
+            "L-BTC" if asset == LBTC else asset or "??")
+
+
 def _latest(case, metadata, verify=False):
     from .cli import resolve_latest, run_path, verify_export
     selected = resolve_latest(case, "latest")
@@ -150,7 +164,8 @@ def _latest(case, metadata, verify=False):
     if verify:
         verify_export(path)
     state = read_json(path / "trace.json")
-    if state.get("run_id") != selected or state.get("case_id") != metadata["case_id"]:
+    if (state.get("run_id") != selected or state.get("case_id") != metadata["case_id"]
+            or blockchain(state) != blockchain(metadata)):
         raise TraceError("Saved run does not match this investigation.")
     return path, state
 
@@ -173,7 +188,8 @@ def _status(case, metadata):
 def _trace_arguments(case, metadata, settings):
     """Validate saved source/evidence before invoking SecretSpec or any remote call."""
     settings = effective_run_settings(settings)
-    arguments = ["trace", "--case", str(case)]
+    chain = blockchain(metadata)
+    arguments = ["trace", "--case", str(case), "--blockchain", chain]
     from .group_hops import normalize_reference_name, reference_addresses, reference_name
     reference = normalize_reference_name(settings.get("hop_reference_name", ""))
     parent = None
@@ -183,8 +199,7 @@ def _trace_arguments(case, metadata, settings):
         if parent.get("source", "").startswith("fixture://") and not fixture:
             raise TraceError("This run's fixture path is not configured. Use the trace command with its original --fixture.")
         if not fixture:
-            from .api import ENTERPRISE
-            if parent.get("source") != ENTERPRISE:
+            if parent.get("source") != default_api(chain):
                 raise TraceError("Continue with the trace command and the original API source.")
         from .seed_settings import normalize_seeds
         # A saved collection is evidence of its original roots. Changing the
@@ -254,7 +269,7 @@ def _address_activity_text(summary):
              f"({count('confirmed_unspent_output_count')} confirmed; "
              f"mempool change {count('mempool_unspent_output_delta')})",
              "General unspent outputs cover all indexed assets at the address, including outputs outside this investigation. "
-             "This is an output count, not an L-BTC balance. It does not mean a traced trail ended there."]
+             "This is an output count, not a balance. It does not mean a traced trail ended there."]
     if summary.get("first_confirmed_activity") is not None and summary.get("history_complete") is True:
         lines.append("First confirmed activity (UTC): " + date("first_confirmed_activity"))
     else:
@@ -346,6 +361,7 @@ def create_app(root=None):
             super().__init__()
             self.mode, self.case = mode, case
             self.metadata = read_case(case) if case else {}
+            self.selected_blockchain = blockchain(self.metadata)
             # Global defaults apply when a case is created. Missing settings on an
             # older case use built-in defaults, never later global preferences.
             self.settings = (validate_settings(self.metadata.get("run_defaults", {}))
@@ -364,7 +380,10 @@ def create_app(root=None):
                     yield Label("Investigation name")
                     yield Input(str(self.metadata.get("name", "")), id="case-name")
                 if self.mode == "new":
-                    yield Static("Data source: Live Liquid", markup=False)
+                    yield Label("Network")
+                    yield Select([("Liquid Network", "liquid"), ("Bitcoin Network", "bitcoin")],
+                                 value=self.selected_blockchain, allow_blank=False, id="blockchain")
+                    yield Static("Data source: Live " + self.selected_blockchain.title(), id="lookup-network", markup=False)
                     yield Label("Transaction hashes separated by commas")
                     yield Input(placeholder="64-character hash, another hash, ...", id="lookup-txid")
                     yield Button("Load outputs", id="lookup")
@@ -383,7 +402,8 @@ def create_app(root=None):
                     yield Static("Credential provider: " + (os.environ.get("LIQUID_SECRET_PROVIDER") or "protonpass")
                                  + " / profile: " + (os.environ.get("LIQUID_SECRET_PROFILE") or "development"), markup=False)
                 if self.mode == "run":
-                    source = "Synthetic data: no Blockstream requests." if self.metadata.get("fixture") else "Live Liquid: running this trace may consume Blockstream credits."
+                    source = ("Synthetic data: no Blockstream requests." if self.metadata.get("fixture") else
+                              "Live " + blockchain(self.metadata).title() + ": running this trace may consume Blockstream credits.")
                     yield Static(source, markup=False)
                     if self.metadata.get("latest_run"):
                         yield Static("Adds hops to the saved run's existing ceiling. Use 0 to retry eligible branches within that ceiling, "
@@ -419,7 +439,7 @@ def create_app(root=None):
                                  "Use Sync and reorganize to apply this to an existing board.", markup=False)
                     yield Label("Separate branch hubs")
                     yield TextArea("\n".join(self.settings["hub_addresses"]), id="hub-addresses")
-                    yield Static("Enter one full Liquid address per line. Choose high-activity or shared addresses "
+                    yield Static("Enter one full address per line for this investigation's network. Choose high-activity or shared addresses "
                                  "as new tree roots for the layout. Spending transactions line up vertically when "
                                  "other inputs allow; their outputs branch to the right. Each address keeps one "
                                  "identity and all connections. Tracing stays the same.", markup=False)
@@ -524,6 +544,18 @@ def create_app(root=None):
                 settings["connector_style"] = self.query_one("#connector-style", Select).value
             return validate_settings(settings)
 
+        def on_select_changed(self, event: Select.Changed):
+            if event.select.id != "blockchain" or self.mode != "new" or not self.is_mounted:
+                return
+            chain = blockchain(event.value)
+            if chain == self.selected_blockchain:
+                return
+            self.selected_blockchain = chain
+            self.query_one("#seeds", TextArea).text = ""
+            self.query_one("#lookup-network", Static).update("Data source: Live " + chain.title())
+            self.query_one("#form-error", Static).update(
+                "Network changed. Load or enter starting outputs for " + chain.title() + ".")
+
         def on_button_pressed(self, event: Button.Pressed):
             if self.app.busy:
                 return
@@ -556,7 +588,7 @@ def create_app(root=None):
                 if self.mode == "new":
                     seeds = _seed_values(self.query_one("#seeds", TextArea).text)
                     case = create_investigation(investigation_root, name, board=board,
-                                                seeds=seeds, run_defaults=settings)
+                                                seeds=seeds, run_defaults=settings, blockchain=self.selected_blockchain)
                     self.dismiss(case)
                 elif self.mode == "global":
                     save_settings(investigation_root, settings)
@@ -605,13 +637,14 @@ def create_app(root=None):
                     report_path = Path(directory) / "outputs.json"
                     arguments = (["inspect-tx", "--txid", txids[0]] if len(txids) == 1
                                  else ["inspect-txs", "--txids", ",".join(txids)])
-                    arguments.extend(["--output", str(report_path)])
+                    arguments.extend(["--blockchain", self.selected_blockchain, "--output", str(report_path)])
                     with self.app.suspend():
                         result = subprocess.run(_command(arguments, live=True), cwd=_project(),
                                                 env=_environment(), check=False)
                     if result.returncode:
                         raise TraceError("Output lookup failed. Check the terminal for credential or API errors, then retry.")
-                    reports = _lookup_reports(read_json(report_path), txids)
+                    reports = _lookup_reports(read_json(report_path), txids,
+                                              expected_blockchain=self.selected_blockchain)
                 self.app.push_screen(OutputScreen(reports), self.use_outputs)
             except KeyboardInterrupt:
                 error_field.update("Output lookup interrupted. No investigation was created.")
@@ -631,6 +664,7 @@ def create_app(root=None):
         def __init__(self, reports):
             super().__init__()
             self.reports = reports
+            self.blockchain = blockchain(reports[0])
             self.selected = set()
             self.outputs = {output["outpoint"]: output for report in reports for output in report["outputs"]}
             self.transactions = {output["outpoint"]: (number, report["txid"])
@@ -655,13 +689,12 @@ def create_app(root=None):
             table = self.query_one("#outputs", DataTable)
             self.choice_column = table.add_columns("Selected", "Transaction", "Output", "Address", "Amount", "Asset", "Type")[0]
             for outpoint, output in self.outputs.items():
-                asset = output.get("asset")
+                amount, asset = _output_cells(output, self.blockchain)
                 number, txid = self.transactions[outpoint]
                 table.add_row("No" if output["selectable"] else "Unavailable", f"{number}: {txid[:8]}…{txid[-6:]}",
                               str(output["vout"]),
                               Text(output.get("address") or "No address"),
-                              str(output["value"]) + " base units" if output.get("value") is not None else "??",
-                              Text("L-BTC" if asset == LBTC else asset or "??"),
+                              amount, Text(asset),
                               Text(output.get("reason") or output.get("script_type") or "??"), key=outpoint)
             table.focus()
 
@@ -676,7 +709,7 @@ def create_app(root=None):
             key = event.row_key.value
             error_field = self.query_one("#output-error", Static)
             if not self.outputs[key]["selectable"]:
-                error_field.update("This is a fee, peg-out, or unspendable output; it cannot start a forward Liquid trace.")
+                error_field.update("This is a terminal or unspendable output; it cannot start a forward trace.")
                 return
             error_field.update("")
             if key in self.selected:
@@ -723,7 +756,7 @@ def create_app(root=None):
                 yield Static("", id="address-page", markup=False)
                 yield DataTable(id="addresses", cursor_type="row")
                 yield Label("Address (select a row with Enter, or paste one)")
-                yield Input(placeholder="Liquid address", id="address-value")
+                yield Input(placeholder=blockchain(read_case(self.case)).title() + " address", id="address-value")
                 yield Button("Review saved activity", id="address-select")
                 yield Static("Select or paste an address to review it.", id="address-activity", markup=False)
                 yield Label("Maximum history pages per refresh")
@@ -733,11 +766,11 @@ def create_app(root=None):
                              "partial history cannot establish an address's first on-chain use.", markup=False)
                 yield Button("Refresh address activity", id="address-refresh", disabled=True)
                 yield Checkbox("Enable this address assessment", id="service-enabled")
-                yield Checkbox("Stop tracing through this address", value=True, id="service-stop")
+                yield Checkbox("Stop tracing through this address", value=False, id="service-stop")
                 yield Label("hop_limit for Full trace")
                 yield Input(id="service-hop-limit", placeholder="No local cap")
                 yield Static("Blank = no local cap; 0 = stop this plotted path; 1 = one consolidation hop. "
-                             "Collection and peg-out tracing ignore this cap. Use Stop tracing above to stop those paths. "
+                             "Collection and endpoint tracing ignore this cap. Use Stop tracing above to stop those paths. "
                              "Starter connections ignores both rules when inspecting saved evidence.", markup=False)
                 yield Label("Confidence (your assessment, not automatic verification)")
                 yield Select([("Suspected", "suspected"), ("Confirmed", "confirmed")],
@@ -802,7 +835,7 @@ def create_app(root=None):
             self.query_one("#service-enabled", Checkbox).value = rule.get("enabled", False)
             from .services import rule_fields
             fields = rule_fields(rule)
-            self.query_one("#service-stop", Checkbox).value = fields["stop_tracing"]
+            self.query_one("#service-stop", Checkbox).value = fields["stop_tracing"] if rule else False
             self.query_one("#service-hop-limit", Input).value = (str(fields["hop_limit"]) if fields["hop_limit"] is not None else "")
             self.query_one("#service-confidence", Select).value = fields["confidence"]
             self.query_one("#service-source", Input).value = fields["source"]
@@ -1230,7 +1263,7 @@ def create_app(root=None):
         def update_summary(self):
             try:
                 metadata = read_case(self.case)
-                source = "Synthetic data" if metadata.get("fixture") else "Live Liquid"
+                source = "Synthetic data" if metadata.get("fixture") else "Live " + blockchain(metadata).title()
                 board = metadata.get("miro_board")
                 settings = validate_settings(metadata.get("run_defaults", {}))
                 self.query_one("#case-summary", Static).update(

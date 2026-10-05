@@ -12,6 +12,7 @@ from collections import defaultdict
 from .edge_labels import caption_box, caption_text
 from .graph_markers import node_border
 from .miro_frames import activity_frames
+from .networks import blockchain
 
 
 PAGE_WIDTH = 1152.0
@@ -308,7 +309,7 @@ def render_details(graph, nodes, edges, overview_svg):
                             '<a href="graph.json">graph.json</a> and the transaction CSV.</p></details>')
     page = '''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
-<title>Liquid trace · Overview and detail pages</title><style>
+<title>''' + blockchain(graph).title() + ''' trace · Overview and detail pages</title><style>
 body{margin:0;background:#eef1f5;color:#172033;font:14px system-ui,sans-serif}header{padding:18px 24px;background:white}
 h1{font-size:22px}h2{font-size:18px;margin:0 0 6px}p{margin:5px 0 10px;line-height:1.4}a{color:#155e75}
 .sheet{width:381mm;margin:18px auto;padding:8mm;background:white;break-after:page;page-break-after:always}

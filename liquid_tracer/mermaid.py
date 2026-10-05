@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .name_colors import color_text
+from .networks import blockchain
 from .edge_labels import caption_text
 from .graph_markers import node_border
 from .common import TraceError, save_json
@@ -88,7 +89,7 @@ def _items(graph):
 def mermaid_source(graph):
     """Return deterministic Mermaid text, including every displayed edge."""
     nodes, edges, ids = _items(graph)
-    lines = ["flowchart LR", "  %% Local Liquid Network trace; IDs map to mermaid-node-map.json."]
+    lines = ["flowchart LR", f"  %% Local {blockchain(graph).title()} Network trace; IDs map to mermaid-node-map.json."]
     shapes = {"transaction": ("[", "]"), "context_group": ("[", "]"),
               "address": ("((", "))"), "event": ("{", "}")}
     for node in nodes:
@@ -147,7 +148,7 @@ def _preview_html(graph, svg):
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
-<title>Liquid trace · {title}</title>
+<title>{blockchain(graph).title()} trace · {title}</title>
 <style>
 body {{ margin:0; color:#172033; background:#f5f6f8; font:15px system-ui,sans-serif; }}
 header {{ padding:20px 28px; background:white; border-bottom:1px solid #d5dbe3; }}
@@ -159,7 +160,7 @@ summary {{ cursor:pointer; }} li {{ margin:6px 0; }}
 .chart img {{ display:block; max-width:none; }}
 {LEGEND_CSS}
 </style></head><body>
-<header><h1>Liquid trace · {title}</h1>
+<header><h1>{blockchain(graph).title()} trace · {title}</h1>
 <p>Run {run_id} · {len(graph['nodes'])} nodes · {displayed_count} links · Fees {fees}{simulated}</p>
 <p>{notice}</p>
 <p>{layout_note}</p>
@@ -169,7 +170,7 @@ summary {{ cursor:pointer; }} li {{ margin:6px 0; }}
 {register_html(graph)}
 {legend_html(graph)}
 <details><summary>Detailed evidence notes</summary><ul>{items}</ul></details></header>
-<main class="chart"><img alt="Directed Liquid Network transaction graph" src="data:image/svg+xml;base64,{encoded}"></main>
+<main class="chart"><img alt="Directed {blockchain(graph).title()} Network transaction graph" src="data:image/svg+xml;base64,{encoded}"></main>
 </body></html>
 """
 

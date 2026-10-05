@@ -1,4 +1,4 @@
-"""Bounded, resumable peg-out searches and separate reviewed plot snapshots."""
+"""Bounded, resumable endpoint searches and separate reviewed plot snapshots."""
 
 from contextlib import contextmanager
 import fcntl
@@ -15,6 +15,7 @@ from .api import Esplora, Limits
 from .common import StopRun, TraceError, canonical, digest, now, read_json, save_json
 from .investigations import read_case, validate_settings
 from .pegout_paths import pegout_graph, validate_query
+from .networks import blockchain
 from .services import apply_service_labels, effective_services
 from .store import Store
 from .trace import new_state, trace, validate_transaction
@@ -36,13 +37,13 @@ def preview_files(directory):
 
 def _ordinary(path):
     if any(p.is_symlink() for p in (path, *path.parents)):
-        raise TraceError("Peg-out search files cannot contain symbolic links")
+        raise TraceError("Endpoint search files cannot contain symbolic links")
     return path
 
 
 def _search_path(case, search_id):
     if not isinstance(search_id, str) or not SEARCH_ID.fullmatch(search_id):
-        raise TraceError("Choose a saved peg-out search")
+        raise TraceError("Choose a saved endpoint search")
     return _ordinary(Path(case) / "pegouts" / search_id)
 
 
@@ -54,7 +55,7 @@ def _locked(case, *, exclusive=False):
             fcntl.flock(trace_lock, mode | fcntl.LOCK_NB)
             fcntl.flock(case_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise TraceError("A trace or settings change is active; retry the peg-out search afterward") from None
+            raise TraceError("A trace or settings change is active; retry the endpoint search afterward") from None
         yield
 
 
@@ -75,14 +76,14 @@ def _verify_manifest(directory, allowed, required):
         fields = line.split("  ", 1)
         if (len(fields) != 2 or not re.fullmatch(r"[0-9a-f]{64}", fields[0])
                 or fields[1] in seen or not allowed(fields[1])):
-            raise TraceError("Invalid peg-out snapshot manifest")
+            raise TraceError("Invalid endpoint snapshot manifest")
         checksum, name = fields
         path = _ordinary(directory / name)
         if not path.is_file() or digest(path.read_bytes()) != checksum:
-            raise TraceError("Peg-out snapshot changed or is incomplete; restore the saved evidence")
+            raise TraceError("Endpoint snapshot changed or is incomplete; restore the saved evidence")
         seen.add(name)
     if not set(required).issubset(seen):
-        raise TraceError("Peg-out snapshot manifest is incomplete")
+        raise TraceError("Endpoint snapshot manifest is incomplete")
     return seen
 
 
@@ -98,20 +99,22 @@ def _read_search(case, search_id, *, checkpoint=False):
         index = read_json(directory / "evidence-index.json")
         if (not isinstance(index, list) or any(not isinstance(row, dict) for row in index)
                 or {row.get("file") for row in index} != files - ARCHIVE_FILES):
-            raise TraceError("Peg-out evidence index disagrees with its manifest")
+            raise TraceError("Endpoint evidence index disagrees with its manifest")
     elif not checkpoint:
-        raise TraceError("Peg-out search was interrupted before archiving; resume it first")
+        raise TraceError("Endpoint search was interrupted before archiving; resume it first")
     state, query = read_json(directory / "trace.json"), read_json(directory / "query.json")
-    if (not isinstance(query, dict) or set(query) not in (
+    options = {"include_unspent", "include_unspendable", "include_attributed_stops"}
+    if (not isinstance(query, dict) or set(query) - options not in (
                 {"txid", "min_hops", "max_hops"}, {"seeds", "min_hops", "max_hops"})
-            or validate_query(**query) != query or not isinstance(state, dict)
+            or not isinstance(state, dict) or validate_query(**query, blockchain=blockchain(state)) != query
             or state.get("case_id") != read_case(case)["case_id"] or state.get("run_id") != search_id
+            or blockchain(state) != blockchain(read_case(case))
             or state.get("pegout_query") != query
             or not isinstance(state.get("transactions"), dict) or not isinstance(state.get("outputs"), dict)
             or not isinstance(state.get("links"), dict) or not isinstance(state.get("seeds"), list)
             or ("seeds" in query and state["seeds"] != query["seeds"])
             or state.get("limits", {}).get("max_hops") != query["max_hops"]):
-        raise TraceError("Peg-out search does not match this investigation or query")
+        raise TraceError("Endpoint search does not match this investigation or query")
     return state, query, sealed
 
 
@@ -123,18 +126,18 @@ def _verify_checkpoint(store, state):
         row = observations.get(record.get("observation_id"))
         if (row is None or row["source"] != state["source"] or row["endpoint"] != "/tx/" + txid
                 or json.loads(row["body"]) != record["data"]):
-            raise TraceError("Interrupted peg-out transaction is not backed by saved evidence")
+            raise TraceError("Interrupted endpoint transaction is not backed by saved evidence")
     for key, link in state["links"].items():
         txid, _, index = key.rpartition(":")
         row = observations.get(link.get("observation_id"))
         if row is None or row["source"] != state["source"] or row["endpoint"] != "/tx/" + txid + "/outspends":
-            raise TraceError("Interrupted peg-out spend is not backed by saved evidence")
+            raise TraceError("Interrupted endpoint spend is not backed by saved evidence")
         data = json.loads(row["body"])
         if (not index.isdecimal() or not isinstance(data, list) or int(index) >= len(data)
                 or data[int(index)].get("spent") is not True
                 or data[int(index)].get("txid") != link.get("spending_txid")
                 or data[int(index)].get("vin") != link.get("vin")):
-            raise TraceError("Interrupted peg-out spend disagrees with saved evidence")
+            raise TraceError("Interrupted endpoint spend disagrees with saved evidence")
 
 
 def _archive(store, state, query, directory):
@@ -170,7 +173,8 @@ def _progress(progress, phase):
 
 def search_pegouts(case, txid=None, min_hops=0, max_hops=10, *, resume=None,
                    max_transactions=None, max_outpoints=None, max_requests=None, max_seconds=None,
-                   open_browser=False, progress=None):
+                   open_browser=False, progress=None, include_unspent=False,
+                   include_unspendable=False, include_attributed_stops=False):
     """Fetch a bounded search, archive it, then plot the paths found so far."""
     from .change_outputs import _lookup_options, _saved_state
     case = _ordinary(Path(case))
@@ -178,13 +182,16 @@ def search_pegouts(case, txid=None, min_hops=0, max_hops=10, *, resume=None,
         metadata = read_case(case)
         parent, sealed = None, True
         if resume is not None:
-            if txid is not None or min_hops != 0 or max_hops != 10:
+            if (txid is not None or min_hops != 0 or max_hops != 10
+                    or include_unspent or include_unspendable or include_attributed_stops):
                 raise TraceError("Resume uses the saved origin and hop range; omit new query fields")
             parent, query, sealed = _read_search(case, resume, checkpoint=True)
         else:
+            endpoint_options = {"include_unspent": include_unspent, "include_unspendable": include_unspendable,
+                                "include_attributed_stops": include_attributed_stops, "blockchain": blockchain(metadata)}
             query = (validate_query(min_hops=min_hops, max_hops=max_hops,
-                                    seeds=metadata.get("seeds", [])) if txid is None
-                     else validate_query(txid, min_hops, max_hops))
+                                    seeds=metadata.get("seeds", []), **endpoint_options) if txid is None
+                     else validate_query(txid, min_hops, max_hops, **endpoint_options))
         latest = _saved_state(case) if parent is None else None
         baseline = parent if parent is not None else latest
         options = _lookup_options(case, baseline)
@@ -199,9 +206,9 @@ def search_pegouts(case, txid=None, min_hops=0, max_hops=10, *, resume=None,
             if parent is not None and not sealed:
                 _verify_checkpoint(store, parent)
             api = Esplora(store, "pending", limits, base=options["base_url"],
-                           auth=options["auth"], fixture=options["fixture"])
+                           auth=options["auth"], fixture=options["fixture"], blockchain=blockchain(metadata))
             state = new_state(query.get("seeds", []), api.base, limits, labels, parent,
-                              case_id=metadata["case_id"])
+                              case_id=metadata["case_id"], blockchain=blockchain(metadata))
             if parent is not None and "seeds" in query:
                 # Recover interruptions before or during initial seed queuing,
                 # preserving any seed statuses already backed by saved evidence.
@@ -243,7 +250,7 @@ def search_pegouts(case, txid=None, min_hops=0, max_hops=10, *, resume=None,
             state.setdefault("stats", {})["requests_this_run"] = api.budget.requests
             _archive(store, state, query, directory)
             for error in state["errors"]:
-                print("Peg-out search: " + str(error), file=sys.stderr)
+                print("Endpoint search: " + str(error), file=sys.stderr)
         finally:
             try:
                 if api is not None:
@@ -254,7 +261,7 @@ def search_pegouts(case, txid=None, min_hops=0, max_hops=10, *, resume=None,
     try:
         return preview_pegouts(case, state["run_id"], open_browser=open_browser, progress=progress)
     except TraceError as error:
-        raise TraceError(f"Peg-out search {state['run_id']} was saved. Retry its preview without fetching again. "
+        raise TraceError(f"Endpoint search {state['run_id']} was saved. Retry its preview without fetching again. "
                          + str(error)) from error
 
 
@@ -288,7 +295,8 @@ def preview_pegouts(case, search_id, *, open_browser=False, progress=None):
         _progress(progress, "pegout_paths")
         # Search archives describe collection. The new display policy belongs
         # to this preview, so regenerating never rewrites its source archive.
-        plot_query = validate_query(**query, transaction_io="complete", attribution_hop_limits="ignore")
+        plot_query = validate_query(**query, transaction_io="complete", attribution_hop_limits="ignore",
+                                    blockchain=blockchain(state))
         graph = pegout_graph(state, plot_query, color_attribution_arrows=attribution_arrow_coloring(metadata),
                               group_context_inputs=context_input_grouping(metadata),
                               center_name=centered_name_group(metadata), include_fees=include_fee_flows(metadata))
@@ -308,7 +316,7 @@ def preview_pegouts(case, search_id, *, open_browser=False, progress=None):
             save_json(destination / "layout-report.json", {"run_id": search_id, "node_count": 0, "edge_count": 0})
             (destination / "graph.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg" width="800" height="100"/>', encoding="utf-8")
             (destination / "graph.html").write_text('<!doctype html><html lang="en"><meta charset="utf-8">'
-                '<title>Peg-out search</title><h1>No peg-out requests found</h1><p>'
+                '<title>Endpoint search</title><h1>No matching endpoints found</h1><p>'
                 + html.escape(graph["notice"]) + '</p></html>', encoding="utf-8")
             result = {"html": str(destination / "graph.html"), "svg": str(destination / "graph.svg")}
         try:
@@ -317,7 +325,7 @@ def preview_pegouts(case, search_id, *, open_browser=False, progress=None):
             save_json(destination / "miro-plan.json", plan)
             save_json(destination / "pegouts.json", report)
             (destination / "graph.mmd").write_text(mermaid_source(graph) if graph["nodes"] else
-                "flowchart LR\n  %% No peg-out requests found in searched data.\n", encoding="utf-8")
+                "flowchart LR\n  %% No matching endpoints found in searched data.\n", encoding="utf-8")
             write_transaction_csv(destination / "transactions.csv", graph, state)
             _write_manifest(destination, preview_files(destination))
         except BaseException:
@@ -340,7 +348,7 @@ def saved_pegout_snapshot(case, preview_id):
     from .miro import validate_plan
     case = _ordinary(Path(case))
     if not isinstance(preview_id, str) or not PREVIEW_ID.fullmatch(preview_id):
-        raise TraceError("Choose a saved peg-out preview")
+        raise TraceError("Choose a saved endpoint preview")
     directory = _ordinary(case / "previews" / preview_id)
     files = preview_files(directory)
     _verify_manifest(directory, lambda name: name in files - {"SHA256SUMS"}, files - {"SHA256SUMS"})
@@ -352,24 +360,25 @@ def saved_pegout_snapshot(case, preview_id):
     # and retain their original graph/plan, irrespective of current preferences.
     if "include_fees" in report and (type(report["include_fees"]) is not bool
             or report["include_fees"] is not graph.get("include_fees")):
-        raise TraceError("Peg-out preview fee setting disagrees with its saved graph")
+        raise TraceError("Endpoint preview fee setting disagrees with its saved graph")
     plot_query = report.get("query")
-    if not isinstance(plot_query, dict) or validate_query(**plot_query) != plot_query:
-        raise TraceError("Peg-out preview has an invalid saved display query")
+    if not isinstance(plot_query, dict) or validate_query(**plot_query, blockchain=blockchain(state)) != plot_query:
+        raise TraceError("Endpoint preview has an invalid saved display query")
     search_query = {key: value for key, value in plot_query.items()
                     if key not in {"transaction_io", "attribution_hop_limits"}}
-    if (graph.get("namespace", {}).get("case_id") != metadata["case_id"]
+    if (blockchain(graph) != blockchain(state)
+            or graph.get("namespace", {}).get("case_id") != metadata["case_id"]
             or graph.get("namespace", {}).get("source") != state.get("source")
             or graph.get("run_id") != state["run_id"] or plan.get("run_id") != state["run_id"]
             or graph.get("graph_options", {}).get("view") != "pegout_paths"
             or graph.get("graph_options", {}).get("pegout_query") != plot_query
             or search_query != query or plan.get("schema_version") != 1):
-        raise TraceError("Peg-out preview does not match this investigation or query")
+        raise TraceError("Endpoint preview does not match this investigation or query")
     if report.get("archive_sha256") != digest((_search_path(case, state["run_id"]) / "SHA256SUMS").read_bytes()):
-        raise TraceError("Peg-out preview source archive changed; restore the saved evidence")
+        raise TraceError("Endpoint preview source archive changed; restore the saved evidence")
     validate_plan(plan)
     if _plan(graph) != plan or read_json(directory / "pegouts.json") != report:
-        raise TraceError("Peg-out preview and publication plan disagree")
+        raise TraceError("Endpoint preview and publication plan disagree")
     return graph, plan, state
 
 
@@ -384,7 +393,7 @@ def reviewed_pegouts(case, preview_id):
             or graph["graph_options"].get("center_name", "") != centered_name_group(metadata)
             or (report["query"].get("transaction_io") == "complete"
                 and graph["graph_options"].get("group_context_inputs", False) is not context_input_grouping(metadata))):
-        raise TraceError("Evidence, colors, layout settings or trace controls changed; regenerate the peg-out preview")
+        raise TraceError("Evidence, colors, layout settings or trace controls changed; regenerate the endpoint preview")
     return graph, plan
 
 
@@ -440,5 +449,5 @@ def publish_pegouts(case, preview_id, board, *, max_items=0, **kwargs):
         if ((metadata.get("miro_board") and target == board_id(metadata["miro_board"]))
                 or (case / "miro" / (key + ".json")).exists()
                 or (case / "miro" / ("connections-" + key + ".json")).exists()):
-            raise TraceError("Choose a separate Miro board for peg-out paths; an existing graph is protected")
+            raise TraceError("Choose a separate Miro board for endpoint paths; an existing graph is protected")
         return publish(plan, target, case / "miro" / ("pegouts-" + key + ".json"), max_items=max_items, **kwargs)

@@ -13,6 +13,7 @@ from .investigations import read_case, validate_settings
 from .layout_preview import _preview_html, export_layout, render_svg
 from .miro import make_plan, validate_plan
 from .services import effective_services
+from .networks import blockchain
 from .layout_search import normalize_layout_attempts
 from .layout_search_reporting import layout_search_warning
 
@@ -260,7 +261,7 @@ def export_compaction(before, after, directory, *, archive_sha256, service_sha25
                  if report.get("truncated") else "")
         document = '''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
-<title>Liquid trace · Compact graph comparison</title><style>
+<title>''' + blockchain(after).title() + ''' trace · Compact graph comparison</title><style>
 body{margin:0;background:#f5f6f8;color:#172033;font:14px system-ui,sans-serif}header{padding:20px;background:white}
 h1{font-size:22px}p{max-width:85em;line-height:1.6}a{color:#155e75}table{border-collapse:collapse;font-variant-numeric:tabular-nums}
 th,td{padding:6px 14px;border-bottom:1px solid #d5dbe3;text-align:right}th:first-child{text-align:left}details{padding:12px;background:white}

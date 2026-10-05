@@ -11,6 +11,7 @@ import math
 from bisect import bisect_left
 from collections import defaultdict
 
+from .networks import blockchain
 from .common import output_kind
 from .connector_styles import routed_shape
 from .edge_labels import translate_label
@@ -41,7 +42,7 @@ def annotate_changes(graph, state):
         if type(vout) is not int or not 0 <= vout < len(outputs):
             skipped.append({**entry, "reason": "Selected vout is not present in this transaction."})
             continue
-        if output_kind(outputs[vout]) != "spendable":
+        if output_kind(outputs[vout], blockchain(state)) != "spendable":
             skipped.append({**entry, "reason": "Selected vout is not a spendable output."})
             continue
         edge = edges.get("out:" + entry["outpoint"])

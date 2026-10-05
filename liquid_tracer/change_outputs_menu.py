@@ -4,7 +4,9 @@ import contextlib
 import tempfile
 from pathlib import Path
 
-from .common import LBTC, TraceError, read_json
+from .common import TraceError, read_json
+from .investigations import read_case
+from .networks import blockchain
 
 
 def change_output_screen(base, button, case):
@@ -159,7 +161,7 @@ def change_output_screen(base, button, case):
                                          "The saved change designation is unchanged." if live else
                                          "Transaction lookup failed. The saved change designation is unchanged.")
                     report = read_json(report_path)
-                    menu._lookup_reports(report, [txid])
+                    menu._lookup_reports(report, [txid], expected_blockchain=blockchain(read_case(case)))
                     if (type(report.get("revision")) is not int or not isinstance(report.get("current_notes"), str)
                             or report.get("current_vout") is not None and
                             (type(report["current_vout"]) is not int or report["current_vout"] < 0)):
@@ -169,10 +171,9 @@ def change_output_screen(base, button, case):
                 table = self.query_one("#change-output-rows", DataTable)
                 options = [("No change designation (original ELK rules)", "")]
                 for index, output in enumerate(report["outputs"]):
-                    asset = output.get("asset")
+                    amount, asset = menu._output_cells(output, blockchain(report))
                     table.add_row(str(output["vout"]), Text(output.get("address") or "No address"),
-                                  str(output["value"]) + " base units" if output.get("value") is not None else "??",
-                                  Text("L-BTC" if asset == LBTC else asset or "??"),
+                                  amount, Text(asset),
                                   "Spendable" if output["selectable"] else Text(output.get("reason") or "Not spendable"),
                                   key=str(index))
                     if output["selectable"]:

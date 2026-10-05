@@ -68,7 +68,7 @@ def _detect(text):
     return matches[0]
 
 
-def _prepare(files):
+def _prepare(files, *, blockchain="liquid"):
     if not isinstance(files, list) or not 1 <= len(files) <= MAX_FILES:
         raise TraceError("Choose one to three CSV files, with at most one file of each type")
     prepared = []
@@ -101,7 +101,7 @@ def _prepare(files):
             entry["source_sha256"] = digest(source)
             if kind == "auto":
                 kind = entry["kind"] = _detect(text)
-            entry["parsed"] = _IMPORTERS[kind].parse_import(text, "csv")
+            entry["parsed"] = _IMPORTERS[kind].parse_import(text, "csv", **({"blockchain": blockchain} if kind == "attributions" else {}))
         except TraceError as error:
             entry["errors"].append({"message": str(error)})
     for kind in KINDS:
@@ -156,7 +156,8 @@ def _plan(case, settings, prepared):
 
 def preview_import(case, files):
     """Plan all uploads against one settings snapshot without writing anything."""
-    prepared = _prepare(files)
+    from .investigations import read_case
+    prepared = _prepare(files, blockchain=read_case(case)["blockchain"])
     return _plan(case, load_services(case), prepared)
 
 
@@ -206,7 +207,8 @@ def apply_import(case, files, *, approval_sha256):
     """Revalidate the whole review under both locks, then save all files or none."""
     if not isinstance(approval_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", approval_sha256):
         raise TraceError("Preview the CSV files and approve their exact approval_sha256 before saving")
-    prepared = _prepare(files)
+    from .investigations import read_case
+    prepared = _prepare(files, blockchain=read_case(case)["blockchain"])
     case = Path(case)
     with (case / "trace.lock").open("a") as trace_lock:
         try:

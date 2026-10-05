@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 
 from .name_colors import color_text
+from .networks import blockchain
 from .graph_markers import node_border
 from .connector_styles import stroke_width
 from .common import TraceError, save_json
@@ -25,7 +26,7 @@ LAYOUT_NOTICE = "ELK layout; Miro routes may differ. Crossing counts are estimat
 _COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
 _PERCENT = re.compile(r"(?:\d+(?:\.\d+)?|\.\d+)%\Z")
 _EXPLORER_URL = re.compile(
-    r"https://blockstream\.info/(?:liquid|liquidtestnet)/"
+    r"https://blockstream\.info/(?:(?:liquid|liquidtestnet|testnet|testnet4|signet)/)?"
     r"(?:tx/[0-9a-fA-F]{64}|address/[a-zA-Z0-9]{1,200})\Z"
 )
 
@@ -307,7 +308,7 @@ def _svg(graph, nodes, edges, *, banner=True):
     width, height = max(800, right - left + margin * 2), bottom - top + margin * 2
     lines = [f'<svg xmlns="http://www.w3.org/2000/svg" role="group" aria-labelledby="title desc" '
              f'width="{_fmt(width)}" height="{_fmt(height)}" viewBox="{_fmt(x)} {_fmt(y)} {_fmt(width)} {_fmt(height)}">',
-             '<title id="title">Liquid trace · ' + _escape(layout_title(graph)) + '</title>',
+             '<title id="title">' + blockchain(graph).capitalize() + ' trace · ' + _escape(layout_title(graph)) + '</title>',
              '<desc id="desc">' + _escape(layout_notice(graph) + " " + str(graph.get("notice", ""))) + '</desc>',
              '<style>.explorer-link { cursor:pointer; } '
              '.explorer-link:focus-visible > g '
@@ -434,7 +435,7 @@ def _preview_html(graph, svg, metrics, *, detail_pages=False):
     return f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
-<title>Liquid trace · {_escape(layout_title(graph))}</title><style>
+<title>{blockchain(graph).capitalize()} trace · {_escape(layout_title(graph))}</title><style>
 body {{ margin:0; color:#172033; background:#f5f6f8; font:14px system-ui,sans-serif; }}
 header {{ padding:16px 24px; background:white; border-bottom:1px solid #d5dbe3; }}
 h1 {{ font-size:22px; margin:0 0 8px; }} p {{ margin:6px 0; }} a {{ color:#155e75; }}
@@ -447,7 +448,7 @@ details {{ margin-top:8px; }} summary {{ cursor:pointer; }} li {{ margin:4px 0; 
 body:has(#chart:target) header {{ display:none; }}
 #chart:target svg {{ width:100%; height:auto; }}
 {LEGEND_CSS}
-</style></head><body><header><div class="summary"><div><h1>Liquid trace · {_escape(layout_title(graph))}</h1>
+</style></head><body><header><div class="summary"><div><h1>{blockchain(graph).capitalize()} trace · {_escape(layout_title(graph))}</h1>
 <p>Run {_escape(graph.get('run_id', ''))} · {len(graph['nodes'])} nodes · {len(graph['edges'])} links · Fees {fees}{simulated}</p>
 <p>{_escape(layout_notice(graph))}</p><p>Scroll to explore; use your browser zoom to adjust the scale. Select Explorer on a transaction or address to open Blockstream in a new tab.</p>
 <p><a href="graph.svg" download>Download SVG</a> · <a href="graph.json" download>Graph details</a> ·

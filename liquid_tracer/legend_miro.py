@@ -5,6 +5,7 @@ import math
 
 from .legend import legend_notes, legend_rows
 from .name_colors import color_value
+from .networks import blockchain
 from .presentation_items import proof
 
 WIDTH = 1300
@@ -60,7 +61,8 @@ def _note_blocks(value):
 
 
 def _pages(graph):
-    title = ("SYNTHETIC DATA · " if graph.get("simulated") else "") + "Liquid UTXO trace · Color key"
+    title = (("SYNTHETIC DATA · " if graph.get("simulated") else "")
+             + blockchain(graph).title() + " UTXO trace · Color key")
     blocks = [block for row in legend_rows(graph) for block in _row_blocks(row)]
     blocks.extend(block for note in legend_notes(graph) for block in _note_blocks(note))
     pages, page, height = [], [], 90

@@ -14,6 +14,7 @@ import re
 import uuid
 
 from .api import http
+from .networks import blockchain
 from .common import TraceError, canonical, digest, now, read_json, save_json
 from .group_hops import reference_name
 
@@ -194,7 +195,8 @@ def _archive_source(case, run_id, metadata=None, *, progress=None):
     report_progress(progress, "loading_collection", 0, 1)
     state = read_json(archive / "trace.json")
     report_progress(progress, "loading_collection", 1, 1)
-    if not isinstance(state, dict) or state.get("run_id") != run_id or state.get("case_id") != metadata["case_id"]:
+    if (not isinstance(state, dict) or state.get("run_id") != run_id or state.get("case_id") != metadata["case_id"]
+            or blockchain(state) != blockchain(metadata)):
         raise TraceError("The selected collection run does not belong to this investigation")
     return state, digest((archive / "SHA256SUMS").read_bytes())
 
@@ -214,6 +216,8 @@ def _source(case, run_id, *, progress=None, prepared=None):
         settings = _settings(metadata)
     state, archive_sha256 = (prepared if prepared is not None else
                              _archive_source(case, run_id, metadata, progress=progress))
+    if blockchain(state) != blockchain(metadata):
+        raise TraceError("The selected collection network does not match this investigation")
     state["labels"] = apply_service_labels(state["labels"], controls)
     state["service_controls"] = controls
     counts = apply_saved_counts(case, state)
@@ -225,6 +229,7 @@ def _source(case, run_id, *, progress=None, prepared=None):
 
 
 def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_unspendable=False,
+           include_attributed_stops=False,
            include_context=False, transaction_io="complete", attribution_hop_limits="ignore",
            connection_scope="all_saved", pegout_lbtc_limit=None, hop_basis="configured"):
     from .connections import validate_hops, validate_connection_scope
@@ -234,22 +239,23 @@ def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_un
     name = reference_name(state) if hop_basis == "configured" else ""
     basis = {"hop_basis": hop_basis} if hop_basis == "original_seeds" else {}
     if not isinstance(goal, str) or goal not in GOALS:
-        raise TraceError("Choose the full investigation, starter connections, or peg-out paths plot")
+        raise TraceError("Choose the full investigation, starter connections, or endpoint paths plot")
     if goal != "connections" and connection_scope not in (None, "all_saved"):
         raise TraceError("Connection scope applies only to Starter connections")
-    if type(include_unspent) is not bool or type(include_unspendable) is not bool:
+    if any(type(value) is not bool for value in (include_unspent, include_unspendable, include_attributed_stops)):
         raise TraceError("Additional endpoint options must be true or false")
-    if goal != "pegouts" and (include_unspent or include_unspendable):
-        raise TraceError("Additional endpoint options apply only to peg-out paths plots")
+    if goal != "pegouts" and (include_unspent or include_unspendable or include_attributed_stops):
+        raise TraceError("Additional endpoint options apply only to endpoint paths plots")
     if type(include_context) is not bool:
         raise TraceError("Include context addresses must be true or false")
     if goal != "pegouts" and include_context:
-        raise TraceError("Include context addresses applies only to peg-out paths plots")
+        raise TraceError("Include context addresses applies only to endpoint paths plots")
     if goal != "pegouts" and pegout_lbtc_limit is not None:
         raise TraceError("A cumulative L-BTC limit applies only to peg-out paths plots")
     if goal == "pegouts":
         return validate_query(seeds=state["seeds"], min_hops=min_hops, max_hops=max_hops,
                               include_unspent=include_unspent, include_unspendable=include_unspendable,
+                              include_attributed_stops=include_attributed_stops, blockchain=blockchain(state),
                               include_context=include_context, hop_reference_name=name, hop_basis=hop_basis,
                               transaction_io=transaction_io, attribution_hop_limits=attribution_hop_limits,
                               pegout_lbtc_limit=pegout_lbtc_limit)
@@ -398,6 +404,7 @@ def _summary(graph, preview_id, *, reviewable=True, reason=None):
 
 def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=None, *, include_unspent=False,
                  include_unspendable=False, include_context=False, open_browser=False, progress=None,
+                 include_attributed_stops=False,
                  layout_mode="fresh", board_record_id=None, token=None, transport=http,
                  interval=.02, workers=4, layout_settings=None, data_source="investigation", dataset_id=None,
                  connection_scope="all_saved", pegout_lbtc_limit=None, hop_basis="configured",
@@ -433,10 +440,11 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=None, *, incl
         from .shared_projection import materialize_shared_source
         with _locked(case):
             metadata = read_case(case)
-        preliminary = {"seeds": metadata.get("seeds", []),
+        preliminary = {"seeds": metadata.get("seeds", []), "blockchain": blockchain(metadata),
                        "hop_reference_name": metadata.get("run_defaults", {}).get("hop_reference_name", "")}
         query = _query(goal, preliminary, min_hops, max_hops, include_unspent=include_unspent,
                        include_unspendable=include_unspendable, include_context=include_context,
+                       include_attributed_stops=include_attributed_stops,
                        connection_scope=connection_scope, pegout_lbtc_limit=pegout_lbtc_limit, hop_basis=hop_basis)
         bound = query.get("max_hops")
         scope = query.get("connection_scope") if goal == "connections" else None
@@ -465,6 +473,7 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=None, *, incl
                   "address_tx_counts": deepcopy(state["address_tx_counts"])}
         query = _query(goal, state, min_hops, max_hops, include_unspent=include_unspent,
                        include_unspendable=include_unspendable, include_context=include_context,
+                       include_attributed_stops=include_attributed_stops,
                        connection_scope=connection_scope, pegout_lbtc_limit=pegout_lbtc_limit, hop_basis=hop_basis)
         settings = _effective_settings(settings, goal, query)
         with timings.measure("build_graph"):
@@ -506,7 +515,7 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=None, *, incl
             len(edge["details"]["context_summary"]["member_edge_ids"]) - 1
             for edge in summaries(graph))
         report = {"schema_version": 1, "case_id": state["case_id"], "run_id": state["run_id"],
-                  "goal": goal, "query": query, "seeds": list(state["seeds"]),
+                  "goal": goal, "query": query, "seeds": list(state["seeds"]), "blockchain": blockchain(state),
                   "created_at": now(), **coverage, **fingerprints, **board_fields,
                   "input_snapshot_version": 1, "input_snapshot_at": inputs["captured_at"],
                   "inputs_sha256": digest(canonical(inputs)),
@@ -531,7 +540,8 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=None, *, incl
         elif goal == "pegouts":
             from .pegout_csv import pegout_lbtc_summary
             report.update(match_count=graph["pegouts"]["match_count"], status=graph["pegouts"]["status"])
-            report["pegout_lbtc_summary"] = pegout_lbtc_summary(graph, state)
+            if blockchain(state) == "liquid":
+                report["pegout_lbtc_summary"] = pegout_lbtc_summary(graph, state)
             report["csv_export_version"] = 1
             for key in ("endpoint_count", "endpoint_counts", "context_edge_count", "pegout_limit_summary"):
                 if key in graph["pegouts"]:
@@ -602,6 +612,7 @@ def _snapshot(case, preview_id, *, with_inputs=False):
     if (report.get("schema_version") != 1 or not isinstance(report.get("goal"), str)
             or report["goal"] not in GOALS or not isinstance(report.get("query"), dict)
             or report.get("case_id") != read_case(case)["case_id"]
+            or blockchain(graph) != blockchain(report)
             or graph.get("namespace", {}).get("case_id") != report.get("case_id")
             or report.get("run_id") != preview_id[:16] or graph.get("run_id") != report.get("run_id")
             or plan.get("run_id") != graph["run_id"] or read_json(directory / "plot.json") != report
@@ -691,13 +702,14 @@ def _review_source(case, graph, source_cache=None, inputs=None):
         if source_cache is not None:
             # Several goals commonly share one large archive. Verify its bytes
             # once per listing, retaining only the seed/source identity here.
-            state = {key: state[key] for key in ("seeds", "source", "hop_reference_name", "collection_source") if key in state}
+            state = {key: state[key] for key in ("seeds", "source", "hop_reference_name", "collection_source", "blockchain") if key in state}
             source_cache[cache_key] = state, fingerprints
     query = report.get("query", {})
     expected = _query(report["goal"], state, query.get("min_hops", 0),
                       query.get("max_hops", None if report["goal"] == "full" else 10),
                       include_unspent=query.get("include_unspent", False),
                       include_unspendable=query.get("include_unspendable", False),
+                      include_attributed_stops=query.get("include_attributed_stops", False),
                       include_context=query.get("include_context", False),
                       transaction_io=query.get("transaction_io"),
                       attribution_hop_limits=query.get("attribution_hop_limits"),
@@ -708,7 +720,8 @@ def _review_source(case, graph, source_cache=None, inputs=None):
         from .export import PRESENTATION_VERSION
         if settings["presentation_version"] != PRESENTATION_VERSION:
             raise TraceError("Saved layout uses a different presentation version; regenerate the plot")
-    if (any(report.get(key) != value for key, value in fingerprints.items()
+    if (blockchain(graph) != blockchain(state) or blockchain(report) != blockchain(state)
+            or any(report.get(key) != value for key, value in fingerprints.items()
             if settings is None or key != "settings_sha256")
             or query != expected or graph["namespace"].get("source") != state["source"]
             or ("seeds" in report and canonical(report["seeds"]) != canonical(state["seeds"]))

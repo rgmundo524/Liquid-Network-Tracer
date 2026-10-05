@@ -13,7 +13,7 @@ from .common import HEX64, StopRun, TraceError, now
 HISTORY_PAGE_SIZE = 25
 DEFAULT_HISTORY_PAGES = 5
 _ADDRESS = re.compile(r"[A-Za-z0-9]{14,200}|SYNTHETIC-[A-Za-z0-9_-]{1,180}")
-_BECH32_PREFIXES = ("ex1", "tex1", "ert1", "lq1", "tlq1", "el1")
+_BECH32_PREFIXES = ("ex1", "tex1", "ert1", "lq1", "tlq1", "el1", "bc1", "tb1", "bcrt1")
 _STOP_REASONS = {"request_limit", "time_limit", "server_retry_later", "interrupted"}
 
 
@@ -25,10 +25,10 @@ def validate_address(value):
     SYNTHETIC prefix supports offline fixtures, never an ownership attribution.
     """
     if not isinstance(value, str):
-        raise TraceError("Enter one Liquid address")
+        raise TraceError("Enter one blockchain address")
     value = value.strip()
     if not _ADDRESS.fullmatch(value):
-        raise TraceError("Enter one Liquid address without spaces, a URL, or a transaction output suffix")
+        raise TraceError("Enter one blockchain address without spaces, a URL, or a transaction output suffix")
     if value.isupper() and value.lower().startswith(_BECH32_PREFIXES):
         value = value.lower()
     return value
@@ -119,7 +119,9 @@ def inspect_address(api, address, max_pages=DEFAULT_HISTORY_PAGES):
         "unspent_output_count": combined_unspent if counts_consistent else None,
         "output_counts_consistent": counts_consistent,
         "count_basis": "funded_txo_count minus spent_txo_count; combined count includes mempool delta",
-        "output_scope": "All indexed outputs/assets at this address, not an L-BTC balance or only investigation UTXOs.",
+        "output_scope": ("All indexed outputs at this address, not a BTC balance or only investigation UTXOs."
+                         if getattr(api, "blockchain", "liquid") == "bitcoin" else
+                         "All indexed outputs/assets at this address, not an L-BTC balance or only investigation UTXOs."),
         "history_pages": 0, "max_pages": max_pages, "history_transactions_seen": 0,
         "history_complete": False, "history_stop_reason": "page_limit",
         "first_confirmed_activity": None, "oldest_observed_confirmed_activity": None,

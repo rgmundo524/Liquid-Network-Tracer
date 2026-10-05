@@ -15,6 +15,7 @@ import re
 import sqlite3
 import tempfile
 
+from .networks import blockchain
 from .common import HEX64, TraceError, canonical, digest, now, output_kind, parse_outpoint, read_json, save_json
 from .investigations import read_case
 from .trace import TERMINAL, validate_transaction
@@ -162,7 +163,8 @@ class _Evidence:
 def _verify(case, archive, state, metadata, evidence):
     from .api import Limits
     from .cli import verify_export
-    if (state.get("schema_version") != 1 or state.get("case_id") != metadata["case_id"]
+    if (state.get("schema_version") != 1 or blockchain(state) != blockchain(metadata)
+            or state.get("case_id") != metadata["case_id"]
             or state.get("run_id") != archive.name or not _finished(state)
             or state.get("collection_source") or state.get("pegout_query")
             or state.get("address_mode") not in {"merged", "outpoint_occurrences"}
@@ -251,7 +253,7 @@ def _verify(case, archive, state, metadata, evidence):
                 or not isinstance(output.get("status"), str) or output["status"] == "pending"):
             raise TraceError("Collection output is incomplete or disagrees with its transaction")
         status = output["status"]
-        kind = output_kind(transactions[txid]["data"]["vout"][index])
+        kind = output_kind(transactions[txid]["data"]["vout"][index], blockchain(state))
         if status in TERMINAL - {"spent"} and status != kind:
             raise TraceError("Collection terminal output disagrees with saved transaction")
         if (status == "spent") != (key in links):

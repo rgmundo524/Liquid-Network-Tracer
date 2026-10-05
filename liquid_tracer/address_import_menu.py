@@ -21,7 +21,7 @@ def import_screen(base, button, case):
             with VerticalScroll(classes="form-panel"):
                 yield Label("Import address attributions", classes="title")
                 yield Static("Import before the first run or between runs. No Blockstream calls or Miro changes. "
-                             "A plain list uses suspected confidence with tracing stops enabled. "
+                             "A plain list uses suspected confidence and continues tracing; set stop_tracing=true for a boundary. "
                              "CSV/JSON can specify names, sources, notes, confidence and independent stop flags. "
                              "CSV columns can be in any order; unrelated columns such as Duplicate count are ignored. "
                              "Supported fields still require valid values, and JSON rejects unsupported fields.", markup=False)

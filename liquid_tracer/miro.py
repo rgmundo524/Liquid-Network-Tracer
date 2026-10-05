@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .api import http
 from .common import TraceError, canonical, digest, now
+from .networks import blockchain
 from .export import edge_color
 from . import legend_miro, miro_legend_updates
 from .edge_labels import FONT_SIZE as CAPTION_FONT_SIZE, caption_text
@@ -90,7 +91,7 @@ def make_plan(graph):
             connector["context_evidence"] = context_group_miro.evidence(edge)
         connectors.append(connector)
     plan = {"schema_version": 2 if incremental else 1, "run_id": graph["run_id"], "shapes": shapes, "connectors": connectors}
-    for key in ("layout", "fee_items", "include_fees", "connector_attachment", "graph_options", "address_convergences", "board_layout"):
+    for key in ("blockchain", "layout", "fee_items", "include_fees", "connector_attachment", "graph_options", "address_convergences", "board_layout"):
         if key in graph:
             plan[key] = copy.deepcopy(graph[key])
     if "fee_items" in graph:
@@ -119,6 +120,7 @@ def make_plan(graph):
 def validate_plan(plan):
     if not isinstance(plan, dict) or plan.get("schema_version") not in (1, 2):
         raise TraceError("Unsupported Miro plan schema; regenerate the export")
+    blockchain(plan)
     copy = {k: v for k, v in plan.items() if k != "sha256"}
     if digest(canonical(copy)) != plan.get("sha256"):
         raise TraceError("Miro plan checksum mismatch; regenerate the export")
@@ -165,6 +167,8 @@ def validate_plan(plan):
     plot_miro.validate(plan)
     board_layout.validate(plan)
     if "activity_frames" in plan:
+        if blockchain(plan["activity_frames"]) != blockchain(plan):
+            raise TraceError("Miro frame blockchain disagrees with the graph; regenerate the export")
         seeds = plan.get("run", {}).get("seeds")
         starts = ({"tx:" + seed.rpartition(":")[0] for seed in seeds
                    if isinstance(seed, str) and ":" in seed} & shape_keys) if isinstance(seeds, list) else None

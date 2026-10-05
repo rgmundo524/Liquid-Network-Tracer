@@ -16,7 +16,7 @@ MAX_CSV_BYTES = 64 * 1024 * 1024
 PROVENANCE_FIELDS = (
     "Investigation ID", "Investigation Name", "Run ID", "Plot ID", "Plot Created At",
     "Minimum Hops", "Maximum Hops", "Include Unspent", "Include Unspendable",
-    "Data Source", "Shared Dataset ID", "Shared Run ID",
+    "Data Source", "Shared Dataset ID", "Shared Run ID", "Include Attributed Stops",
 )
 FIELDS = (*ENDPOINT_TABLE_FIELDS, *PROVENANCE_FIELDS)
 
@@ -108,8 +108,8 @@ def _pin_shared(case, metadata, source):
             candidates.append((report["created_at"], directory.name, run))
     if not candidates:
         if different_seeds:
-            return info, None, "Saved peg-out previews use different starting outputs. Generate a preview for the current starting outputs before combining endpoints."
-        return info, None, "No completed Path to peg-outs plot exists for the selected shared snapshot."
+            return info, None, "Saved endpoint previews use different starting outputs. Generate a preview for the current starting outputs before combining endpoints."
+        return info, None, "No completed Paths to endpoints plot exists for the selected shared snapshot."
     _, preview_id, run = max(candidates)
     archive = _ordinary(case / "runs" / run)
     if not archive.is_dir() or not _ordinary(archive / "SHA256SUMS").is_file():
@@ -155,7 +155,7 @@ def _pin(case, identity, requested_run, source=None):
             if report["goal"] == "pegouts":
                 candidates.append((report["created_at"], directory.name))
         if not candidates:
-            return info, None, "No completed Path to peg-outs plot exists for the selected run."
+            return info, None, "No completed Paths to endpoints plot exists for the selected run."
         _, preview_id = max(candidates)
         return info, preview_id, None
 
@@ -206,6 +206,7 @@ def build_combined_endpoint_csv(investigations, resolve_case):
                 "Maximum Hops": query["max_hops"],
                 "Include Unspent": str(query.get("include_unspent", False)).lower(),
                 "Include Unspendable": str(query.get("include_unspendable", False)).lower(),
+                "Include Attributed Stops": str(query.get("include_attributed_stops", False)).lower(),
                 "Data Source": "shared" if source else "investigation",
                 "Shared Dataset ID": source["dataset_id"] if source else "",
                 "Shared Run ID": source["run_id"] if source else "",

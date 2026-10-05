@@ -4,6 +4,7 @@ Priority belongs to an exact displayed outpoint, never to an address label,
 ownership attribution, or the order of the transaction's evidence records.
 """
 
+from .networks import blockchain, is_primary
 from collections import defaultdict
 
 
@@ -39,7 +40,7 @@ def input_orders(graph):
             vin = edge.get("details", {}).get("vin", {})
             source = nodes[edge["source"]]
             continuing = (source["kind"] == "address"
-                          and source.get("details", {}).get("network", "liquid") == "liquid"
+                          and is_primary(source, graph)
                           and not vin.get("is_pegin") and not vin.get("is_coinbase")
                           and any(parent["id"] != key and parent["column"] < nodes[key]["column"]
                                   for parent in outputs.get((edge.get("outpoint"), edge["source"]), [])))

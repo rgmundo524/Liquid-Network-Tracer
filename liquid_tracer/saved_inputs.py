@@ -3,7 +3,7 @@
 from .common import TraceError, canonical, output_kind
 
 
-def saved_input_output(transactions, vin):
+def saved_input_output(transactions, vin, *, blockchain="liquid"):
     """Keep raw transaction payloads intact while resolving missing prevout facts.
 
     Only the full funding transaction ID and output index can supply facts.
@@ -23,7 +23,7 @@ def saved_input_output(transactions, vin):
     if type(index) is not int or not 0 <= index < len(funding):
         raise TraceError("Input references an invalid saved funding output")
     output = funding[index]
-    if output_kind(output) != "spendable":
+    if output_kind(output, blockchain) != "spendable":
         raise TraceError("Input spends a non-spendable saved output")
     fields = ("scriptpubkey", "scriptpubkey_asm", "scriptpubkey_type", "scriptpubkey_address",
               "value", "valuecommitment", "asset", "assetcommitment", "noncecommitment", "pegout")

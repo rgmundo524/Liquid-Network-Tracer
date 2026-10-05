@@ -10,6 +10,7 @@ import csv
 
 from .common import HEX64, LBTC, TraceError, canonical, output_kind
 from .attribution_presentation import display_name
+from .networks import blockchain as normalize_blockchain, is_primary
 
 TRANSACTION_CSV_FIELDS = (
     "Block", "Time", "Transaction Label", "Transaction Hash", "Address Label",
@@ -19,7 +20,7 @@ TRANSACTION_CSV_FIELDS = (
 VALUE_NOTICE = (
     "Asset Value and PegOut Value are exact explicit base units (satoshis for BTC/L-BTC), "
     "not inferred whole-token amounts. Asset is L-BTC for its recognized explicit asset ID, "
-    "BTC for a Bitcoin peg-in input, or the full explicit Liquid asset ID otherwise. "
+    "BTC for Bitcoin outputs and peg-in inputs, or the full explicit Liquid asset ID otherwise. "
     "Confidential or missing asset identities are blank, never inferred from an amount, "
     "address label or graph color. Do not sum different assets. Blank amounts are unknown, "
     "not zero. PegOut Value repeats the peg-out request output amount; it is not a second "
@@ -36,9 +37,9 @@ def _amount(output):
     return value
 
 
-def _asset(output, *, pegin=False):
+def _asset(output, *, pegin=False, blockchain="liquid"):
     """Identify this occurrence's asset without consulting labels or a registry."""
-    if pegin:
+    if pegin or normalize_blockchain(blockchain) == "bitcoin":
         # This occurrence is the Bitcoin prevout consumed by a Liquid peg-in,
         # not an L-BTC output minted in the receiving transaction.
         return "BTC"
@@ -74,7 +75,7 @@ def _text(value):
     return value
 
 
-def _context_endpoints(nodes, edges):
+def _context_endpoints(nodes, edges, *, blockchain="liquid"):
     """Resolve summary inputs to their original address evidence, never a union.
 
     A summary is only a display replacement. Its complete membership and input
@@ -102,7 +103,7 @@ def _context_endpoints(nodes, edges):
             identity, info = member["id"], member["details"]
             if (not isinstance(identity, str) or not identity or identity in nodes
                     or identity in members or identity in used or member.get("kind") != "address"
-                    or info.get("network") != "liquid"
+                    or not is_primary(member, blockchain)
                     or not isinstance(info.get("address"), str) or not info["address"]):
                 raise TraceError("Transaction CSV context summary contains an invalid address member")
             members[identity] = member
@@ -137,7 +138,8 @@ def transaction_csv_rows(graph, state):
     No node styles, positions, Miro IDs, legends or synthetic ownership claims.
     """
     try:
-        if (graph.get("run_id") != state.get("run_id")
+        chain = normalize_blockchain(state)
+        if (normalize_blockchain(graph) != chain or graph.get("run_id") != state.get("run_id")
                 or graph.get("namespace", {}).get("case_id") != state.get("case_id")
                 or graph.get("namespace", {}).get("source") != state.get("source")):
             raise TraceError("Transaction CSV graph does not match the saved run, case or source")
@@ -156,7 +158,7 @@ def transaction_csv_rows(graph, state):
             if key != "tx:" + txid or canonical(transaction) != canonical(archived):
                 raise TraceError("Transaction CSV graph disagrees with saved transaction evidence")
             transactions[txid] = archived
-        context_endpoints = _context_endpoints(nodes, graph["edges"])
+        context_endpoints = _context_endpoints(nodes, graph["edges"], blockchain=chain)
         endpoint_nodes = {**nodes, **{key: node for members in context_endpoints.values()
                                       for key, node in members.items()}}
         labels = state.get("labels", [])
@@ -212,7 +214,7 @@ def transaction_csv_rows(graph, state):
                 output = {} if coinbase else (vin.get("prevout") or {})
                 if not coinbase and graph.get("graph_options", {}).get("resolve_saved_inputs") is True:
                     from .saved_inputs import saved_input_output
-                    output = saved_input_output(input_transactions, vin)
+                    output = saved_input_output(input_transactions, vin, blockchain=chain)
                 outpoint = f"{vin.get('txid', txid)}:{vin.get('vout', io_index)}"
                 if coinbase:
                     flags.append("COINBASE")
@@ -226,13 +228,13 @@ def transaction_csv_rows(graph, state):
                 raise TraceError("Transaction CSV arrow disagrees with its exact UTXO reference")
             if other["kind"] == "address":
                 details = other["details"]
-                if (details.get("network") != ("bitcoin" if pegin else "liquid")
+                if (details.get("network") != ("bitcoin" if pegin else chain)
                         or details.get("address") != output.get("scriptpubkey_address")
                         or outpoint not in endpoint_outpoints[other["id"]]):
                     raise TraceError("Transaction CSV address endpoint disagrees with its saved UTXO")
             elif other["id"] != (f"coinbase:{txid}:{io_index}" if coinbase else "event:" + outpoint):
                 raise TraceError("Transaction CSV event endpoint disagrees with its saved I/O")
-            kind = output_kind(output)
+            kind = output_kind(output, "bitcoin" if pegin else chain)
             pegout = direction == "out" and kind == "pegout"
             address = (output["pegout"].get("scriptpubkey_address") if pegout
                        else output.get("scriptpubkey_address")) or ""
@@ -276,7 +278,7 @@ def transaction_csv_rows(graph, state):
             row = dict(zip(TRANSACTION_CSV_FIELDS, (
                 block, timestamp, f"Starting TX {starts[tx_key]}" if tx_key in starts else "", txid,
                 "; ".join(names), "; ".join(flags), address,
-                amount, _asset(output, pegin=pegin), amount if pegout else "", direction.upper(), io_index,
+                amount, "" if coinbase else _asset(output, pegin=pegin, blockchain=chain), amount if pegout else "", direction.upper(), io_index,
             )))
             rows.append(row)
         rows.sort(key=lambda row: (row["Time"] == "", row["Time"],

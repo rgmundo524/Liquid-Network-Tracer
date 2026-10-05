@@ -4,6 +4,7 @@ Canonical edges remain the evidence and CSV inventory. Only a temporary display
 projection replaces each group's inputs with one connector; its membership is
 rederived before use. Persisted flags cannot impersonate a runtime projection.
 """
+from .networks import blockchain, is_primary
 from collections import defaultdict
 from copy import deepcopy
 
@@ -58,7 +59,7 @@ def _derive_groups(graph):
             incident[edge["source"]].append(edge)
             incident[edge["target"]].append(edge)
         visible_addresses = {node.get("details", {}).get("address") for node in nodes.values()
-                             if node["kind"] == "address" and node.get("details", {}).get("network") == "liquid"}
+                             if node["kind"] == "address" and is_primary(node, graph)}
         designated = {f"{txid}:{item['vout']}"
                       for txid, item in graph.get("service_controls", {}).get("change_outputs", {}).items()
                       if isinstance(item, dict) and type(item.get("vout")) is int}
@@ -80,7 +81,7 @@ def _derive_groups(graph):
                 info = member.get("details", {})
                 address = info.get("address")
                 key = member["id"]
-                if (member["kind"] != "address" or info.get("network") != "liquid"
+                if (member["kind"] != "address" or not is_primary(member, graph)
                         or not isinstance(address, str) or not address or _protected(member)
                         or not isinstance(key, str) or not key or key in members or key in nodes
                         or key in seen_members or address in visible_addresses or address in seen_addresses
@@ -157,7 +158,7 @@ def _derive_parallel(graph):
             info = source.get("details", {})
             address = info.get("address")
             if (source["kind"] != "address" or target["kind"] != "transaction"
-                    or info.get("network") != "liquid" or not isinstance(address, str) or not address
+                    or not is_primary(source, graph) or not isinstance(address, str) or not address
                     or not _input_edge(edge, source["id"], target["id"])
                     or edge.get("details", {}).get("validated_trace_link") is not None
                     or edge.get("original_source") is not None

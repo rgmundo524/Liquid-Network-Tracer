@@ -1,3 +1,4 @@
+from .networks import blockchain
 """Starter-to-starter paths, derived only from verified saved UTXO spends.
 
 The directed transaction DAG is the search graph. Address equality, co-inputs,
@@ -98,7 +99,7 @@ def _saved_connection_evidence(state, *, copy_state=True):
                 key = f"{parent}:{output_index}"
                 if key in actual_spends:
                     raise TraceError("Saved transactions contain conflicting spends of one output")
-                saved_input_output(transactions, vin)
+                saved_input_output(transactions, vin, blockchain=blockchain(state))
                 actual_spends[key] = (txid, index)
         for key, link in links.items():
             parent, index = parse_outpoint(key)
@@ -179,7 +180,7 @@ def _connecting_outpoints(state, max_hops=10, *, connection_scope=None):
                     or actual["vout"] != index or parent == child):
                 raise TraceError("Connection spend link disagrees with its saved transaction input")
             output = funding["vout"][index]
-            if output_kind(output) != "spendable":
+            if output_kind(output, blockchain(state)) != "spendable":
                 raise TraceError("Connection spend link references a non-spendable output")
             # Validate topology even for a link later excluded by a stop rule.
             verified.append((parent, child, key, vin))
@@ -299,7 +300,7 @@ def _connecting_outpoints(state, max_hops=10, *, connection_scope=None):
                 for parent in topology:
                     if parent in arrivals:
                         for index, output in enumerate(transactions[parent]["data"]["vout"]):
-                            kind = output_kind(output)
+                            kind = output_kind(output, blockchain(state))
                             if kind != "fee":
                                 depths[f"{parent}:{index}"] = (0 if kind == "spendable" and
                                     output.get("scriptpubkey_address") in addresses else arrivals[parent])
@@ -308,15 +309,15 @@ def _connecting_outpoints(state, max_hops=10, *, connection_scope=None):
                             arrivals[child] = min(arrivals.get(child, float("inf")), depths[key] + 1)
                 retained_depths = kept | {f"{target}:{index}" for target in targets
                     for index, output in enumerate(transactions[target]["data"]["vout"])
-                    if output_kind(output) != "fee"}
+                    if output_kind(output, blockchain(state)) != "fee"}
                 for key in retained_depths:
                     output_depths[key].add(depths[key])
                 for target in targets:
-                    if not any(output_kind(output) != "fee" for output in transactions[target]["data"]["vout"]):
+                    if not any(output_kind(output, blockchain(state)) != "fee" for output in transactions[target]["data"]["vout"]):
                         terminal_depths[target].add(arrivals[target])
                 pairs.extend({"source": root, "target": target, "shortest_hops": (min(
                     (depths[f"{target}:{index}"] for index, output in enumerate(transactions[target]["data"]["vout"])
-                     if output_kind(output) != "fee"), default=arrivals[target])
+                     if output_kind(output, blockchain(state)) != "fee"), default=arrivals[target])
                     if all_saved else downstream[target])} for target in targets)
             else:
                 pairs.extend({"source": root, "target": target, "shortest_hops": downstream[target]} for target in targets)

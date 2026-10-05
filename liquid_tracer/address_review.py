@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .address_activity import inspect_address, validate_address
+from .networks import blockchain, default_api
 from .api import ENTERPRISE, Esplora, Limits
 from .common import TraceError, canonical, digest, read_json, save_json
 from .investigations import read_case
@@ -179,7 +180,8 @@ def inspect_case_address(case, address, *, run_id="latest", max_pages=5, max_req
             from .cli import verify_export
             verify_export(archive)
             state = read_json(archive / "trace.json")
-            if state.get("case_id") != metadata["case_id"] or state.get("run_id") != selected:
+            if (state.get("case_id") != metadata["case_id"] or state.get("run_id") != selected
+                    or blockchain(state) != blockchain(metadata)):
                 raise TraceError("Saved trace does not match this investigation")
             source = state["source"]
         fixture = metadata.get("fixture")
@@ -187,7 +189,7 @@ def inspect_case_address(case, address, *, run_id="latest", max_pages=5, max_req
             raise TraceError("The saved synthetic fixture is unavailable")
         if source and source.startswith("fixture://") and not fixture:
             raise TraceError("The original synthetic fixture is required for this address review")
-        base = source if source and not source.startswith("fixture://") else ENTERPRISE
+        base = source if source and not source.startswith("fixture://") else default_api(metadata)
         auth = "blockstream" if urlsplit(base).hostname == "enterprise.blockstream.info" else "none"
         limits = Limits(max_hops=0, max_transactions=1, max_outpoints=1,
                         max_requests=max_requests, max_seconds=max_seconds)
@@ -196,7 +198,7 @@ def inspect_case_address(case, address, *, run_id="latest", max_pages=5, max_req
         try:
             options = {"transport": transport} if transport is not None else {}
             api = Esplora(store, "address-" + inspection_id, limits, base=base, auth=auth,
-                          fixture=fixture, tx_cache_seconds=0, workers=1, **options)
+                          fixture=fixture, blockchain=blockchain(metadata), tx_cache_seconds=0, workers=1, **options)
             if source and api.base != source:
                 raise TraceError("Address review source does not match the investigation's saved source")
             # Validate the existing index before spending any API requests.

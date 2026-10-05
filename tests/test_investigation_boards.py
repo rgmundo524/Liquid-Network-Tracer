@@ -161,7 +161,7 @@ class InvestigationBoardTests(unittest.TestCase):
     def test_incompatible_pegout_address_modes_preserve_board_and_registry(self):
         for old, new, message in (
                 ("outpoint_occurrences", "merged", "Generate & create board"),
-                ("merged", "outpoint_occurrences", "Select a regenerated Paths to peg-outs layout")):
+                ("merged", "outpoint_occurrences", "Select a regenerated Paths to endpoints layout")):
             with self.subTest(old=old, new=new):
                 board = link_board(self.case, "pegouts", old, "pegout-" + old)
                 remote = AnnotationMiro()

@@ -5,6 +5,7 @@ address assessments. A connecting transaction must actually have both a named
 input and a named output; no address-level traversal invents a value flow.
 """
 
+from .networks import blockchain, is_primary
 from collections import defaultdict
 from statistics import median
 from .hub_layout import hub_layout_view
@@ -22,7 +23,7 @@ def selected_members(graph):
     selected = set()
     for node in graph["nodes"]:
         details = node.get("details", {})
-        if node["kind"] != "address" or details.get("network", "liquid") != "liquid":
+        if node["kind"] != "address" or not is_primary(node, graph):
             continue
         for assessment in details.get("address_attributions", []):
             value = assessment.get("entity") or assessment.get("name")

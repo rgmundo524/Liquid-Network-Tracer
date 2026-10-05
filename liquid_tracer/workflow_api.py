@@ -59,6 +59,12 @@ def public_starter_summary(value):
 
 def public_plot(value):
     result = _fields(value, PLOT_FIELDS)
+    if "blockchain" in value:
+        from .networks import blockchain
+        try:
+            result["blockchain"] = blockchain(value)
+        except TraceError:
+            pass
     # Lightweight reports are deliberately unverified. Invalid optional text
     # must not reach string-only UI operations while browsing an investigation.
     for key in PLOT_TEXT_FIELDS:
@@ -151,7 +157,7 @@ def public_plot(value):
         query = value.get("query")
         if isinstance(query, dict):
             try:
-                normalized = validate_query(**query)
+                normalized = validate_query(**query, blockchain=value.get("blockchain", "liquid"))
                 if normalized == query:
                     result["query"] = normalized
             except (TraceError, TypeError):
@@ -169,7 +175,8 @@ def public_plot(value):
             except TraceError:
                 pass
         counts = value.get("endpoint_counts")
-        if (isinstance(counts, dict) and set(counts) == {"pegout", "unspent", "unspendable"}
+        if (isinstance(counts, dict) and set(counts) in ({"pegout", "unspent", "unspendable"},
+                                                     {"pegout", "unspent", "unspendable", "attributed_stop"})
                 and all(type(count) is int and count >= 0 for count in counts.values())
                 and type(value.get("endpoint_count")) is int
                 and value["endpoint_count"] == sum(counts.values())):
@@ -509,7 +516,7 @@ def workflow_action(server, case, metadata, body):
         required = {"action", "goal", "run_id"}
         if body.get("goal") != "connections":
             required.update({"min_hops", "max_hops"})
-        endpoint_options = {"include_unspent", "include_unspendable"}
+        endpoint_options = {"include_unspent", "include_unspendable", "include_attributed_stops"}
         allowed = {"include_context", "layout_mode", "board_record_id", "layout_settings", "min_hops", "max_hops",
                    "data_source", "dataset_id", "connection_scope", "pegout_lbtc_limit", "hop_basis"}
         if action == "plot-sync":
@@ -517,7 +524,7 @@ def workflow_action(server, case, metadata, body):
         if not required <= set(body) or set(body) - required - endpoint_options - allowed:
             raise RequestError("Choose a saved collection, plotting goal, and hop range.")
         if not isinstance(body.get("goal"), str) or body["goal"] not in GOALS:
-            raise RequestError("Choose full trace, starter connections, or peg-out paths.")
+            raise RequestError("Choose full trace, starter connections, or paths to endpoints.")
         if body.get("hop_basis", "configured") not in ("configured", "original_seeds"):
             raise RequestError("Choose original starting transactions or the configured hop reference.")
         scope = body.get("connection_scope", "all_saved")
@@ -545,14 +552,16 @@ def workflow_action(server, case, metadata, body):
         if any(type(body.get(key, False)) is not bool for key in endpoint_options):
             raise RequestError("Additional endpoint options must be true or false.")
         if body["goal"] != "pegouts" and any(body.get(key, False) for key in endpoint_options):
-            raise RequestError("Additional endpoint options apply only to peg-out paths plots.")
+            raise RequestError("Additional endpoint options apply only to paths to endpoints plots.")
         if type(body.get("include_context", False)) is not bool:
             raise RequestError("Include context addresses must be true or false.")
         if body["goal"] != "pegouts" and body.get("include_context", False):
-            raise RequestError("Include context addresses applies only to peg-out paths plots.")
+            raise RequestError("Include context addresses applies only to paths to endpoints plots.")
         pegout_limit = None
         if "pegout_lbtc_limit" in body:
             from .pegout_limit import normalize_pegout_lbtc_limit
+            if metadata.get("blockchain", "liquid") != "liquid":
+                raise RequestError("Cumulative L-BTC peg-out limits are available only for Liquid investigations.")
             if body["goal"] != "pegouts" or body["pegout_lbtc_limit"] is None:
                 raise RequestError("Choose a cumulative L-BTC amount for peg-out paths only.")
             pegout_limit = normalize_pegout_lbtc_limit(body["pegout_lbtc_limit"])
@@ -596,7 +605,7 @@ def workflow_action(server, case, metadata, body):
                 raise RequestError("Provide the complete layout settings for this plot.")
             snapshot = validate_layout_settings({**supplied, "presentation_version": PRESENTATION_VERSION})
             arguments.extend(["--layout-settings-json", json.dumps(snapshot, separators=(",", ":"))])
-        for key in ("include_unspent", "include_unspendable", "include_context"):
+        for key in ("include_unspent", "include_unspendable", "include_attributed_stops", "include_context"):
             if body.get(key):
                 arguments.append("--" + key.replace("_", "-"))
         if mode == "update":

@@ -30,11 +30,12 @@ _RULE_FIELDS = {"address", "name", "notes", "confidence", "source", "observed_at
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
-def _root(root):
+def _root(root, blockchain="liquid"):
     path = Path(root).expanduser().absolute()
     if ".." in path.parts or any(part.is_symlink() for part in (path, *path.parents)):
         raise TraceError("Shared attribution paths must not contain symbolic links or parent traversal")
-    return path
+    from .networks import blockchain as network_chain
+    return path / ".bitcoin" if network_chain(blockchain) == "bitcoin" else path
 
 
 @contextmanager
@@ -134,9 +135,9 @@ def _read(descriptor, root):
     return _validate(json.loads(raw.decode("utf-8"), object_pairs_hook=address_import._json_pairs))
 
 
-def load_library(root):
+def load_library(root, *, blockchain="liquid"):
     """Read one atomic version without creating workspace files or directories."""
-    root = _root(root)
+    root = _root(root, blockchain)
     try:
         with _directory(root) as descriptor:
             return _read(descriptor, root)
@@ -146,11 +147,11 @@ def load_library(root):
         raise TraceError("Unable to read the shared attribution library safely") from error
 
 
-def catalog(root, query="", offset=0, limit=100):
+def catalog(root, query="", offset=0, limit=100, *, blockchain="liquid"):
     if (not isinstance(query, str) or len(query) > 512 or type(offset) is not int or offset < 0
             or type(limit) is not int or not 1 <= limit <= 500):
         raise TraceError("Choose a text search and a valid shared attribution page")
-    library = load_library(root)
+    library = load_library(root, blockchain=blockchain)
     needle = query.strip().casefold()
     rows = [rule for address, rule in sorted(library["rules"].items())
             if not needle or needle in " ".join(str(rule[key]) for key in
@@ -159,7 +160,7 @@ def catalog(root, query="", offset=0, limit=100):
             "offset": offset, "limit": limit, "rows": copy.deepcopy(rows[offset:offset + limit]), "notice": NOTICE}
 
 
-def _parse(text, format):
+def _parse(text, format, blockchain="liquid"):
     if not isinstance(text, str):
         raise TraceError("Shared attribution import must be UTF-8 text")
     try:
@@ -221,7 +222,7 @@ def _parse(text, format):
                     ignored[field] += 1
                 ignored_rows += bool(controls)
                 normalized.update(stop_tracing=False, hop_limit=None)
-                rule = address_import._row(normalized)
+                rule = address_import._row(normalized, blockchain=blockchain)
                 existing = accepted.get(rule["address"])
                 if existing:
                     if not address_import._same_assessment(existing["rule"], rule):
@@ -252,9 +253,10 @@ def _plan(root, library, parsed, policy):
             "ignored_controls": parsed["ignored_controls"], "ignored_control_rows": parsed["ignored_control_rows"]}
 
 
-def preview_import(root, text, *, format="auto", policy="keep"):
-    root = _root(root)
-    return _plan(root, load_library(root), _parse(text, format), policy)
+def preview_import(root, text, *, format="auto", policy="keep", blockchain="liquid"):
+    library = load_library(root, blockchain=blockchain)
+    root = _root(root, blockchain)
+    return _plan(root, library, _parse(text, format, blockchain), policy)
 
 
 def _write(descriptor, library):
@@ -277,10 +279,10 @@ def _write(descriptor, library):
             pass
 
 
-def apply_import(root, text, *, approval_sha256, format="auto", policy="keep"):
+def apply_import(root, text, *, approval_sha256, format="auto", policy="keep", blockchain="liquid"):
     if not isinstance(approval_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", approval_sha256):
         raise TraceError("Preview and approve the exact shared attribution import before saving")
-    root, parsed = _root(root), _parse(text, format)
+    root, parsed = _root(root, blockchain), _parse(text, format, blockchain)
     try:
         with _directory(root, create=True) as descriptor:
             lock = os.open(LOCKNAME, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=descriptor)
@@ -316,10 +318,10 @@ def apply_import(root, text, *, approval_sha256, format="auto", policy="keep"):
         raise TraceError("Unable to save the shared attribution library safely") from error
 
 
-def export_library(root):
+def export_library(root, *, blockchain="liquid"):
     """Export import-sized CSV parts; tracing controls are explicitly inactive."""
     from .input_export import _parts, _zip
-    library = load_library(root)
+    library = load_library(root, blockchain=blockchain)
     parts, count = _parts(library, "attributions")
     multiple = len(parts) > 1
     return {"filename": "shared-attributions.zip" if multiple else "shared-attributions.csv",

@@ -7,6 +7,7 @@ This operation never groups a displayed asset-flow continuation or infers common
 ownership. Rebuilding the graph with grouping disabled restores original nodes.
 """
 
+from .networks import blockchain, is_primary
 from collections import defaultdict
 from copy import deepcopy
 
@@ -64,7 +65,7 @@ addresses are required; all must connect only as external inputs to one tx.
     for node in nodes.values():
         details = node.get("details", {})
         address = details.get("address")
-        if (node["kind"] == "address" and details.get("network") == "liquid"
+        if (node["kind"] == "address" and is_primary(node, graph)
                 and isinstance(address, str) and address):
             identities[address].append(node)
 

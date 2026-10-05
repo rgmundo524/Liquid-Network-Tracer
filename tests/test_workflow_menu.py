@@ -79,7 +79,7 @@ class PlotCommandTests(unittest.TestCase):
                                         include_context=True)
         self.assertFalse(live)
         self.assertEqual(arguments[-4:], ["--include-unspent", "--include-unspendable", "--include-context", "--open"])
-        for key in ("include_unspent", "include_unspendable", "include_context"):
+        for key in ("include_unspent", "include_unspendable", "include_attributed_stops", "include_context"):
             for value in (None, 1, "true"):
                 with self.subTest(option=key, value=value), self.assertRaises(TraceError):
                     plot_arguments("case", "pegouts", "run", **{key: value})
@@ -123,6 +123,39 @@ class PlotCommandTests(unittest.TestCase):
             with self.subTest(summary=summary):
                 plot["pegout_limit_summary"] = summary
                 self.assertEqual(_endpoint_summary(plot), "1 peg-outs, L-BTC target 0.00000001")
+
+
+    def test_attributed_endpoint_flag_round_trips_for_preview_and_publication(self):
+        from liquid_tracer.cli import parser
+        for publish in (False, True):
+            arguments, live = plot_arguments("case", "pegouts", "saved-run", publish=publish,
+                name="Endpoints", blockchain="bitcoin", include_unspent=True,
+                include_unspendable=True, include_attributed_stops=True)
+            parsed = parser().parse_args(arguments)
+            self.assertTrue(parsed.include_attributed_stops)
+            self.assertTrue(parsed.include_unspent)
+            self.assertTrue(parsed.include_unspendable)
+            self.assertEqual(live, publish)
+            self.assertEqual(parsed.goal, "pegouts")
+
+    def test_bitcoin_rejects_lbtc_target_without_relabeling_it_as_btc(self):
+        with self.assertRaisesRegex(TraceError, "only for Liquid"):
+            plot_arguments("case", "pegouts", "run", blockchain="bitcoin", pegout_lbtc_limit="60")
+        arguments, _ = plot_arguments("case", "pegouts", "run", pegout_lbtc_limit="60.00000000")
+        self.assertEqual(arguments[-3:], ["--pegout-lbtc-limit", "60", "--open"])
+        for goal in ("full", "connections"):
+            with self.subTest(goal=goal), self.assertRaises(TraceError):
+                plot_arguments("case", goal, "run", pegout_lbtc_limit="60")
+
+    def test_bitcoin_endpoint_summary_never_claims_pegouts_or_lbtc(self):
+        plot = {"goal": "pegouts", "blockchain": "bitcoin", "match_count": 99,
+                "query": {"include_unspent": True, "include_unspendable": True,
+                          "include_attributed_stops": True, "pegout_lbtc_limit": "60"},
+                "endpoint_counts": {"pegout": 99, "unspent": 3, "unspendable": 1, "attributed_stop": 2}}
+        self.assertEqual(_endpoint_summary(plot), "3 unspent UTXOs, 1 unspendable outputs, 2 attributed stops")
+        plot.pop("blockchain")
+        self.assertEqual(_endpoint_summary(plot, "bitcoin"),
+                         "3 unspent UTXOs, 1 unspendable outputs, 2 attributed stops")
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "Install the optional tui extra")
@@ -197,6 +230,48 @@ class WorkflowMenuTests(unittest.IsolatedAsyncioTestCase):
             await self.click(app, pilot, "#plot-preview")
             self.assertEqual(app.result, (["plot", "--case", str(self.case), "--goal", "pegouts", "--run", run,
                                           "--min-hops", "2", "--max-hops", "10", "--open"], False))
+
+    async def test_bitcoin_endpoints_default_to_all_types_and_submit_an_offline_preview(self):
+        from textual.widgets import Checkbox, Select, Static
+        self.case = create_investigation(self.root, "Bitcoin", blockchain="bitcoin", seeds=["a" * 64 + ":0"])
+        run = "saved-run"
+        save_json(self.case / "runs" / run / "trace.json", {})
+        save_json(self.case / "case.json", {**read_case(self.case), "latest_run": run})
+        app = self.app_for(plot_screen)
+        async with app.run_test(size=(110, 55)) as pilot:
+            app.screen.query_one("#plot-goal", Select).value = "pegouts"
+            await pilot.pause()
+            for option in ("unspent", "unspendable", "attributed-stops"):
+                self.assertTrue(app.screen.query_one("#plot-include-" + option, Checkbox).value)
+            help_text = str(app.screen.query_one("#plot-endpoint-help", Static).render())
+            self.assertIn("Bitcoin endpoints", help_text)
+            self.assertNotIn("Peg-outs are always included", help_text)
+            self.assertIn("A name alone does not stop tracing", help_text)
+            self.assertFalse(app.screen.query("#plot-pegout-limit"))
+            await self.click(app, pilot, "#plot-preview")
+            self.assertFalse(app.result[1])
+            self.assertEqual(app.result[0][-4:],
+                ["--include-unspent", "--include-unspendable", "--include-attributed-stops", "--open"])
+            self.assertNotIn("--pegout-lbtc-limit", app.result[0])
+
+    async def test_bitcoin_hidden_endpoints_never_leak_into_other_goals(self):
+        from textual.widgets import Select
+        self.case = create_investigation(self.root, "Bitcoin", blockchain="bitcoin", seeds=["a" * 64 + ":0"])
+        run = "saved-run"
+        save_json(self.case / "runs" / run / "trace.json", {})
+        save_json(self.case / "case.json", {**read_case(self.case), "latest_run": run})
+        for goal in ("full", "connections"):
+            app = self.app_for(plot_screen)
+            async with app.run_test(size=(110, 55)) as pilot:
+                app.screen.query_one("#plot-goal", Select).value = "pegouts"
+                await pilot.pause()
+                app.screen.query_one("#plot-goal", Select).value = goal
+                await pilot.pause()
+                await self.click(app, pilot, "#plot-go")
+                self.assertTrue(app.result[1])
+                self.assertEqual(app.result[0][0], "plot-sync")
+                for flag in ("--include-unspent", "--include-unspendable", "--include-attributed-stops"):
+                    self.assertNotIn(flag, app.result[0])
 
     async def test_update_layout_selects_matching_board_and_combines_generation_with_sync(self):
         from textual.widgets import Input, Select

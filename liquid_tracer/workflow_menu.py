@@ -5,10 +5,11 @@ from pathlib import Path
 
 from .common import TraceError
 from .investigations import effective_run_settings, read_case
+from .networks import blockchain as normalize_blockchain
 
 
 GOALS = [("Full investigation", "full"), ("Starter connections", "connections"),
-         ("Paths to peg-outs", "pegouts")]
+         ("Paths to endpoints", "pegouts")]
 GOAL_NAMES = dict((value, label) for label, value in GOALS)
 ERRORS = (TraceError, ValueError, OSError, KeyError, TypeError)
 
@@ -28,7 +29,7 @@ def _item_budget_summary(settings):
     return "Optional budgets are enabled. Use 0 for unlimited new Miro items."
 
 
-def _endpoint_summary(plot):
+def _endpoint_summary(plot, blockchain=None):
     if plot.get("goal") == "connections":
         query = plot.get("query", {})
         scope = query.get("connection_scope")
@@ -49,12 +50,15 @@ def _endpoint_summary(plot):
     if plot.get("goal") != "pegouts":
         return ""
     query, counts = plot.get("query", {}), plot.get("endpoint_counts", {})
-    labels = [f"{counts.get('pegout', plot.get('match_count', 0))} peg-outs"]
+    chain = normalize_blockchain(plot if blockchain is None else blockchain)
+    labels = [f"{counts.get('pegout', plot.get('match_count', 0))} peg-outs"] if chain == "liquid" else []
     if query.get("include_unspent"):
         labels.append(f"{counts.get('unspent', 0)} unspent UTXOs")
     if query.get("include_unspendable"):
         labels.append(f"{counts.get('unspendable', 0)} unspendable outputs")
-    if query.get("pegout_lbtc_limit"):
+    if query.get("include_attributed_stops"):
+        labels.append(f"{counts.get('attributed_stop', 0)} attributed stops")
+    if chain == "liquid" and query.get("pegout_lbtc_limit"):
         labels.append(f"L-BTC target {query['pegout_lbtc_limit']}")
         from .pegout_limit import validate_pegout_limit_summary
         try:
@@ -68,7 +72,7 @@ def _endpoint_summary(plot):
         labels.append(("all transaction inputs and outputs included" if query.get("transaction_io") == "complete"
                        else "context addresses included") +
                       (" (isolated inputs grouped)" if plot.get("layout_settings", {}).get("group_context_inputs") else ""))
-    return ", ".join(labels)
+    return ", ".join(labels) or "No endpoint types selected"
 
 
 def _compatible_plot(plot, board):
@@ -85,19 +89,24 @@ def _compatible_plot(plot, board):
 
 
 def plot_arguments(case, goal, run, minimum="0", maximum="10", *, include_unspent=False, include_unspendable=False,
-                   include_context=False, layout_mode="fresh", board_record_id=None,
-                   publish=False, name=None, max_items=0):
+                   include_context=False, include_attributed_stops=False, layout_mode="fresh", board_record_id=None,
+                   publish=False, name=None, max_items=0, blockchain="liquid", pegout_lbtc_limit=None):
     """Validate terminal fields; plotting always uses an explicit saved run."""
+    chain = normalize_blockchain(blockchain)
     if goal not in GOAL_NAMES:
         raise TraceError("Choose a plotting goal")
-    if type(include_unspent) is not bool or type(include_unspendable) is not bool:
+    if any(type(value) is not bool for value in (include_unspent, include_unspendable, include_attributed_stops)):
         raise TraceError("Additional endpoint options must be true or false")
-    if goal != "pegouts" and (include_unspent or include_unspendable):
-        raise TraceError("Additional endpoint options apply only to peg-out paths plots")
+    if goal != "pegouts" and (include_unspent or include_unspendable or include_attributed_stops):
+        raise TraceError("Additional endpoint options apply only to endpoint paths plots")
     if type(include_context) is not bool:
         raise TraceError("Include context addresses must be true or false")
     if goal != "pegouts" and include_context:
-        raise TraceError("Include context addresses applies only to peg-out paths plots")
+        raise TraceError("Include context addresses applies only to endpoint paths plots")
+    from .pegout_limit import normalize_pegout_lbtc_limit
+    limit = normalize_pegout_lbtc_limit(pegout_lbtc_limit)
+    if limit is not None and (chain != "liquid" or goal != "pegouts"):
+        raise TraceError("A cumulative L-BTC target is available only for Liquid endpoint paths")
     if not isinstance(run, str) or not run:
         raise TraceError("Collect transaction data first, then choose a saved run")
     if layout_mode not in ("fresh", "update"):
@@ -116,8 +125,12 @@ def plot_arguments(case, goal, run, minimum="0", maximum="10", *, include_unspen
         arguments.append("--include-unspent")
     if include_unspendable:
         arguments.append("--include-unspendable")
+    if include_attributed_stops:
+        arguments.append("--include-attributed-stops")
     if include_context:
         arguments.append("--include-context")
+    if limit is not None:
+        arguments += ["--pegout-lbtc-limit", limit]
     if layout_mode == "update":
         arguments += ["--layout-mode", "update", "--board-record-id", board_record_id]
     if publish:
@@ -138,6 +151,8 @@ def plot_screen(base, button, case):
     class PlotScreen(base):
         def compose(self):
             metadata = read_case(case)
+            self.blockchain = normalize_blockchain(metadata)
+            bitcoin = self.blockchain == "bitcoin"
             self.settings = effective_run_settings(metadata.get("run_defaults", {}))
             runs = [path.parent.name for path in sorted((Path(case) / "runs").glob("*/trace.json"), reverse=True)]
             selected = metadata.get("latest_run")
@@ -167,7 +182,7 @@ def plot_screen(base, button, case):
                             disabled=not self.settings["budget_limits_enabled"])
                 yield Static(_item_budget_summary(self.settings), markup=False)
                 yield Static("Full investigation: all displayed activity. Starter connections: all verified saved paths between "
-                             "starting transactions. Paths to peg-outs: verified paths ending in matching requests. "
+                             "starting transactions. Paths to endpoints: verified paths ending at selected endpoint types. "
                              "Both focused plots include inputs and outputs of their selected transactions. "
                              "Fee flows are hidden unless enabled in investigation settings.", markup=False)
                 with Vertical(id="plot-range"):
@@ -177,10 +192,16 @@ def plot_screen(base, button, case):
                     yield Label("Maximum transaction hops, inclusive")
                     yield Input(value="10", id="plot-max-hops", type="integer")
                 with Vertical(id="plot-endpoints"):
-                    yield Checkbox("Include unspent UTXOs", id="plot-include-unspent")
-                    yield Checkbox("Include unspendable outputs", id="plot-include-unspendable")
-                    yield Static("Peg-outs are always included. Unspent means recorded as unspent in this saved collection; "
-                                 "it is not a live balance check. Fee outputs are excluded from endpoint selection.", markup=False)
+                    yield Checkbox("Include unspent UTXOs", value=bitcoin, id="plot-include-unspent")
+                    yield Checkbox("Include unspendable outputs", value=bitcoin, id="plot-include-unspendable")
+                    yield Checkbox("Include explicit attribution stops", value=bitcoin, id="plot-include-attributed-stops")
+                    yield Static(("Bitcoin endpoints can be observed unspent outputs, OP_RETURN and other unspendable "
+                                  "outputs, or enabled explicit attribution stops. " if bitcoin else
+                                  "Liquid peg-out requests are always included. ") +
+                                 "Unspent means recorded as unspent in this saved collection; it is not a live balance check. "
+                                 "A name alone does not stop tracing. An attributed stop is a tracing boundary, "
+                                 "not proof of ownership or an unspent balance. Fee outputs are excluded from endpoint selection.",
+                                 id="plot-endpoint-help", markup=False)
                     yield Static("Every selected transaction displays its inputs and outputs. "
                                  "Fee flows are hidden unless enabled in investigation settings. "
                                  "Other branch outputs stay visible without extending the trace or adding matching endpoints. "
@@ -188,7 +209,7 @@ def plot_screen(base, button, case):
                                  "Group isolated context inputs layout setting.", markup=False)
                 yield Static("The selected hop range filters saved data; it does not collect additional transactions. "
                              "A starting transaction is hop 0. Missing matches may reflect incomplete coverage.", markup=False)
-                yield Static("Full trace respects attribution stops and hop limits. Paths to peg-outs respects stops and its "
+                yield Static("Full trace respects attribution stops and hop limits. Paths to endpoints respects stops and its "
                              "selected hop range, ignoring local attribution caps. Starter connections ignores both attribution "
                              "stops and caps and has no plotting hop cutoff; labels and saved confirmation status remain.", markup=False)
                 yield Static("", id="workflow-error", markup=False)
@@ -238,6 +259,8 @@ def plot_screen(base, button, case):
                         self.query_one("#plot-max-hops", Input).value,
                         include_unspent=goal == "pegouts" and self.query_one("#plot-include-unspent", Checkbox).value,
                         include_unspendable=goal == "pegouts" and self.query_one("#plot-include-unspendable", Checkbox).value,
+                        include_attributed_stops=goal == "pegouts" and self.query_one("#plot-include-attributed-stops", Checkbox).value,
+                        blockchain=self.blockchain,
                         layout_mode=mode, board_record_id=self.query_one("#plot-board", Select).value if mode == "update" else None,
                         publish=event.button.id == "plot-go", name=self.query_one("#plot-name", Input).value,
                         max_items=_new_item_budget(read_case(case).get("run_defaults", {}),
@@ -260,7 +283,9 @@ def boards_screen(base, button, case):
         def compose(self):
             self.boards = {row["id"]: row for row in list_boards(case)}
             self.plots = {row["preview_id"]: row for row in list_plots(case)}
-            self.settings = effective_run_settings(read_case(case).get("run_defaults", {}))
+            metadata = read_case(case)
+            self.blockchain = normalize_blockchain(metadata)
+            self.settings = effective_run_settings(metadata.get("run_defaults", {}))
             yield Header()
             with VerticalScroll(classes="form-panel"):
                 yield Label("Saved boards and recovery", classes="title")
@@ -334,7 +359,7 @@ def boards_screen(base, button, case):
                     if _compatible_plot(plot, row)]
                 self.query_one("#workflow-preview", Select).set_options([
                     (f"{plot['run_id']} | {plot['preview_id']}" +
-                     (" | " + _endpoint_summary(plot) if plot.get("goal") in ("pegouts", "connections") else ""),
+                     (" | " + _endpoint_summary(plot, self.blockchain) if plot.get("goal") in ("pegouts", "connections") else ""),
                      plot["preview_id"]) for plot in compatible])
                 if resuming and compatible:
                     self.query_one("#workflow-preview", Select).value = compatible[0]["preview_id"]
@@ -356,7 +381,7 @@ def boards_screen(base, button, case):
                 self.query_one("#workflow-preview-status", Static).update(
                     f"Saved run: {plot['run_id']}\nCollection status: {plot.get('source_run_status', 'unknown')}; "
                     f"hop ceiling: {plot.get('source_max_hops', 'unknown')}."
-                    + ("\nScope: " + _endpoint_summary(plot) if plot.get("goal") in ("pegouts", "connections") else "")
+                    + ("\nScope: " + _endpoint_summary(plot, self.blockchain) if plot.get("goal") in ("pegouts", "connections") else "")
                     + (" No matching activity to publish." if plot.get("empty") else "") if ready else
                     "Choose a compatible saved plot. If none are listed, return to Plot saved data.")
 

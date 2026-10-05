@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 from .common import HEX64, TraceError, canonical, digest, now, read_json, save_json
 from .investigations import read_case
+from .networks import blockchain, default_api
 from .services import _text, load_services
 
 NOTICE = ("Change is an investigator designation, not a claim proved by the blockchain. "
@@ -62,7 +63,8 @@ def _saved_state(case):
     verify_export(archive)
     state = read_json(archive / "trace.json")
     if (not isinstance(state, dict) or state.get("case_id") != metadata["case_id"]
-            or state.get("run_id") != selected or not isinstance(state.get("transactions"), dict)):
+            or state.get("run_id") != selected or not isinstance(state.get("transactions"), dict)
+            or blockchain(state) != blockchain(metadata)):
         raise TraceError("Saved trace does not match this investigation")
     return state
 
@@ -74,7 +76,7 @@ def _saved_outputs(state, txid):
     record = state["transactions"][txid]
     if not isinstance(record, dict):
         raise TraceError("Saved transaction has an invalid record")
-    return transaction_outputs(txid, record.get("data"))
+    return transaction_outputs(txid, record.get("data"), blockchain=blockchain(state))
 
 
 def check_known_output(state, txid, vout):
@@ -139,8 +141,10 @@ def set_change_output(case, txid, vout, notes="", expected_revision=None):
 
 
 def _lookup_options(case, state):
-    from .api import ENTERPRISE
     metadata = read_case(case)
+    chain = blockchain(metadata)
+    if state is not None and blockchain(state) != chain:
+        raise TraceError("Saved trace blockchain does not match this investigation")
     source = state.get("source") if state is not None else None
     if state is not None and (not isinstance(source, str) or not source):
         raise TraceError("Saved transaction source is invalid; restore the original evidence")
@@ -153,9 +157,9 @@ def _lookup_options(case, state):
             raise TraceError("Transaction lookup source does not match the investigation's saved source")
     elif source and source.startswith("fixture://"):
         raise TraceError("The original synthetic fixture is required for this transaction lookup")
-    base = source if source and not source.startswith("fixture://") else ENTERPRISE
+    base = source if source and not source.startswith("fixture://") else default_api(chain)
     auth = "blockstream" if urlsplit(base).hostname == "enterprise.blockstream.info" else "none"
-    return {"fixture": fixture, "base_url": base, "auth": auth}
+    return {"fixture": fixture, "base_url": base, "auth": auth, "blockchain": chain}
 
 
 def lookup_requires_network(case, txid):

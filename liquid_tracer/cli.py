@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 
 from .api import ENTERPRISE, Esplora, Limits
+from .networks import blockchain, default_api
 from .hop_limits import UNSET
 from .address_counts import apply_saved_counts, ensure_counts, ensure_graph_counts
 from .boards import create_board
@@ -56,7 +57,7 @@ def context_arguments(command):
 
 def parser():
     case_default = os.environ.get("LIQUID_CASE_DIR") or None
-    root = argparse.ArgumentParser(description="Bounded Liquid UTXO reachability with saved evidence and Miro export")
+    root = argparse.ArgumentParser(description="Bounded Liquid and Bitcoin UTXO reachability with saved evidence and Miro export")
     commands = root.add_subparsers(dest="command", required=True)
     menu = commands.add_parser("menu", help="Open the interactive investigation menu")
     menu.add_argument("--investigations-dir", type=Path, help="Directory containing saved investigations")
@@ -69,20 +70,22 @@ def parser():
     credentials.add_argument("--service", choices=["blockstream", "miro", "all"], default="blockstream",
                              help="Service credentials to check (default: blockstream)")
     inspect = commands.add_parser("inspect-tx", help="Look up one transaction's outputs before choosing seeds")
-    inspect.add_argument("--txid", required=True, help="64-character Liquid transaction hash")
+    inspect.add_argument("--txid", required=True, help="64-character transaction hash")
     inspect.add_argument("--output", type=Path, help="Write output JSON to a new file instead of stdout")
     inspect.add_argument("--fixture", type=Path, help="Offline synthetic API response; no network calls")
     inspect.add_argument("--max-requests", type=int, default=5, help="All HTTP attempts, including OAuth and retries (default: 5)")
     inspect.add_argument("--max-seconds", type=float, default=30, help="Maximum lookup duration (default: 30)")
-    inspect.add_argument("--base-url", default=ENTERPRISE)
+    inspect.add_argument("--base-url")
+    inspect.add_argument("--blockchain", choices=["liquid", "bitcoin"], default="liquid")
     inspect.add_argument("--auth", choices=["blockstream", "none"], default="blockstream")
     batch = commands.add_parser("inspect-txs", help="Look up comma-separated transaction hashes before choosing seeds")
-    batch.add_argument("--txids", required=True, help="Liquid transaction hashes separated by commas")
+    batch.add_argument("--txids", required=True, help="Transaction hashes separated by commas")
     batch.add_argument("--output", type=Path, help="Write the complete output report to a new file instead of stdout")
     batch.add_argument("--fixture", type=Path, help="Offline synthetic API responses; no network calls")
     batch.add_argument("--max-requests", type=int, help="Shared HTTP attempt limit (default: 5 per distinct transaction)")
     batch.add_argument("--max-seconds", type=float, help="Shared lookup duration limit (default: 30 seconds per distinct transaction)")
-    batch.add_argument("--base-url", default=ENTERPRISE)
+    batch.add_argument("--base-url")
+    batch.add_argument("--blockchain", choices=["liquid", "bitcoin"], default="liquid")
     batch.add_argument("--auth", choices=["blockstream", "none"], default="blockstream")
     inputs = commands.add_parser("input-export", help="Export current CSV inputs without a run or network requests")
     inputs.add_argument("--case", type=Path, default=case_default, required=case_default is None)
@@ -164,7 +167,7 @@ def parser():
     run = commands.add_parser("trace", help="Start or extend a bounded run")
     run.add_argument("--case", type=Path, default=case_default, required=case_default is None,
                      help="Case directory (default: LIQUID_CASE_DIR)")
-    run.add_argument("--seed", action="append", default=[], help="Liquid HASH:NUMBER, using the numeric output index starting at 0; may be repeated")
+    run.add_argument("--seed", action="append", default=[], help="HASH:NUMBER, using the numeric output index starting at 0; may be repeated")
     run.add_argument("--seeds-file", type=Path, help="One HASH:NUMBER per line, using the numeric output index starting at 0; # comments allowed")
     run.add_argument("--resume", help="Prior run ID or latest in this case; extends its saved frontier")
     run.add_argument("--only", action="append", help="Resume only these frontier outpoints; may be repeated")
@@ -176,7 +179,8 @@ def parser():
     run.add_argument("--max-outpoints", type=int, default=0, help="Output lookup budget; 0 means unlimited (default)")
     run.add_argument("--max-requests", type=int, default=0, help="All HTTP attempts, including OAuth and retries; 0 means unlimited (default)")
     run.add_argument("--max-seconds", type=float, default=0, help="Total tracing duration; 0 means unlimited (default)")
-    run.add_argument("--base-url", default=ENTERPRISE)
+    run.add_argument("--base-url")
+    run.add_argument("--blockchain", choices=["liquid", "bitcoin"], help="Must match the investigation network")
     run.add_argument("--auth", choices=["blockstream", "none"], default="blockstream")
     run.add_argument("--fixture", type=Path, help="Offline synthetic API responses; no network calls")
     run.add_argument("--labels", type=Path)
@@ -266,6 +270,7 @@ def parser():
                           help="Starter connections: all saved paths, paths within --max-hops, or one shortest saved route per connected pair")
         plot.add_argument("--pegout-lbtc-limit",
                           help="Stop at this cumulative public L-BTC peg-out amount; include the crossing output")
+        plot.add_argument("--include-attributed-stops", action="store_true", help="Include explicitly stopped attributed outputs as endpoints")
         plot.add_argument("--include-unspent", action="store_true",
                           help="Include paths to outputs recorded as unspent in peg-out plots")
         plot.add_argument("--include-unspendable", action="store_true",
@@ -319,16 +324,19 @@ def parser():
     connection_publish.add_argument("--preview", required=True)
     connection_publish.add_argument("--board", required=True)
     connection_publish.add_argument("--max-items", type=int, default=0)
-    pegouts = commands.add_parser("pegouts", help="Trace forward from saved selected seeds and plot peg-out requests in an inclusive hop range")
+    pegouts = commands.add_parser("pegouts", help="Trace forward from selected seeds to endpoints in an inclusive hop range")
     pegouts.add_argument("--case", type=Path, default=case_default, required=case_default is None)
     origin = pegouts.add_mutually_exclusive_group()
-    origin.add_argument("--txid", help="Optional different Liquid transaction; searches all its outputs instead of saved selected seeds, at hop 0")
+    origin.add_argument("--txid", help="Optional different transaction on the investigation network; searches all its outputs at hop 0")
     origin.add_argument("--resume", help="Resume a saved peg-out search with the same origin and hop range")
     pegouts.add_argument("--min-hops", type=int, default=0, help="Minimum transaction distance to a peg-out, inclusive")
     pegouts.add_argument("--max-hops", type=int, default=10, help="Maximum transaction distance to a peg-out, inclusive")
     for limit in ("transactions", "outpoints", "requests"):
         pegouts.add_argument("--max-" + limit, type=int, help="Per-search budget; defaults to investigation settings")
     pegouts.add_argument("--max-seconds", type=float, help="Per-search time budget; defaults to investigation settings")
+    pegouts.add_argument("--include-unspent", action="store_true", help="Include outputs observed unspent")
+    pegouts.add_argument("--include-unspendable", action="store_true", help="Include OP_RETURN outputs")
+    pegouts.add_argument("--include-attributed-stops", action="store_true", help="Include explicitly stopped attributed outputs")
     pegouts.add_argument("--open", dest="open_browser", action="store_true")
     pegout_preview = commands.add_parser("pegouts-preview", help="Rebuild a peg-out search chart from saved search evidence")
     pegout_preview.add_argument("--case", type=Path, default=case_default, required=case_default is None)
@@ -533,7 +541,7 @@ def board_id(value):
     return value
 
 
-def case_identity(case):
+def case_identity(case, chain=None):
     case.mkdir(parents=True, exist_ok=True)
     with (case / "case.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -544,7 +552,7 @@ def case_identity(case):
                 raise TraceError("Invalid case identity; restore the original case.json")
             return identity
         identity = uuid.uuid4().hex
-        save_json(path, {"schema_version": 1, "case_id": identity})
+        save_json(path, {"schema_version": 1, "case_id": identity, **({"blockchain": blockchain(chain)} if chain is not None else {})})
         return identity
 
 
@@ -667,7 +675,7 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
         full_plan = make_plan(full_graph)
         fee_outpoints = {f"{txid}:{index}" for txid, record in state["transactions"].items()
                          for index, output in enumerate(record["data"]["vout"])
-                         if output_kind(output) == "fee"}
+                         if output_kind(output, blockchain(state)) == "fee"}
     except (KeyError, TypeError, ValueError, AttributeError):
         raise TraceError("Saved trace cannot be rendered; restore the original evidence") from None
     validate_plan(full_plan)
@@ -1002,13 +1010,18 @@ def run_trace(args, progress=None):
         parent = read_json(run_path(args.case, args.resume) / "trace.json") if args.resume else None
         if parent and parent.get("collection_source", {}).get("kind") == "shared":
             raise TraceError("This run is a shared evidence view; continue the shared collection instead of a private trace")
-        identity = case_identity(args.case)
+        identity = case_identity(args.case, args.blockchain)
         if parent and parent.get("case_id", identity) != identity:
             raise TraceError("The resumed run belongs to a different case")
         if parent and parent.get("run_id") != args.resume:
             raise TraceError("Saved trace does not match the selected run")
         from .group_hops import normalize_reference_name, reference_addresses, reference_name
         metadata = read_case(args.case)
+        chain = blockchain(metadata)
+        if args.blockchain is not None and args.blockchain != chain:
+            raise TraceError("The requested blockchain differs from this investigation")
+        if parent is not None and blockchain(parent) != chain:
+            raise TraceError("The resumed run belongs to a different blockchain")
         if metadata.get("shared_dataset") is True and shared_request is None:
             raise TraceError("Use shared-collect with an explicit investigation policy for this dataset")
         if shared_request is not None:
@@ -1042,8 +1055,8 @@ def run_trace(args, progress=None):
         try:
             api = Esplora(store, "pending", limits, args.base_url, args.auth, args.fixture,
                           args.tx_cache_seconds, args.min_interval, workers=args.api_workers,
-                          advertised_rps=args.api_rate_limit, adaptive_workers=args.fixture is None)
-            state = new_state(seeds, api.base, limits, labels, parent, case_id=identity)
+                          advertised_rps=args.api_rate_limit, adaptive_workers=args.fixture is None, blockchain=chain)
+            state = new_state(seeds, api.base, limits, labels, parent, case_id=identity, blockchain=chain)
             if reference:
                 state["hop_reference_name"] = reference
             else:
@@ -1144,6 +1157,8 @@ def saved_graph(case, run_id="latest", include_fees=None, *, group_context_input
         raise TraceError("Saved trace does not match the selected run")
     if state.get("case_id") != metadata["case_id"]:
         raise TraceError("The saved run belongs to a different case")
+    if blockchain(state) != blockchain(metadata):
+        raise TraceError("The saved run belongs to a different blockchain")
     service_settings = effective_services(case)
     state["labels"] = apply_service_labels(state["labels"], service_settings)
     state["service_controls"] = {key: value for key, value in service_settings.items() if key != "history"}
@@ -1397,7 +1412,7 @@ def _dispatch(args, *, progress, diagnostics):
                     raise TraceError("Output report parent must be an existing directory")
             inspect = inspect_transactions if txids is not None else inspect_transaction
             result = inspect(txids if txids is not None else args.txid, fixture=args.fixture,
-                             base_url=args.base_url, auth=args.auth,
+                             base_url=args.base_url, auth=args.auth, blockchain=args.blockchain,
                              max_requests=args.max_requests, max_seconds=args.max_seconds)
             if args.output is None:
                 print(json.dumps(result, indent=2))
@@ -1479,6 +1494,7 @@ def _dispatch(args, *, progress, diagnostics):
                 hop_basis=args.hop_basis,
                 connection_scope=args.connection_scope, pegout_lbtc_limit=args.pegout_lbtc_limit,
                 include_unspent=args.include_unspent, include_unspendable=args.include_unspendable,
+                include_attributed_stops=args.include_attributed_stops,
                 include_context=args.include_context,
                 layout_mode=args.layout_mode, board_record_id=args.board_record_id,
                 layout_settings=args.layout_settings_json,
@@ -1491,6 +1507,7 @@ def _dispatch(args, *, progress, diagnostics):
                 hop_basis=args.hop_basis,
                 connection_scope=args.connection_scope, pegout_lbtc_limit=args.pegout_lbtc_limit,
                 include_unspent=args.include_unspent, include_unspendable=args.include_unspendable,
+                include_attributed_stops=args.include_attributed_stops,
                 include_context=args.include_context,
                 layout_mode=args.layout_mode, board_record_id=args.board_record_id,
                 layout_settings=args.layout_settings_json,
@@ -1530,6 +1547,8 @@ def _dispatch(args, *, progress, diagnostics):
             result = search_pegouts(args.case, args.txid, args.min_hops, args.max_hops,
                 resume=args.resume, max_transactions=args.max_transactions, max_outpoints=args.max_outpoints,
                 max_requests=args.max_requests, max_seconds=args.max_seconds,
+                include_unspent=args.include_unspent, include_unspendable=args.include_unspendable,
+                include_attributed_stops=args.include_attributed_stops,
                 open_browser=args.open_browser, progress=progress)
             print(json.dumps(result, indent=2))
             return 1 if result.get("status") == "error" else 0

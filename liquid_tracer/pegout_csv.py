@@ -12,7 +12,8 @@ import re
 
 from .common import TraceError, canonical, output_kind, parse_outpoint
 from .group_hops import reference_name
-from .pegout_paths import _paths, validate_query
+from .pegout_paths import _endpoint_state, _paths, validate_query
+from .networks import blockchain, explorer_root
 from .transaction_csv import _amount, _asset, _block_time, _text, transaction_csv_rows
 
 
@@ -20,19 +21,21 @@ PEGOUT_LIMIT_FIELDS = (
     "Pegout L-BTC Limit", "Selected Pegout L-BTC", "Pegout Limit Excess L-BTC", "Pegout Limit Stop Reason",
 )
 
+NETWORK_FIELDS = ("Network", "Value BTC", "Value", "Attribution Confidence", "Attribution Source", "Boundary Status")
+
 PATH_FIELDS = (
     "Transaction Hash", "Roles", "Source Transactions", "Source Seed Outpoints",
     "Source Paths", "Traced Input Outpoints", "Traced Output Outpoints", "Endpoint Outpoints",
     "Hop Counts", "Hop Reference", "Seed Depth", "Block", "Time",
     "Transaction Observation ID", "Transaction Observed At", "Explorer URL",
-) + PEGOUT_LIMIT_FIELDS
+) + ("Network",) + PEGOUT_LIMIT_FIELDS
 ENDPOINT_FIELDS = (
     "Transaction Hash", "Vout", "Outpoint", "Source Transactions", "Source Seed Outpoints",
     "Source Paths", "Address", "Receiving Entity", "Status", "Asset", "Value Base Units",
     "Value LBTC", "Hop Counts", "Hop Reference", "Seed Depth", "Block", "Time",
     "Transaction Observation ID", "Transaction Observed At", "Spend Observation ID",
     "Spend Observed At", "Explorer URL", "Hops from Seed", "Source Seed Hops",
-) + PEGOUT_LIMIT_FIELDS
+) + NETWORK_FIELDS + PEGOUT_LIMIT_FIELDS
 ENDPOINT_TABLE_FIELDS = (
     "Source", "Source Value", "Deposit/Peg-out Tx", "Address/Peg-out Address",
     "Receiving Entity", "Status", "Pegout LBTC", "Hops from Seed", "Source Seed Hops",
@@ -40,7 +43,7 @@ ENDPOINT_TABLE_FIELDS = (
     "Source Paths", "Hop Counts", "Hop Reference", "Value LBTC", "Asset", "Value Base Units",
     "Seed Depth", "Block", "Time", "Transaction Observation ID", "Transaction Observed At",
     "Spend Observation ID", "Spend Observed At", "Explorer URL",
-) + PEGOUT_LIMIT_FIELDS
+) + NETWORK_FIELDS + PEGOUT_LIMIT_FIELDS
 
 
 def _joined(values):
@@ -52,8 +55,8 @@ def _lbtc_units(amount):
     return str(whole) + (("." + f"{fraction:08d}".rstrip("0")) if fraction else "")
 
 
-def _whole_lbtc(output):
-    if _asset(output) != "L-BTC" or _amount(output) == "":
+def _whole_lbtc(output, chain="liquid"):
+    if _asset(output, blockchain=chain) != "L-BTC" or _amount(output) == "":
         return ""
     return _lbtc_units(_amount(output))
 
@@ -64,6 +67,8 @@ def pegout_lbtc_summary(graph, state):
     Matching paths are already selected by the peg-out graph. Computing this
     small report once avoids rerunning path searches when the UI opens a case.
     """
+    if blockchain(state) != "liquid":
+        raise TraceError("L-BTC peg-out summaries apply only to Liquid")
     result = {"pegout_count": 0, "valued_lbtc_count": 0, "unknown_amount_count": 0,
               "unknown_asset_count": 0, "non_lbtc_count": 0}
     total, seen = 0, set()
@@ -77,7 +82,7 @@ def pegout_lbtc_summary(graph, state):
             output = state["transactions"][txid]["data"]["vout"][index]
             if output_kind(output) != "pegout":
                 raise TraceError("Peg-out amount summary requires actual peg-out outputs")
-            asset, amount = _asset(output), _amount(output)
+            asset, amount = _asset(output, blockchain=blockchain(state)), _amount(output)
             result["pegout_count"] += 1
             if not asset:
                 result["unknown_asset_count"] += 1
@@ -151,9 +156,10 @@ def _transaction_fields(txid, state, observations):
     block, stamp = _block_time(record["data"])
     oid = record.get("observation_id", "")
     source = state["source"]
-    explorer = "https://blockstream.info/" + ("liquidtestnet" if "liquidtestnet" in source else "liquid")
+    chain = blockchain(state)
+    explorer = explorer_root(state)
     return {
-        "Transaction Hash": txid, "Seed Depth": record.get("depth", ""), "Block": block,
+        "Transaction Hash": txid, "Seed Depth": record.get("depth", ""), "Block": block, "Network": chain,
         "Time": stamp, "Transaction Observation ID": oid,
         "Transaction Observed At": _observed_at(observations, oid, state, "/tx/" + txid),
         "Explorer URL": "" if source.startswith("fixture://") else explorer + "/tx/" + txid,
@@ -166,12 +172,16 @@ def pegout_csv_rows(graph, state, *, observations=None):
         report = graph["pegouts"]
         raw_query = report["query"]
         from .plot_scope import projected_hop_basis
-        state = projected_hop_basis(state, raw_query.get("hop_basis", "configured"))
+        state = _endpoint_state(projected_hop_basis(state, raw_query.get("hop_basis", "configured")), raw_query)
+        chain = blockchain(state)
+        if blockchain(graph) != chain:
+            raise TraceError("Endpoint CSV graph and evidence belong to different networks")
         name = reference_name(state)
         query = validate_query(raw_query.get("txid"), raw_query.get("min_hops", 0),
                                raw_query.get("max_hops", 10), seeds=raw_query.get("seeds"),
                                include_unspent=raw_query.get("include_unspent", False),
                                include_unspendable=raw_query.get("include_unspendable", False),
+                               include_attributed_stops=raw_query.get("include_attributed_stops", False), blockchain=chain,
                                include_context=raw_query.get("include_context", False),
                                transaction_io=raw_query.get("transaction_io"),
                                attribution_hop_limits=raw_query.get("attribution_hop_limits"),
@@ -197,9 +207,10 @@ def pegout_csv_rows(graph, state, *, observations=None):
                 or report.get("match_count") != len(pegouts)
                 or report.get("transaction_count") != len(depths)):
             raise TraceError("Endpoint CSV path report disagrees with saved spend evidence")
-        if query.get("include_unspent") or query.get("include_unspendable"):
+        if chain == "bitcoin" or query.get("include_unspent") or query.get("include_unspendable") or query.get("include_attributed_stops"):
             counts = {kind: sum(match["kind"] == kind for match in matches)
-                      for kind in ("pegout", "unspent", "unspendable")}
+                      for kind in (("pegout", "unspent", "unspendable", "attributed_stop")
+                                   if query.get("include_attributed_stops") else ("pegout", "unspent", "unspendable"))}
             if (canonical(report.get("endpoint_matches")) != canonical(matches)
                     or report.get("endpoint_count") != len(matches)
                     or report.get("endpoint_counts") != counts):
@@ -221,7 +232,7 @@ def pegout_csv_rows(graph, state, *, observations=None):
             local_edges = {f"{direction}:{txid}:{index}"
                            for txid in transactions for direction, field in (("in", "vin"), ("out", "vout"))
                            for index, item in enumerate(state["transactions"][txid]["data"][field])
-                           if direction == "in" or include_fees or output_kind(item) != "fee"}
+                           if direction == "in" or include_fees or output_kind(item, chain) != "fee"}
             if actual_edges != local_edges:
                 raise TraceError("Endpoint CSV graph is missing complete transaction inputs or outputs")
         if any(edge["id"] not in expected_edges and
@@ -239,7 +250,7 @@ def pegout_csv_rows(graph, state, *, observations=None):
             txid = query["txid"]
             seeds = [f"{txid}:{index}" for index, output in
                      enumerate(state["transactions"].get(txid, {}).get("data", {}).get("vout", []))
-                     if output_kind(output) != "fee"]
+                     if output_kind(output, chain) != "fee"]
         transaction_sources, endpoint_sources = defaultdict(dict), defaultdict(dict)
         endpoint_seed_hops = defaultdict(dict)
         for seed in seeds:
@@ -288,15 +299,23 @@ def pegout_csv_rows(graph, state, *, observations=None):
             io = output_rows[txid, index]
             kind = match["kind"]
             status = ("Peg-out" if kind == "pegout" else "Dormant" if kind == "unspent" else
+                      "Attributed stop" if kind == "attributed_stop" else
                       "OP_RETURN" if output.get("scriptpubkey_type") == "op_return"
                       or output.get("scriptpubkey", "").startswith("6a") else "Unspendable")
             oid = match.get("spend_observation_id", "") if kind == "unspent" else ""
+            attributions = match.get("attributions", [])
+            amount, asset = _amount(output), _asset(output, blockchain=chain)
+            whole = _lbtc_units(amount) if amount != "" and asset in ("BTC", "L-BTC") else ""
             endpoint_rows.append({
                 **_transaction_fields(txid, state, observations),
                 **_source_fields(endpoint_sources[key]), **limit_provenance, "Vout": index, "Outpoint": key,
-                "Address": io["Address Hash"], "Receiving Entity": io["Address Label"],
-                "Status": status, "Asset": _asset(output), "Value Base Units": _amount(output),
-                "Value LBTC": _whole_lbtc(output), "Hop Counts": _joined(match["hops"]),
+                "Address": io["Address Hash"], "Receiving Entity": (_joined(entry["name"] for entry in attributions)
+                                                               if attributions else io["Address Label"]),
+                "Status": status, "Asset": asset, "Value Base Units": amount,
+                "Value LBTC": _whole_lbtc(output, chain), "Value BTC": whole if chain == "bitcoin" else "",
+                "Value": whole, "Attribution Confidence": _joined(entry["confidence"] for entry in attributions),
+                "Attribution Source": _joined(entry["source"] for entry in attributions),
+                "Boundary Status": "Explicit attribution stop" if kind == "attributed_stop" else "", "Hop Counts": _joined(match["hops"]),
                 "Hops from Seed": min(endpoint_seed_hops[key].values()),
                 "Source Seed Hops": json.dumps(endpoint_seed_hops[key], sort_keys=True, separators=(",", ":")),
                 "Hop Reference": name or "Selected seed outputs", "Spend Observation ID": oid,
@@ -331,10 +350,10 @@ def _source_values(row, state):
         key = source["seed_outpoint"]
         txid, index = parse_outpoint(key)
         output = state["transactions"][txid]["data"]["vout"][index]
-        asset, amount = _asset(output), _amount(output)
+        asset, amount = _asset(output, blockchain=blockchain(state)), _amount(output)
         value = ""
         if asset and amount != "":
-            value = (_whole_lbtc(output) + " L-BTC" if asset == "L-BTC"
+            value = (_lbtc_units(amount) + " " + asset if asset in ("L-BTC", "BTC")
                      else str(amount) + " base units " + asset)
         values[key] = value
     if len(values) == 1:
@@ -356,7 +375,7 @@ def endpoint_table_rows(graph, state, *, observations=None):
     rows = []
     for endpoint in endpoints:
         status = {"Peg-out": "Pegout", "OP_RETURN": "OP_Return",
-                  "Dormant": "Dormant", "Unspendable": "Unspendable"}[endpoint["Status"]]
+                  "Dormant": "Dormant", "Unspendable": "Unspendable", "Attributed stop": "Attributed_Stop"}[endpoint["Status"]]
         row = {key: endpoint[key] for key in ENDPOINT_TABLE_FIELDS if key in endpoint}
         row.update({
             "Source": endpoint["Source Transactions"], "Source Value": _source_values(endpoint, state),

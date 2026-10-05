@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 from .address_activity import validate_address
 from .address_count_cache import CountCacheJournal, read_snapshot
+from .networks import blockchain, default_api, is_primary
 from .common import StopRun, TraceError, canonical, digest, read_json, save_json
 from .performance import public_api_diagnostics
 
@@ -75,7 +76,7 @@ def addresses(state):
     for record in state['transactions'].values():
         transaction = record['data']
         outputs = list(transaction['vout'])
-        outputs.extend((saved_input_output(evidence, vin) if resolve else vin.get('prevout') or {})
+        outputs.extend((saved_input_output(evidence, vin, blockchain=blockchain(state)) if resolve else vin.get('prevout') or {})
                        for vin in transaction['vin']
                        if not vin.get('is_pegin') and not vin.get('is_coinbase'))
         for output in outputs:
@@ -171,7 +172,7 @@ def annotate(graph, state):
         address = node['details'].get('address')
         record = state.get('address_tx_counts', {}).get(address)
         node['tx_count'] = None
-        if node['details'].get('network') == 'liquid' and _valid(record, state['source'], address):
+        if is_primary(node, state) and _valid(record, state['source'], address):
             node['tx_count'] = record['confirmed_tx_count'] + record['mempool_tx_count']
             node['details']['tx_count_observation'] = copy.deepcopy(record)
         node['details']['tx_count_basis'] = 'Confirmed plus mempool transactions at last address statistics observation; not visible arrows.'
@@ -260,13 +261,13 @@ def _collect_counts(case, state, wanted, *, max_requests, max_seconds, refresh=F
                         raise TraceError("The saved synthetic fixture is required to fetch address counts")
                     stop = "fixture_unavailable"
                 else:
-                    base = source if not source.startswith("fixture://") else ENTERPRISE
+                    base = source if not source.startswith("fixture://") else default_api(state)
                     auth = "blockstream" if urlsplit(base).hostname == "enterprise.blockstream.info" else "none"
                     options = {"transport": transport} if transport is not None else {}
                     fetch_options = state.get("fetch_options", {})
                     store = Store(case)
                     api = Esplora(store, "counts-"+uuid.uuid4().hex, limits, base=base, auth=auth,
-                                  fixture=fixture, tx_cache_seconds=0, workers=fetch_options.get("workers", 8),
+                                  fixture=fixture, blockchain=blockchain(state), tx_cache_seconds=0, workers=fetch_options.get("workers", 8),
                                   adaptive_workers=True,
                                   advertised_rps=fetch_options.get("advertised_rps"),
                                   min_interval=_saved_min_interval(fetch_options), **options)
@@ -412,7 +413,7 @@ def ensure_counts(case, state, *, graph=None, progress=None, fixture=None, trans
         raise TraceError("Address counts do not match this investigation")
     wanted = (addresses(state) if graph is None else
               {node["details"]["address"] for node in graph["nodes"]
-               if node["kind"] == "address" and node["details"].get("network") == "liquid"})
+               if node["kind"] == "address" and is_primary(node, state)})
     settings = metadata.get("run_defaults", {})
     if metadata.get("shared_dataset") is True:
         # The shared collector freezes one focused investigation's policy at

@@ -49,12 +49,12 @@ export function seedEditorInput(element: HTMLInputElement | HTMLTextAreaElement)
   return true;
 }
 
-export function seedEditorPanel(caseId: string, busy: boolean): string {
+export function seedEditorPanel(caseId: string, busy: boolean, blockchain = "liquid"): string {
   const draft = drafts.get(caseId);
   if (!draft?.open) return '';
   const locked = draft.pending || busy;
   return `<section class="panel" id="seed-editor-panel" aria-labelledby="seed-editor-title"><div class="panel-head"><div><h2 id="seed-editor-title" tabindex="-1">Change starting outputs</h2><p>Choose the transaction outputs used for future collection and shared-data plots.</p></div><button type="button" class="btn" data-action="seed-editor-close">Close</button></div><div class="panel-body">
-    <p>Saved runs, previews, exports, and Miro boards keep their original starting outputs. A new shared-data plot uses this selection; a plot from an older investigation snapshot keeps that snapshot’s selection.</p>
+    <p>Blockchain: ${blockchain === "bitcoin" ? "Bitcoin" : "Liquid"}. Starting outputs must belong to this network.</p><p>Saved runs, previews, exports, and Miro boards keep their original starting outputs. A new shared-data plot uses this selection; a plot from an older investigation snapshot keeps that snapshot’s selection.</p>
     <label class="field"><span>Starting outputs · one transaction ID:vout per line</span><textarea class="mono" id="seed-editor-text" data-case-id="${esc(caseId)}" rows="8" spellcheck="false"${disabled(locked || !draft.selection)}>${esc(draft.text)}</textarea><small>Replace, add, or remove entries. Vout indexes start at 0. Commas and spaces are also accepted. This replaces the complete selection.</small></label>
     <p class="small muted">If these outputs are in the saved shared data, select Shared collection in Plots &amp; Miro and generate another preview. Otherwise collect data for the new selection. Saving here does not download data or generate a graph.</p>
     <div class="form-actions"><button type="button" class="btn primary" data-action="seed-editor-save"${disabled(locked || !draft.selection)}>Save starting outputs</button><button type="button" class="btn" data-action="seed-editor-reload"${disabled(locked)}>Reload saved selection</button></div>

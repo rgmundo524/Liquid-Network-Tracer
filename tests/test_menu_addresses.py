@@ -119,6 +119,30 @@ class AddressMenuTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(screen.selected_address, OTHER)
         process.assert_not_called()
 
+    async def test_new_name_does_not_stop_tracing_and_existing_stop_is_preserved(self):
+        from textual.widgets import Checkbox, Input
+        set_service(self.case, OTHER, name="Explicit stop", stop_tracing=True)
+        app = create_app(self.root)
+        with patch("liquid_tracer.address_review.list_addresses", side_effect=self.report), \
+                patch("liquid_tracer.address_review.saved_activity", return_value=SUMMARY), \
+                patch("liquid_tracer.menu.subprocess.run") as process:
+            async with app.run_test(size=(115, 55)) as pilot:
+                screen = await self.open_review(app, pilot)
+                self.assertFalse(screen.query_one("#service-stop", Checkbox).value)
+                await self.select_row(screen, pilot)
+                self.assertFalse(screen.query_one("#service-stop", Checkbox).value)
+                screen.query_one("#service-enabled", Checkbox).value = True
+                screen.query_one("#service-name", Input).value = "Name only"
+                await self.click(app, pilot, "#service-save")
+                self.assertFalse(load_services(self.case)["rules"][ADDRESS]["stop_tracing"])
+                screen.query_one("#address-value", Input).value = OTHER
+                await self.click(app, pilot, "#address-select")
+                self.assertTrue(screen.query_one("#service-stop", Checkbox).value)
+                screen.query_one("#address-value", Input).value = ADDRESS
+                await self.click(app, pilot, "#address-select")
+                self.assertFalse(screen.query_one("#service-stop", Checkbox).value)
+        process.assert_not_called()
+
     async def test_service_rule_survives_reopen_and_can_be_disabled(self):
         from textual.widgets import Checkbox, Input, Static, TextArea
         app = create_app(self.root)
@@ -129,6 +153,7 @@ class AddressMenuTests(unittest.IsolatedAsyncioTestCase):
                 screen = await self.open_review(app, pilot)
                 await self.select_row(screen, pilot)
                 screen.query_one("#service-enabled", Checkbox).value = True
+                screen.query_one("#service-stop", Checkbox).value = True
                 screen.query_one("#service-name", Input).value = "Suspected exchange"
                 screen.query_one("#service-rationale", TextArea).text = "Repeated deposit consolidation.\nInvestigator assessment."
                 await self.click(app, pilot, "#service-save")

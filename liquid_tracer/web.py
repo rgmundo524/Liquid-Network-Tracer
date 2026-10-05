@@ -449,7 +449,7 @@ class LocalServer(ThreadingHTTPServer):
         if not self.root.is_dir():
             return []
         return sorted(path for path in self.root.iterdir()
-                      if path.name != ".shared-collection" and path.is_dir() and not path.is_symlink()
+                      if path.name not in {".shared-collection", ".shared-collection-bitcoin"} and path.is_dir() and not path.is_symlink()
                       and (path / "case.json").is_file() and not (path / "case.json").is_symlink())
 
     def case_summary(self, case, metadata, detail=False):
@@ -1110,7 +1110,8 @@ class LocalServer(ThreadingHTTPServer):
             # JavaScript numbers cannot exactly represent every explicit Liquid
             # amount. Keep the numeric field for compatibility and provide its
             # exact decimal representation for display in the browser.
-            return {"transactions": [{**transaction, "outputs": [
+            return {"blockchain": validate_blockchain(result.get("blockchain", "liquid")),
+                    "transactions": [{**transaction, "outputs": [
                 {**output, "value_text": str(output["value"]) if type(output.get("value")) is int else None}
                 for output in transaction["outputs"]]} for transaction in validated]}
         # Never return absolute local paths or raw trace errors to a page. Only
@@ -1667,6 +1668,16 @@ class Handler(BaseHTTPRequestHandler):
             query = {}
             if parsed.query and not mutation and plot_html_request(parts) and parsed.query == "download=1":
                 query["download"] = True
+            elif parsed.query and not mutation and parts == ["api", "shared-attributions", "export"]:
+                try:
+                    if len(parsed.query) > 100:
+                        raise ValueError
+                    values = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=1)
+                    if set(values) != {"blockchain"} or len(values["blockchain"]) != 1:
+                        raise ValueError
+                    query["blockchain"] = validate_blockchain(values["blockchain"][0])
+                except (ValueError, TraceError):
+                    raise RequestError("Choose Liquid or Bitcoin for the attribution export") from None
             elif parsed.query:
                 if mutation or len(parts) != 4 or parts[:2] != ["api", "cases"] or parts[3] != "plots":
                     raise RequestError("Route not found", 404)
@@ -1732,7 +1743,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, self.server.session())
         elif parts == ["api", "shared-attributions", "export"]:
             from .shared_attributions import export_library
-            product = export_library(self.server.root)
+            product = export_library(self.server.root, blockchain=(query or {}).get("blockchain", "liquid"))
             self.send(200, product["data"], product["content_type"], download=product["filename"])
         elif len(parts) == 4 and parts[:2] == ["api", "cases"] and parts[3] == "shared-attributions":
             from .services import shared_attribution_status
@@ -1871,18 +1882,20 @@ class Handler(BaseHTTPRequestHandler):
     def post(self, parts, body):
         if parts == ["api", "shared-attributions"]:
             from .shared_attributions import catalog
-            if set(body) - {"query", "offset", "limit"}:
+            if set(body) - {"query", "offset", "limit", "blockchain"}:
                 raise RequestError("Shared attributions accept a search and pagination only")
             try:
                 return catalog(self.server.root, query=body.get("query", ""),
-                    offset=body.get("offset", 0), limit=body.get("limit", 100)), 200
+                    offset=body.get("offset", 0), limit=body.get("limit", 100),
+                    blockchain=validate_blockchain(body.get("blockchain", "liquid"))), 200
             except TraceError as error:
                 raise RequestError(str(error)) from None
         if parts == ["api", "shared-attributions", "import"]:
             from .shared_attributions import apply_import, preview_import
-            if set(body) - {"text", "format", "policy", "approve_plan"}:
+            if set(body) - {"text", "format", "policy", "approve_plan", "blockchain"}:
                 raise RequestError("Shared attribution import accepts uploaded text, format, policy and approval only; not file paths")
-            options = {"format": body.get("format", "auto"), "policy": body.get("policy", "keep")}
+            options = {"format": body.get("format", "auto"), "policy": body.get("policy", "keep"),
+                       "blockchain": validate_blockchain(body.get("blockchain", "liquid"))}
             try:
                 result = (apply_import(self.server.root, body.get("text"),
                     approval_sha256=body["approve_plan"], **options) if "approve_plan" in body
@@ -1909,15 +1922,15 @@ class Handler(BaseHTTPRequestHandler):
             if set(body) - {"txids", "source", "blockchain"}:
                 raise RequestError("Transaction lookup accepts transaction IDs and a supported blockchain only; not fixture files or custom arguments.")
             if body.get("source", "live") != "live":
-                raise RequestError("New transaction lookups use live Liquid data.")
+                raise RequestError("New transaction lookups use live blockchain data.")
             txids = parse_transaction_hashes(body.get("txids"))
-            arguments = ["inspect-txs", "--txids", ",".join(txids)]
+            arguments = ["inspect-txs", "--txids", ",".join(txids), "--blockchain", blockchain]
             return self.server.start_job(arguments, action="lookup", live=True, txids=txids), 202
         if parts == ["api", "cases"]:
             if set(body) - {"name", "seeds", "board", "settings", "source", "blockchain"}:
                 raise RequestError("New investigations accept a name, blockchain, starting outputs, board and settings only; not fixture files.")
             if body.get("source", "live") != "live":
-                raise RequestError("New investigations use live Liquid data.")
+                raise RequestError("New investigations use live blockchain data.")
             seeds = body.get("seeds")
             if not isinstance(seeds, list) or not seeds or any(not isinstance(seed, str) for seed in seeds):
                 raise RequestError("Select at least one starting output.")

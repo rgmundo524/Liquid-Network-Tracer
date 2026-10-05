@@ -58,10 +58,12 @@ def parse_outpoint(value):
     return txid.lower(), int(index)
 
 
-def output_kind(output):
-    if output.get("pegout"):
+def output_kind(output, blockchain="liquid"):
+    from .networks import blockchain as normalize_blockchain
+    chain = normalize_blockchain(blockchain)
+    if chain == "liquid" and output.get("pegout"):
         return "pegout"
-    if output.get("scriptpubkey_type") == "fee" or output.get("scriptpubkey") == "":
+    if chain == "liquid" and (output.get("scriptpubkey_type") == "fee" or output.get("scriptpubkey") == ""):
         return "fee"
     if output.get("scriptpubkey_type") == "op_return" or output.get("scriptpubkey", "").startswith("6a"):
         return "provably_unspendable"
@@ -74,14 +76,14 @@ def public_fields(output):
         "valuecommitment", "asset", "assetcommitment", "pegout")}
 
 
-def quantity(output):
+def quantity(output, blockchain="liquid"):
     value = output.get("value")
     if value is None:
         amount = "amount confidential" if output.get("valuecommitment") else "amount unavailable"
     else:
         amount = str(value) + " base units"
     asset = output.get("asset")
-    name = "L-BTC" if asset == LBTC else ((asset[:10] + "…") if asset else "asset unknown")
+    name = "BTC" if blockchain == "bitcoin" else "L-BTC" if asset == LBTC else ((asset[:10] + "…") if asset else "asset unknown")
     return amount + "; " + name
 
 

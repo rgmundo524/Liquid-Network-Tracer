@@ -8,6 +8,7 @@ import hashlib
 import math
 
 from .common import TraceError
+from .networks import blockchain
 
 
 OUTER_KEY = "frame:graph"
@@ -126,8 +127,11 @@ def activity_frames(graph, *, indexed=True):
             "starting_transaction_keys": component["starting_transaction_keys"],
         })
     result = {"schema_version": 2 if indexed else 1,
-              "outer": {"key": OUTER_KEY, "title": "Liquid UTXO trace · Complete graph"},
+              "outer": {"key": OUTER_KEY, "title": blockchain(graph).title() + " UTXO trace · Complete graph"},
               "activities": activities}
+    # Historical Liquid frame descriptors remain byte-for-byte reproducible.
+    if blockchain(graph) != "liquid":
+        result["blockchain"] = blockchain(graph)
     if indexed:
         result["starting_transactions"] = catalog
     return result
@@ -164,6 +168,8 @@ def validate_activity_frames(metadata, shape_keys, connector_items, *, starting_
             "edges": [{"id": item["key"], "source": item["source"], "target": item["target"]}
                       for item in connector_items],
         }
+        if "blockchain" in metadata:
+            graph["blockchain"] = blockchain(metadata)
         if metadata["schema_version"] == 2:
             # Plans retain the timestamp-to-index mapping because shape bodies
             # do not contain raw transaction evidence. Validate a complete,

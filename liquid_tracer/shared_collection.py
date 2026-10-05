@@ -12,6 +12,7 @@ import uuid
 from .common import TraceError, canonical, digest, now, parse_outpoint, read_json, save_json
 from .investigations import effective_run_settings, list_investigations, read_case, validate_settings
 from .progress import report_progress
+from .networks import blockchain, default_api
 
 DIRECTORY = ".shared-collection"
 IDENTITY = re.compile(r"[0-9a-f]{32}\Z")
@@ -38,13 +39,16 @@ def _safe(path):
     return path
 
 
+def dataset_directory(chain="liquid"):
+    return DIRECTORY if blockchain(chain) == "liquid" else DIRECTORY + "-bitcoin"
+
+
 def dataset_path(case):
-    return _safe(_safe(case).parent / DIRECTORY)
+    return _safe(_safe(case).parent / dataset_directory(blockchain(read_case(case))))
 
 
 def _source(case, metadata=None, *, verify=True, progress=None):
     """Determine source identity without contacting an API."""
-    from .api import ENTERPRISE
     from .cli import run_path, verify_export
     metadata = metadata or read_case(case)
     fixture = metadata.get("fixture")
@@ -63,9 +67,11 @@ def _source(case, metadata=None, *, verify=True, progress=None):
             report_progress(progress, "loading_collection", 0, 1)
             parent = read_json(trace_file)
             report_progress(progress, "loading_collection", 1, 1)
-            _remember(_SOURCE_HINTS, trace_file, (signature, {key: parent.get(key) for key in ("case_id", "run_id", "source")}))
+            _remember(_SOURCE_HINTS, trace_file, (signature, {**{key: parent.get(key) for key in ("case_id", "run_id", "source")}, "blockchain": blockchain(parent)}))
         if parent.get("case_id") != metadata["case_id"] or parent.get("run_id") != metadata["latest_run"]:
             raise TraceError("The selected collection does not belong to its investigation")
+        if blockchain(parent) != blockchain(metadata):
+            raise TraceError("The selected collection belongs to a different blockchain")
         source = parent.get("source")
         if not isinstance(source, str) or not source:
             raise TraceError("Saved collection has no API source identity")
@@ -74,7 +80,7 @@ def _source(case, metadata=None, *, verify=True, progress=None):
         if source.startswith("fixture://") and not configured:
             raise TraceError("The investigation's original fixture is required for shared collection")
     else:
-        source = configured or ENTERPRISE
+        source = configured or default_api(metadata)
     return source, parent
 
 
@@ -136,6 +142,7 @@ def load_shared_run(case, run_id="latest", *, dataset_id=None, progress=None):
     report_progress(progress, "loading_collection", 1, 1)
     if (state.get("case_id") != metadata["case_id"] or state.get("run_id") != run_id
             or state.get("source") != metadata["source"]
+            or blockchain(state) != blockchain(metadata)
             or state.get("shared_collection", {}).get("dataset_id") != metadata["case_id"]):
         raise TraceError("Shared run does not match the dataset identity")
     return path, state, archive
@@ -148,10 +155,10 @@ def resolve_shared_run(case, run_id="latest", dataset_id=None):
 
 def _create_dataset(root, focused, source):
     root = _safe(root)
-    path = _safe(root / DIRECTORY)
+    path = _safe(root / dataset_directory(focused["blockchain"]))
     # The workspace lock covers first creation only. Collectors use the normal
     # dataset trace.lock, independently of every private investigation.
-    with _safe(root / ".shared-collection.lock").open("a") as lock:
+    with _safe(root / (dataset_directory(focused["blockchain"]) + ".lock")).open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if not path.exists():
             path.mkdir()
@@ -177,7 +184,7 @@ def prepare_collection(case, members=None, *, hops, resume=None, hop_reference_n
     from .group_hops import normalize_reference_name, reference_addresses, reference_name
     from .services import apply_service_labels, effective_services
     case = _safe(case)
-    if case.name == DIRECTORY:
+    if read_case(case).get("shared_dataset") is True:
         raise TraceError("Choose an investigation to supply shared collection policy")
     if type(hops) is not int or not 0 <= hops <= 2147483647:
         raise TraceError("Collection hops must be a whole number from 0 to 2147483647")
@@ -262,6 +269,7 @@ def _request(case, request_id):
             or request.get("request_id") != request_id or request.get("dataset_id") != metadata["case_id"]
             or request.get("policy_case_id") != read_case(case)["case_id"]
             or request.get("source") != metadata["source"]
+            or blockchain(request) != blockchain(metadata)
             or digest(canonical({key: value for key, value in request.items() if key != "sha256"})) != request.get("sha256")):
         raise TraceError("Prepared shared collection changed; prepare a new request")
     fixture = request.get("fixture")
@@ -273,7 +281,6 @@ def _request(case, request_id):
 
 def collect_prepared(case, request_id, *, progress=None):
     """Run the ordinary bounded collector under the shared dataset's lock."""
-    from .api import ENTERPRISE
     from .cli import parser, run_trace
     path, request = _request(_safe(case), request_id)
     values = request["settings"]
@@ -290,7 +297,7 @@ def collect_prepared(case, request_id, *, progress=None):
         arguments.extend(["--fixture", request["fixture"]])
     else:
         arguments.extend(["--base-url", request["source"], "--auth",
-                          "blockstream" if request["source"] == ENTERPRISE else "none"])
+                          "blockstream" if request["source"].startswith("https://enterprise.blockstream.info/") else "none"])
     if request["include_unconfirmed"]:
         arguments.append("--include-unconfirmed")
     args = parser().parse_args(arguments)
@@ -300,7 +307,7 @@ def collect_prepared(case, request_id, *, progress=None):
 
 def read_summary(root, case=None):
     """Small read-only UI description; reading never initializes a dataset."""
-    path = _safe(_safe(root) / DIRECTORY)
+    path = dataset_path(case) if case is not None else _safe(_safe(root) / DIRECTORY)
     result = {"name": "Shared collection", "compatible": True, "seeds": [], "seed_count": 0,
               "members": [], "runs": []}
     if not (path / "case.json").exists():

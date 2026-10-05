@@ -3,6 +3,7 @@
 from collections import defaultdict, deque
 import math
 
+from .networks import blockchain
 from .common import TraceError, output_kind, parse_outpoint
 from .group_hops import reference_addresses
 from .hop_limits import output_budget
@@ -27,7 +28,7 @@ def walk_outputs(state, seeds, links, limit, confirmed, *, seed_distances=None,
     def admit(key, depth, remaining, previous=None):
         txid, index = parse_outpoint(key)
         output = rows[txid][index]
-        if output_kind(output) == "fee" or depth > limit:
+        if output_kind(output, blockchain(state)) == "fee" or depth > limit:
             return
         remaining = min(remaining, output_budget(state["labels"], key, output,
                                                 respect_attribution_hops=respect_attribution_hops,
@@ -60,7 +61,7 @@ def walk_outputs(state, seeds, links, limit, confirmed, *, seed_distances=None,
             continue
         for index, output in enumerate(rows[child]):
             following_depth = (0 if output.get("scriptpubkey_address") in addresses
-                               and output_kind(output) == "spendable" else depth + 1)
+                               and output_kind(output, blockchain(state)) == "spendable" else depth + 1)
             admit(f"{child}:{index}", following_depth, remaining - 1, point)
     return seen, predecessors
 

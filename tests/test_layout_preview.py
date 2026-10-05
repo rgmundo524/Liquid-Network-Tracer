@@ -163,17 +163,21 @@ class LayoutPreviewTests(unittest.TestCase):
         self.assertEqual(json.loads(Path(result["graph"]).read_text())["notice"], hostile)
 
     def test_explorer_links_are_active_inline_and_in_downloaded_svg(self):
-        for network in ("liquid", "liquidtestnet"):
+        for network in ("liquid", "liquidtestnet", "", "testnet", "testnet4", "signet"):
             with self.subTest(network=network):
                 graph = graph_fixture()
                 graph["simulated"] = False
-                graph["nodes"][0]["url"] = f"https://blockstream.info/{network}/tx/" + "a" * 64
-                graph["nodes"][1]["url"] = f"https://blockstream.info/{network}/address/ex1syntheticaddress"
-                result = export_layout(graph, self.root / network)
+                graph["blockchain"] = "liquid" if network.startswith("liquid") else "bitcoin"
+                root = "https://blockstream.info" + ("/" + network if network else "")
+                graph["nodes"][0]["url"] = root + "/tx/" + "a" * 64
+                graph["nodes"][1]["url"] = root + "/address/ex1syntheticaddress"
+                result = export_layout(graph, self.root / (network or "bitcoin"))
                 page = Path(result["html"]).read_text()
                 standalone = Path(result["svg"]).read_text()
                 inline = re.search(r'<main id="chart" class="chart">(.*?)</main>', page, re.S).group(1)
                 self.assertEqual(inline, standalone)
+                self.assertIn(graph["blockchain"].capitalize() + " trace ·", page)
+                self.assertIn(graph["blockchain"].capitalize() + " trace ·", standalone)
                 self.assertNotIn("<img", page)
                 self.assertNotIn("<object", page)
                 self.assertNotIn("<script", page)
@@ -202,7 +206,11 @@ class LayoutPreviewTests(unittest.TestCase):
                    valid_tx + "?token=secret", valid_tx + "#fragment", valid_tx + "\n",
                    valid_tx + '\" onload="alert(1)', valid_tx.replace("/tx/", "/address/../tx/"),
                    valid_tx.replace("/tx/", "/%74x/"), valid_tx.replace("/liquid/", "/bitcoin/"),
-                   valid_tx[:-1], "https://blockstream.info/liquid/address/ex1address"]
+                   valid_tx[:-1], "https://blockstream.info/liquid/address/ex1address",
+                   "https://blockstream.info/testnet/other/tx/" + "a" * 64,
+                   "https://blockstream.info/tx/" + "a" * 64 + "?network=liquid",
+                   "https://blockstream.info//tx/" + "a" * 64,
+                   "https://blockstream.info/signet/../tx/" + "a" * 64]
         for url in invalid:
             with self.subTest(url=url):
                 graph = graph_fixture()

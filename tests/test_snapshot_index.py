@@ -232,7 +232,7 @@ class SnapshotIndexTests(unittest.TestCase):
     def test_legacy_private_source_identity_needs_no_graph_or_observation_index(self):
         self.legacy_private()
         with patch("liquid_tracer.cli.verify_export", wraps=verify_export) as verify:
-            self.assertEqual(self.source_identity(), self.state)
+            self.assertEqual(self.source_identity(), {**self.state, "blockchain": "liquid"})
             self.assertEqual(verify.call_count, 1)
         self.assertEqual(list((self.dataset / "indexes").glob("*.sqlite")), [])
         original_read = read_json
@@ -241,7 +241,18 @@ class SnapshotIndexTests(unittest.TestCase):
             return original_read(path)
         with patch("liquid_tracer.cli.verify_export", side_effect=AssertionError("warm full read")), \
              patch("liquid_tracer.snapshot_index.read_json", side_effect=read_small):
+            self.assertEqual(self.source_identity(), {**self.state, "blockchain": "liquid"})
+
+    def test_private_source_identity_caches_explicit_bitcoin_without_rewriting_evidence(self):
+        self.legacy_private()
+        self.state["blockchain"] = "bitcoin"
+        self.seal()
+        evidence = (self.archive / "trace.json").read_bytes()
+        with patch("liquid_tracer.cli.verify_export", wraps=verify_export) as verify:
             self.assertEqual(self.source_identity(), self.state)
+            self.assertEqual(self.source_identity(), self.state)
+            self.assertEqual(verify.call_count, 1)
+        self.assertEqual((self.archive / "trace.json").read_bytes(), evidence)
 
     def test_private_identity_cache_corruption_reverifies_source(self):
         self.legacy_private()
@@ -251,7 +262,7 @@ class SnapshotIndexTests(unittest.TestCase):
         envelope["payload"]["identity"]["source"] = "corrupt"
         save_json(cache, envelope)
         with patch("liquid_tracer.cli.verify_export", wraps=verify_export) as verify:
-            self.assertEqual(self.source_identity(), self.state)
+            self.assertEqual(self.source_identity(), {**self.state, "blockchain": "liquid"})
             self.assertEqual(verify.call_count, 1)
 
     def test_private_identity_changed_archive_and_wrong_identity_fail_closed(self):

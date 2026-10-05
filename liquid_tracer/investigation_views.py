@@ -95,15 +95,15 @@ def collection(case, metadata, selected_run=None, *, history=False):
 
 def shared_collection(root, case, metadata, selected_run=None):
     """Compatibility hints and cached shared runs, without reading evidence."""
-    from .api import ENTERPRISE
+    from .networks import default_api
     from .run_summaries import get_run_summary
-    from .shared_collection import DIRECTORY, RUN_ID, _dataset_metadata, _safe
+    from .shared_collection import dataset_path, RUN_ID, _dataset_metadata, _safe
 
     result = {"name": "Shared collection", "compatible": True, "seeds": [], "seed_count": 0,
               "members": [], "runs": []}
     loading = False
     try:
-        path = _safe(_safe(root) / DIRECTORY)
+        path = dataset_path(case)
         if not (path / "case.json").exists():
             return {"shared_collection": result, "sections": {"shared": "ready"}}
         dataset = _dataset_metadata(path)
@@ -125,7 +125,7 @@ def shared_collection(root, case, metadata, selected_run=None):
             # Exact fixture contents are checked by the worker before use.
             if not dataset["source"].startswith("fixture://"):
                 raise TraceError("Different collection source")
-        elif dataset["source"] != ENTERPRISE:
+        elif dataset["source"] != default_api(metadata):
             raise TraceError("Different collection source")
         for archive in sorted((path / "runs").glob("*"), reverse=True):
             if not RUN_ID.fullmatch(archive.name) or archive.is_symlink() or not archive.is_dir():

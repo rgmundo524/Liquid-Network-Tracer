@@ -1,3 +1,4 @@
+from .networks import blockchain
 """Saved-evidence scope comparisons before graph construction or layout.
 
 The index proves exact transaction spends globally. Only reached transaction
@@ -275,7 +276,7 @@ def _analyse_index(index, seeds, labels, max_hops, *, progress=None, cancel=None
             raise TraceError("A selected starting output does not exist in saved evidence")
         tx_depths[txid] = min(depth, tx_depths.get(txid, depth))
         output = raw[number]
-        if output_kind(output) == "fee":
+        if output_kind(output, blockchain(index.metadata)) == "fee":
             continue
         if key not in outputs:
             outputs[key] = (output, index.output(key) or {})
@@ -292,7 +293,7 @@ def _analyse_index(index, seeds, labels, max_hops, *, progress=None, cancel=None
             continue
         paths[key] = [(d, r) for d, r in paths[key] if not (depth <= d and remaining >= r)] + [(depth, remaining)]
         link = links[key]
-        if output_kind(output) == "spendable" and remaining > 0 and depth < max_hops and link:
+        if output_kind(output, blockchain(index.metadata)) == "spendable" and remaining > 0 and depth < max_hops and link:
             child = link["spending_txid"]
             rows = transaction(child)["data"]["vout"]
             tx_depths[child] = min(depth + 1, tx_depths.get(child, depth + 1))
@@ -320,7 +321,7 @@ def _analyse_index(index, seeds, labels, max_hops, *, progress=None, cancel=None
             if not arrivals:
                 continue
             output, item = outputs[key]
-            kind = output_kind(output)
+            kind = output_kind(output, blockchain(index.metadata))
             counts["output_count"] += 1
             address = output.get("scriptpubkey_address")
             if address:

@@ -7,6 +7,7 @@ No seed-to-endpoint paths are enumerated and no section failure falls back to a
 whole-graph solve.
 """
 
+from .networks import blockchain, is_primary
 from collections import defaultdict
 import math
 
@@ -54,7 +55,7 @@ def address_neighbors(graph, request, structure):
         details = node.get("details", {})
         if (key not in children or node["kind"] != "address" or key in protected
                 or node.get("role") == "seed"
-                or details.get("network", "liquid") != "liquid"
+                or not is_primary(node, graph)
                 or details.get("address") in hubs
                 or any(node.get(field) for field in ("layout_hub", "change_output", "name", "name_colors",
                                                     "attribution_reference", "is_starting"))
