@@ -216,16 +216,18 @@ def _shared_index(case, metadata, run_id, dataset_id, progress):
 
 
 def materialize_shared_run(case, run_id="latest", dataset_id=None, *, progress=None,
-                           max_hops=None, connection_scope=None):
+                           max_hops=None, connection_scope=None, hop_basis="configured"):
     """Return a sealed local source run; never update private latest/history."""
     return materialize_shared_source(case, run_id, dataset_id, progress=progress,
-                                     max_hops=max_hops, connection_scope=connection_scope)[0]
+                                     max_hops=max_hops, connection_scope=connection_scope, hop_basis=hop_basis)[0]
 
 
 def materialize_shared_source(case, run_id="latest", dataset_id=None, *, progress=None,
-                              max_hops=None, connection_scope=None):
+                              max_hops=None, connection_scope=None, hop_basis="configured"):
     """Return (run ID, verified state, manifest digest) for reuse within a job."""
     from .plots import _locked, _ordinary
+    from .plot_scope import validate_hop_basis
+    validate_hop_basis(hop_basis)
     case = _ordinary(Path(case))
     with _locked(case):
         metadata = read_case(case)
@@ -234,6 +236,8 @@ def materialize_shared_source(case, run_id="latest", dataset_id=None, *, progres
             raise TraceError("Choose this investigation's starting outputs before plotting shared data")
         seeds = sorted({f"{txid}:{index}" for txid, index in map(parse_outpoint, raw_seeds)})
         reference = normalize_reference_name(metadata.get("run_defaults", {}).get("hop_reference_name", ""))
+        if hop_basis == "original_seeds":
+            reference = ""
     # Named-group distance can reset far beyond an ordinary seed-hop limit.
     if reference and connection_scope is None:
         max_hops = None

@@ -36,7 +36,8 @@ def name_color_import_screen(base, button, case):
                 with Horizontal(classes="buttons"):
                     yield button("Use CSV template", id="name-color-import-template")
                     yield button("Preview import", id="name-color-import-preview")
-                yield Static("Preview before saving. Import attribution names first. Existing colors are kept by default.",
+                yield Static("Preview before saving. Unused names are saved for later matching address attributions. "
+                             "Existing colors are kept by default.",
                              id="name-color-import-summary", markup=False)
                 table = DataTable(id="name-color-import-rows", cursor_type="row")
                 table.styles.height = 10

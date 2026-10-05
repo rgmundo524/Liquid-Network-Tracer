@@ -11,10 +11,12 @@ import os
 import stat
 import time
 import uuid
+from concurrent.futures import CancelledError
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from .cancellation import check_cancelled
 from .common import TraceError
 from .render_runtime import _available_bytes, _available_cpu_count
 
@@ -278,7 +280,8 @@ class SharedRenderResources:
             return RenderLease(self, workers, heap, per_worker, count, state["pool_heap"]), count, state["pool_heap"]
 
     def acquire(self, workers, total_heap_mb, *, peak_rss_mb=None, progress=None, exclusive=False, refresh_heap=None,
-                worker_heap_mb=None):
+                worker_heap_mb=None, cancel_event=None):
+        check_cancelled(cancel_event)
         if type(workers) is not int or workers < 1 or type(total_heap_mb) is not int or total_heap_mb < 1:
             raise TraceError("ELK resource requests require positive worker and heap limits")
         if worker_heap_mb is not None and (type(worker_heap_mb) is not int or worker_heap_mb < 1):
@@ -286,6 +289,7 @@ class SharedRenderResources:
         started = self._clock()
         next_report = started
         while True:
+            check_cancelled(cancel_event)
             lease, count, capacity = self._try_acquire(workers, total_heap_mb, peak_rss_mb, exclusive, refresh_heap,
                                                        worker_heap_mb)
             now = self._clock()
@@ -302,9 +306,17 @@ class SharedRenderResources:
                     event["message"] = f"Waiting for shared ELK resources; {count} active layouts"
                 try:
                     progress(event)
+                except CancelledError:
+                    if lease is not None:
+                        self.release()
+                    raise
                 except Exception:
                     pass
                 next_report = now + 5
+            if cancel_event is not None and cancel_event.is_set():
+                if lease is not None:
+                    self.release()
+                raise CancelledError()
             if lease is not None:
                 return lease
             self._sleep(POLL_SECONDS)

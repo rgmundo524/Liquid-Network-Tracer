@@ -13,7 +13,7 @@ from liquid_tracer.investigations import read_case, update_case
 from liquid_tracer.menu import create_app
 from tests import test_web, test_menu_addresses
 from tests.test_connections import saved_case
-from tests.test_attribution_convergence import graph_state
+from tests.test_attribution_convergence import graph_state, tx
 
 
 class ConnectionWebTests(unittest.TestCase):
@@ -112,18 +112,23 @@ class ConnectionWebTests(unittest.TestCase):
             self.assertIn(result["preview_id"], args)
             self.assertTrue(worker.call_args.kwargs["live"])
 
-    def test_cli_empty_chart_and_no_network(self):
+    def test_cli_disconnected_starters_still_have_a_chart_without_network(self):
         case, _, _ = self.setup_case()
         saved_case(case, graph_state())
         output = io.StringIO()
-        with contextlib.redirect_stdout(output):
+        with contextlib.redirect_stdout(output), \
+                patch("liquid_tracer.elk_layout.optimize_graph", side_effect=lambda graph, **kwargs: graph), \
+                patch("liquid_tracer.api.Esplora.get", side_effect=AssertionError("No blockchain requests")):
             self.assertEqual(main(["connections", "--case", str(case), "--hops", "1"]), 0)
         result = json.loads(output.getvalue())
         graph, plan = reviewed_connections(case, result["preview_id"])
-        self.assertEqual(graph["nodes"], [])
-        self.assertEqual(plan["shapes"], [])
-        self.assertEqual(plan["connectors"], [])
-        self.assertFalse((case / "previews" / result["preview_id"] / "details.html").exists())
+        self.assertEqual({node["id"] for node in graph["nodes"] if node["kind"] == "transaction"},
+                         {"tx:" + tx("a"), "tx:" + tx("b")})
+        self.assertEqual(result["connection_count"], 0)
+        self.assertTrue(result["includes_all_starters"])
+        self.assertTrue(plan["shapes"])
+        self.assertEqual(len(plan["connectors"]), 2)
+        self.assertTrue((case / "previews" / result["preview_id"] / "details.html").exists())
 
 
 class ConnectionMenuTests(unittest.IsolatedAsyncioTestCase):

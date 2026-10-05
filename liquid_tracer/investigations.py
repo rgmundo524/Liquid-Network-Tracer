@@ -101,6 +101,18 @@ def validate_settings(settings):
     return result
 
 
+def generation_settings(settings):
+    """Default new generation preferences to Trace without changing old evidence.
+
+    Historical settings and preview fingerprints keep validate_settings' Standard
+    fallback. An explicitly saved Standard preference remains a deliberate choice.
+    """
+    result = validate_settings(settings)
+    if "layout_style" not in settings:
+        result["layout_style"] = "trace"
+    return result
+
+
 def effective_run_settings(settings):
     """Resolve opt-in run budgets without overwriting saved numeric preferences.
 
@@ -116,11 +128,11 @@ def effective_run_settings(settings):
 
 def load_settings(root):
     path = Path(root) / "settings.json"
-    return validate_settings(read_json(path)) if path.exists() else validate_settings({})
+    return generation_settings(read_json(path)) if path.exists() else generation_settings({})
 
 
 def save_settings(root, settings):
-    values = validate_settings(settings)
+    values = generation_settings(settings)
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     with (root / "settings.lock").open("a") as lock:
@@ -154,7 +166,7 @@ def update_case(case, updates):
         from .cli import board_id
         changes["miro_board"] = board_id(changes["miro_board"])
     if "run_defaults" in changes:
-        changes["run_defaults"] = validate_settings(changes["run_defaults"])
+        changes["run_defaults"] = generation_settings(changes["run_defaults"])
     case = Path(case)
     with (case / "trace.lock").open("a") as trace_lock, (case / "case.lock").open("a") as lock:
         try:
@@ -171,7 +183,7 @@ def save_plot_settings(case, settings):
     """Merge display settings into the latest investigation metadata atomically."""
     if not isinstance(settings, dict) or set(settings) - PLOT_SETTING_KEYS:
         raise TraceError("Plot settings accept layout style, layout attempts, connectors, fees, attribution arrows, context grouping, center name, and branch hubs only")
-    validated = validate_settings(settings)
+    validated = generation_settings(settings)
     changes = {key: validated[key] for key in settings}
     case = Path(case)
     with (case / "trace.lock").open("a") as trace_lock, (case / "case.lock").open("a") as case_lock:
@@ -183,8 +195,8 @@ def save_plot_settings(case, settings):
         except BlockingIOError:
             raise TraceError("An investigation operation is active; save plot settings after it finishes") from None
         metadata = read_case(case)
-        defaults = validate_settings(metadata.get("run_defaults", {}))
-        defaults = validate_settings({**defaults, **changes})
+        defaults = generation_settings(metadata.get("run_defaults", {}))
+        defaults = generation_settings({**defaults, **changes})
         if changes and defaults != metadata.get("run_defaults"):
             metadata = {**metadata, "run_defaults": defaults}
             save_json(case / "case.json", metadata)
@@ -203,7 +215,7 @@ def save_collection_reference(case, name):
         except BlockingIOError:
             raise TraceError("An investigation operation is active; change the hop origin after it finishes") from None
         metadata = read_case(case)
-        defaults = validate_settings(metadata.get("run_defaults", {}))
+        defaults = generation_settings(metadata.get("run_defaults", {}))
         defaults["hop_reference_name"] = name
         if defaults != metadata.get("run_defaults"):
             metadata = {**metadata, "run_defaults": defaults}
@@ -222,7 +234,7 @@ def _name(value):
 def create_investigation(root, name, *, board=None, fixture=None, seeds=None, run_defaults=None, blockchain="liquid"):
     blockchain = validate_blockchain(blockchain)
     name = _name(name)
-    defaults = validate_settings(run_defaults or {})
+    defaults = generation_settings({} if run_defaults is None else run_defaults)
     if board:
         from .cli import board_id
         board = board_id(board)

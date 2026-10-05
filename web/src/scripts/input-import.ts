@@ -136,6 +136,7 @@ function reviewRow(file: FileReview, entry: Change): string {
     incoming = assessment(entry.rule); previous = assessment(entry.previous);
   } else if (file.kind === 'name-colors') {
     label = entry.name; incoming = entry.color === null ? 'Clear assignment' : color(entry.color); previous = color(entry.previous);
+    if (entry.addresses === 0 && entry.color !== null) incoming += '<br><small>Unused in this investigation</small>';
   } else {
     label = entry.txid; incoming = entry.vout === null ? 'Clear designation' : `vout ${esc(entry.vout)}`;
     previous = entry.previous === null ? 'No designation' : `vout ${esc(entry.previous)}`;
@@ -155,7 +156,7 @@ export function inputImportPanel(caseId: string, busy: boolean): string {
   if (!draft.open) return '';
   const locked = busy || draft.pending, review = draft.review;
   return `<section class="panel" id="input-import-panel" aria-labelledby="input-import-title"><div class="panel-head"><div><h2 id="input-import-title" tabindex="-1">Import CSV files</h2><p>Add attributions, name colors, and change outputs together.</p></div><button class="btn" data-action="input-import-close"${off(locked)}>Close</button></div><div class="panel-body">
-    <p>Choose one, two, or all three CSV files in the same picker. File types are detected from their columns. New attribution names can receive colors in this same import, in any file order.</p>
+    <p>Choose one, two, or all three CSV files in the same picker. File types are detected from their columns. Color files can be reused across investigations; names without matching address attributions are saved for later use.</p>
     <label class="field"><span>${draft.files.length ? 'Add or replace CSV files' : 'Choose CSV files'}</span><input type="file" id="input-import-files" accept=".csv,text/csv" multiple${off(locked)}/><small>Up to three files, one per type. Maximum 5,000 rows / 512 KiB each. Selecting a queued filename again updates its contents and keeps its type and conflict policy. Preview it again before saving.</small></label>
     <div class="table-wrap"><table><thead><tr><th>File</th><th>Contents</th><th>Existing entries</th><th></th></tr></thead><tbody>${draft.files.map((file, index) => {
       const detected = review?.files[index]?.kind || detectedKind(file.text);

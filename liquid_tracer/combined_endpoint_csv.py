@@ -77,6 +77,9 @@ def _pin_shared(case, metadata, source):
     info = {"case_id": metadata["case_id"], "name": metadata.get("name") or case.name,
             "run_id": source["run_id"], "collection_source": source}
     candidates = []
+    from .seed_settings import normalize_seeds
+    current_seeds = normalize_seeds(metadata["seeds"]) if metadata.get("seeds") else None
+    different_seeds = False
     for directory in _ordinary(case / "previews").glob("*-plots-*"):
         if not PREVIEW_ID.fullmatch(directory.name):
             continue
@@ -96,8 +99,16 @@ def _pin_shared(case, metadata, source):
                 or not directory.name.startswith(run + "-plots-")):
             raise TraceError("A saved plot for the selected shared run has invalid metadata; restore or regenerate it")
         if report["goal"] == "pegouts":
+            # This selection asks for the current investigation over a shared
+            # snapshot. A historical preview is still downloadable explicitly,
+            # but must not silently stand in for newly selected starting roots.
+            if current_seeds is not None and normalize_seeds(report.get("query", {}).get("seeds", [])) != current_seeds:
+                different_seeds = True
+                continue
             candidates.append((report["created_at"], directory.name, run))
     if not candidates:
+        if different_seeds:
+            return info, None, "Saved peg-out previews use different starting outputs. Generate a preview for the current starting outputs before combining endpoints."
         return info, None, "No completed Path to peg-outs plot exists for the selected shared snapshot."
     _, preview_id, run = max(candidates)
     archive = _ordinary(case / "runs" / run)

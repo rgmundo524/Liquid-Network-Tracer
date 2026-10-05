@@ -80,7 +80,8 @@ class GroupHopWorkflowTests(unittest.TestCase):
 
     def test_changed_reference_uses_new_ceiling_and_unchanged_reference_adds_hops(self):
         case, metadata, _ = self.named_case()
-        parent = {'source': 'fixture://synthetic', 'hop_reference_name': 'Perp', 'labels': []}
+        parent = {'source': 'fixture://synthetic', 'hop_reference_name': 'Perp',
+                  'labels': [], 'seeds': metadata['seeds'][:]}
         metadata = {**metadata, 'latest_run': 'a' * 16}
         with patch('liquid_tracer.menu._latest', return_value=(None, parent)):
             same, _ = _trace_arguments(case, metadata, validate_settings({'hops': 2, 'hop_reference_name': ' PERP '}))

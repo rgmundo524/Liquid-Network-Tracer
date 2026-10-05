@@ -8,6 +8,8 @@ from unittest.mock import patch
 from liquid_tracer.common import LBTC, TraceError, digest, read_json, save_json
 from liquid_tracer.connections import connection_graph, preview_connections, reviewed_connections
 from liquid_tracer.investigations import create_investigation, update_case
+from liquid_tracer.export import legend_lines
+from liquid_tracer.legend import legend_notes
 from liquid_tracer.miro import make_plan, validate_plan
 from liquid_tracer.transaction_csv import transaction_csv_rows
 from tests.test_attribution_convergence import annotation, graph_state, tx
@@ -26,6 +28,39 @@ def io_ids(state, names):
 
 
 class CompleteTransactionConnectionTests(unittest.TestCase):
+    def test_fees_are_explicit_display_context_with_hidden_removal_proofs(self):
+        state = graph_state((("a:0", "b"),))
+        data = state["transactions"][tx("b")]["data"]
+        fee = f"{tx('b')}:{len(data['vout'])}"
+        data["vout"].append({"scriptpubkey": "", "scriptpubkey_type": "fee", "value": 12, "asset": LBTC})
+        before = deepcopy(state)
+        for scope, maximum in (("all_saved", 10), ("hop_limited", 1)):
+            with self.subTest(scope=scope):
+                options = {"connection_scope": scope, "transaction_io": "complete"}
+                hidden = connection_graph(state, maximum, **options)
+                visible = connection_graph(state, maximum, include_fees=True, **options)
+                self.assertFalse(hidden["include_fees"])
+                self.assertNotIn("out:" + fee, {edge["id"] for edge in hidden["edges"]})
+                self.assertNotIn("event:" + fee, {node["id"] for node in hidden["nodes"]})
+                self.assertEqual(set(visible["fee_items"]), {"out:" + fee, "event:" + fee})
+                self.assertEqual(hidden["fee_items"], visible["fee_items"])
+                self.assertEqual(hidden["connections"]["outpoints"], visible["connections"]["outpoints"])
+                self.assertEqual(hidden["connections"]["context_edge_count"] + 1,
+                                 visible["connections"]["context_edge_count"])
+                self.assertEqual(len(transaction_csv_rows(hidden, state)), len(hidden["edges"]))
+                for renderer in (legend_lines, legend_notes):
+                    self.assertIn("Fee flows are hidden", " ".join(renderer(hidden)))
+                    self.assertIn("including fees", " ".join(renderer(visible)))
+                validate_plan(make_plan(hidden))
+                validate_plan(make_plan(visible))
+        legacy = connection_graph(state, connection_scope="all_saved", include_fees=True)
+        self.assertFalse(legacy["include_fees"])
+        self.assertEqual(legacy["fee_items"], {})
+        for value in (None, 1, 0, "true", [], {}):
+            with self.subTest(value=value), self.assertRaisesRegex(TraceError, "Fee display"):
+                complete(state, include_fees=value)
+        self.assertEqual(state, before)
+
     def test_all_local_io_preserves_selection_without_expanding_context_or_descendants(self):
         state = graph_state((("a:0", "c"), ("c:0", "b"), ("a:1", "d"), ("e:0", "c")),
                             raw_links=(("f:0", "c"),))
@@ -71,7 +106,7 @@ class CompleteTransactionConnectionTests(unittest.TestCase):
         op_return = add_unspendable(state, tx("b"))
         fee = f"{tx('b')}:{len(data['vout'])}"
         data["vout"].append({"scriptpubkey": "", "scriptpubkey_type": "fee", "value": 12, "asset": LBTC})
-        graph = complete(state)
+        graph = complete(state, include_fees=True)
         edges = {edge["id"]: edge for edge in graph["edges"]}
         self.assertEqual(set(edges), io_ids(state, "ab"))
         self.assertEqual(graph["connections"]["outpoints"], [tx("a") + ":0"])
@@ -118,12 +153,13 @@ class CompleteTransactionConnectionTests(unittest.TestCase):
                 self.assertEqual(row["Address Hash"], "SYNTHETIC-c-address")
                 self.assertEqual(state, before)
 
-    def test_empty_and_legacy_modes_keep_original_membership(self):
+    def test_complete_mode_shows_all_starters_and_legacy_keeps_original_membership(self):
         graph = complete(graph_state())
-        self.assertEqual(graph["nodes"], [])
-        self.assertEqual(graph["edges"], [])
-        self.assertEqual(graph["connections"]["context_edge_count"], 0)
-        self.assertEqual(transaction_csv_rows(graph, graph_state()), [])
+        self.assertEqual({node["id"] for node in graph["nodes"] if node["kind"] == "transaction"},
+                         {"tx:" + tx("a"), "tx:" + tx("b")})
+        self.assertEqual(graph["connections"]["connection_count"], 0)
+        self.assertEqual(graph["connections"]["context_edge_count"], 2)
+        self.assertEqual(len(transaction_csv_rows(graph, graph_state())), 2)
         state = graph_state((("a:0", "b"),))
         legacy = connection_graph(state, connection_scope="all_saved")
         self.assertEqual(len(legacy["edges"]), 2)
@@ -149,7 +185,7 @@ class CompleteTransactionConnectionTests(unittest.TestCase):
             preview = preview_connections(case)
             graph, plan = reviewed_connections(case, preview["preview_id"])
             self.assertEqual(preview["transaction_io"], "complete")
-            self.assertTrue(preview["include_fees"])
+            self.assertFalse(preview["include_fees"])
             self.assertTrue(preview["group_context_inputs"])
             self.assertEqual(graph["context_groups"]["group_count"], 1)
             validate_plan(plan)

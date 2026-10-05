@@ -21,3 +21,5 @@ trace.lock
 dist/
 node_modules/
 .astro/
+# The build output can be a generated symlink.
+/web/dist

@@ -123,7 +123,7 @@ class InputImportMenuTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_second_file_prevents_apply_and_identifies_source(self):
         from textual.widgets import Button, Static
         paths = self.files()
-        paths[0].write_text("Name,Color\nUnknown service,#123456\n")
+        paths[0].write_text("Name,Color\nUnknown service,invalid\n")
         app = create_app(self.root)
         async with app.run_test(size=(120, 65)) as pilot:
             screen = await self.open_import(app, pilot)

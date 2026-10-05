@@ -1,9 +1,10 @@
 """Bounded ELK processes sharing one heap budget and ordered result delivery."""
 
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import CancelledError, FIRST_COMPLETED, ThreadPoolExecutor, wait
 from queue import Empty, SimpleQueue
 from threading import Event
 
+from .cancellation import check_cancelled
 from .elk_errors import ElkWorkerFailure
 from .render_runtime import elk_worker_budget, renderer_heap_is_auto, renderer_heap_mb
 from .shared_render_resources import SharedRenderResources
@@ -16,6 +17,8 @@ POLL_SECONDS = 0.2
 def _emit(report, event):
     try:
         report(event)
+    except CancelledError:
+        raise
     except Exception:
         pass  # Progress remains advisory, including delivery on the main thread.
 
@@ -33,7 +36,8 @@ def _request(request, index):
             "boundaryOrdering": ordered}
 
 
-def _batch(request, jobs, worker, progress_for_attempt, worker_count, total_heap_mb, heap_mb, lease):
+def _batch(request, jobs, worker, progress_for_attempt, worker_count, total_heap_mb, heap_mb, lease,
+           parent_cancel_event=None):
     """Drain one bounded batch. Never invoke a user's progress sink in a thread."""
     cancel_event = Event()
     events = SimpleQueue()
@@ -58,8 +62,10 @@ def _batch(request, jobs, worker, progress_for_attempt, worker_count, total_heap
 
     try:
         for index, seed in jobs:
+            check_cancelled(parent_cancel_event)
             pending[executor.submit(run, index, seed)] = (index, seed)
         while pending:
+            check_cancelled(parent_cancel_event)
             finished, _ = wait(pending, timeout=POLL_SECONDS, return_when=FIRST_COMPLETED)
             # Read fatal failures before calling progress sinks. An engine
             # setup failure must promptly stop every still-running sibling.
@@ -70,6 +76,7 @@ def _batch(request, jobs, worker, progress_for_attempt, worker_count, total_heap
                 except ElkWorkerFailure as exc:
                     outcomes[index] = exc
             flush()
+        check_cancelled(parent_cancel_event)
         return outcomes
     finally:
         # Also covers cancellation while submitting a future or while a
@@ -81,7 +88,7 @@ def _batch(request, jobs, worker, progress_for_attempt, worker_count, total_heap
         executor.shutdown(wait=True, cancel_futures=True)
 
 
-def iter_attempts(request, seeds, worker, progress_for_attempt, metadata):
+def iter_attempts(request, seeds, worker, progress_for_attempt, metadata, *, cancel_event=None):
     """Yield each configured seed once, in order, with bounded live candidates.
 
     Start with a graph-sized pilot and use its measured peak RAM to size later
@@ -90,17 +97,19 @@ def iter_attempts(request, seeds, worker, progress_for_attempt, metadata):
     other batches drain. Remaining work stays sequential. A retry replaces that
     seed's outcome and never adds a configured attempt.
     """
+    check_cancelled(cancel_event)
     if not request["children"]:
-        yield from _iter_attempts(request, seeds, worker, progress_for_attempt, metadata, None)
+        yield from _iter_attempts(request, seeds, worker, progress_for_attempt, metadata, None, cancel_event)
         return
     with SharedRenderResources() as resources:
-        yield from _iter_attempts(request, seeds, worker, progress_for_attempt, metadata, resources)
+        yield from _iter_attempts(request, seeds, worker, progress_for_attempt, metadata, resources, cancel_event)
 
 
-def _iter_attempts(request, seeds, worker, progress_for_attempt, metadata, resources):
+def _iter_attempts(request, seeds, worker, progress_for_attempt, metadata, resources, cancel_event=None):
     metadata.update(execution="sequential", worker_count=1, memory_retry_count=0)
     next_index, sequential, observed_peak = 1, False, None
     while next_index <= len(seeds):
+        check_cancelled(cancel_event)
         if not request["children"]:
             seed = seeds[next_index - 1]
             yield next_index, seed, [{"seed": seed, "nodes": [], "edges": [],
@@ -125,7 +134,7 @@ def _iter_attempts(request, seeds, worker, progress_for_attempt, metadata, resou
         requested_heap_mb = total_heap_mb
         lease = resources.acquire(worker_count, total_heap_mb, peak_rss_mb=None if sequential else observed_peak,
                                   progress=progress_for_attempt(next_index, seeds[next_index - 1]),
-                                  worker_heap_mb=heap_mb)
+                                  worker_heap_mb=heap_mb, cancel_event=cancel_event)
         worker_count, total_heap_mb, heap_mb = lease.worker_count, lease.total_heap_mb, lease.heap_mb
         metadata["worker_count"] = max(metadata["worker_count"], worker_count)
         if worker_count > 1:
@@ -155,17 +164,18 @@ def _iter_attempts(request, seeds, worker, progress_for_attempt, metadata, resou
 
                 try:
                     outcome = worker(_request(request, index), [seed], progress=serial_progress, heap_mb=heap_mb,
-                                     resource_lease_fd=lease.resource_lease_fd)
+                                     resource_lease_fd=lease.resource_lease_fd, cancel_event=cancel_event)
                 except ElkWorkerFailure as exc:
                     outcome = exc
                 outcomes = {index: outcome}
                 del outcome
             else:
                 outcomes = _batch(request, jobs, worker, measured_progress,
-                                  worker_count, total_heap_mb, heap_mb, lease)
+                                  worker_count, total_heap_mb, heap_mb, lease, cancel_event)
                 sequential = any(isinstance(outcome, ElkWorkerFailure)
                                  and outcome.failure_code in MEMORY_PRESSURE_CODES for outcome in outcomes.values())
         for index, seed in jobs:
+            check_cancelled(cancel_event)
             outcome = outcomes.pop(index)
             if (isinstance(outcome, ElkWorkerFailure) and outcome.failure_code in MEMORY_PRESSURE_CODES
                     and (worker_count > 1 or total_heap_mb < requested_heap_mb or lease.active_layouts > 1
@@ -176,7 +186,8 @@ def _iter_attempts(request, seeds, worker, progress_for_attempt, metadata, resou
                 report = measured_progress(index, seed)
                 sequential = True
                 retry_lease = resources.acquire(1, renderer_heap_mb(), progress=report, exclusive=True,
-                                                refresh_heap=renderer_heap_mb if renderer_heap_is_auto() else None)
+                                                refresh_heap=renderer_heap_mb if renderer_heap_is_auto() else None,
+                                                cancel_event=cancel_event)
                 retry_heap_mb = retry_lease.heap_mb
                 fields = {"worker_count": 1, "active_workers": 1,
                           "total_heap_mb": retry_heap_mb, "heap_mb": retry_heap_mb,
@@ -191,12 +202,13 @@ def _iter_attempts(request, seeds, worker, progress_for_attempt, metadata, resou
                 with retry_lease:
                     try:
                         outcome = worker(_request(request, index), [seed], progress=retry_progress, heap_mb=retry_heap_mb,
-                                         resource_lease_fd=retry_lease.resource_lease_fd)
+                                         resource_lease_fd=retry_lease.resource_lease_fd, cancel_event=cancel_event)
                     except ElkWorkerFailure as exc:
                         outcome = exc
             if not isinstance(outcome, ElkWorkerFailure) and index in measurements:
                 observed_peak = max(observed_peak or 0, measurements[index])
                 metadata["peak_rss_mb"] = observed_peak
+            check_cancelled(cancel_event)
             yield index, seed, outcome
             del outcome
         next_index += worker_count

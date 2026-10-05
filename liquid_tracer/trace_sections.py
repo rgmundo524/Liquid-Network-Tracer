@@ -10,13 +10,14 @@ whole-graph solve.
 from collections import defaultdict
 import math
 
+from .cancellation import check_cancelled
 from .common import TraceError
 from .elk_errors import ElkWorkerFailure
 from .elk_sections_parallel import iter_sections
 from .trace_layout import trace_structure
 from .trace_section_geometry import assemble
 
-SECTION_LAYOUT_VERSION = 7
+SECTION_LAYOUT_VERSION = 8
 MIN_SECTION_NODES = 600
 MIN_SECTION_EDGES = 2400
 MAX_SECTION_NODES = 128
@@ -121,10 +122,16 @@ def plan(graph, request, *, structure=None):
             groups.append(current)
 
     partition(backbone)
+    # The selected entity can branch beyond the single exact spine. Reserve
+    # bounded local groups for those members so named forks and joins receive
+    # the same focus in section layouts as in the ordinary Trace ordering.
+    # They are never added to the exact backbone or its routing preferences.
+    partition(structure.get("named_core", set()) - backbone)
     for branch in structure["branches"]:
         partition(branch)
-    # Shared hubs must remain individual junctions, never duplicated into the
-    # branches they connect. Isolated/context objects also retain one owner.
+    # Unassigned shared hubs remain individual sections, never duplicated into
+    # the branches they connect. Named shared addresses already have exactly
+    # one owner in the focus sections above, without becoming backbone nodes.
     for key in order:
         if key not in assigned:
             partition([key])
@@ -199,7 +206,9 @@ def _validate_local(request, candidate):
             raise TraceError("ELK section returned invalid connector labels")
 
 
-def iter_candidates(graph, request, seeds, worker, progress_for_attempt, metadata, *, structure=None):
+def iter_candidates(graph, request, seeds, worker, progress_for_attempt, metadata, *, structure=None,
+                    cancel_event=None):
+    check_cancelled(cancel_event)
     # Board updates reserve dummy columns for the monolithic engine. The
     # assembler uses the real dependency columns directly, retaining their
     # alignment while removing those non-evidence spacer objects.
@@ -226,6 +235,7 @@ def iter_candidates(graph, request, seeds, worker, progress_for_attempt, metadat
                     max_worker_ports=max((sum(len(n.get("ports", [])) for n in requests[i]["children"])
                                           for i in jobs), default=0))
     for attempt, seed in enumerate(seeds, 1):
+        check_cancelled(cancel_event)
         report = progress_for_attempt(attempt, seed)
         report({"phase": "optimizing", "stage": "section_preparing", "completed": 0, "total": 0,
                 "message": f"Arranging {len(groups):,} Trace sections around the preferred backbone",
@@ -233,9 +243,11 @@ def iter_candidates(graph, request, seeds, worker, progress_for_attempt, metadat
         candidates = [None] * len(groups)
         execution = {}
         failure = None
-        stream = iter_sections([requests[index] for index in jobs], seed, worker, report, execution)
+        stream = iter_sections([requests[index] for index in jobs], seed, worker, report, execution,
+                               **({"cancel_event": cancel_event} if cancel_event is not None else {}))
         try:
             for index, alternatives in stream:
+                check_cancelled(cancel_event)
                 if isinstance(alternatives, ElkWorkerFailure):
                     failure = alternatives
                     break
@@ -263,13 +275,16 @@ def iter_candidates(graph, request, seeds, worker, progress_for_attempt, metadat
         report({"phase": "optimizing", "stage": "section_assembling", "completed": 0, "total": 0,
                 "message": "Joining Trace sections and routing shared-address connections"})
         from .trace_section_local import local_candidates
+        check_cancelled(cancel_event)
         candidates = local_candidates({**request, "addressNeighbors": address_hints}, requests, candidates, backbone, seed,
                                       {node["id"]: node["kind"] for node in graph["nodes"]},
                                       structure["edges"])
+        check_cancelled(cancel_event)
         candidate = assemble({**request, "backboneEdges": structure["edges"],
                               "nodeShapes": {node["id"]: node["kind"] for node in graph["nodes"]},
                               "addressNeighbors": address_hints, "localSectionGeometry": True,
                               "sectionRequests": requests},
                              groups, candidates, backbone)
         candidate.update(seed=seed, inputOrderPolicy="geometry", branchProfile="flow_weighted", branchBoundary=False)
+        check_cancelled(cancel_event)
         yield attempt, seed, [candidate]

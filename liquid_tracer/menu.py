@@ -186,9 +186,17 @@ def _trace_arguments(case, metadata, settings):
             from .api import ENTERPRISE
             if parent.get("source") != ENTERPRISE:
                 raise TraceError("Continue with the trace command and the original API source.")
-        ceiling = "--additional-hops" if reference.casefold() == reference_name(parent).casefold() else "--hops"
-        arguments.extend(["--resume", "latest", ceiling, str(settings["hops"])])
-    else:
+        from .seed_settings import normalize_seeds
+        # A saved collection is evidence of its original roots. Changing the
+        # investigation's roots starts a fresh run; it must never silently
+        # continue the previous roots. Older CLI-only cases can lack metadata.
+        if (metadata.get("seeds") and
+                normalize_seeds(metadata["seeds"]) != normalize_seeds(parent.get("seeds", []))):
+            parent = None
+        else:
+            ceiling = "--additional-hops" if reference.casefold() == reference_name(parent).casefold() else "--hops"
+            arguments.extend(["--resume", "latest", ceiling, str(settings["hops"])])
+    if parent is None:
         seeds = metadata.get("seeds")
         if not seeds:
             raise TraceError("No starting outputs are saved. Start this investigation using the trace command.")
@@ -196,8 +204,8 @@ def _trace_arguments(case, metadata, settings):
             arguments.extend(["--seed", seed])
         arguments.extend(["--hops", str(settings["hops"])])
     if reference:
-        from .services import apply_service_labels, load_services
-        labels = apply_service_labels(parent.get("labels", []) if parent else [], load_services(case))
+        from .services import apply_service_labels, effective_services
+        labels = apply_service_labels(parent.get("labels", []) if parent else [], effective_services(case))
         if not reference_addresses({"labels": labels, "hop_reference_name": reference}):
             raise TraceError("The hop reference name has no enabled address attributions; choose an existing named group")
     arguments.extend(["--hop-reference-name", reference])
@@ -785,9 +793,9 @@ def create_app(root=None):
 
         def select_address(self):
             from .address_review import saved_activity
-            from .services import load_services, validate_address
+            from .services import effective_services, validate_address
             address = validate_address(self.query_one("#address-value", Input).value)
-            rule = load_services(self.case)["rules"].get(address) or {}
+            rule = effective_services(self.case)["rules"].get(address) or {}
             summary = saved_activity(self.case, address)
             self.selected_address = address
             self.query_one("#address-value", Input).value = address
@@ -1468,7 +1476,10 @@ def create_app(root=None):
                 if status == 0:
                     try:
                         result = json.loads(output)
-                        message = ("No connection found in the saved searched data. Nothing was plotted. "
+                        message = (f"Starter connection chart saved: all {result.get('starting_transaction_count')} "
+                                   f"starting transactions shown; {result.get('connection_count')} connected starter pair(s). "
+                                   if result.get("includes_all_starters") else
+                                   "No connection found in the saved searched data. Nothing was plotted. "
                                    if result.get("connection_count") == 0 else
                                    f"Connection-only chart saved: {result.get('connection_count')} starter pair(s). ")
                         message += "Full Miro graph unchanged. " + str(result.get("html", ""))

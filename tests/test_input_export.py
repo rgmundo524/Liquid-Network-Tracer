@@ -108,12 +108,16 @@ class InputExportTests(unittest.TestCase):
         preview = name_color_import.preview_import(self.case, text, format="csv")
         self.assertTrue(preview["valid"], preview["errors"])
         self.assertEqual(preview["counts"]["unchanged"], 2)
-        # Fresh cases must first contain matching attribution names. Unused assignments
-        # stay in the export so the investigator can restore those names too.
+        # Reusing a palette never requires copying another investigation's attributions.
         fresh = create_investigation(self.root, "No names", seeds=[A + ":0"])
         preview = name_color_import.preview_import(fresh, text, format="csv")
-        self.assertFalse(preview["valid"])
-        self.assertTrue(all("Unknown attribution name" in error["message"] for error in preview["errors"]))
+        self.assertTrue(preview["valid"], preview["errors"])
+        self.assertEqual(preview["counts"]["add"], 2)
+        self.assertEqual([row["addresses"] for row in preview["changes"]], [0, 0])
+        name_color_import.apply_import(fresh, text, format="csv", approval_sha256=preview["approval_sha256"])
+        self.assertEqual(load_services(fresh)["rules"], {})
+        self.assertEqual(load_services(fresh)["name_colors"], load_services(self.case)["name_colors"])
+        self.assertEqual(build_input_export(fresh, "name-colors")["rows"], {"name-colors": 2})
 
     def test_change_outputs_roundtrip_zero_vout_and_notes_without_lookups(self):
         self.settings(changes={B: {"vout": 4294967295, "notes": "Future transaction", "updated_at": "2026-09-19"},

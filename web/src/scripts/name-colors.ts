@@ -41,7 +41,7 @@ export function nameColorsPanel(caseId: string, busy: boolean): string {
     <button class="btn" data-action="name-colors-role-save" data-color-index="${i}"${disabled}>Save color</button>
     <button class="btn" data-action="name-colors-role-clear" data-color-index="${i}"${disabled}>Reset to default</button></td></tr>`;
   }).join('')}</tbody></table></div>
-  <div class="panel-head"><h3>Imported name colors</h3><a class="btn" href="/api/cases/${esc(encodeURIComponent(caseId))}/input-exports/name-colors" download>Export saved CSV</a></div><p class="address-note">${esc(data?.notice || 'Loading saved names...')}</p>
+  <div class="panel-head"><h3>Name color palette</h3><a class="btn" href="/api/cases/${esc(encodeURIComponent(caseId))}/input-exports/name-colors" download>Export saved CSV</a></div><p class="address-note">${esc(data?.notice || 'Loading saved names...')}</p>
   <p class="address-note">Export includes all saved name color assignments across every page. Unsaved edits and graph-role colors are excluded. Empty exports contain column headers; large exports download as a ZIP of CSV parts.</p>
   <div class="form-actions"><button class="btn" data-action="input-import-open"${disabled}>Import CSV files</button></div>
   <details id="advanced-name-colors"><summary>Advanced imports: paste name colors or import JSON</summary>${nameColorImportPanel(caseId, busy || state.pending)}</details>
@@ -49,16 +49,16 @@ export function nameColorsPanel(caseId: string, busy: boolean): string {
   <div class="form-actions"><button class="btn" data-action="name-colors-load"${disabled}>Search / refresh</button></div>
   <div class="table-wrap"><table><thead><tr><th>Name</th><th>Addresses</th><th>Color</th><th>Actions</th></tr></thead><tbody>${(data?.rows || []).map((row, i) => {
     const color = state.drafts.get(row.key) ?? row.color ?? '';
-    return `<tr><td>${esc(row.name)}<small class="muted">${row.variants.length > 1 ? '<br>' + esc(row.variants.join(', ')) : ''}</small></td><td>${row.addresses}<small class="muted"><br>${row.enabled_addresses} active</small></td><td><input type="color" id="name-colors-picker-${i}" aria-label="Choose color for ${esc(row.name)}" value="${safeColor(color) ? color : '#d1d5db'}"${disabled}/>
+    return `<tr><td>${esc(row.name)}<small class="muted">${row.variants.length > 1 ? '<br>' + esc(row.variants.join(', ')) : ''}</small></td><td>${row.addresses}<small class="muted"><br>${row.addresses === 0 ? 'Unused in this investigation' : row.enabled_addresses + ' active'}</small></td><td><input type="color" id="name-colors-picker-${i}" aria-label="Choose color for ${esc(row.name)}" value="${safeColor(color) ? color : '#d1d5db'}"${disabled}/>
     <input id="name-colors-hex-${i}" aria-label="Hex color for ${esc(row.name)}" placeholder="Default" maxlength="7" value="${esc(color)}"${disabled}/><br><small>${row.color ? 'Saved: ' + esc(row.color) : 'No name color assigned'}</small></td><td>
     <button class="btn" data-action="name-colors-save" data-color-index="${i}"${disabled}>Save color</button>
     <button class="btn" data-action="name-colors-clear" data-color-index="${i}"${disabled}>Clear assignment</button></td></tr>`;
   }).join('')}</tbody></table></div>
-  ${data && !data.total ? '<p>No named assessments yet. Graph-role colors can still be assigned above.</p>' : ''}
+  ${data && !data.total ? '<p>No named assessments or saved name colors yet. Import a color palette now; matching address attributions will use it when added.</p>' : ''}
   <div class="form-actions"><span>${data?.total || 0} distinct names. Page ${Math.floor(state.offset / 100) + 1}.</span>
   <button class="btn" data-action="name-colors-prev"${disabled || state.offset === 0 ? ' disabled' : ''}>Previous</button>
   <button class="btn" data-action="name-colors-next"${disabled || !data || state.offset + 100 >= data.total ? ' disabled' : ''}>Next</button></div>
-  <p class="address-note">Name assignments also apply to future imports. Selected seed addresses retain their configured seed color. Blank restores the applicable default. Borders remain unchanged.</p>
+  <p class="address-note">Unused colors remain saved for future matching address attributions. Reuse the same CSV in other investigations to keep colors consistent. Selected seed addresses retain their configured seed color. Blank restores the applicable default. Borders remain unchanged.</p>
   <p role="status">${esc(state.message)}</p></div></section>`;
 }
 

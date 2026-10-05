@@ -23,7 +23,7 @@ PLOT_TEXT_FIELDS = {"status", "source_run_status", "source_stop_reason", "notice
                     "board_name", "hop_reference_name", "input_snapshot_at"}
 BOARD_FIELDS = {"id", "record_id", "name", "goal", "board_id", "status", "preview_id", "run_id",
                 "legacy_snapshot", "can_sync", "notice", "pending_count", "created", "reused",
-                "creation_preview_id", "created_board", "reused_board"}
+                "creation_preview_id", "created_board", "reused_board", "can_delete", "deleted"}
 
 
 def _fields(value, allowed):
@@ -38,8 +38,23 @@ def public_board(value):
     if value.get("board_id"):
         identity = board_id(value["board_id"])
         result["board_id"] = identity
-        result["board_url"] = "https://miro.com/app/board/" + quote(identity, safe="") + "/"
+        if value.get("status") != "deleted":
+            result["board_url"] = "https://miro.com/app/board/" + quote(identity, safe="") + "/"
     return result
+
+
+def public_starter_summary(value):
+    """Expose bounded, typed counts for all-starter previews, including zero paths."""
+    count = value.get("starting_transaction_count")
+    missing = value.get("unconnected_starting_transactions")
+    if (value.get("includes_all_starters") is not True or type(count) is not int
+            or not 2 <= count <= 2 ** 53 - 1 or not isinstance(missing, list)
+            or len(missing) > count or any(not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key)
+                                         for key in missing)
+            or len(set(missing)) != len(missing)):
+        return {}
+    return {"includes_all_starters": True, "starting_transaction_count": count,
+            "unconnected_starting_transaction_count": len(missing)}
 
 
 def public_plot(value):
@@ -59,6 +74,17 @@ def public_plot(value):
     if "preview_number_notice" in result and not isinstance(result["preview_number_notice"], str):
         result.pop("preview_number_notice")
     source = value.get("collection_source")
+    # Seed provenance belongs to the saved preview, never today's metadata.
+    # Older shared and peg-out reports already captured it in these fields.
+    seeds = value.get("seeds", value.get("query", {}).get("seeds") if isinstance(value.get("query"), dict) else None)
+    if seeds is None and isinstance(source, dict):
+        seeds = source.get("projection_seeds")
+    if seeds is not None:
+        from .seed_settings import normalize_seeds
+        try:
+            result["seeds"] = normalize_seeds(seeds)
+        except TraceError:
+            pass
     if (isinstance(source, dict) and source.get("kind") == "shared"
             and isinstance(source.get("dataset_id"), str) and re.fullmatch(r"[0-9a-f]{32}", source["dataset_id"])
             and isinstance(source.get("run_id"), str) and re.fullmatch(r"[0-9a-f]{16}", source["run_id"])
@@ -71,11 +97,11 @@ def public_plot(value):
         result["update_counts"] = dict(counts)
     scope, maximum = value.get("connection_scope"), value.get("max_hops")
     if (value.get("goal") == "connections" and
-            ((scope == "all_saved" and maximum is None) or
+            ((scope in ("all_saved", "shortest") and maximum is None) or
              (scope == "hop_limited" and type(maximum) is int and 0 <= maximum <= 2147483647))):
         result["connection_scope"] = scope
         query = value.get("query")
-        allowed = {"connection_scope", "hop_reference_name", "transaction_io"}
+        allowed = {"connection_scope", "hop_reference_name", "transaction_io", "hop_basis"}
         if scope == "hop_limited":
             allowed.add("max_hops")
         if (isinstance(query, dict) and set(query) <= allowed
@@ -84,6 +110,10 @@ def public_plot(value):
             try:
                 name = normalize_reference_name(query.get("hop_reference_name", ""))
                 normalized = {"connection_scope": scope, **({"hop_reference_name": name} if name else {})}
+                if "hop_basis" in query:
+                    if query["hop_basis"] != "original_seeds" or name:
+                        raise TraceError("Invalid saved connection hop basis")
+                    normalized["hop_basis"] = "original_seeds"
                 if scope == "hop_limited":
                     if type(query.get("max_hops")) is not int or query["max_hops"] != maximum:
                         raise TraceError("Saved connection hop limit disagrees with its query")
@@ -98,6 +128,17 @@ def public_plot(value):
         if (result.get("query", {}).get("transaction_io") == "complete"
                 and type(context_count) is int and context_count >= 0):
             result["context_edge_count"] = context_count
+            result.update(public_starter_summary(value))
+    if value.get("goal") == "full" and isinstance(value.get("query"), dict):
+        from .plots import _query
+        query = value["query"]
+        try:
+            normalized = _query("full", {"hop_reference_name": query.get("hop_reference_name", "")},
+                                0, query.get("max_hops"), hop_basis=query.get("hop_basis", "configured"))
+            if query == normalized:
+                result["query"] = normalized
+        except (TraceError, TypeError):
+            pass
     if value.get("goal") == "pegouts":
         from .pegout_paths import validate_query
         from .pegout_csv import validate_pegout_lbtc_summary
@@ -164,7 +205,7 @@ def plot_artifact(case, preview_id, *, verified=False):
         if not safe_path(case, ["previews", preview_id, name]).is_file():
             continue
         url = "/files/" + identity + "/previews/" + quote(preview_id) + "/" + quote(name)
-        result["downloads"].append({"name": name, "url": url})
+        result["downloads"].append({"name": name, "url": url + "?download=1" if name == "graph.html" else url})
         if name == "graph.html":
             result["preview_url"] = url
     if read_json(directory / "plot.json").get("goal") == "pegouts":
@@ -237,7 +278,7 @@ def _plot_summary(case, directory, identity):
         if not _ordinary(directory / name).is_file():
             continue
         url = "/files/" + identity + "/previews/" + quote(directory.name) + "/" + quote(name)
-        artifact["downloads"].append({"name": name, "url": url})
+        artifact["downloads"].append({"name": name, "url": url + "?download=1" if name == "graph.html" else url})
         if name == "graph.html":
             artifact["preview_url"] = url
     if report["goal"] == "pegouts":
@@ -401,6 +442,32 @@ def case_workflow(case, *, lightweight=False):
     return result
 
 
+def public_analysis(case, value):
+    """Small saved scope summary; evidence and filesystem paths stay off the API."""
+    from .scope_analysis import ANALYSIS_ID
+
+    identity = value.get("analysis_id")
+    if not isinstance(identity, str) or not ANALYSIS_ID.fullmatch(identity):
+        raise TraceError("Invalid saved analysis identity")
+    case_id = read_case(case)["case_id"]
+    if value.get("case_id") != case_id:
+        raise TraceError("Saved analysis belongs to a different investigation")
+    fields = {"analysis_id", "analysis_number", "case_id", "name", "created_at", "run_id", "source",
+              "max_hops", "hop_basis", "comparisons", "frontier", "frontier_count", "notice",
+              "input_sha256", "source_hop_reference_name", "cache_hit"}
+    result = {key: item for key, item in value.items() if key in fields}
+    result["id"] = identity
+    prefix = "/files/" + case_id + "/analyses/" + identity + "/"
+    result["downloads"] = [{"name": name, "url": prefix + name}
+                           for name in ("analysis.json", "frontiers.csv", "inputs.json", "SHA256SUMS")]
+    return result
+
+
+def analysis_summaries(case):
+    from .scope_analysis import list_analyses
+    return {"analyses": [public_analysis(case, value) for value in list_analyses(case, limit=20)]}
+
+
 def workflow_action(server, case, metadata, body):
     from .boards import board_options
     from .cli import board_id, resolve_latest, run_path
@@ -411,21 +478,50 @@ def workflow_action(server, case, metadata, body):
 
     action = body["action"]
     live = False
-    if action in ("plot", "plot-sync"):
+    if action == "scope-analyze":
+        from .connections import validate_hops
+        required = {"action", "run_id", "max_hops"}
+        if not required <= set(body) or set(body) - required - {"data_source", "dataset_id"}:
+            raise RequestError("Choose a saved collection and an analysis hop limit.")
+        maximum = validate_hops(body["max_hops"])
+        source = body.get("data_source", "investigation")
+        if source not in ("investigation", "shared") or not isinstance(body["run_id"], str):
+            raise RequestError("Choose investigation data or a saved shared collection.")
+        if source == "shared":
+            from .shared_collection import pin_shared_run
+            dataset_id = body.get("dataset_id")
+            if not isinstance(dataset_id, str) or not re.fullmatch(r"[0-9a-f]{32}", dataset_id):
+                raise RequestError("Choose a compatible shared collection dataset.")
+            selected, _ = pin_shared_run(case, body["run_id"], dataset_id=dataset_id)
+        else:
+            if "dataset_id" in body:
+                raise RequestError("A shared dataset ID applies only to shared collection data.")
+            selected = resolve_latest(case, body["run_id"])
+            if not re.fullmatch(r"[0-9a-f]{16}", selected) or not run_path(case, selected).is_dir():
+                raise RequestError("Choose a saved collection to analyze.")
+        # Pin identifiers now; verification, indexing, and traversal run after
+        # the task is visible and outside the server's jobs lock.
+        arguments = [action, "--case", str(case), "--run", selected,
+                     "--max-hops", str(maximum), "--data-source", source]
+        if source == "shared":
+            arguments.extend(["--dataset-id", dataset_id])
+    elif action in ("plot", "plot-sync"):
         required = {"action", "goal", "run_id"}
         if body.get("goal") != "connections":
             required.update({"min_hops", "max_hops"})
         endpoint_options = {"include_unspent", "include_unspendable"}
         allowed = {"include_context", "layout_mode", "board_record_id", "layout_settings", "min_hops", "max_hops",
-                   "data_source", "dataset_id", "connection_scope", "pegout_lbtc_limit"}
+                   "data_source", "dataset_id", "connection_scope", "pegout_lbtc_limit", "hop_basis"}
         if action == "plot-sync":
             allowed.add("name")
         if not required <= set(body) or set(body) - required - endpoint_options - allowed:
             raise RequestError("Choose a saved collection, plotting goal, and hop range.")
         if not isinstance(body.get("goal"), str) or body["goal"] not in GOALS:
             raise RequestError("Choose full trace, starter connections, or peg-out paths.")
+        if body.get("hop_basis", "configured") not in ("configured", "original_seeds"):
+            raise RequestError("Choose original starting transactions or the configured hop reference.")
         scope = body.get("connection_scope", "all_saved")
-        if scope not in ("all_saved", "hop_limited") or ("connection_scope" in body and body["goal"] != "connections"):
+        if scope not in ("all_saved", "hop_limited", "shortest") or ("connection_scope" in body and body["goal"] != "connections"):
             raise RequestError("Choose a connection search scope for Starter connections only.")
         if scope == "hop_limited" and "max_hops" not in body:
             raise RequestError("Choose the maximum number of transaction hops for Starter connections.")
@@ -484,6 +580,8 @@ def workflow_action(server, case, metadata, body):
             # Hashing here would delay registration and hold the jobs API lock.
         arguments = [action, "--case", str(case), "--goal", body["goal"], "--run", selected,
                      "--min-hops", str(lower), "--max-hops", str(upper)]
+        if "hop_basis" in body:
+            arguments.extend(["--hop-basis", body["hop_basis"]])
         if "connection_scope" in body:
             arguments.extend(["--connection-scope", scope])
         if pegout_limit is not None:
@@ -539,6 +637,22 @@ def workflow_action(server, case, metadata, body):
                 if not record or record["goal"] != body["goal"]:
                     raise RequestError("Choose the pending board entry to recover.")
                 arguments.extend(["--record", record["id"]])
+    elif action == "board-delete":
+        if (set(body) != {"action", "record_id", "board_id", "confirm_delete"}
+                or body.get("confirm_delete") is not True):
+            raise RequestError("Confirm deletion of the entire selected Miro board.")
+        record = body.get("record_id")
+        if not isinstance(record, str) or not re.fullmatch(
+                r"(?:board-[0-9a-f]{32}|legacy-(?:full|connections|pegouts)-[0-9a-f]{24})", record):
+            raise RequestError("Choose a saved Miro board to delete.")
+        target = board_id(body.get("board_id"))
+        if target != body["board_id"]:
+            raise RequestError("Confirm the exact Miro board ID shown for the selected board.")
+        # Register immediately. The worker validates the record-to-board binding
+        # under locks before making the destructive request.
+        arguments = ["investigation-board-delete", "--case", str(case), "--record", record,
+                     "--board", target, "--confirm-delete"]
+        live = True
     elif action == "board-sync":
         if set(body) != {"action", "record_id", "preview_id", "reorganize"} or type(body.get("reorganize")) is not bool:
             raise RequestError("Choose an investigation board, a saved plot, and whether to reorganize it.")
@@ -571,6 +685,11 @@ def workflow_action(server, case, metadata, body):
 
 
 def workflow_result(case, value, action):
+    if action == "scope-analyze":
+        from .scope_analysis import read_analysis
+        result = public_analysis(case, read_analysis(case, value.get("analysis_id")))
+        result["cache_hit"] = value.get("cache_hit") is True
+        return result
     if action == "plot":
         # Completion only announces the saved preview. Re-reading and hashing
         # its potentially enormous graph here delays the finished task; explicit

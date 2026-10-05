@@ -18,7 +18,7 @@ MAX_FILES = 3
 MAX_BYTES = 512 * 1024
 KINDS = ("attributions", "name-colors", "change-outputs")
 NOTICE = ("Review address attributions, name colors, and change outputs together. "
-          "Attributions in this upload are checked before name colors, regardless of file order. "
+          "Color palettes can include unused names; their colors apply when matching address attributions exist. "
           "Existing values are kept unless you choose replace for that file. "
           "All files must pass review before anything is saved. "
           "This saves local investigation settings without blockchain requests or Miro changes. "
@@ -114,7 +114,7 @@ def _prepare(files):
 
 
 def _plan(case, settings, prepared):
-    # Project only valid attribution changes. Color validation must see the names
+    # Project only valid attribution changes so color previews count the addresses
     # that would actually be saved, including the file's keep/replace policy.
     projected = copy.deepcopy(settings)
     plans = [None] * len(prepared)
@@ -135,9 +135,6 @@ def _plan(case, settings, prepared):
                 if change["action"] in ("add", "replace"):
                     rule = change["rule"]
                     projected["rules"][rule["address"]] = copy.deepcopy(rule)
-        if entry["kind"] == "name-colors" and "notice" in plan:
-            plan["notice"] = plan["notice"].replace("Import attribution names first. ",
-                "Attribution names in this upload are available before colors are checked. ")
         plans[index] = {**plan, "name": entry["name"], "kind": entry["kind"],
                         "policy": entry["policy"], "file_index": index}
     errors = [{"file": plan["name"], "file_index": index, **error}

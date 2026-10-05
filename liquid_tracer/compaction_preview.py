@@ -12,7 +12,7 @@ from .common import TraceError, canonical, digest, read_json, save_json
 from .investigations import read_case, validate_settings
 from .layout_preview import _preview_html, export_layout, render_svg
 from .miro import make_plan, validate_plan
-from .services import load_services
+from .services import effective_services
 from .layout_search import normalize_layout_attempts
 from .layout_search_reporting import layout_search_warning
 
@@ -62,7 +62,7 @@ def _hash_file(path):
 
 
 def service_fingerprint(case):
-    settings = load_services(case)
+    settings = effective_services(case)
     return digest(canonical({key: value for key, value in settings.items() if key != "history"}))
 
 

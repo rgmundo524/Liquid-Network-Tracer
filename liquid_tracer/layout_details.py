@@ -67,42 +67,49 @@ def _axis_range(first, last, origin, extent, step):
     return range(low, high + 1)
 
 
-def _box_cells(box, origin):
-    columns = _axis_range(box[0], box[2], origin[0], PAGE_WIDTH, PAGE_WIDTH - OVERLAP)
-    rows = _axis_range(box[1], box[3], origin[1], PAGE_HEIGHT, PAGE_HEIGHT - OVERLAP)
+def _box_cells(box, origin, geometry=None):
+    width, height, overlap = geometry or (PAGE_WIDTH, PAGE_HEIGHT, OVERLAP)
+    columns = _axis_range(box[0], box[2], origin[0], width, width - overlap)
+    rows = _axis_range(box[1], box[3], origin[1], height, height - overlap)
     if len(columns) * len(rows) > MAX_DETAIL_PAGES:
         raise _AtlasTooLarge
     return ((column, row) for row in rows for column in columns)
 
 
-def _viewport(cell, origin):
-    x = origin[0] + cell[0] * (PAGE_WIDTH - OVERLAP)
-    y = origin[1] + cell[1] * (PAGE_HEIGHT - OVERLAP)
-    return x, y, x + PAGE_WIDTH, y + PAGE_HEIGHT
+def _viewport(cell, origin, geometry=None):
+    width, height, overlap = geometry or (PAGE_WIDTH, PAGE_HEIGHT, OVERLAP)
+    x = origin[0] + cell[0] * (width - overlap)
+    y = origin[1] + cell[1] * (height - overlap)
+    return x, y, x + width, y + height
 
 
-def _segment_cells(start, end, origin):
+def _segment_cells(start, end, origin, geometry=None):
     """Enumerate the occupied strips, not a diagonal's entire bounding box."""
     pad = 14.0  # Arrowheads and the rounded-elbow control hull.
+    width, height, overlap = geometry or (PAGE_WIDTH, PAGE_HEIGHT, OVERLAP)
     for column in _axis_range(min(start[0], end[0]) - pad, max(start[0], end[0]) + pad,
-                              origin[0], PAGE_WIDTH, PAGE_WIDTH - OVERLAP):
-        x = origin[0] + column * (PAGE_WIDTH - OVERLAP)
+                              origin[0], width, width - overlap):
+        x = origin[0] + column * (width - overlap)
         low_y, high_y = sorted((start[1], end[1]))
         delta = end[0] - start[0]
         if delta:
-            fractions = sorted(((x - pad - start[0]) / delta, (x + PAGE_WIDTH + pad - start[0]) / delta))
+            fractions = sorted(((x - pad - start[0]) / delta, (x + width + pad - start[0]) / delta))
             first, last = max(0, fractions[0]), min(1, fractions[1])
             if first > last:
                 continue
             low_y, high_y = sorted((start[1] + first * (end[1] - start[1]),
                                    start[1] + last * (end[1] - start[1])))
-        for row in _axis_range(low_y - pad, high_y + pad, origin[1], PAGE_HEIGHT, PAGE_HEIGHT - OVERLAP):
-            box = _viewport((column, row), origin)
+        for row in _axis_range(low_y - pad, high_y + pad, origin[1], height, height - overlap):
+            box = _viewport((column, row), origin, geometry)
             if _segment_hits(start, end, (box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad)):
                 yield column, row
 
 
-def _activity_pages(nodes, edges, bounds, sequence):
+def _activity_pages(nodes, edges, bounds, sequence, *, geometry=None):
+    if geometry is not None and (len(geometry) != 3
+            or any(not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) for value in geometry)
+            or not 0 <= geometry[2] < min(geometry[0], geometry[1])):
+        raise ValueError('Invalid detail page geometry')
     origin = bounds[0] - PADDING, bounds[1] - PADDING
     cells = defaultdict(lambda: {"node_ids": set(), "edge_ids": set(), "caption_ids": set()})
 
@@ -112,15 +119,15 @@ def _activity_pages(nodes, edges, bounds, sequence):
             raise _AtlasTooLarge
 
     for node in nodes:
-        for cell in _box_cells(_node_box(node), origin):
+        for cell in _box_cells(_node_box(node), origin, geometry):
             add(cell, "node_ids", node["id"])
     for edge in edges:
         for start, end in zip(edge["points"], edge["points"][1:]):
-            for cell in _segment_cells(start, end, origin):
+            for cell in _segment_cells(start, end, origin, geometry):
                 add(cell, "edge_ids", edge["id"])
         if caption_text(edge):
             left, top, right, bottom = caption_box(edge, edge["points"])
-            for cell in _box_cells((left - 3, top - 3, right + 3, bottom + 3), origin):
+            for cell in _box_cells((left - 3, top - 3, right + 3, bottom + 3), origin, geometry):
                 add(cell, "caption_ids", edge["id"])
                 add(cell, "edge_ids", edge["id"])
     lookup = {node["id"]: node for node in nodes}
@@ -129,7 +136,7 @@ def _activity_pages(nodes, edges, bounds, sequence):
     labels = {cell: f"A{sequence}-{index}" for index, cell in enumerate(ordered, 1)}
     pages = []
     for cell in ordered:
-        box = _viewport(cell, origin)
+        box = _viewport(cell, origin, geometry)
         entry = {key: sorted(value) for key, value in cells[cell].items()}
         boundary_edges = []
         for identity in entry["edge_ids"]:

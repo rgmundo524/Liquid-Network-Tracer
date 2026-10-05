@@ -113,6 +113,8 @@ def _session(state_path, board_id, namespace, token, transport, interval, progre
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise TraceError("Another publisher is using this state file; wait for it to finish.") from None
+        from .board_write_guard import state_board_lock
+        resources.enter_context(state_board_lock(state_path, board_id))
         state = _load_sync_state(state_path, board_id, namespace, allow_pending=True)
         pending_frame(state)
         base = "https://api.miro.com/v2/boards/" + quote(board_id, safe="")

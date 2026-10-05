@@ -1,4 +1,4 @@
-"""Opt-in trace-first presentation without changing evidence or node identity.
+"""Trace-first presentation without changing evidence or node identity.
 
 A spine is one exact displayed outpoint path, not a claim that one input funds
 one output. Other branches and every shared address remain visible. All helpers
@@ -10,10 +10,10 @@ from math import hypot
 from statistics import median
 
 from .hub_layout import hub_layout_view, hub_plan
-from .named_group_layout import selected_members
+from .named_group_layout import CORE_STRAIGHTNESS, group_structure
 
 
-TRACE_LAYOUT_VERSION = 6
+TRACE_LAYOUT_VERSION = 7
 SPINE_STRAIGHTNESS = 96
 TERMINAL_STRAIGHTNESS = 16
 
@@ -47,14 +47,17 @@ def trace_structure(graph):
     context. A requested name and explicit change designations break path choices
     before ordinary exact continuations, traced-edge counts and length. Repeated
     transfers through a many-to-many address do not make it the visual backbone;
-    that one address stays peripheral. This is presentation, not ownership.
+    that one address stays peripheral unless selected as part of the separate
+    named focus band. This is presentation, not ownership.
     """
     enabled = graph.get("graph_options", {}).get("layout_style") == "trace"
     empty = {"enabled": enabled, "core": set(), "members": set(), "transactions": set(),
              "edges": set(), "excluded_hubs": set(), "spine": [], "terminal_pairs": [],
              "terminal_edges": set(), "branches": [], "peripheral": set(), "shared_hubs": set(),
              "selected_name": bool(graph.get("graph_options", {}).get("center_name")),
-             "matched_addresses": 0, "terminal_rows": []}
+             "matched_addresses": 0, "terminal_rows": [],
+             "named_core": set(), "named_members": set(), "named_transactions": set(),
+             "named_edges": set(), "named_excluded_hubs": set()}
     if not enabled:
         return empty
     graph = hub_layout_view(graph)
@@ -62,8 +65,21 @@ def trace_structure(graph):
     nodes = {node["id"]: node for node in graph["nodes"] if node["id"] not in fees}
     txs = {key for key, node in nodes.items() if node["kind"] == "transaction"}
     hubs = {key for key, node in nodes.items() if node.get("layout_hub") is True}
-    named = selected_members(graph) - hubs
-    empty.update(excluded_hubs=hubs, matched_addresses=len(named))
+    named_group = (group_structure(graph) if empty["selected_name"] else
+                   {key: set() for key in ("members", "transactions", "core", "edges", "excluded_hubs")})
+    named = named_group["members"] & nodes.keys()
+    # Named focus is independent of the exact spine. In particular, a reused
+    # named address remains one junction and never implies an outpoint match.
+    # Explicit layout hubs keep their designated placement instead of joining
+    # the named band, just as they do in the legacy Standard layout.
+    named_core = named_group["core"] & nodes.keys()
+    empty.update(excluded_hubs=hubs, matched_addresses=len(named),
+                 named_core=named_core, named_members=named,
+                 named_transactions=named_group["transactions"] & nodes.keys(),
+                 named_edges={edge["id"] for edge in graph["edges"]
+                              if edge["id"] in named_group["edges"]
+                              and edge["source"] in named_core and edge["target"] in named_core},
+                 named_excluded_hubs=named_group["excluded_hubs"])
     incoming, outgoing, incident = defaultdict(list), defaultdict(list), defaultdict(list)
     outputs, inputs = defaultdict(list), defaultdict(list)
     for edge in sorted(graph["edges"], key=lambda edge: edge["id"]):
@@ -209,13 +225,18 @@ def trace_structure(graph):
 
 
 def trace_order(graph, base_order=None, structure=None):
-    """Place a central spine between compact branch bands and outer shared nodes."""
+    """Keep the whole named group central, beside the exact spine if selected.
+
+    Branch membership stays unchanged for topology and section planning. Only
+    the displayed ordering moves named members out of their branch bands.
+    """
     structure = trace_structure(graph) if structure is None else structure
     if not structure["enabled"]:
         return None
     graph = hub_layout_view(graph)
     nodes = {node["id"]: node for node in graph["nodes"]}
     rank = {key: index for index, key in enumerate(base_order or sorted(nodes))}
+    named_core = structure.get("named_core", set())
     def ordered(keys):
         return sorted(keys, key=lambda key: (rank.get(key, len(rank)), key))
     sides, loads, totals = [[], []], [defaultdict(float), defaultdict(float)], [0., 0.]
@@ -224,6 +245,8 @@ def trace_order(graph, base_order=None, structure=None):
     units = [[structure["branches"][index] for index in row["components"]]
              for row in structure["terminal_rows"]]
     units.extend([component] for index, component in enumerate(structure["branches"]) if index not in bundled)
+    units = [[part - named_core for part in parts if part - named_core] for parts in units]
+    units = [parts for parts in units if parts]
     for parts in sorted(units, key=lambda parts: (
             min(nodes[key]["column"] for part in parts for key in part),
             min(key for part in parts for key in part))):
@@ -243,11 +266,12 @@ def trace_order(graph, base_order=None, structure=None):
             loads[side][column] += height
             totals[side] += height
     outside = [[], []]
-    for key in ordered(structure["peripheral"]):
+    for key in ordered(structure["peripheral"] - named_core):
         side = min((0, 1), key=lambda side: (totals[side], side))
         outside[side].append(key)
         totals[side] += nodes[key]["height"] + 80
-    order = outside[0] + sides[0] + ordered(structure["core"]) + sides[1] + outside[1]
+    central = ordered(structure["core"] - named_core) + ordered(named_core)
+    order = outside[0] + sides[0] + central + sides[1] + outside[1]
     seen = set(order)
     order += ordered(nodes.keys() - seen)
     # An anchored hub belongs beside its exact entry, rather than in the outer
@@ -272,7 +296,52 @@ def trace_priorities(graph, structure=None):
     if not structure["enabled"]:
         return {}
     return {**{key: TERMINAL_STRAIGHTNESS for key in structure["terminal_edges"]},
+            **{key: CORE_STRAIGHTNESS for key in structure.get("named_edges", ())},
             **{key: SPINE_STRAIGHTNESS for key in structure["edges"]}}
+
+
+def _named_metrics(nodes, structure, scale):
+    """Measure a band, not a single line that overlapping named forks cannot fit.
+
+    Each dependency column contributes once regardless of its number of named
+    nodes. An unrelated object between two named members interrupts the band;
+    the group's necessary height itself is not penalized.
+    """
+    named = structure.get("named_core", set())
+    counts = {"named_group_nodes": len(named),
+              "named_group_transactions": len(structure.get("named_transactions", ())),
+              "named_group_excluded_hubs": len(structure.get("named_excluded_hubs", ()))}
+    if not named:
+        return {**counts, "named_group_alignment": 0, "named_group_center_offset": 0,
+                "named_group_interleaving": 0}
+    columns, selected = defaultdict(list), defaultdict(list)
+    for key, node in nodes.items():
+        columns[node["column"]].append(node)
+        if key in named:
+            selected[node["column"]].append(node)
+    def midpoint(items):
+        return (min(node["y"] - node["height"] / 2 for node in items)
+                + max(node["y"] + node["height"] / 2 for node in items)) / 2
+    centers = [midpoint(items) for items in selected.values()]
+    middle = median(centers) if centers else 0
+    alignment = sum(abs(center - middle) for center in centers)
+    offset = sum(abs(midpoint(items) - midpoint(columns[column]))
+                 for column, items in selected.items())
+    interruptions = 0
+    for column in selected:
+        seen, pending = False, 0
+        for node in sorted(columns[column], key=lambda node: (node["y"], node["id"])):
+            if node["id"] in named:
+                if seen:
+                    interruptions += pending
+                seen, pending = True, 0
+            elif seen:
+                pending += 1
+    divisor = max(1, len(centers)) * scale
+    return {**counts,
+            "named_group_alignment": round(alignment / divisor, 6),
+            "named_group_center_offset": round(offset / divisor, 6),
+            "named_group_interleaving": round(interruptions / max(1, len(named)), 6)}
 
 
 def trace_metrics(graph, structure=None):
@@ -281,6 +350,13 @@ def trace_metrics(graph, structure=None):
     graph = hub_layout_view(graph)
     nodes = {node["id"]: node for node in graph["nodes"]}
     scale = median([max(node["width"], node["height"]) + 80 for node in nodes.values()]) if nodes else 1
+    named_nodes, named_scale = nodes, scale
+    if structure.get("named_core"):
+        fees = {key for key, item in graph.get("fee_items", {}).items() if item.get("endpoint") == "shapes"}
+        if fees:
+            named_nodes = {key: node for key, node in nodes.items() if key not in fees}
+            named_scale = median([max(node["width"], node["height"]) + 80 for node in named_nodes.values()])
+    named_metrics = _named_metrics(named_nodes, structure, named_scale)
     core = [nodes[key] for key in structure["core"]]
     middle = median([node["y"] for node in core]) if core else 0
     drift = sum(abs(node["y"] - middle) for node in core) / (max(1, len(core)) * scale)
@@ -290,11 +366,13 @@ def trace_metrics(graph, structure=None):
         dx = max(0, abs(a["x"] - b["x"]) - (a["width"] + b["width"]) / 2)
         dy = max(0, abs(a["y"] - b["y"]) - (a["height"] + b["height"]) / 2)
         distances.append(hypot(dx, dy) / scale)
-    memberships = {key: index for index, group in enumerate(structure["branches"]) for key in group}
+    named_core = structure.get("named_core", set())
+    memberships = {key: index for index, group in enumerate(structure["branches"]) for key in group
+                   if key not in named_core}
     columns = defaultdict(list)
     # Core/peripheral nodes can interrupt a branch's siblings too. They do not
     # add their own branch penalty, but must remain in the vertical scan.
-    visible = set(memberships) | structure["core"] | structure["peripheral"]
+    visible = set(memberships) | structure["core"] | structure["peripheral"] | named_core
     for key in visible:
         columns[nodes[key]["column"]].append((nodes[key]["y"], key, memberships.get(key)))
     extra_runs = 0
@@ -312,7 +390,7 @@ def trace_metrics(graph, structure=None):
         positions = [nodes[key]["x"] for key in row["transactions"]]
         center = median(positions)
         row_drift.extend(abs(value - center) / scale for value in positions)
-    return {"version": TRACE_LAYOUT_VERSION, "enabled": structure["enabled"],
+    return {"version": TRACE_LAYOUT_VERSION, "enabled": structure["enabled"], **named_metrics,
             "edge_count": len(graph["edges"]),
             "spine_nodes": len(core), "spine_transactions": len(structure["transactions"]),
             "matched_addresses": structure["matched_addresses"], "terminal_pairs": len(distances),

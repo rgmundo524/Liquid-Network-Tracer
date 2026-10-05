@@ -86,7 +86,7 @@ class CompleteTransactionPegoutTests(unittest.TestCase):
         fee = f"{tx('b')}:{len(data['vout'])}"
         data["vout"].append({"scriptpubkey": "", "scriptpubkey_type": "fee", "value": 1, "asset": LBTC})
         query = validate_query(seeds=[tx("a") + ":0"], min_hops=1, max_hops=1, transaction_io="complete")
-        graph = pegout_graph(state, query)
+        graph = pegout_graph(state, query, include_fees=True)
         edges = {edge["id"]: edge for edge in graph["edges"]}
         self.assertEqual(set(edges), io_ids(state, ("a", "b")))
         self.assertEqual([item["outpoint"] for item in graph["pegouts"]["matches"]], [endpoint])
@@ -166,11 +166,13 @@ class CompleteTransactionPegoutTests(unittest.TestCase):
         add_pegout(state, tx("b"))
         graph = pegout_graph(state, query)
         notes = " ".join(legend_notes(graph))
-        self.assertIn("Every input and output", notes)
-        self.assertIn("including fees", notes)
+        self.assertIn("Every input and non-fee output", notes)
+        self.assertIn("Fee flows are hidden", notes)
+        shown = pegout_graph(state, query, include_fees=True)
+        self.assertIn("including fees", " ".join(legend_notes(shown)))
         self.assertIn("excluded from endpoint selection", notes)
         self.assertNotIn("Only qualifying paths are plotted", notes)
-        self.assertIn("Every input and output", graph["notice"])
+        self.assertIn("Every input and non-fee output", graph["notice"])
 
 
 if __name__ == "__main__":

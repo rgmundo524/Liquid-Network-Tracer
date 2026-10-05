@@ -15,7 +15,7 @@ from .api import Esplora, Limits
 from .common import StopRun, TraceError, canonical, digest, now, read_json, save_json
 from .investigations import read_case, validate_settings
 from .pegout_paths import pegout_graph, validate_query
-from .services import apply_service_labels, load_services
+from .services import apply_service_labels, effective_services
 from .store import Store
 from .trace import new_state, trace, validate_transaction
 
@@ -192,7 +192,7 @@ def search_pegouts(case, txid=None, min_hops=0, max_hops=10, *, resume=None,
             "max_transactions": max_transactions, "max_outpoints": max_outpoints,
             "max_requests": max_requests, "max_seconds": max_seconds})
         limits.validate()
-        controls = load_services(case)
+        controls = effective_services(case)
         labels = apply_service_labels(baseline.get("labels", []) if baseline else [], controls)
         store, api = Store(case), None
         try:
@@ -281,7 +281,7 @@ def preview_pegouts(case, search_id, *, open_browser=False, progress=None):
     case = _ordinary(Path(case))
     with _locked(case):
         state, query, _ = _read_search(case, search_id)
-        metadata, controls = read_case(case), load_services(case)
+        metadata, controls = read_case(case), effective_services(case)
         state["labels"] = apply_service_labels(state["labels"], controls)
         state["service_controls"] = {k: v for k, v in controls.items() if k != "history"}
         apply_saved_counts(case, state)
@@ -377,7 +377,7 @@ def reviewed_pegouts(case, preview_id):
     from .cli import attribution_arrow_coloring, centered_name_group, context_input_grouping
 
     graph, plan, _ = saved_pegout_snapshot(case, preview_id)
-    metadata, controls = read_case(case), load_services(case)
+    metadata, controls = read_case(case), effective_services(case)
     report = graph["pegouts"]
     if (report.get("service_sha256") != digest(canonical({k: v for k, v in controls.items() if k != "history"}))
             or graph["graph_options"].get("color_attribution_arrows", False) is not attribution_arrow_coloring(metadata)

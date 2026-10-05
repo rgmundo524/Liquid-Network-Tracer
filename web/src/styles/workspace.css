@@ -1434,6 +1434,10 @@ dialog::backdrop {
 .preview-library-actions { display: flex; align-items: flex-start; justify-content: flex-end; flex-wrap: wrap; gap: 8px; min-width: 160px; }
 .selected-preview-details { margin-top: 24px; padding-top: 20px; border-top: 1px solid #d9e5df; }
 .selected-preview-details > h3 { margin-top: 0; }
+.preview-publish { margin: 16px 0 24px; padding: 20px; border: 1px solid #9bbfb1; border-radius: 10px; background: #f0f8f4; }
+.preview-publish h4 { margin: 0 0 8px; font-size: 16px; }
+.preview-publish > p { margin: 8px 0; }
+.preview-publish:focus-visible { outline: 2px solid #28816a; outline-offset: 3px; }
 @media (max-width: 760px) {
   .preview-library-card { flex-direction: column; gap: 10px; }
   .preview-library-actions { justify-content: flex-start; min-width: 0; }

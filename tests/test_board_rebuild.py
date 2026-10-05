@@ -53,6 +53,31 @@ class BoardRebuildTests(unittest.TestCase):
     def rebuild(self, **options):
         return rebuild_board(self.case, source_board="old_board=", transport=self.remote, **options)
 
+    def test_deleted_rebuild_target_is_not_relinked_from_complete_receipt(self):
+        from liquid_tracer.board_deletion import delete_board
+        from liquid_tracer.investigation_boards import list_boards
+
+        result = self.rebuild()
+        record = next(item for item in list_boards(self.case) if item["board_id"] == result["board_id"])
+        delete_board(self.case, record["id"], result["board_id"], transport=Mock(return_value=(204, {}, b"")))
+        update_case(self.case, {"miro_board": "old_board="})
+        with self.assertRaisesRegex(TraceError, "deleted"):
+            self.rebuild()
+        self.assertEqual(read_case(self.case)["miro_board"], "old_board=")
+        self.assertEqual(self.remote.call_count, 1)
+
+    def test_uncertain_source_deletion_blocks_rebuild_before_layout(self):
+        from liquid_tracer.board_deletion import delete_board
+        from liquid_tracer.investigation_boards import list_boards
+
+        record = next(item for item in list_boards(self.case) if item["board_id"] == "old_board=")
+        with self.assertRaisesRegex(TraceError, "did not confirm"):
+            delete_board(self.case, record["id"], "old_board=", transport=Mock(return_value=(404, {}, b"")))
+        with self.assertRaisesRegex(TraceError, "did not confirm"):
+            self.rebuild()
+        self.remote.assert_not_called()
+        self.refresh.assert_not_called()
+
     def test_cli_dispatch_pins_source_and_one_off_budget(self):
         with patch("liquid_tracer.cli.rebuild_board", return_value={"board_id": "new_board="}) as call, \
                 contextlib.redirect_stdout(io.StringIO()):

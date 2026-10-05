@@ -27,7 +27,7 @@ from .common import TraceError, parse_outpoint, read_json
 from .inspection import parse_transaction_hashes
 from .investigations import (create_investigation, default_root, effective_run_settings, load_settings,
                              read_case, save_collection_reference, save_plot_settings, save_settings, update_case,
-                             validate_blockchain, validate_settings)
+                             validate_blockchain, validate_settings, generation_settings)
 from .menu import _command, _environment, _lookup_reports, _project, _seed_values, _trace_arguments
 from .progress import public_progress
 from .performance import public_performance
@@ -54,9 +54,17 @@ COMPACTION_NAMES = LAYOUT_NAMES | {"before.html", "before.svg", "before.json", "
 LAYOUT_ALGORITHMS = ("elk_layered_v1", "dependency_layers_v1")
 FALLBACK_REASONS = ("size_limit", "timeout", "mermaid_size_limit", "mermaid_timeout")
 from .connections import FILES as CONNECTION_NAMES, LEGACY_FILES as LEGACY_CONNECTION_NAMES, preview_files
-CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact", "connections", "pegouts", "pegouts-preview", "plot"}
+CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact", "connections", "pegouts", "pegouts-preview", "plot",
+                       "scope-analyze"}
 ACTIVE_JOB_STATUSES = {"running", "cancelling"}
 MAX_FAILURE_RESULT_BYTES = 256 * 1024
+
+
+def plot_html_request(parts):
+    from .plots import PREVIEW_ID
+    return bool(len(parts) == 5 and parts[0] == "files" and CASE_ID.fullmatch(parts[1])
+                and parts[2] == "previews" and PREVIEW_ID.fullmatch(parts[3])
+                and parts[4] == "graph.html")
 
 
 def read_edit_conflicts(path):
@@ -162,7 +170,8 @@ def public_service(rule):
     if not isinstance(rule, dict):
         return None
     from .services import rule_fields, notes_for
-    return {key: rule[key] for key in ("address", "name", "enabled", "created_at", "updated_at") if key in rule} | rule_fields(rule) | {"notes": notes_for(rule)}
+    return {key: rule[key] for key in ("address", "name", "enabled", "created_at", "updated_at",
+        "attribution_origin", "shared_library_id", "shared_revision") if key in rule} | rule_fields(rule) | {"notes": notes_for(rule)}
 
 
 
@@ -410,6 +419,7 @@ class LocalServer(ThreadingHTTPServer):
         self.jobs = {}
         self.active_job = None
         self.job_lock = threading.RLock()
+        self.pending_seed_edits = set()
         self.processes = {}
         self.job_threads = {}
         # Only credential entry owns the shared terminal. Once web_worker has
@@ -443,11 +453,12 @@ class LocalServer(ThreadingHTTPServer):
                       and (path / "case.json").is_file() and not (path / "case.json").is_symlink())
 
     def case_summary(self, case, metadata, detail=False):
+        from .board_write_guard import visible_board
         summary = {"id": metadata["case_id"], "name": metadata.get("name") or case.name,
                    "blockchain": validate_blockchain(metadata.get("blockchain", "liquid")),
                    "created_at": metadata.get("created_at"), "latest_run": metadata.get("latest_run"),
-                   "fixture": bool(metadata.get("fixture")), "miro_board": metadata.get("miro_board"),
-                   "run_defaults": validate_settings(metadata.get("run_defaults", {})),
+                   "fixture": bool(metadata.get("fixture")), "miro_board": visible_board(case, metadata.get("miro_board")),
+                   "run_defaults": generation_settings(metadata.get("run_defaults", {})),
                    "seed_count": len(metadata["seeds"]) if isinstance(metadata.get("seeds"), list) else 0,
                    "status": "Not started"}
         runs = []
@@ -667,7 +678,9 @@ class LocalServer(ThreadingHTTPServer):
                         product.update(display_options)
                     if kind == "connections":
                         report = info["connections"]
-                        if report.get("connection_scope") in ("all_saved", "hop_limited"):
+                        from .workflow_api import public_starter_summary
+                        product.update(public_starter_summary(report))
+                        if report.get("connection_scope") in ("all_saved", "hop_limited", "shortest"):
                             product["connection_scope"] = report["connection_scope"]
                         if report.get("transaction_io") == "complete":
                             product["transaction_io"] = "complete"
@@ -746,6 +759,8 @@ class LocalServer(ThreadingHTTPServer):
     def ensure_case_idle(self, case_id):
         """Admission is serialized with both quick mutations and job creation."""
         self.ensure_open()
+        if case_id in getattr(self, "pending_seed_edits", set()):
+            raise RequestError("Starting outputs are being saved. Try again after the save finishes.", 409)
         if case_id is not None:
             for job in self.jobs.values():
                 if (job.get("case_id") == case_id and job["status"] in ACTIVE_JOB_STATUSES
@@ -753,6 +768,28 @@ class LocalServer(ThreadingHTTPServer):
                     raise RequestError("This investigation already has an active action (" + job["action"]
                                        + "). Wait for it to finish before changing it. "
                                        "Other investigations remain available.", 409)
+
+    def save_case_seeds(self, case, identity, body):
+        from .seed_settings import SeedEditConflict, save_seeds
+
+        if set(body) != {"seeds", "expected_revision"}:
+            raise RequestError("Saving starting outputs requires outputs and the current revision only.")
+        # Keep admission atomic without holding the jobs lock during file I/O.
+        with self.job_lock:
+            self.ensure_case_idle(identity)
+            if any(job["status"] in ACTIVE_JOB_STATUSES and job.get("resource_kind") == "shared_collection"
+                   for job in self.jobs.values()):
+                raise RequestError("Shared collection is active. Save starting outputs after it finishes.", 409)
+            self.pending_seed_edits.add(identity)
+        try:
+            return save_seeds(case, body["seeds"], expected_revision=body["expected_revision"])
+        except SeedEditConflict as error:
+            raise RequestError(str(error), 409) from None
+        except TraceError as error:
+            raise RequestError(str(error)) from None
+        finally:
+            with self.job_lock:
+                self.pending_seed_edits.discard(identity)
 
     def trim_jobs(self):
         # An unusually busy server may have more than 128 active jobs. Never
@@ -766,6 +803,9 @@ class LocalServer(ThreadingHTTPServer):
 
     def ensure_resources_available(self, case_id, resource):
         self.ensure_open()
+        pending = getattr(self, "pending_seed_edits", set())
+        if case_id in pending or (pending and resource["resource_kind"] == "shared_collection"):
+            raise RequestError("Starting outputs are being saved. Start this action after the save finishes.", 409)
         requested = {"case_id": case_id, **resource}
         for job in self.jobs.values():
             if job["status"] in ACTIVE_JOB_STATUSES and conflicts(job, requested):
@@ -791,12 +831,17 @@ class LocalServer(ThreadingHTTPServer):
                                **resource, "execution_state": "starting",
                                "started_at": time.time(),
                                "cancellable": action in CANCELLABLE_ACTIONS,
-                               "message": ("Generating the layout and syncing Miro. Check the launching terminal if Proton Pass needs to unlock."
+                               "message": ("Preparing to delete the confirmed investigation's local files."
+                                           if action == "investigation-delete" else
+                                           "Preparing to delete the confirmed Miro board. Check the launching terminal if Proton Pass needs to unlock."
+                                           if action == "board-delete" else
+                                           "Generating the layout and syncing Miro. Check the launching terminal if Proton Pass needs to unlock."
                                            if action == "plot-sync" else
                                            "Reading the Miro board before arranging new objects. Check the launching terminal if Proton Pass needs to unlock."
                                            if live and action == "plot" else
                                            "Working. Check the launching terminal if Proton Pass needs to unlock."
-                                           if live else "Plotting saved collection data…" if action == "plot"
+                                           if live else "Preparing saved-data scope analysis…"
+                                           if action == "scope-analyze" else "Plotting saved collection data…" if action == "plot"
                                            else "Preparing the graph and checking missing address counts…"
                                            if action in CANCELLABLE_ACTIONS else "Working with saved local evidence…")}
         if self.active_job is None:
@@ -927,9 +972,14 @@ class LocalServer(ThreadingHTTPServer):
                 report = read_json(result)
                 if report.get("ok") is not True or not isinstance(report.get("result"), dict):
                     raise RuntimeError("Invalid action result")
+                if action == "investigation-delete" and report["result"].get("case_id") != self.jobs[identity]["case_id"]:
+                    raise RuntimeError("Deletion result does not match the confirmed investigation")
                 value = self.public_result(report["result"], action, case, txids)
             completion = dict(status="succeeded", cancellable=False,
-                    message=(("Frame recovery complete. Choose Create / update Miro frames to resume."
+                    message=(("Investigation removed. Some local files could not be deleted; check the launching terminal for cleanup details."
+                              if value.get("cleanup_pending") else "Investigation and its local files deleted.")
+                             if action == "investigation-delete" else
+                             ("Frame recovery complete. Choose Create / update Miro frames to resume."
                               if value.get("resume_action") == "miro-frames" else
                               "Frame recovery complete. Finish Sync to Miro, then create or update frames.") if action == "miro-frame-recover"
                              else "Frame review ready. Inspect the linked board before choosing a recovery." if action == "miro-frame-review"
@@ -944,6 +994,8 @@ class LocalServer(ThreadingHTTPServer):
                     "Miro sync stopped because generated objects differ from their last-synced values. "
                     "Open the linked objects and review the differences below."
                     if edit_conflicts is not None else
+                    "Investigation deletion did not finish. Refresh the investigation list and check the launching terminal for details."
+                    if action == "investigation-delete" else
                     "Plot and sync stopped. Check the launching terminal and the saved board status. "
                     "Resume the saved layout if publication already started."
                     if action == "plot-sync" else
@@ -980,6 +1032,15 @@ class LocalServer(ThreadingHTTPServer):
             pass
 
     def public_result(self, result, action, case, txids):
+        if action == "investigation-delete":
+            # The worker has removed the directory; no case reads are valid here.
+            identity, name = result.get("case_id"), result.get("name")
+            if (not isinstance(identity, str) or not CASE_ID.fullmatch(identity)
+                    or not isinstance(name, str) or not 1 <= len(name) <= 120
+                    or any(ord(char) < 32 or ord(char) == 127 for char in name)
+                    or result.get("deleted") is not True or type(result.get("cleanup_pending")) is not bool):
+                raise RequestError("Invalid investigation deletion result")
+            return {key: result[key] for key in ("case_id", "name", "deleted", "cleanup_pending")}
         if action == "shared-trace":
             summary = self.shared_collection_summary(case)
             run_id = result.get("run_id")
@@ -998,7 +1059,8 @@ class LocalServer(ThreadingHTTPServer):
             if counts is not None:
                 value["address_counts"] = counts
             return value
-        if action in ("plot", "plot-sync", "board-create", "board-create-sync", "board-link", "board-sync"):
+        if action in ("plot", "plot-sync", "board-create", "board-create-sync", "board-link", "board-sync", "board-delete",
+                      "scope-analyze"):
             from .workflow_api import workflow_result
             return workflow_result(case, result, action)
         if action in ("pegouts", "pegouts-preview"):
@@ -1121,7 +1183,9 @@ class LocalServer(ThreadingHTTPServer):
                 from .connections import reviewed_connections
                 graph, _ = reviewed_connections(case, directory.name)
                 report = graph["connections"]
-                if report.get("connection_scope") in ("all_saved", "hop_limited"):
+                from .workflow_api import public_starter_summary
+                value.update(public_starter_summary(report))
+                if report.get("connection_scope") in ("all_saved", "hop_limited", "shortest"):
                     value["connection_scope"] = report["connection_scope"]
                 if report.get("transaction_io") == "complete":
                     value["transaction_io"] = "complete"
@@ -1144,6 +1208,9 @@ class LocalServer(ThreadingHTTPServer):
 
     @staticmethod
     def artifact(case, parts):
+        if len(parts) == 3 and parts[0] == "analyses":
+            from .scope_analysis import verified_analysis_file
+            return verified_analysis_file(case, parts[1], parts[2])
         if len(parts) != 3 or parts[0] not in ("previews", "exports") or not ARTIFACT_DIR.fullmatch(parts[1]):
             raise RequestError("File not found", 404)
         kind = parts[1].split("-")[1]
@@ -1192,9 +1259,17 @@ class LocalServer(ThreadingHTTPServer):
         from .cli import miro_recovery_status, resolve_latest, run_path, verify_export
 
         action = body.get("action")
+        if action == "investigation-delete":
+            if (set(body) != {"action", "confirm_name"} or not isinstance(body.get("confirm_name"), str)
+                    or body["confirm_name"] != metadata.get("name")):
+                raise RequestError("Type the investigation's exact current name to confirm deletion.")
+            arguments = ["investigation-delete", "--investigations-dir", str(self.root), "--case", str(case),
+                         "--case-id", metadata["case_id"], "--confirm-name=" + body["confirm_name"]]
+            return self.start_job(arguments, action=action, live=False, case=case)
         if action not in PARALLEL_ACTIONS:
             self.ensure_case_idle(metadata["case_id"])
-        if action in ("plot", "plot-sync", "board-create", "board-create-sync", "board-link", "board-sync"):
+        if action in ("plot", "plot-sync", "board-create", "board-create-sync", "board-link", "board-sync", "board-delete",
+                      "scope-analyze"):
             from .workflow_api import workflow_action
             return workflow_action(self, case, metadata, body)
         if action == "shared-trace":
@@ -1318,7 +1393,7 @@ class LocalServer(ThreadingHTTPServer):
             raise RequestError("Frame creation uses the selected saved run and linked board only.")
         if action == "miro-rebuild" and set(body) != {"action", "run_id", "source_board", "name", "max_new_items"}:
             raise RequestError("Rebuilding uses a saved run, the reviewed source board, a name and a new-item budget only.")
-        settings = validate_settings(body.get("settings", metadata.get("run_defaults", {})))
+        settings = generation_settings(body.get("settings", metadata.get("run_defaults", {})))
         selected = body.get("run_id", "latest")
         live = False
         if action == "trace":
@@ -1590,7 +1665,9 @@ class Handler(BaseHTTPRequestHandler):
                 raise RequestError("Route not found", 404)
             parts = unquote(parsed.path).strip("/").split("/")
             query = {}
-            if parsed.query:
+            if parsed.query and not mutation and plot_html_request(parts) and parsed.query == "download=1":
+                query["download"] = True
+            elif parsed.query:
                 if mutation or len(parts) != 4 or parts[:2] != ["api", "cases"] or parts[3] != "plots":
                     raise RequestError("Route not found", 404)
                 try:
@@ -1606,13 +1683,22 @@ class Handler(BaseHTTPRequestHandler):
                 # Only reviewed import routes accept larger, bounded text bodies.
                 is_import = (len(parts) == 4 and parts[:2] == ["api", "cases"]
                              and parts[3] in ("address-import", "name-color-import", "change-output-import", "input-import"))
+                is_import = is_import or parts == ["api", "shared-attributions", "import"]
                 # Three CSVs may each contain 512 KiB; JSON escaping can expand
                 # their representation. Individual source limits still apply.
-                import_limit = 12 * 1024 * 1024 if is_import and parts[3] == "input-import" else 4 * 1024 * 1024
+                import_limit = 12 * 1024 * 1024 if is_import and parts[-1] == "input-import" else 4 * 1024 * 1024
                 body = self.body(import_limit if is_import else MAX_BODY)
-                if parts == ["api", "endpoint-exports"]:
-                    # Immutable multi-case downloads can be substantial. Do not
-                    # block job admission, progress polling, or cancellation.
+                attribution_read = (len(parts) == 4 and parts[:2] == ["api", "cases"]
+                    and parts[3] in {"addresses", "address", "name-colors"}
+                    and self.read_only_case_request(parts[3], body))
+                if len(parts) == 4 and parts[:2] == ["api", "cases"] and parts[3] == "seeds":
+                    result, status = self.post(parts, body)
+                    self.send(status, result)
+                    return
+                if (parts == ["api", "endpoint-exports"]
+                        or parts[:2] == ["api", "shared-attributions"] or attribution_read):
+                    # Library imports serialize on their own file lock. Reads
+                    # and immutable exports must not hold the job lock over I/O.
                     with self.server.job_lock:
                         self.server.ensure_open()
                     result, status = self.post(parts, body)
@@ -1644,6 +1730,18 @@ class Handler(BaseHTTPRequestHandler):
     def get(self, parts, query=None):
         if parts == ["api", "session"]:
             self.send(200, self.server.session())
+        elif parts == ["api", "shared-attributions", "export"]:
+            from .shared_attributions import export_library
+            product = export_library(self.server.root)
+            self.send(200, product["data"], product["content_type"], download=product["filename"])
+        elif len(parts) == 4 and parts[:2] == ["api", "cases"] and parts[3] == "shared-attributions":
+            from .services import shared_attribution_status
+            case, _ = self.server.case(parts[2])
+            self.send(200, shared_attribution_status(case))
+        elif len(parts) == 4 and parts[:2] == ["api", "cases"] and parts[3] == "seeds":
+            from .seed_settings import seed_settings
+            case, metadata = self.server.case(parts[2])
+            self.send(200, seed_settings(case, metadata))
         elif parts == ["api", "jobs"]:
             with self.server.job_lock:
                 jobs = [dict(job) for job in self.server.jobs.values()]
@@ -1683,6 +1781,15 @@ class Handler(BaseHTTPRequestHandler):
             result = (investigation_views.collection(case, metadata, parts[4]) if parts[3] == "collection" else
                       investigation_views.shared_collection(self.server.root, case, metadata, parts[4]))
             self.send(200, result)
+        elif len(parts) == 4 and parts[:2] == ["api", "cases"] and parts[3] == "analyses":
+            from .workflow_api import analysis_summaries
+            case, _ = self.server.case(parts[2])
+            self.send(200, analysis_summaries(case))
+        elif len(parts) == 5 and parts[:2] == ["api", "cases"] and parts[3] == "analyses":
+            from .scope_analysis import read_analysis
+            from .workflow_api import public_analysis
+            case, _ = self.server.case(parts[2])
+            self.send(200, public_analysis(case, read_analysis(case, parts[4])))
         elif len(parts) == 4 and parts[:2] == ["api", "cases"] and parts[3] == "plots":
             from .workflow_api import plot_summary_page
             case, _ = self.server.case(parts[2])
@@ -1731,11 +1838,19 @@ class Handler(BaseHTTPRequestHandler):
             content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             from .layout_overview import navigation_files
             navigation = navigation_files(path.parent) if path.suffix == ".html" else frozenset()
-            self.send(200, path.read_bytes(), content_type, preview=path.suffix in (".html", ".svg"),
-                      download=None if path.suffix == ".html" else path.name,
-                      preview_navigation=bool(navigation and path.name in navigation | {"graph.html", "details.html"}),
-                      explorer_links=parts[3].split("-")[1] in ("elk", "compact", "connections", "pegouts", "plots") and path.suffix in (".html", ".svg"))
+            raw = path.read_bytes()
+            download_original = bool(plot_html_request(parts) and (query or {}).get("download"))
+            toolbar = bool(plot_html_request(parts) and not download_original)
+            if toolbar:
+                from .preview_toolbar import add_preview_toolbar
+                raw = add_preview_toolbar(raw, parts[1], parts[3])
+            self.send(200, raw, content_type, preview=path.suffix in (".html", ".svg"),
+                      download=path.name if download_original or path.suffix != ".html" else None,
+                      preview_navigation=bool(toolbar or navigation and path.name in navigation | {"graph.html", "details.html"}),
+                      explorer_links=(parts[2] == "analyses" or parts[3].split("-")[1] in ("elk", "compact", "connections", "pegouts", "plots")) and path.suffix in (".html", ".svg"))
         else:
+            if parts and parts[0] in {"api", "files"}:
+                raise RequestError("Page not found", 404)
             path = safe_path(self.server.assets, ["index.html"] if parts == [""] else parts)
             if not path.is_file():
                 raise RequestError("Page not found", 404)
@@ -1754,6 +1869,27 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def post(self, parts, body):
+        if parts == ["api", "shared-attributions"]:
+            from .shared_attributions import catalog
+            if set(body) - {"query", "offset", "limit"}:
+                raise RequestError("Shared attributions accept a search and pagination only")
+            try:
+                return catalog(self.server.root, query=body.get("query", ""),
+                    offset=body.get("offset", 0), limit=body.get("limit", 100)), 200
+            except TraceError as error:
+                raise RequestError(str(error)) from None
+        if parts == ["api", "shared-attributions", "import"]:
+            from .shared_attributions import apply_import, preview_import
+            if set(body) - {"text", "format", "policy", "approve_plan"}:
+                raise RequestError("Shared attribution import accepts uploaded text, format, policy and approval only; not file paths")
+            options = {"format": body.get("format", "auto"), "policy": body.get("policy", "keep")}
+            try:
+                result = (apply_import(self.server.root, body.get("text"),
+                    approval_sha256=body["approve_plan"], **options) if "approve_plan" in body
+                    else preview_import(self.server.root, body.get("text"), **options))
+            except TraceError as error:
+                raise RequestError(str(error)) from None
+            return result, 200
         if parts == ["api", "endpoint-exports"]:
             from .combined_endpoint_csv import build_combined_endpoint_csv
             if set(body) != {"investigations"}:
@@ -1786,13 +1922,23 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(seeds, list) or not seeds or any(not isinstance(seed, str) for seed in seeds):
                 raise RequestError("Select at least one starting output.")
             normalized = _seed_values(" ".join(seeds))
-            settings = validate_settings(body.get("settings", load_settings(self.server.root)))
+            settings = generation_settings(body.get("settings", load_settings(self.server.root)))
             case = create_investigation(self.server.root, body.get("name"), seeds=normalized,
                 board=body.get("board") or None, run_defaults=settings, blockchain=blockchain)
             from .investigation_views import overview
             return overview(case, read_case(case)), 201
         if len(parts) == 4 and parts[:2] == ["api", "cases"]:
             case, metadata = self.server.case(parts[2])
+            if parts[3] == "seeds":
+                return self.server.save_case_seeds(case, metadata["case_id"], body), 200
+            if parts[3] == "shared-attributions":
+                from .services import set_shared_attributions
+                if set(body) != {"enabled", "expected_revision"}:
+                    raise RequestError("Choose shared attribution use and supply the current revision")
+                try:
+                    return set_shared_attributions(case, body["enabled"], expected_revision=body["expected_revision"]), 200
+                except TraceError as error:
+                    raise RequestError(str(error)) from None
             if parts[3] == "change-outputs":
                 from .change_outputs import catalog, set_change_output
 
@@ -1899,7 +2045,7 @@ class Handler(BaseHTTPRequestHandler):
     def address_request(self, route, case, body):
         from .address_activity import validate_address
         from .address_review import list_addresses, saved_activity
-        from .services import load_services, set_service
+        from .services import effective_services, set_service
 
         if route == "addresses":
             selected = body.get("run_id", "latest")
@@ -1925,7 +2071,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(selected, str) or (selected != "latest" and not RUN_ID.fullmatch(selected)):
                 raise RequestError("Choose a saved run for this address review.")
             activity = saved_activity(case, address, run_id=selected)
-            service = load_services(case)["rules"].get(address)
+            service = effective_services(case)["rules"].get(address)
             return {"address": address, "service": public_service(service),
                     "activity": public_address_activity(activity) if activity else None}
         if type(body.get("enabled")) is not bool:

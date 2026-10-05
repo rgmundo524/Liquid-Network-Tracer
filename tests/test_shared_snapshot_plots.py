@@ -156,7 +156,9 @@ class SharedSnapshotPlotTests(unittest.TestCase):
         self.select_seeds("a", "1")
         finite = self.shared_plot("connections", max_hops=3, connection_scope="hop_limited")
         all_saved = self.shared_plot("connections", max_hops=3, connection_scope="all_saved")
-        self.assertTrue(finite["empty"])
+        self.assertFalse(finite["empty"])
+        self.assertTrue(finite["includes_all_starters"])
+        self.assertEqual(finite["connection_count"], 0)
         self.assertFalse(all_saved["empty"])
         graph = self.assert_same_plot_evidence(
             self.full_plot("connections", max_hops=3, connection_scope="all_saved"), all_saved)

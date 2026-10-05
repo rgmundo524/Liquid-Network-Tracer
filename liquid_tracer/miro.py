@@ -29,6 +29,7 @@ from .miro_updates import patch_item
 from .miro_state import SyncState, load_state
 from .miro_reads import check_empty_frames, preflight, validate_frame_children
 from .miro_quota import SharedMiroQuota
+from .board_write_guard import state_board_lock
 from .miro_frames import frame_bodies, validate_activity_frames
 from .miro_creation_parents import (normalize_created_shapes, validate_creation_detaches,
                                     finish_creation_detaches)
@@ -1578,6 +1579,7 @@ def _sync(plan, board_id, state_path, max_items=0, token=None, transport=http, i
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise TraceError("Another publisher is using this state file") from None
+        resources.enter_context(state_board_lock(state_path, board_id))
         state = _load_sync_state(state_path, board_id, namespace)
         report = preview(state)
         removals = {} if frames_only else _fee_removals(plan, state)
@@ -1994,6 +1996,7 @@ def publish(plan, board_id, state_path, max_items=0, token=None, transport=http,
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise TraceError("Another publisher is using this state file") from None
+        resources.enter_context(state_board_lock(state_path, board_id))
         state = load_state(state_path, {
             "board_id": board_id, "plan_sha256": plan["sha256"], "items": {}, "pending": None})
         if state["board_id"] != board_id or state["plan_sha256"] != plan["sha256"]:

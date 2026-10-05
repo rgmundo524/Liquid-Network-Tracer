@@ -117,7 +117,7 @@ class HopLimitedConnectionTests(unittest.TestCase):
         before = deepcopy(state)
         with patch("liquid_tracer.api.Esplora.get", side_effect=AssertionError("Use saved data only")):
             result = connection_graph(state, 1, connection_scope="hop_limited", transaction_io="complete",
-                                      group_context_inputs=True)
+                                      group_context_inputs=True, include_fees=True)
         self.assertEqual({node["id"] for node in result["nodes"] if node["kind"] == "transaction"},
                          {"tx:" + tx("a"), "tx:" + tx("b")})
         self.assertEqual({edge["id"] for edge in result["edges"]}, io_ids(state, "ab"))

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from liquid_tracer.common import LBTC, TraceError, digest, read_json, save_json
+from liquid_tracer.common import LBTC, TraceError, digest, output_kind, read_json, save_json
 from liquid_tracer.context_connectors import display_graph
 from liquid_tracer.connections import connection_graph, preview_connections, reviewed_connections
 from liquid_tracer.investigations import create_investigation, read_case, update_case
@@ -27,10 +27,11 @@ def complete_state():
     return state
 
 
-def input_output_keys(state, selected):
+def input_output_keys(state, selected, *, include_fees=False):
     return {(txid, direction, str(index)) for txid in selected
             for direction, field in (("IN", "vin"), ("OUT", "vout"))
-            for index, _ in enumerate(state["transactions"][txid]["data"][field])}
+            for index, output in enumerate(state["transactions"][txid]["data"][field])
+            if direction == "IN" or include_fees or output_kind(output) != "fee"}
 
 
 def csv_rows(result):
@@ -61,12 +62,12 @@ class CompleteStarterWorkflowTests(unittest.TestCase):
             guard.start()
             self.addCleanup(guard.stop)
 
-    def test_new_plot_groups_context_but_exports_every_input_output_and_fee(self):
+    def test_new_plot_groups_context_but_hides_fees_by_default_in_graph_and_csv(self):
         before = files(self.archive)
         result = preview_plot(self.case, "connections")
         graph, plan = reviewed_plot(self.case, result["preview_id"])
         self.assertEqual(result["query"], {"connection_scope": "all_saved", "transaction_io": "complete"})
-        self.assertTrue(result["layout_settings"]["include_fees"])
+        self.assertFalse(result["layout_settings"]["include_fees"])
         self.assertTrue(result["layout_settings"]["group_context_inputs"])
         self.assertEqual(result["layout_settings"]["hub_addresses"], [])
         selected = {tx(name) for name in "acb"}
@@ -91,6 +92,51 @@ class CompleteStarterWorkflowTests(unittest.TestCase):
         self.assertEqual(graph["plot"]["display_edge_count"], len(plan["connectors"]))
         self.assertEqual(public_plot(result)["display_edge_count"], len(plan["connectors"]))
         self.assertEqual(files(self.archive), before)
+
+    def test_fee_opt_in_and_saved_settings_survive_later_preference_changes(self):
+        before = files(self.archive)
+        hidden = preview_plot(self.case, "connections")
+        hidden_graph, hidden_plan = reviewed_plot(self.case, hidden["preview_id"])
+        update_case(self.case, {"run_defaults": {**read_case(self.case)["run_defaults"], "include_fees": True}})
+        visible = preview_plot(self.case, "connections")
+        visible_graph, visible_plan = reviewed_plot(self.case, visible["preview_id"])
+        original = files(Path(visible["directory"]))
+        self.assertTrue(visible_graph["include_fees"])
+        self.assertEqual(hidden_graph["fee_items"], visible_graph["fee_items"])
+        self.assertTrue(hidden_graph["fee_items"])
+        self.assertFalse(any("FEE" in row["Address Flags"] for row in csv_rows(hidden)))
+        self.assertEqual(sum("FEE" in row["Address Flags"] for row in csv_rows(visible)), 3)
+        self.assertEqual({(row["Transaction Hash"], row["Direction"], row["Number of I/O"])
+                          for row in csv_rows(visible)},
+                         input_output_keys(self.state, {tx(name) for name in "acb"}, include_fees=True))
+        for key in ("pairs", "outpoints", "transaction_count", "connection_count", "status"):
+            self.assertEqual(hidden_graph["connections"][key], visible_graph["connections"][key])
+        self.assertEqual(visible_graph["connections"]["context_edge_count"],
+                         hidden_graph["connections"]["context_edge_count"] + 3)
+        self.assertEqual(reviewed_plot(self.case, hidden["preview_id"]), (hidden_graph, hidden_plan))
+        update_case(self.case, {"run_defaults": {**read_case(self.case)["run_defaults"], "include_fees": False}})
+        self.assertEqual(reviewed_plot(self.case, visible["preview_id"]), (visible_graph, visible_plan))
+        # Explicitly replaying frozen settings must not use the current default.
+        repeated = preview_plot(self.case, "connections", layout_settings=visible["layout_settings"])
+        self.assertEqual(csv_rows(repeated), csv_rows(visible))
+        self.assertEqual(files(Path(visible["directory"])), original)
+        self.assertEqual(files(self.archive), before)
+
+    def test_standalone_fee_choice_is_captured_in_graph_and_preserved_on_review(self):
+        hidden = preview_connections(self.case)
+        hidden_graph, hidden_plan = reviewed_connections(self.case, hidden["preview_id"])
+        self.assertFalse(hidden_graph["include_fees"])
+        update_case(self.case, {"run_defaults": {**read_case(self.case)["run_defaults"], "include_fees": True}})
+        visible = preview_connections(self.case)
+        visible_graph, visible_plan = reviewed_connections(self.case, visible["preview_id"])
+        before = files(Path(visible["directory"]))
+        self.assertTrue(visible_graph["include_fees"])
+        self.assertEqual(sum("FEE" in row["Address Flags"] for row in csv_rows(visible)), 3)
+        self.assertEqual(hidden_graph["fee_items"], visible_graph["fee_items"])
+        self.assertEqual(reviewed_connections(self.case, hidden["preview_id"]), (hidden_graph, hidden_plan))
+        update_case(self.case, {"run_defaults": {**read_case(self.case)["run_defaults"], "include_fees": False}})
+        self.assertEqual(reviewed_connections(self.case, visible["preview_id"]), (visible_graph, visible_plan))
+        self.assertEqual(files(Path(visible["directory"])), before)
 
     def test_saved_display_count_is_verified_without_replacing_canonical_count(self):
         result = preview_plot(self.case, "connections")

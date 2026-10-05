@@ -117,10 +117,10 @@ def _effective_settings(settings, goal, query=None):
         # snapshots with an empty list keep their original layout settings.
         if goal == "connections":
             result["hub_addresses"] = []
-        # Complete peg-out context honors the captured fee display setting.
-        # Starter connections and legacy path-only snapshots keep their policy.
-        if goal == "connections" or not complete:
-            result["include_fees"] = complete
+        # Complete focused plots honor the captured fee display setting.
+        # Legacy path-only snapshots keep their original fee-free policy.
+        if not complete:
+            result["include_fees"] = False
         if not complete and not (goal == "pegouts" and (query or {}).get("include_context")):
             result["group_context_inputs"] = False
     return result
@@ -203,14 +203,14 @@ def _source(case, run_id, *, progress=None, prepared=None):
     from .address_counts import apply_saved_counts
     from .cli import resolve_latest
     from .investigations import read_case
-    from .services import apply_service_labels, load_services
+    from .services import apply_service_labels, effective_services
     # Collection checkpoints and latest-run publication do not mutate older
     # run archives. Hold only the metadata lock while choosing one saved run
     # and one complete CSV/settings revision, then release it before I/O/ELK.
     with _locked(case):
         metadata = read_case(case)
         run_id = resolve_latest(case, run_id)
-        controls = {key: value for key, value in load_services(case).items() if key != "history"}
+        controls = {key: value for key, value in effective_services(case).items() if key != "history"}
         settings = _settings(metadata)
     state, archive_sha256 = (prepared if prepared is not None else
                              _archive_source(case, run_id, metadata, progress=progress))
@@ -226,9 +226,13 @@ def _source(case, run_id, *, progress=None, prepared=None):
 
 def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_unspendable=False,
            include_context=False, transaction_io="complete", attribution_hop_limits="ignore",
-           connection_scope="all_saved", pegout_lbtc_limit=None):
+           connection_scope="all_saved", pegout_lbtc_limit=None, hop_basis="configured"):
     from .connections import validate_hops, validate_connection_scope
     from .pegout_paths import validate_query
+    from .plot_scope import validate_hop_basis
+    validate_hop_basis(hop_basis)
+    name = reference_name(state) if hop_basis == "configured" else ""
+    basis = {"hop_basis": hop_basis} if hop_basis == "original_seeds" else {}
     if not isinstance(goal, str) or goal not in GOALS:
         raise TraceError("Choose the full investigation, starter connections, or peg-out paths plot")
     if goal != "connections" and connection_scope not in (None, "all_saved"):
@@ -246,22 +250,25 @@ def _query(goal, state, min_hops, max_hops, *, include_unspent=False, include_un
     if goal == "pegouts":
         return validate_query(seeds=state["seeds"], min_hops=min_hops, max_hops=max_hops,
                               include_unspent=include_unspent, include_unspendable=include_unspendable,
-                              include_context=include_context, hop_reference_name=reference_name(state),
+                              include_context=include_context, hop_reference_name=name, hop_basis=hop_basis,
                               transaction_io=transaction_io, attribution_hop_limits=attribution_hop_limits,
                               pegout_lbtc_limit=pegout_lbtc_limit)
-    reference = {"hop_reference_name": reference_name(state)} if reference_name(state) else {}
+    reference = {**basis, **({"hop_reference_name": name} if name else {})}
     if goal == "connections":
         if transaction_io not in (None, "complete"):
             raise TraceError("Starter connection transaction inputs and outputs must be complete")
         io = {"transaction_io": transaction_io} if transaction_io is not None else {}
         scope = validate_connection_scope(connection_scope)
-        if scope == "all_saved":
+        if scope in ("all_saved", "shortest"):
             if max_hops is not None:
                 validate_hops(max_hops)  # Old clients may supply an unused, valid hop value.
-            return {"connection_scope": "all_saved", **io, **reference}
+            return {"connection_scope": scope, **io, **reference}
         if scope == "hop_limited":
             return {"connection_scope": scope, "max_hops": validate_hops(max_hops), **io, **reference}
         return {"max_hops": validate_hops(max_hops), **io, **reference}
+    if max_hops is not None:
+        from .plot_scope import validate_max_hops
+        return {"max_hops": validate_max_hops(max_hops), **reference}
     return reference
 
 
@@ -284,19 +291,28 @@ def _graph(state, goal, query, settings, *, initial_layout=True):
     from .connections import connection_graph
     from .export import build_graph
     from .pegout_paths import pegout_graph
-    from .plot_scope import project_full_scope
+    from .plot_scope import project_full_scope, projected_hop_basis
+    state = projected_hop_basis(state, query.get("hop_basis", "configured"))
     options = {key: settings[key] for key in ("color_attribution_arrows", "center_name")}
     options["initial_layout"] = initial_layout
     if goal == "connections":
         return connection_graph(state, query.get("max_hops"), connection_scope=query.get("connection_scope"),
                                 transaction_io=query.get("transaction_io"),
-                                group_context_inputs=settings["group_context_inputs"], **options)
+                                group_context_inputs=settings["group_context_inputs"],
+                                include_fees=settings["include_fees"], **options)
     if goal == "pegouts":
         return pegout_graph(state, query, group_context_inputs=settings["group_context_inputs"],
                             include_fees=settings["include_fees"], hub_addresses=settings["hub_addresses"], **options)
-    return build_graph(project_full_scope(state), merge_addresses=True, **options,
+    graph = build_graph(project_full_scope(state, max_hops=query.get("max_hops")), merge_addresses=True, **options,
                        resolve_saved_inputs=state.get("collection_source", {}).get("kind") == "shared",
                        **{key: settings[key] for key in ("include_fees", "group_context_inputs", "hub_addresses")})
+    if "max_hops" in query:
+        graph["graph_options"]["full_trace_max_hops"] = query["max_hops"]
+        basis = (f"away from attribution group {query['hop_reference_name']}, resetting at reached group outputs"
+                 if query.get("hop_reference_name") else "from the selected starting outputs")
+        graph["notice"] = (f"Full trace analysis scope: through hop {query['max_hops']} {basis}. "
+                           "Activity beyond this boundary is not included. " + graph["notice"])
+    return graph
 
 
 def plot_plan(graph):
@@ -313,14 +329,34 @@ def plot_plan(graph):
     return plan
 
 
-def _coverage(state):
+def _same_saved_plan(first, second):
+    """Compare validated plans across the empty parallel-catalog addition.
+
+    Older previews predate this optional catalog. Its absence and an empty
+    catalog carry the same evidence; every nonempty proof and all other plan
+    fields must still match. The original plans and their hashes stay intact.
+    """
+    from .miro import validate_plan
+
+    validate_plan(first)
+    validate_plan(second)
+
+    def content(plan):
+        return {key: value for key, value in plan.items()
+                if key != "sha256" and not (key == "context_parallel_items" and value == {})}
+    return canonical(content(first)) == canonical(content(second))
+
+
+def _coverage(state, *, hop_basis="configured"):
     maximum = state.get("limits", {}).get("max_hops")
     status = state.get("status")
     reason = state.get("stop_reason")
     text = f"Source collection {state['run_id']}: status {status or 'unknown'}; hop limit {maximum if maximum is not None else 'unknown'}. "
-    name = reference_name(state)
+    name = reference_name(state) if hop_basis == "configured" else ""
     if name:
         text += f"Hops count away from attribution group {name}, resetting at each reached group output. "
+    elif hop_basis == "original_seeds":
+        text += "This plot counts ordinary transaction hops from the original starting outputs; named groups do not reset its limit. "
     if reason:
         text += f"Stop reason: {reason}. "
     selection = state.get("collection_source", {}).get("selection", {})
@@ -360,11 +396,12 @@ def _summary(graph, preview_id, *, reviewable=True, reason=None):
     return result
 
 
-def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, include_unspent=False,
+def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=None, *, include_unspent=False,
                  include_unspendable=False, include_context=False, open_browser=False, progress=None,
                  layout_mode="fresh", board_record_id=None, token=None, transport=http,
                  interval=.02, workers=4, layout_settings=None, data_source="investigation", dataset_id=None,
-                 connection_scope="all_saved", pegout_lbtc_limit=None, _preflight=None, _board_lock_held=False):
+                 connection_scope="all_saved", pegout_lbtc_limit=None, hop_basis="configured",
+                 _preflight=None, _board_lock_held=False):
     """Plot saved evidence afresh, or review additions against a selected live board."""
     from .cli import open_preview
     from .elk_layout import optimize_graph
@@ -375,6 +412,12 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
     from .progress import report_progress
     from .plot_performance import PlotTimings
     timings = PlotTimings(progress)
+    # Older full-trace callers omitted a scope and must keep their original
+    # collection view. New UI/CLI requests supply their explicit analysis cap.
+    # An explicitly bounded connection search must supply its bound; otherwise
+    # a missing limit silently becomes a different, ten-hop query.
+    if max_hops is None and goal != "full" and not (goal == "connections" and connection_scope == "hop_limited"):
+        max_hops = 10
     report_progress(progress, "preparing_plot", 0, 1)
     if layout_mode not in ("fresh", "update"):
         raise TraceError("Choose a fresh layout or an update to an existing Miro board")
@@ -394,12 +437,13 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
                        "hop_reference_name": metadata.get("run_defaults", {}).get("hop_reference_name", "")}
         query = _query(goal, preliminary, min_hops, max_hops, include_unspent=include_unspent,
                        include_unspendable=include_unspendable, include_context=include_context,
-                       connection_scope=connection_scope, pegout_lbtc_limit=pegout_lbtc_limit)
-        bound = query.get("max_hops") if goal in ("pegouts", "connections") else None
+                       connection_scope=connection_scope, pegout_lbtc_limit=pegout_lbtc_limit, hop_basis=hop_basis)
+        bound = query.get("max_hops")
         scope = query.get("connection_scope") if goal == "connections" else None
         with timings.measure("shared_projection"):
             run_id, state, checksum = materialize_shared_source(
-                case, run_id, dataset_id=dataset_id, progress=progress, max_hops=bound, connection_scope=scope)
+                case, run_id, dataset_id=dataset_id, progress=progress, max_hops=bound, connection_scope=scope,
+                hop_basis=hop_basis)
         prepared = (state, checksum)
     with ExitStack() as operation:
         if layout_mode == "update" and not _board_lock_held:
@@ -410,12 +454,18 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
         report_progress(progress, "layout", 0, 1)
         if layout_settings is not None:
             settings = validate_layout_settings(layout_settings)
+        elif "layout_style" not in settings:
+            # _source retains historical fingerprints for archive review. Only
+            # this new-generation path supplies the current default, using the
+            # same captured settings revision; explicit/legacy snapshots win.
+            from .investigations import generation_settings
+            settings = {**settings, "layout_style": generation_settings({})["layout_style"]}
         inputs = {"schema_version": 1, "case_id": state["case_id"], "run_id": state["run_id"],
                   "captured_at": now(), "service_controls": deepcopy(state["service_controls"]),
                   "address_tx_counts": deepcopy(state["address_tx_counts"])}
         query = _query(goal, state, min_hops, max_hops, include_unspent=include_unspent,
                        include_unspendable=include_unspendable, include_context=include_context,
-                       connection_scope=connection_scope, pegout_lbtc_limit=pegout_lbtc_limit)
+                       connection_scope=connection_scope, pegout_lbtc_limit=pegout_lbtc_limit, hop_basis=hop_basis)
         settings = _effective_settings(settings, goal, query)
         with timings.measure("build_graph"):
             graph = _graph(state, goal, query, settings, initial_layout=False)
@@ -449,14 +499,15 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
                 with timings.measure("layout"):
                     graph = optimize_graph(graph, connector_style=settings["connector_style"],
                                            layout_attempts=settings["layout_attempts"], progress=progress)
-        coverage = _coverage(state)
+        coverage = _coverage(state, hop_basis=hop_basis)
         graph["notice"] = coverage["coverage_notice"] + " " + graph["notice"]
         from .context_connectors import summaries
         display_edge_count = len(graph["edges"]) - sum(
             len(edge["details"]["context_summary"]["member_edge_ids"]) - 1
             for edge in summaries(graph))
         report = {"schema_version": 1, "case_id": state["case_id"], "run_id": state["run_id"],
-                  "goal": goal, "query": query, "created_at": now(), **coverage, **fingerprints, **board_fields,
+                  "goal": goal, "query": query, "seeds": list(state["seeds"]),
+                  "created_at": now(), **coverage, **fingerprints, **board_fields,
                   "input_snapshot_version": 1, "input_snapshot_at": inputs["captured_at"],
                   "inputs_sha256": digest(canonical(inputs)),
                   "layout_settings": deepcopy(settings), "settings_sha256": digest(canonical(settings)),
@@ -469,6 +520,9 @@ def preview_plot(case, goal, run_id="latest", min_hops=0, max_hops=10, *, includ
             report["collection_source"] = deepcopy(state["collection_source"])
         if goal == "connections":
             report.update(connection_count=graph["connections"]["connection_count"], status=graph["connections"]["status"])
+            for key in ("includes_all_starters", "starting_transaction_count", "unconnected_starting_transactions"):
+                if key in graph["connections"]:
+                    report[key] = deepcopy(graph["connections"][key])
             if "connection_scope" in query:
                 report["connection_scope"] = query["connection_scope"]
             if query.get("transaction_io") == "complete":
@@ -539,7 +593,6 @@ def _snapshot(case, preview_id, *, with_inputs=False):
     if seen != files - {"SHA256SUMS"}:
         raise TraceError("The saved plot manifest is incomplete")
     from .investigations import read_case
-    from .miro import validate_plan
     graph, plan = read_json(directory / "graph.json"), read_json(directory / "miro-plan.json")
     if (not isinstance(graph, dict) or not isinstance(plan, dict)
             or not isinstance(graph.get("plot"), dict) or not isinstance(graph.get("namespace"), dict)
@@ -557,13 +610,12 @@ def _snapshot(case, preview_id, *, with_inputs=False):
     name = reference_name(report)
     if name != reference_name(report["query"]) or name != reference_name(graph):
         raise TraceError("Saved plot hop reference disagrees with its graph; regenerate the plot")
-    validate_plan(plan)
+    if not _same_saved_plan(plot_plan(graph), plan):
+        raise TraceError("Saved plot and its Miro plan disagree")
     if ("display_edge_count" in report
             and (type(report["display_edge_count"]) is not int
                  or report["display_edge_count"] != len(plan["connectors"]))):
         raise TraceError("Saved plot displayed connection count disagrees with its Miro plan")
-    if plot_plan(graph) != plan:
-        raise TraceError("Saved plot and its Miro plan disagree")
     if report["goal"] == "pegouts":
         query = report["query"]
         pegouts = graph.get("pegouts", {})
@@ -580,6 +632,8 @@ def _snapshot(case, preview_id, *, with_inputs=False):
             from .pegout_csv import validate_pegout_lbtc_summary
             validate_pegout_lbtc_summary(report["pegout_lbtc_summary"], report.get("match_count"))
     elif report["goal"] == "connections":
+        from .connections import validate_starter_visibility
+        validate_starter_visibility(graph)
         query, connections, options = report["query"], graph.get("connections", {}), graph.get("graph_options", {})
         if (any(canonical(value.get("connection_scope")) != canonical(query.get("connection_scope"))
                 for value in (report, connections, options))
@@ -589,8 +643,12 @@ def _snapshot(case, preview_id, *, with_inputs=False):
                 or any(canonical(value) != canonical(query.get("max_hops")) for value in
                        (report.get("max_hops"), connections.get("max_hops"), options.get("connection_hops")))
                 or any(canonical(report.get(key)) != canonical(connections.get(key))
-                       for key in ("connection_count", "status"))):
+                       for key in ("connection_count", "status", "includes_all_starters",
+                                   "starting_transaction_count", "unconnected_starting_transactions"))):
             raise TraceError("Saved connection scope disagrees with its graph; regenerate the plot")
+    elif any(canonical(value) != canonical(report["query"].get("max_hops")) for value in
+             (report.get("max_hops"), graph.get("graph_options", {}).get("full_trace_max_hops"))):
+        raise TraceError("Saved full trace scope disagrees with its graph; regenerate the plot")
     _snapshot_settings(graph)
     _snapshot_board(graph, plan)
     inputs = _snapshot_inputs(directory, graph)
@@ -636,14 +694,15 @@ def _review_source(case, graph, source_cache=None, inputs=None):
             state = {key: state[key] for key in ("seeds", "source", "hop_reference_name", "collection_source") if key in state}
             source_cache[cache_key] = state, fingerprints
     query = report.get("query", {})
-    expected = _query(report["goal"], state, query.get("min_hops", 0), query.get("max_hops", 10),
+    expected = _query(report["goal"], state, query.get("min_hops", 0),
+                      query.get("max_hops", None if report["goal"] == "full" else 10),
                       include_unspent=query.get("include_unspent", False),
                       include_unspendable=query.get("include_unspendable", False),
                       include_context=query.get("include_context", False),
                       transaction_io=query.get("transaction_io"),
                       attribution_hop_limits=query.get("attribution_hop_limits"),
                       connection_scope=query.get("connection_scope"),
-                      pegout_lbtc_limit=query.get("pegout_lbtc_limit"))
+                      pegout_lbtc_limit=query.get("pegout_lbtc_limit"), hop_basis=query.get("hop_basis", "configured"))
     settings = _snapshot_settings(graph)
     if settings is not None:
         from .export import PRESENTATION_VERSION
@@ -652,6 +711,7 @@ def _review_source(case, graph, source_cache=None, inputs=None):
     if (any(report.get(key) != value for key, value in fingerprints.items()
             if settings is None or key != "settings_sha256")
             or query != expected or graph["namespace"].get("source") != state["source"]
+            or ("seeds" in report and canonical(report["seeds"]) != canonical(state["seeds"]))
             or canonical(report.get("collection_source")) != canonical(state.get("collection_source"))):
         raise TraceError("Evidence, address counts, trace controls or plot settings changed; regenerate the plot")
 

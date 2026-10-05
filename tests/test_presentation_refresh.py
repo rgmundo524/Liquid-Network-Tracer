@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from liquid_tracer.cli import main, sync_run, verify_export
+from liquid_tracer.cli import layout_appearance, main, sync_run, verify_export
 from liquid_tracer.common import TraceError, canonical, digest, read_json, save_json
 from liquid_tracer.export import PRESENTATION_VERSION, build_graph
 from liquid_tracer.elk_layout import optimize_graph
@@ -56,7 +56,9 @@ class PresentationRefreshTests(unittest.TestCase):
         self.state_path = self.case / "miro" / (digest(b"SYNTHETIC=")[:24] + ".json")
         self.current_plan = read_json(self.run / "miro-plan.json")
         self.old_plan = copy.deepcopy(self.current_plan)
-        self.current_plan = make_plan(optimize_graph(build_graph(read_json(self.run / "trace.json"))))
+        expected_graph = build_graph(read_json(self.run / "trace.json"))
+        expected_graph["graph_options"]["layout_style"] = layout_appearance(read_json(self.case / "case.json"))
+        self.current_plan = make_plan(optimize_graph(expected_graph))
         self.old_plan.pop("presentation_version", None)
         for item in self.old_plan["shapes"]:
             if item["key"] == "legend":

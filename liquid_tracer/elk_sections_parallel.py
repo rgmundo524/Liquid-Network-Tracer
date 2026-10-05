@@ -8,6 +8,7 @@ from concurrent.futures import CancelledError, FIRST_COMPLETED, ThreadPoolExecut
 from queue import Empty, SimpleQueue
 from threading import Event
 
+from .cancellation import check_cancelled
 from .elk_errors import ELK_FATAL_FAILURE_CODES, ElkWorkerFailure
 from .elk_parallel import MEMORY_PRESSURE_CODES, POLL_SECONDS
 from .render_runtime import elk_worker_budget, renderer_heap_is_auto, renderer_heap_mb
@@ -25,7 +26,7 @@ def _emit(progress, event):
         pass  # A broken progress display does not invalidate a layout.
 
 
-def _run_batch(requests, indices, seed, worker, progress, lease):
+def _run_batch(requests, indices, seed, worker, progress, lease, parent_cancel_event=None):
     """Drain workers before releasing their lease or returning any candidates."""
     cancel = Event()
     events = SimpleQueue()
@@ -54,8 +55,10 @@ def _run_batch(requests, indices, seed, worker, progress, lease):
 
     try:
         for index in indices:
+            check_cancelled(parent_cancel_event)
             pending[executor.submit(run, index)] = index
         while pending:
+            check_cancelled(parent_cancel_event)
             finished, _ = wait(pending, timeout=POLL_SECONDS, return_when=FIRST_COMPLETED)
             # Handle failures before progress so invalid worker data cancels
             # siblings immediately. The direct worker normally raises a plain
@@ -69,6 +72,7 @@ def _run_batch(requests, indices, seed, worker, progress, lease):
                         raise
                     outcomes[index] = exc
             flush()
+        check_cancelled(parent_cancel_event)
         return outcomes, measurements
     finally:
         cancel.set()
@@ -77,7 +81,7 @@ def _run_batch(requests, indices, seed, worker, progress, lease):
         executor.shutdown(wait=True, cancel_futures=True)
 
 
-def iter_sections(requests, seed, worker, progress, metadata):
+def iter_sections(requests, seed, worker, progress, metadata, *, cancel_event=None):
     """Yield ``(one_based_index, candidates_or_worker_failure)`` in input order.
 
     The caller orders the largest section first for a measured pilot. Remaining
@@ -89,6 +93,7 @@ def iter_sections(requests, seed, worker, progress, metadata):
     the direct worker, which retains responsibility for credential isolation.
     Progress is delivered only on the iterator's calling thread.
     """
+    check_cancelled(cancel_event)
     requests = tuple(requests)
     metadata.update(execution="sequential", worker_count=1, memory_retry_count=0,
                     section_count=len(requests))
@@ -104,6 +109,7 @@ def iter_sections(requests, seed, worker, progress, metadata):
     next_index, sequential, observed_peak = 1, False, None
     with SharedRenderResources() as resources:
         while next_index <= len(requests):
+            check_cancelled(cancel_event)
             remaining = len(requests) - next_index + 1
             if sequential:
                 worker_count, total_heap = 1, renderer_heap_mb()
@@ -119,16 +125,18 @@ def iter_sections(requests, seed, worker, progress, metadata):
 
             lease = resources.acquire(worker_count, total_heap,
                                       peak_rss_mb=None if sequential else observed_peak,
-                                      progress=report_resource, worker_heap_mb=worker_heap)
+                                      progress=report_resource, worker_heap_mb=worker_heap,
+                                      cancel_event=cancel_event)
             worker_count = lease.worker_count
             metadata["worker_count"] = max(metadata["worker_count"], worker_count)
             if worker_count > 1:
                 metadata["execution"] = "parallel"
             indices = range(next_index, next_index + worker_count)
             with lease:
-                outcomes, measurements = _run_batch(requests, indices, seed, worker, progress, lease)
+                outcomes, measurements = _run_batch(requests, indices, seed, worker, progress, lease, cancel_event)
 
             for index in indices:
+                check_cancelled(cancel_event)
                 outcome = outcomes.pop(index)
                 if isinstance(outcome, ElkWorkerFailure) and outcome.failure_code in MEMORY_PRESSURE_CODES:
                     # The batch lease is released and all sibling processes
@@ -142,7 +150,8 @@ def iter_sections(requests, seed, worker, progress, metadata):
 
                     retry = resources.acquire(1, renderer_heap_mb(), progress=report_retry_resource,
                                               exclusive=True,
-                                              refresh_heap=renderer_heap_mb if renderer_heap_is_auto() else None)
+                                              refresh_heap=renderer_heap_mb if renderer_heap_is_auto() else None,
+                                              cancel_event=cancel_event)
                     with retry:
                         _emit(progress, {"phase": "optimizing", "stage": "retrying_memory",
                                          "message": "Retrying this ELK section alone after other layout batches finish",
@@ -151,12 +160,13 @@ def iter_sections(requests, seed, worker, progress, metadata):
                                          "worker_count": 1, "active_workers": 0,
                                          "heap_mb": retry.heap_mb, "total_heap_mb": retry.total_heap_mb,
                                          "active_layouts": retry.active_layouts, "machine_heap_mb": retry.machine_heap_mb})
-                        retried, retry_measurements = _run_batch(requests, [index], seed, worker, progress, retry)
+                        retried, retry_measurements = _run_batch(requests, [index], seed, worker, progress, retry, cancel_event)
                     outcome = retried[index]
                     measurements.pop(index, None)
                     measurements.update(retry_measurements)
                 if not isinstance(outcome, ElkWorkerFailure) and index in measurements:
                     observed_peak = max(observed_peak or 0, measurements[index])
                     metadata["peak_rss_mb"] = observed_peak
+                check_cancelled(cancel_event)
                 yield index, outcome
             next_index += worker_count

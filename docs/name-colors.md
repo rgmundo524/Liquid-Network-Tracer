@@ -7,7 +7,7 @@ required to configure graph roles.
 
 In the **browser**, use the **Graph role colors** table: choose a color using the
 picker or enter `#RRGGBB`, then select **Save color**. **Reset to default** clears
-only that role's override. The **Imported name colors** table remains separate.
+only that role's override. The **Name color palette** table remains separate.
 
 In the **terminal**, use **Or choose a graph role**, select the category, then use
 the existing palette or hex field and **Save color**. **Clear / reset to default**
@@ -88,8 +88,8 @@ Address,Name,confidence,stop_tracing,hop_limit,source,notes
 ## Import name-group colors
 
 Choose **Import CSV files** and select a UTF-8 name-color CSV. You can include
-the attribution and change-output CSVs in the same batch; new attribution names
-are processed before colors automatically. JSON and pasted contents remain
+the attribution and change-output CSVs in the same batch, or import the color
+file alone before any address attributions exist. JSON and pasted contents remain
 available through the advanced name-color importer. This assigns a color to each name group, including all capitalization
 variants, without editing the address attributions themselves.
 
@@ -102,7 +102,7 @@ Client wallet,#bbf7d0
 
 The [CSV template](../examples/name-colors-template.csv) and
 [JSON template](../examples/name-colors-template.json) are examples; replace the
-names with those in your investigation. JSON uses an array of objects with
+names and colors with your reusable palette. JSON uses an array of objects with
 `name` and `color` fields. Column/field names and attribution-name matching are
 case-insensitive. Colors must be six-digit hex values including `#`; short hex,
 color names, and CSS expressions are rejected.
@@ -115,12 +115,16 @@ color names, and CSS expressions are rejected.
 3. Review the preview, then choose **Apply reviewed name colors**.
 4. Regenerate a preview or choose **Sync to Miro** to update the graph.
 
-Names must exist in the attribution list, saved color assignments, or the
-attribution CSV being applied in the same batch.
-Unknown names are reported as errors so a typo cannot silently create an unused
-group. Include the attribution CSV if the name is new. Identical duplicate
-rows are combined; different colors for the same case-insensitive name are an
-error. Any invalid row blocks the entire import. There is no partial save.
+Reuse the same color file across investigations, even when some names have no
+matching addresses. Unused colors are retained with an address count of zero;
+they apply when matching address attributions are added later. Importing a color
+never creates an address attribution or changes ownership evidence. Colors are
+saved separately in each investigation, so later palette edits do not
+automatically change other investigations.
+
+Identical duplicate rows are combined; different colors for the same
+case-insensitive name are an error. Invalid names or colors still block the
+entire import. There is no partial save.
 
 CSV imports identify `Name` and `Color` by their headers in any column order.
 Unrelated columns, such as a spreadsheet `Duplicate count`, are ignored and are

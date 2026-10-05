@@ -165,6 +165,8 @@ def pegout_csv_rows(graph, state, *, observations=None):
     try:
         report = graph["pegouts"]
         raw_query = report["query"]
+        from .plot_scope import projected_hop_basis
+        state = projected_hop_basis(state, raw_query.get("hop_basis", "configured"))
         name = reference_name(state)
         query = validate_query(raw_query.get("txid"), raw_query.get("min_hops", 0),
                                raw_query.get("max_hops", 10), seeds=raw_query.get("seeds"),
@@ -173,7 +175,8 @@ def pegout_csv_rows(graph, state, *, observations=None):
                                include_context=raw_query.get("include_context", False),
                                transaction_io=raw_query.get("transaction_io"),
                                attribution_hop_limits=raw_query.get("attribution_hop_limits"),
-                               hop_reference_name=name, pegout_lbtc_limit=raw_query.get("pegout_lbtc_limit"))
+                               hop_reference_name=name, pegout_lbtc_limit=raw_query.get("pegout_lbtc_limit"),
+                               hop_basis=raw_query.get("hop_basis", "configured"))
         if canonical(query) != canonical(raw_query) or reference_name(graph) != name:
             raise TraceError("Endpoint CSV hop reference or query disagrees with the saved graph")
         limit_summary = {}

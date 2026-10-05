@@ -265,6 +265,8 @@ def apply_merge(case, approval, board=None, *, token=None, transport=http, inter
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise TraceError("A trace or Miro sync is active; convert addresses after it finishes") from None
+        from .board_deletion import board_write_lock
+        resources.enter_context(board_write_lock(case, target))
         report = preview_merge(case, target)
         if report["approval_sha256"] != approval:
             raise TraceError("The mapping changed after review; create a new conversion preview")

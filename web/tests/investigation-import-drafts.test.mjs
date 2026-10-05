@@ -200,3 +200,30 @@ test('background name-color apply refreshes only its owning cached catalog', asy
   const restored = colors.nameColorsPanel('A', false);
   assert.match(restored, /Saved: #112233/); assert.match(restored, /Saved 1 name color assignment/);
 });
+
+test('empty investigations can import palettes and edit saved unused colors', async () => {
+  let result = {...catalog, total: 0, rows: []};
+  const writes = [];
+  const ctx = context('A', async (_path, payload) => {
+    if (payload.updates) {writes.push(payload); return {changed: 1};}
+    return result;
+  });
+  await colors.nameColorsAction('name-colors-open', ctx);
+  let html = colors.nameColorsPanel('A', false);
+  assert.match(html, /Import a color palette now/);
+  assert.doesNotMatch(html, /data-action="input-import-open" disabled/);
+  await colors.nameColorsAction('name-color-import-open', ctx);
+  assert.match(colors.nameColorsPanel('A', false), /id="name-color-import-panel"/);
+  result = {...catalog, rows: [{key: 'unknown service', name: 'Unknown Service',
+    variants: ['Unknown Service'], addresses: 0, enabled_addresses: 0, color: '#bdbdbd'}]};
+  await colors.nameColorsAction('name-colors-load', ctx);
+  html = colors.nameColorsPanel('A', false);
+  assert.match(html, /Unused in this investigation/);
+  assert.match(html, /Saved: #bdbdbd/);
+  edit(colors.nameColorsInput, 'name-colors-hex-0', '#123456');
+  await colors.nameColorsAction('name-colors-save', ctx, {dataset: {colorIndex: '0'}});
+  assert.equal(writes[0].updates[0].name, 'Unknown Service');
+  assert.equal(writes[0].updates[0].color, '#123456');
+  await colors.nameColorsAction('name-colors-clear', ctx, {dataset: {colorIndex: '0'}});
+  assert.equal(writes[1].updates[0].color, null);
+});

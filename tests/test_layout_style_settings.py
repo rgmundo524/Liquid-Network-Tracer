@@ -76,14 +76,18 @@ class LayoutStyleSettingsTests(unittest.TestCase):
         legacy = _settings(metadata)
         self.assertNotIn("layout_style", legacy)
         self.assertEqual(validate_layout_settings(legacy), legacy)
-        result = preview_plot(self.case, "full")
+        # Submit an explicit historical snapshot. A newly generated preview
+        # without settings now deliberately resolves the current Trace default.
+        result = preview_plot(self.case, "full", layout_settings=legacy)
         self.assertEqual(result["settings_sha256"], digest(canonical(legacy)))
         graph, plan = reviewed_plot(self.case, result["preview_id"])
         self.assertNotIn("layout_style", graph["graph_options"])
         self.assertNotIn("layout_style", result["layout_settings"])
         self.assertEqual((self.case / "case.json").read_bytes(), before)
+        snapshot = {path.name: path.read_bytes() for path in Path(result["directory"]).iterdir() if path.is_file()}
         save_plot_settings(self.case, {"layout_style": "trace"})
         self.assertEqual(reviewed_plot(self.case, result["preview_id"]), (graph, plan))
+        self.assertEqual(snapshot, {path.name: path.read_bytes() for path in Path(result["directory"]).iterdir() if path.is_file()})
         # An older client can still submit a complete pre-style settings snapshot.
         again = preview_plot(self.case, "full", layout_settings=legacy)
         self.assertEqual(again["layout_settings"], legacy)

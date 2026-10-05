@@ -1,9 +1,10 @@
-# Starter connections: all verified saved paths between starting transactions
+# Starter connections: verified saved paths between starting transactions
 
-**Starter connections** selects transactions on verified saved paths between
-starting transactions, then displays every input and output of each selected
-transaction. Choose **Within hop limit** to start with shorter paths, or
-**All saved connections** to search without a plotting cutoff. Both modes use
+**Starter connections** shows every selected starting transaction and selects
+transactions on verified saved paths between them, then displays every input
+and non-fee output of each included transaction. Choose **Shortest connections** for one minimum-hop route per
+connected pair, **Within hop limit** for all routes within a bound, or
+**All saved connections** for all routes without a plotting cutoff. All three modes use
 the selected saved run and ignore attribution `stop_tracing` and `hop_limit`
 values. Attribution labels, colors, and recorded
 confirmation status remain visible.
@@ -14,6 +15,35 @@ connection-preview and fixed-snapshot publication commands remain available.
 Generating either kind of connection graph makes no blockchain requests and
 does not modify the collection archive or existing boards. Address counts use
 saved observations; missing counts stay unknown.
+
+## Shortest connections
+
+Choose **Starter connections → Connection search → Shortest connections**, then
+generate a preview. This searches the selected saved evidence without a plotting
+hop cutoff. For every ordered pair with a directed connection, it retains one
+shortest verified route. One hop means one transaction spending an output of
+the previous transaction. The first spend must use a selected starting output.
+Attribution names do not reset this distance.
+
+If equally short routes exist, a stable ordering selects one; the other equal
+routes and longer alternatives are omitted. The graph combines the selected
+routes and shares their overlapping transactions and addresses. This minimizes
+each pair's hop count, not the total number of objects in a connecting tree.
+Inputs and outputs of the retained transactions remain visible as context,
+with fees hidden unless explicitly enabled. Context does not extend the search.
+
+For example, with `A → X → B` and `A → Y → Z → B`, Shortest connections selects
+`A → X → B` (two hops). All saved connections includes both routes. Connections
+to other selected starters are still searched independently: A to B, A to C,
+B to C, and each reverse direction where a verified directed route exists.
+All starters stay visible, including any without a qualifying connection;
+the preview summary reports how many have no connection within its saved scope.
+A shared receiver
+such as `A → X ← B` alone does not establish a directed route between A and B.
+
+The saved preview list, graph legend, and captured query record this choice.
+Switching to a different search mode creates a new preview; earlier previews
+keep their captured scope.
 
 ## Example: three starters
 
@@ -35,18 +65,22 @@ displayed as annotations. Each saved layout records the selected search scope
 and limit; switching back to a board restores its saved choice. A limit of 0
 cannot connect two distinct starter transactions.
 
-Every verified saved route within the chosen bound is considered, not only the
-shortest route. **All saved connections** removes that bound. A longer saved
+With **Within hop limit**, every verified saved route within the chosen bound
+is considered, not only the shortest route. **All saved connections** removes that bound. A longer saved
 route remains eligible even when an intermediate address has a stop rule
 or an attribution hop cap. The chart contains the union of those transactions
-with their complete inputs and outputs, including fees, peg-outs, unspendable
-outputs, and context addresses. Other inputs and outputs provide local context;
+with their inputs and outputs, including peg-outs, unspendable outputs, and
+context addresses. Fee flows are hidden by default; enable **Include transaction
+fee flows** to show them in a new graph and its transaction CSV. Their original
+records remain in the saved evidence. Other inputs and outputs provide local context;
 they do not establish a qualifying connection or add further transactions. A
 side branch therefore appears as its first output without expanding its later
 transactions. Unchecked outputs are not labeled unspent merely because that
-branch is not followed. If C has no saved connection to another starter, C is
-not plotted. With no connected starter pair, the graph
-and publication plan are empty and publication makes no Miro requests.
+branch is not followed. If C has no saved connection to another starter, C and
+its local inputs and outputs remain visible without adding a connecting path.
+Even with no connected starter pair, a new preview contains all the selected
+starters and can be reviewed and published. Its connection report records zero
+qualifying pairs; shared context alone does not establish a directed connection.
 
 The search is directed. `A -> X <- B` does not qualify unless X is itself another
 selected starter. The source may start only through its selected seed outputs.
@@ -73,16 +107,17 @@ existing ceiling, or add hops for a larger ceiling. Generate a new connection
 plot from the resulting saved run.
 
 Older saved Starter connections queries retain their original stop rules,
-attribution caps, hop bounds, and input/output selection. Their reports and
+attribution caps, hop bounds, input/output selection, and starter visibility. Their reports and
 publication scope do not change when the application is updated. Generate a new
-layout to display complete transaction inputs and outputs on all verified saved
-connections. Saved preview selectors distinguish **all saved connections**, new
-transaction hop limits, and older bounded snapshots.
+layout to include every starter, plus complete transaction inputs and outputs
+on selected verified saved connections. Saved preview selectors distinguish **Shortest connections**,
+**All saved connections**, transaction hop limits, and older bounded snapshots.
 
 ## Browser and terminal
 
 In the browser, open **Plots & Miro**, select the collection snapshot and
-**Starter connections**, select the connection search scope and maximum hops,
+**Starter connections**, select the connection search scope (and maximum hops
+for **Within hop limit**),
 then choose the board destination and generate.
 **Generate preview only** creates local output without publishing. Update
 previews read Miro to retain existing positions; they still make no blockchain
@@ -109,7 +144,7 @@ needed for this display change.
 
 **Group isolated context inputs** can combine eligible external input addresses
 into a summary while preserving each input's connector and CSV row. Transaction
-fee outputs are always included in newly generated connection plots.
+fee outputs are hidden unless **Include transaction fee flows** is enabled.
 
 ## Publishing older standalone previews
 
@@ -133,6 +168,8 @@ board workflow supports repeated updates from new layouts instead.
 ```sh
 liquid-trace plot --case /path/to/investigation --goal connections --run latest --open
 liquid-trace plot --case /path/to/investigation --goal connections --run latest \
+  --connection-scope shortest --open
+liquid-trace plot --case /path/to/investigation --goal connections --run latest \
   --connection-scope hop_limited --max-hops 3 --open
 liquid-trace connections --case /path/to/investigation --run latest --open
 liquid-trace connections-publish --case /path/to/investigation \
@@ -141,7 +178,8 @@ liquid-trace connections-publish --case /path/to/investigation \
 
 The standalone `connections` command returns the actual `preview_id` for
 `connections-publish`. CLI commands keep **all saved connections** as their
-default for compatibility. Add `--connection-scope hop_limited` to use
+default for compatibility. Add `--connection-scope shortest` to select one
+shortest saved route per connected pair. Add `--connection-scope hop_limited` to use
 `--max-hops` with `plot` / `plot-sync`, or `--hops` with `connections`.
 `--min-hops` does not filter Starter connections. These options also work when
 the main plot commands use `--data-source shared`.

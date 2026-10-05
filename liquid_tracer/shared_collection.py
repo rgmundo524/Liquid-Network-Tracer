@@ -175,7 +175,7 @@ def prepare_collection(case, members=None, *, hops, resume=None, hop_reference_n
     captures the selected open investigations, not future browser tab changes.
     """
     from .group_hops import normalize_reference_name, reference_addresses, reference_name
-    from .services import apply_service_labels, load_services
+    from .services import apply_service_labels, effective_services
     case = _safe(case)
     if case.name == DIRECTORY:
         raise TraceError("Choose an investigation to supply shared collection policy")
@@ -185,7 +185,7 @@ def prepare_collection(case, members=None, *, hops, resume=None, hop_reference_n
         fcntl.flock(lock, fcntl.LOCK_SH)
         focused = read_case(case)
         source, private = _source(case, focused)
-        controls = {key: value for key, value in load_services(case).items() if key != "history"}
+        controls = {key: value for key, value in effective_services(case).items() if key != "history"}
         values = effective_run_settings(settings if settings is not None else focused.get("run_defaults", {}))
         labels = apply_service_labels(private.get("labels", []) if private else [], controls)
     reference = normalize_reference_name(values["hop_reference_name"] if hop_reference_name is None else hop_reference_name)

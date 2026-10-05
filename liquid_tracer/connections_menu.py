@@ -26,7 +26,8 @@ def connection_screen(base, button, case, *, publish=False):
                             graph, _ = reviewed_connections(case, path.name)
                             if graph["nodes"]:
                                 scope = graph["connections"]
-                                label = ("all saved connections" if scope.get("connection_scope") == "all_saved"
+                                label = ("shortest connections" if scope.get("connection_scope") == "shortest"
+                                         else "all saved connections" if scope.get("connection_scope") == "all_saved"
                                          else f"{scope['max_hops']} hops")
                                 rows.append((path.name + f" ({label})", path.name))
                         except (TraceError, OSError, ValueError, TypeError, KeyError):
@@ -42,8 +43,10 @@ def connection_screen(base, button, case, *, publish=False):
                 else:
                     yield Static("Uses all verified connections in the latest saved run, with no plotting hop cutoff. "
                                  "Attribution stops and hop limits do not prune this view; labels and recorded confirmation status remain. "
-                                 "Each connecting transaction shows all inputs and outputs, including fees and context. "
-                                 "Other branch outputs stay visible without following their descendants. Unconnected starters are omitted. "
+                                 "Every starting and connecting transaction shows its inputs, outputs, and context. "
+                                 "Fee flows are hidden unless enabled in investigation settings. "
+                                 "Other branch outputs stay visible without following their descendants. "
+                                 "Starters without a qualifying connection remain visible. "
                                  "Only verified UTXO spends create paths. No blockchain requests or Miro changes are made here.", markup=False)
                 yield Static("", id="connection-error", markup=False)
             with Horizontal(classes="buttons form-actions"):

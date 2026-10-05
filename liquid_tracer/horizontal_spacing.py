@@ -31,7 +31,8 @@ def _number(value):
     return value
 
 
-def compact_candidate(candidate):
+def compact_candidate(candidate, *, node_guard=_NODE_GUARD, label_guard=_LABEL_GUARD,
+                      route_guard=_ROUTE_GUARD):
     """Compact an ephemeral worker candidate in place and return it.
 
 Only completely vacant x bands are removed. A node or caption's entire width
@@ -46,6 +47,8 @@ every pair of objects. Validate all geometry before making any changes.
     if (not isinstance(candidate, dict) or not isinstance(candidate.get("nodes"), list)
             or not isinstance(candidate.get("edges"), list)):
         raise TraceError("ELK returned invalid geometry for horizontal spacing")
+    if any(_number(value) < 0 for value in (node_guard, label_guard, route_guard)):
+        raise TraceError("Invalid horizontal spacing guards")
     intervals, positions, bounds = [], [], []
 
     def point(item):
@@ -66,12 +69,12 @@ every pair of objects. Validate all geometry before making any changes.
         bounds.extend((x, end))
 
     for node in candidate["nodes"]:
-        rectangle(node, _NODE_GUARD)
+        rectangle(node, node_guard)
     # Locally solved sections are rigid envelopes. Compact the gaps between
     # them without stretching their internal routes or invalidating their
     # saved bounds. Older section candidates contain no envelope list.
     for section in candidate.get("sectionGeometry", {}).get("sections", []):
-        rectangle(section, _ROUTE_GUARD)
+        rectangle(section, route_guard)
     for edge in candidate["edges"]:
         if not isinstance(edge, dict):
             raise TraceError("ELK returned invalid geometry for horizontal spacing")
@@ -79,13 +82,13 @@ every pair of objects. Validate all geometry before making any changes.
         if not isinstance(labels, list) or not isinstance(sections, list):
             raise TraceError("ELK returned invalid geometry for horizontal spacing")
         for label in labels:
-            rectangle(label, _LABEL_GUARD)
+            rectangle(label, label_guard)
         for section in sections:
             if not isinstance(section, dict) or not isinstance(section.get("bendPoints", []), list):
                 raise TraceError("ELK returned invalid geometry for horizontal spacing")
             for item in [section.get("startPoint"), *section.get("bendPoints", []), section.get("endPoint")]:
                 x = point(item)
-                intervals.append((_number(x - _ROUTE_GUARD), _number(x + _ROUTE_GUARD)))
+                intervals.append((_number(x - route_guard), _number(x + route_guard)))
                 bounds.append(x)
 
     ends, removed_prefix = [], [0.0]

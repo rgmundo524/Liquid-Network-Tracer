@@ -42,6 +42,29 @@ class WebNameColorTests(unittest.TestCase):
             self.assertEqual(load_services(case)['name_colors'], {})
             process.assert_not_called()
 
+    def test_color_palette_can_precede_address_attributions(self):
+        _, created = self.create(); case, _ = self.server.case(created['id'])
+        route = '/api/cases/' + created['id']
+        with patch.object(self.server, 'start_job') as process:
+            catalog = self.success(route + '/name-colors', {})
+            self.assertEqual(catalog['total'], 0)
+            self.success(route + '/name-colors', {
+                'updates': [{'name': 'Unknown Service', 'color': '#BDBDBD'}],
+                'expected_revision': catalog['revision']})
+            catalog = self.success(route + '/name-colors', {})
+            self.assertEqual(catalog['total'], 1)
+            self.assertEqual(catalog['rows'][0]['addresses'], 0)
+            self.assertEqual(catalog['rows'][0]['color'], '#bdbdbd')
+            self.assertEqual(load_services(case)['rules'], {})
+            payload = {'text': 'Address,Name\nSYNTHETIC-one,UNKNOWN SERVICE\n'}
+            review = self.success(route + '/address-import', payload)
+            self.success(route + '/address-import', {
+                **payload, 'approve_plan': review['approval_sha256']})
+            catalog = self.success(route + '/name-colors', {})
+            self.assertEqual(catalog['rows'][0]['addresses'], 1)
+            self.assertEqual(catalog['rows'][0]['color'], '#bdbdbd')
+            process.assert_not_called()
+
     def test_rejects_csrf_busy_stale_invalid_and_injected_requests(self):
         route, case = self.imported(); endpoint = route + '/name-colors'
         self.assertEqual(self.request(endpoint, {}, headers={'X-Liquid-CSRF': 'wrong'})[0], 403)
@@ -59,7 +82,7 @@ class WebNameColorTests(unittest.TestCase):
                      {'updates': [{'name': 'Perp', 'color': '#fff"/><script>'}], 'expected_revision': catalog['revision']},
                      {'updates': [{'name': 'Perp', 'color': '#123456'}], 'expected_revision': True},
                      {'updates': [{'name': 'Perp', 'color': '#123456'}]},
-                     {'updates': [{'name': 'other', 'color': '#123456'}], 'expected_revision': catalog['revision']}):
+                     {'updates': [{'name': '', 'color': '#123456'}], 'expected_revision': catalog['revision']}):
             with self.subTest(body=body): self.assertEqual(self.request(endpoint, body)[0], 400)
             self.assertEqual((case / 'services.json').read_bytes(), before)
         set_service(case, 'SYNTHETIC-third', name='Third')

@@ -88,10 +88,14 @@ def create_board(case, name=None, team_id=None, visibility="private", transport=
         # Explicitly linking a board in settings also recovers an uncertain POST.
         if metadata.get("miro_board"):
             target = board_id(metadata["miro_board"])
+            from .board_deletion import assert_board_writable
+            assert_board_writable(case, target)
             return _result(target)
         receipt = _read_receipt(receipt_path, metadata["case_id"])
         if receipt and receipt["status"] == "created":
             target = board_id(receipt.get("board_id"))
+            from .board_deletion import assert_board_writable
+            assert_board_writable(case, target)
             save_json(case / "case.json", {**metadata, "miro_board": target})
             return _result(target, receipt, receipt_path=receipt_path)
         if receipt and receipt["status"] == "pending":

@@ -14,11 +14,19 @@ from liquid_tracer.api import Esplora
 from liquid_tracer.common import TraceError, digest, save_json
 from liquid_tracer.export import build_graph
 from liquid_tracer.investigations import create_investigation
-from liquid_tracer.name_colors import set_name_colors
+from liquid_tracer.name_colors import name_color_catalog, set_name_colors
 from liquid_tracer.role_colors import set_role_colors
-from liquid_tracer.services import load_services, set_service
+from liquid_tracer.services import load_services, service_labels, set_service
 from tests.fixtures import A, B
 from tests import test_service_presentation
+
+
+REUSABLE_PALETTE_CSV = (
+    "Name,Color\nBTSE,#b4fdcd\nsettlenet,#bfd8fd\n"
+    "Unknown Service,#bdbdbd\nPerp,#8B0000\n"
+)
+REUSABLE_PALETTE = {"btse": "#b4fdcd", "settlenet": "#bfd8fd",
+                    "unknown service": "#bdbdbd", "perp": "#8b0000"}
 
 
 class NameColorImportTests(unittest.TestCase):
@@ -93,6 +101,51 @@ class NameColorImportTests(unittest.TestCase):
         self.assertEqual(result["changed"], 0)
         self.assertEqual(load_services(self.case)["name_colors"], {"client wallet": "#000000"})
 
+    def test_reuses_palette_in_partly_matching_and_empty_investigations(self):
+        fresh = create_investigation(self.root, "Reuse palette", seeds=[A + ":0"])
+        for case, expected_addresses in ((self.case, {"btse": 2}), (fresh, {})):
+            with self.subTest(case=case.name):
+                before = load_services(case)
+                case_bytes = (case / "case.json").read_bytes()
+                plan = name_color_import.preview_import(case, REUSABLE_PALETTE_CSV)
+                self.assertTrue(plan["valid"], plan["errors"])
+                self.assertEqual(plan["counts"]["add"], 4)
+                self.assertEqual({row["key"]: row["addresses"] for row in plan["changes"]},
+                                 {key: expected_addresses.get(key, 0) for key in REUSABLE_PALETTE})
+                with patch("liquid_tracer.api.http", side_effect=AssertionError("No network")):
+                    result = name_color_import.apply_import(case, REUSABLE_PALETTE_CSV,
+                        approval_sha256=plan["approval_sha256"])
+                after = load_services(case)
+                self.assertEqual(result["changed"], 4)
+                self.assertEqual(after["name_colors"], REUSABLE_PALETTE)
+                self.assertEqual(after["rules"], before["rules"])
+                self.assertEqual(after["history"][:-1], before["history"])
+                self.assertEqual(after["history"][-1]["type"], "name_colors")
+                self.assertEqual(after["revision"], before["revision"] + 1)
+                self.assertEqual((case / "case.json").read_bytes(), case_bytes)
+                rows = {row["key"]: row for row in name_color_catalog(case)["rows"]}
+                for key, color in REUSABLE_PALETTE.items():
+                    self.assertEqual(rows[key]["color"], color)
+                    self.assertEqual(rows[key]["addresses"], expected_addresses.get(key, 0))
+
+    def test_new_unused_json_names_preserve_keep_replace_clear_and_duplicate_rules(self):
+        source = '[{"name":"New Service","color":"#ABCDEF"},{"name":"new service","color":"#abcdef"}]'
+        plan = name_color_import.preview_import(self.case, source)
+        self.assertTrue(plan["valid"], plan["errors"])
+        self.assertEqual(plan["duplicate_rows"], 1)
+        self.assertEqual(plan["changes"][0]["addresses"], 0)
+        self.assertEqual(self.apply(source)["changed"], 1)
+        source = '[{"name":"NEW SERVICE","color":"#123456"}]'
+        self.assertEqual(self.apply(source)["counts"]["keep"], 1)
+        self.assertEqual(self.apply(source, policy="replace")["counts"]["replace"], 1)
+        self.assertEqual(load_services(self.case)["name_colors"], {"new service": "#123456"})
+        result = self.apply('[{"name":"new service","color":null}]', policy="replace")
+        self.assertEqual(result["counts"]["clear"], 1)
+        self.assertEqual(load_services(self.case)["name_colors"], {})
+        result = self.apply('[{"name":"Never assigned","color":null}]', policy="replace")
+        self.assertEqual(result["counts"]["unchanged"], 1)
+        self.assertEqual(result["changed"], 0)
+
     def test_identical_duplicates_coalesce_across_case_and_hex_case(self):
         source = '[{"Name":"BTSE","Color":"#ABCDEF"},{"NAME":"btse","COLOR":"#abcdef"}]'
         plan = name_color_import.preview_import(self.case, source)
@@ -108,11 +161,12 @@ class NameColorImportTests(unittest.TestCase):
         self.assertTrue(plan["valid"])
         self.assertEqual(plan["duplicate_rows"], 1)
 
-    def test_conflicts_unknown_names_and_malformed_rows_are_all_or_nothing(self):
+    def test_conflicts_and_malformed_rows_are_all_or_nothing(self):
         before = (self.case / "services.json").read_bytes()
         for source in (
             "Name,Color\nClient wallet,#000000\nBTSE,#abcdef\nbtse,#654321\n",
-            "Name,Color\nBTSE,#abcdef\nNew exchange,#654321\n",
+            "Name,Color\nNew exchange,#abcdef\nnew exchange,#654321\n",
+            "Name,Color\nNew exchange,#abcdef\nOther service,invalid\n",
             "Name,Color\nBTSE,#abcdef\nClient wallet\n",
             "Name,Color\nBTSE,#abcdef,extra\n",
             '[{"name":"BTSE","color":"#abcdef"},{"name":"Client wallet"}]',
@@ -129,8 +183,6 @@ class NameColorImportTests(unittest.TestCase):
                 with self.assertRaises(TraceError):
                     name_color_import.apply_import(self.case, source, approval_sha256="0" * 64)
                 self.assertEqual((self.case / "services.json").read_bytes(), before)
-        unknown = name_color_import.preview_import(self.case, "Name,Color\nUnknown,#000000\n")
-        self.assertIn("import or save", unknown["errors"][0]["message"])
 
     def test_rejects_missing_headers_duplicate_fields_and_malformed_sources(self):
         for source in ("", "Name,Color\n", "Name,role\nBTSE,seed\n",
@@ -152,10 +204,22 @@ class NameColorImportTests(unittest.TestCase):
             with self.subTest(color=color):
                 plan = name_color_import.preview_import(self.case, json.dumps([{"name": "BTSE", "color": color}]))
                 self.assertFalse(plan["valid"])
-        for name in (None, "", "\t", [], "a\nb", "a" * 361):
+        for name in (None, "", "\t", [], "a\nb", "a" * 361, "ß" * 181):
             with self.subTest(name=name):
                 plan = name_color_import.preview_import(self.case, json.dumps([{"name": name, "color": "#123456"}]))
                 self.assertFalse(plan["valid"])
+
+    def test_expanding_unicode_name_cannot_corrupt_palette_storage(self):
+        before = (self.case / "services.json").read_bytes()
+        source = json.dumps([{"name": "New Service", "color": "#123456"},
+                             {"name": "ß" * 181, "color": "#abcdef"}])
+        plan = name_color_import.preview_import(self.case, source)
+        self.assertFalse(plan["valid"])
+        with self.assertRaises(TraceError):
+            name_color_import.apply_import(self.case, source, approval_sha256="0" * 64)
+        self.assertEqual((self.case / "services.json").read_bytes(), before)
+        self.apply(json.dumps([{"name": "ß" * 120, "color": "#ABCDEF"}]))
+        self.assertEqual(load_services(self.case)["name_colors"], {"ss" * 120: "#abcdef"})
 
     def test_unicode_and_unused_name_assignment_are_supported(self):
         self.ingest([{"address": "SYNTHETIC-unicode", "name": "Straße"}])
@@ -255,6 +319,40 @@ class NameColorImportTests(unittest.TestCase):
 
 class NameColorImportGraphTests(unittest.TestCase):
     setUp = test_service_presentation.ServicePresentationTests.setUp
+
+    def test_unused_palette_is_inert_then_matches_attributions_added_later(self):
+        case = create_investigation(self.root / "investigations", "Future labels", seeds=[A + ":0"])
+        baseline = build_graph(self.state)
+        plan = name_color_import.preview_import(case, REUSABLE_PALETTE_CSV)
+        self.assertTrue(plan["valid"], plan["errors"])
+        name_color_import.apply_import(case, REUSABLE_PALETTE_CSV, approval_sha256=plan["approval_sha256"])
+        self.assertEqual(load_services(case)["rules"], {})
+        self.state["service_controls"] = load_services(case)
+        unmatched = build_graph(self.state)
+        self.assertEqual({node["id"]: node["color"] for node in unmatched["nodes"]},
+                         {node["id"]: node["color"] for node in baseline["nodes"]})
+        self.assertEqual(unmatched["edges"], baseline["edges"])
+        set_service(case, "SYNTHETIC-branch-A", name="uNkNoWn SeRvIcE",
+                    notes="New investigator assessment", stop_tracing=False)
+        set_service(case, "SYNTHETIC-victim-deposit", name="Different service", stop_tracing=False)
+        self.state["service_controls"] = load_services(case)
+        self.state["labels"] = service_labels(self.state["service_controls"])
+        evidence = copy.deepcopy(self.state)
+        colored = build_graph(self.state)
+        self.assertEqual(self.state, evidence)
+        child = test_service_presentation.ServicePresentationTests.node(colored, B + ":0")
+        self.assertEqual((child["color_source"], child["color"]), ("name", "#bdbdbd"))
+        self.assertEqual(child["details"]["address_attributions"][0]["notes"], "New investigator assessment")
+        without_palette = copy.deepcopy(self.state)
+        without_palette["service_controls"]["name_colors"] = {}
+        ordinary = {node["id"]: node for node in build_graph(without_palette)["nodes"]}
+        self.assertEqual({node["id"] for node in colored["nodes"]}, set(ordinary))
+        for node in colored["nodes"]:
+            if node["id"] != child["id"]:
+                self.assertEqual(node["color"], ordinary[node["id"]]["color"])
+        self.assertEqual(colored["edges"], unmatched["edges"])
+        self.assertEqual(next(row for row in name_color_catalog(case)["rows"]
+                              if row["key"] == "unknown service")["addresses"], 1)
 
     def test_imported_colors_flow_through_graph_without_changing_evidence_or_seed_priority(self):
         case = create_investigation(self.root / "investigations", "Graph colors", seeds=[A + ":0"])

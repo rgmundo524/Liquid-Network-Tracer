@@ -53,6 +53,27 @@ exclusive descendants on continuation, rather than only stopping new encounters.
 The old internal `suspected_service_stop` / `held_behind_service` output status
 names remain for archive compatibility; they are not confidence claims.
 
+## Shared attribution library
+
+The browser's **Shared attributions** panel stores reusable address assessments
+at the workspace level. Each investigation opts in separately. Shared entries
+contain names, confidence, sources, notes, observation dates and enabled state;
+uploaded stop flags and hop limits are discarded. Local assessments override
+shared entries by exact full address, including disabled local assessments.
+Editing a shared entry through an investigation's address editor creates a local
+override. To update the library, review and apply a replacement shared import.
+
+An opted-in run, analysis or preview captures one shared library revision with
+its local settings. Library edits affect subsequent work, without rewriting
+archived evidence or saved previews. Shared origin, library identity and revision
+are retained in captured settings and inherited labels. Local name colors apply
+to shared names as usual. Turning sharing off removes inherited labels from
+future work while preserving local assessments.
+
+The library is `cases/.shared-attributions.json` (under the selected workspace
+root). Deleting an investigation does not delete this library. Investigation
+input exports remain local-only; export shared entries from the library panel.
+
 ## Attribution information without Miro cards
 
 New Miro plans no longer create attribution register cards or separate stars.

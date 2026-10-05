@@ -199,14 +199,17 @@ class ConnectionPreviewTests(unittest.TestCase):
         self.assertIn("flowchart LR", (directory/"graph.mmd").read_text())
         self.assertIn("#c4b5fd", (directory/"graph.mmd").read_text())
 
-    def test_no_matches_create_empty_graph_and_no_publication_or_layout(self):
+    def test_no_matches_still_export_all_starting_transactions(self):
         self.state, self.archive = saved_case(self.case, graph_state())
-        with patch("liquid_tracer.elk_layout.optimize_graph", side_effect=AssertionError("no layout")):
+        with patch("liquid_tracer.elk_layout.optimize_graph", side_effect=lambda graph, **kwargs: graph):
             result = preview_connections(self.case, max_hops=1)
-        graph, _ = reviewed_connections(self.case, result["preview_id"])
-        self.assertEqual(graph["nodes"], []); self.assertEqual(graph["edges"], [])
-        with patch("liquid_tracer.miro.publish", side_effect=AssertionError("no board writes")):
-            self.assertEqual(publish_connections(self.case, result["preview_id"], "unused")["items"], 0)
+        graph, plan = reviewed_connections(self.case, result["preview_id"])
+        self.assertEqual({node["id"] for node in graph["nodes"] if node["kind"] == "transaction"},
+                         {"tx:" + tx("a"), "tx:" + tx("b")})
+        self.assertEqual(graph["connections"]["connection_count"], 0)
+        self.assertEqual(graph["connections"]["outpoints"], [])
+        self.assertTrue(plan["shapes"])
+        self.assertTrue(all(edge["role"] == "context_output" for edge in graph["edges"]))
         self.assertFalse((self.case/"miro").exists())
 
     def test_current_arrow_preference_colors_connections_and_invalidates_old_preview(self):

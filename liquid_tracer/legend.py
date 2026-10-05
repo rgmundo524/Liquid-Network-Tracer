@@ -76,6 +76,8 @@ def legend_notes(graph=None):
     arrows = (graph or {}).get("graph_options", {}).get("color_attribution_arrows", False)
     all_saved_connections = ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
                              and (graph or {}).get("connections", {}).get("connection_scope") == "all_saved")
+    shortest_connections = ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
+                            and (graph or {}).get("connections", {}).get("connection_scope") == "shortest")
     limited_connections = ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
                            and (graph or {}).get("connections", {}).get("connection_scope") == "hop_limited")
     notes = [
@@ -86,7 +88,7 @@ def legend_notes(graph=None):
         "Thick red borders mark branch convergence. Colors and links do not prove ownership or allocate value.",
         "L-BTC amounts use L-BTC units: 100,000,000 base units = 1 L-BTC. Other assets use base units.",
         ("?? = not publicly available. Collection stop labels remain visible but do not limit this saved-data view."
-         if all_saved_connections or limited_connections else "?? = not publicly available. STOP TRACING = an explicit address boundary."),
+         if all_saved_connections or limited_connections or shortest_connections else "?? = not publicly available. STOP TRACING = an explicit address boundary."),
     ]
     from .group_hops import normalize_reference_name
     name = normalize_reference_name((graph or {}).get("hop_reference_name", ""))
@@ -94,7 +96,7 @@ def legend_notes(graph=None):
         notes.append(f"Hops count away from attribution group {name}. A reached output in that group resets "
                      "its own branch to 0; outside outputs continue independently. "
                      + ("These distances describe saved paths and do not limit starter connections."
-                        if all_saved_connections else
+                        if all_saved_connections or shortest_connections else
                         "These display distances do not reset the transaction-hop connection limit; attribution stops and hop limits are ignored."
                         if limited_connections else "Attribution stop rules "
                         + ("still apply." if (graph or {}).get("pegouts", {}).get("query", {}).get("attribution_hop_limits") == "ignore"
@@ -106,6 +108,18 @@ def legend_notes(graph=None):
             "Saved unconfirmed spends are included and may change. No additional transaction data is fetched; "
             "branches absent from the saved collection cannot establish a connection.",
         ])
+    if shortest_connections:
+        notes.extend([
+            "Starter connections show one shortest verified saved route per connected ordered pair of starting transactions. "
+            "Distances count ordinary transaction steps; equal-length routes use a stable choice. "
+            "Their union is not a minimum-size connecting tree. Longer alternative routes are omitted.",
+            "Attribution stop rules and hop limits are ignored, with no plot hop cutoff. "
+            "Saved unconfirmed spends remain eligible and may change. No additional transaction data is fetched; "
+            "branches absent from the saved collection cannot establish a connection.",
+        ])
+    if (graph or {}).get("connections", {}).get("includes_all_starters"):
+        notes.append("All selected starting transactions remain visible, including those without a qualifying "
+                     "connection to another starter. Their local context does not establish a traced connection.")
     if limited_connections:
         maximum = graph["connections"]["max_hops"]
         notes.extend([
@@ -117,7 +131,10 @@ def legend_notes(graph=None):
     if ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
             and (graph or {}).get("connections", {}).get("transaction_io") == "complete"):
         notes.extend([
-            "Every input and output of each connecting transaction is displayed, including fees. "
+            ("Every input and output of each connecting transaction is displayed, including fees. "
+             if graph.get("include_fees") else
+             "Every input and non-fee output of each connecting transaction is displayed. "
+             "Fee flows are hidden; their source evidence is retained. ") +
             "Thinner context arrows and unfollowed branch outputs do not establish additional starter connections.",
             "Separate UTXO occurrences keep their existing identities; optional context groups summarize "
             "isolated inputs without combining their evidence or CSV rows.",

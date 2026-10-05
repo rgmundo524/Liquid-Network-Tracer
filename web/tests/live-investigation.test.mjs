@@ -8,6 +8,12 @@ import * as frameRecovery from '../src/scripts/frame-recovery.ts';
 import {collectionPerformancePanel} from '../src/scripts/collection-performance.ts';
 import {createTaskNotifications} from '../src/scripts/task-notifications.ts';
 
+const seedEditorSource = stripTypeScriptTypes(
+  readFileSync(new URL('../src/scripts/seed-editor.ts', import.meta.url), 'utf8')
+    .replace(/^export /gm, ''), {mode: 'transform'});
+const seedEditorScript = new vm.Script('Object.assign(globalThis, (() => {' + seedEditorSource +
+  '\nreturn {seedEditorPanel, seedEditorAction, seedEditorInput, seedEditorPending, forgetSeedEditor, sameSeeds};})());');
+
 // Execute the real application handlers with a small DOM and offline HTTP stub.
 // The attribution panels are unrelated to new-investigation and lookup behavior.
 const source = stripTypeScriptTypes(
@@ -17,14 +23,14 @@ const source = stripTypeScriptTypes(
     .replace('void initialize().catch(', 'globalThis.startup = initialize().catch('),
   {mode: 'transform'},
 );
-const script = new vm.Script(source + '\n Object.defineProperty(state, "job", {get() {return runningJobs()[0] || null;}, set(job) {state.jobs.clear(); if (job && state.activeCase && state.page === "dashboard") state.page = "case"; if (job) state.jobs.set(job.id, {status: "running", generation: pageGeneration, caseId: state.activeCase?.id, ...job});}}); globalThis.appTest = {state, dispatch, pollJob: (id) => pollJob(id || runningJobs()[0]?.id), startJob, discoverJobs, runningJobs, jobBanner, jobProgress, cancelJob, openCase, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy, pegoutsGraph, pegoutInput, currentPegoutSearch, suggestCenterNames, suggestHopReferenceNames, render, navigate, workflowInput, currentWorkflow, actionBusy, taskActivity, refreshCaseDetail, refreshSharedCollection, loadCaseSection, loadVisibleSections, verifySelectedPlot};');
+const script = new vm.Script(source + '\n Object.defineProperty(state, "job", {get() {return runningJobs()[0] || null;}, set(job) {state.jobs.clear(); if (job && state.activeCase && state.page === "dashboard") state.page = "case"; if (job) state.jobs.set(job.id, {status: "running", generation: pageGeneration, caseId: state.activeCase?.id, ...job});}}); globalThis.appTest = {state, dispatch, pollJob: (id) => pollJob(id || runningJobs()[0]?.id), startJob, discoverJobs, runningJobs, jobBanner, jobProgress, cancelJob, openCase, newCase, dashboard, workspace, settingsPage, localGraph, elkGraph, compactGraph, currentCompaction, openActionDialog, readSettings, budgetFields, isBusy, pegoutsGraph, pegoutInput, currentPegoutSearch, suggestCenterNames, suggestHopReferenceNames, render, navigate, workflowInput, currentWorkflow, scopeAnalysisInput, currentScopeDraft, actionBusy, taskActivity, refreshCaseDetail, refreshSharedCollection, loadCaseSection, loadVisibleSections, verifySelectedPlot, refreshSession, deleteCaches: {investigationViews, workflowDrafts, pegoutDrafts, boardDrafts, plotLayoutDrafts, layoutFormDrafts, scopeDrafts, settingsDrafts, previewLibraries, sectionErrors, scopeDetails}};');
 const txid = 'a'.repeat(64);
 const defaults = {hops: 1, hop_reference_name: '', max_transactions: 20, max_outpoints: 100, max_requests: 30,
   max_seconds: 60, max_new_items: 750, layout_attempts: 25, connector_style: 'straight', layout_style: 'standard'};
 
-async function harness(respond = () => undefined, {hash = '', storage = new Map(), importAction, importPending = () => false, systemNotification, changeOutputHandlers = {}} = {}) {
+async function harness(respond = () => undefined, {hash = '', storage = new Map(), importAction, importPending = () => false, systemNotification, changeOutputHandlers = {}, sharedAttributionHandlers = {}} = {}) {
   frameRecovery.resetFrameRecovery();
-  const calls = [], listeners = {}, windowListeners = {}, dialogListeners = {}, notifications = [], importActions = [];
+  const calls = [], methods = [], listeners = {}, windowListeners = {}, dialogListeners = {}, notifications = [], importActions = [];
   const editorResets = [], downloads = [], downloadBlobs = [], revokedDownloads = [];
   const toastElements = [], timers = new Map();
   let timerId = 0;
@@ -39,6 +45,10 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
       static createObjectURL(blob) {downloadBlobs.push(blob); return `blob:export-${downloadBlobs.length}`;}
       static revokeObjectURL(url) {revokedDownloads.push(url);}
     }, console, ...frameRecovery, collectionPerformancePanel, createTaskNotifications,
+    sharedAttributionsPanel() {return "";}, sharedAttributionsAction() {return false;},
+    sharedAttributionsInput() {return false;}, sharedAttributionsFile: async () => {},
+    sharedAttributionsPending() {return false;}, selectSharedAttributions() {}, resetSharedAttributions() {},
+    ...sharedAttributionHandlers,
     inputImportInput() {return false;}, changeOutputsInput() {return false;}, nameColorsInput() {return false;}, addressImportInput() {return false;},
     resetNameColors(caseId) {editorResets.push({editor: 'colors', caseId});},
     resetAddressImport(caseId) {editorResets.push({editor: 'addresses', caseId});},
@@ -54,7 +64,7 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
     changeOutputsPending() {return false;}, changeOutputsPanel() {return "";},
     changeOutputsAction() {return false;}, changeOutputsLookupComplete() {return false;},
     ...changeOutputHandlers,
-    nameColorsPanel() {return "";}, nameColorsAction() {return false;}, addressImportAction() {return false;},
+    addressImportPanel() {return "";}, nameColorsPanel() {return "";}, nameColorsAction() {return false;}, addressImportAction() {return false;},
     document: {
       querySelector(selector) {
         if (selector === '#app') return app;
@@ -75,7 +85,7 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
     window: {addEventListener(name, callback) {windowListeners[name] = callback;}, scrollY: 0, scrollTo() {},
       Notification: systemNotification, focus() {focusCount++;},
       localStorage: {getItem(key) {return storage.get(key) ?? null;}, setItem(key, value) {storage.set(key, value);}},
-      sessionStorage: {getItem(key) {return storage.get(key) ?? null;}, setItem(key, value) {storage.set(key, value);}}},
+      sessionStorage: {getItem(key) {return storage.get(key) ?? null;}, setItem(key, value) {storage.set(key, value);}, removeItem(key) {storage.delete(key);}}},
     history: {replaceState() {}},
     location: {hash, pathname: '/', reload() {}},
     setInterval() {}, setTimeout(fn, ms) {const id = ++timerId; timers.set(id, {fn, ms}); return id;}, clearTimeout(id) {timers.delete(id);},
@@ -87,16 +97,30 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
     async fetch(path, options) {
       const body = options.body === undefined ? undefined : JSON.parse(options.body);
       calls.push({path, body});
+      methods.push(options.method || 'GET');
       const response = await Promise.resolve(respond(path, body, calls.length))
         ?? (path === '/api/session' ? {csrf: 'test', settings: defaults, cases: []} : {});
       return {ok: !response.error, status: response.error ? 400 : 200, async json() {return response;}};
     },
   });
+  seedEditorScript.runInContext(context);
   script.runInContext(context);
   await context.startup;
   return {
-    ...context.appTest, app, dialog, calls, notifications, importActions, elements, storage, windowListeners, editorResets, downloads, downloadBlobs, revokedDownloads,
-    toastElements, timers, changeRun(value) {listeners.change({target: {id: "run-picker", value, closest() {return null;}}});}, get focusCount() {return focusCount;},
+    ...context.appTest, app, dialog, calls, methods, notifications, importActions, elements, storage, windowListeners, editorResets, downloads, downloadBlobs, revokedDownloads,
+    toastElements, timers,
+    async setHash(value) {context.location.hash = value; windowListeners.hashchange?.(); await new Promise(setImmediate);},
+    editSeeds(value, caseId = this.state.activeCase?.id) {
+      listeners.input({target: {id: 'seed-editor-text', value, dataset: {caseId}}});
+    },
+    changeRun(value) {listeners.change({target: {id: "run-picker", value, closest() {return null;}}});}, get focusCount() {return focusCount;},
+    chooseSharedAttributionsFile() {listeners.change({target: {id: 'shared-attributions-file', files: []}});},
+    async submitService(values) {
+      const form = {id: 'service-form', values, reportValidity: () => true};
+      elements.set('#service-form', form);
+      listeners.submit({target: form, preventDefault() {}});
+      await new Promise(setImmediate);
+    },
     async submitDialog(values = {}) {
       dialogListeners.submit({target: {values, reportValidity: () => true}, preventDefault() {}});
       await new Promise(setImmediate);
@@ -130,8 +154,8 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
       if (workspace) elements.set('#settings-form', form);
       const target = {id: '', name: 'layout_style', value, form,
         closest: selector => selector.includes('#' + form.id) ? form : null};
-      // Browsers fire input before change on a select; draft capture must not
-      // prevent the subsequent preset choice from applying grouping.
+      // Browsers fire input before change on a select; both events preserve
+      // the independent context-grouping preference.
       listeners.input({target});
       listeners.change({target});
       return form;
@@ -606,7 +630,7 @@ test('input CSV download is available before and after tracing, including while 
     const html = view.settingsPage();
     assert.ok(html.includes(`href="${expected}" download>`));
     assert.match(html, /Export input CSVs/);
-    assert.match(html, /all saved attributions, name colors, and change outputs across every page/);
+    assert.match(html, /all locally saved attributions, name colors, and change outputs across every page/);
     assert.match(html, /Unsaved edits are excluded/);
     assert.doesNotMatch(html, /<script>/);
     assert.equal((html.match(/\/input-exports\/all/g) || []).length, 1);
@@ -1447,8 +1471,8 @@ test('named-group collection saves only its hop basis and keeps original seeds a
   assert.match(view.workspace(), /Hops from named group: Perp/);
   view.openActionDialog('trace');
   assert.match(view.dialog.innerHTML, /name="hop_reference_name" maxlength="120" value="Perp"/);
-  assert.match(view.dialog.innerHTML, /First run or changed named group: maximum hops/);
-  assert.match(view.dialog.innerHTML, /Same hop basis: additional hops/);
+  assert.match(view.dialog.innerHTML, /First run, changed starting outputs, or changed named group: maximum hops/);
+  assert.match(view.dialog.innerHTML, /Same starting outputs and hop basis: additional hops/);
   assert.match(view.dialog.innerHTML, /At the hop limit, the next spending transaction is checked/);
   assert.doesNotMatch(view.dialog.innerHTML, /name="center_name"/);
   await view.submitDialog({hops: '2', hop_reference_name: '  Other group  '});
@@ -1616,7 +1640,7 @@ test('generating a plot captures changed layout settings without mutating invest
   await view.dispatch('workflow-plot');
   const writes = view.calls.filter(call => call.body);
   assert.deepEqual(writes.map(call => call.path), ['/api/cases/case1/actions']);
-  assert.deepEqual(writes[0].body, {action: 'plot', layout_mode: 'fresh', goal: 'full', run_id: 'saved1', min_hops: 0, max_hops: 0, layout_settings: {layout_style: 'standard', layout_attempts: 40, connector_style: 'curved', include_fees: true,
+  assert.deepEqual(writes[0].body, {action: 'plot', layout_mode: 'fresh', goal: 'full', run_id: 'saved1', min_hops: 0, max_hops: 10, hop_basis: 'original_seeds', layout_settings: {layout_style: 'standard', layout_attempts: 40, connector_style: 'curved', include_fees: true,
     group_context_inputs: true, color_attribution_arrows: true, center_name: 'Treasury', hub_addresses: [first, second]}});
   assert.equal(detail.run_defaults.layout_attempts, 25);
   assert.equal(view.state.job.live, false);
@@ -1760,7 +1784,7 @@ test('all plotting goals are visible and plot only the selected saved run withou
     workflowEdit(view, 'min-hops', '2'); workflowEdit(view, 'max-hops', '10');
     await view.dispatch('workflow-plot');
     assert.deepEqual(view.calls.at(-1), {path: '/api/cases/case1/actions', body: {
-      action: 'plot', layout_settings: layoutDefaults, layout_mode: 'fresh', goal, run_id: 'older', min_hops: goal === 'pegouts' ? 2 : 0, max_hops: goal === 'full' ? 0 : 10, ...(goal === 'connections' ? {connection_scope: 'hop_limited'} : {})}});
+      action: 'plot', layout_settings: layoutDefaults, layout_mode: 'fresh', goal, run_id: 'older', min_hops: goal === 'pegouts' ? 2 : 0, max_hops: 10, ...(goal === 'connections' ? {connection_scope: 'hop_limited'} : {hop_basis: 'original_seeds'})}});
     assert.equal(view.state.job.live, false);
     assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 1);
   }
@@ -1785,17 +1809,21 @@ test('Starter connections has its own hop limit and ignores stale peg-out limits
   assert.equal(view.calls.at(-1).body.connection_scope, 'hop_limited');
 });
 
-test('saved Starter layouts distinguish all-saved, bounded and legacy scopes', async () => {
-  for (const scope of ['all_saved', 'hop_limited', undefined]) {
+test('saved Starter layouts distinguish shortest, all-saved, bounded and legacy scopes', async () => {
+  for (const scope of ['shortest', 'all_saved', 'hop_limited', undefined]) {
     const allSaved = scope === 'all_saved';
     const plot = workflowPlot('connections', 'connections1',
-      {max_hops: allSaved ? null : 3, ...(scope ? {query: {connection_scope: scope}} : {})});
+      {max_hops: allSaved || scope === 'shortest' ? null : 3, ...(scope ? {query: {connection_scope: scope}} : {})});
     const view = await harness();
     view.state.activeCase = workflowCase({plots: [plot], boards: [workflowBoard('connections', 'board1', {preview_id: plot.preview_id})]});
     for (const page of ['view-plots', 'view-history', 'view-boards']) {
       await view.dispatch(page);
       const html = view.workspace();
-      assert.match(html, allSaved ? /All saved connections/ : scope === 'hop_limited' ? /Within 3 hops of each starter/ : /Hops 0–3/);
+      assert.match(html, scope === 'shortest' ? /Shortest connections/ : allSaved ? /All saved connections/ : scope === 'hop_limited' ? /Within 3 hops of each starter/ : /Hops 0–3/);
+      if (scope === 'shortest') {
+        assert.match(html, /One shortest saved route per connected ordered pair/);
+        assert.doesNotMatch(html, /All verified saved connections|Legacy bounded connections/);
+      }
       if (!scope) {
         assert.match(html, /Legacy bounded connections/);
         assert.doesNotMatch(html, /Connecting paths within 3 ordinary transaction steps/);
@@ -1866,7 +1894,7 @@ test('peg-out endpoints default off and optional booleans are submitted only for
       if (goal !== 'pegouts') assert.doesNotMatch(view.workspace(), /id="workflow-include-(?:unspent|unspendable)"/);
       await view.dispatch('workflow-plot');
       assert.deepEqual(view.calls.at(-1).body, {action: 'plot', layout_settings: layoutDefaults, layout_mode: 'fresh', goal, run_id: 'saved1',
-        min_hops: 0, max_hops: goal === 'full' ? 0 : 10, ...(goal === 'connections' ? {connection_scope: 'hop_limited'} : {}),
+        min_hops: 0, max_hops: 10, ...(goal === 'connections' ? {connection_scope: 'hop_limited'} : {hop_basis: 'original_seeds'}),
         ...(goal === 'pegouts' && includeUnspent ? {include_unspent: true} : {}),
         ...(goal === 'pegouts' && includeUnspendable ? {include_unspendable: true} : {})});
       assert.equal(view.state.job.live, false);
@@ -1914,7 +1942,7 @@ test('peg-out layouts describe non-fee I/O and optional fees without an optional
     await view.dispatch('plot-goal', {dataset: {goal}});
     await view.dispatch('workflow-plot');
     assert.deepEqual(view.calls.at(-1).body, {action: 'plot', layout_settings: layoutDefaults, layout_mode: 'fresh', goal, run_id: 'saved1',
-      min_hops: 0, max_hops: goal === 'full' ? 0 : 10, ...(goal === 'connections' ? {connection_scope: 'hop_limited'} : {}),
+      min_hops: 0, max_hops: 10, ...(goal === 'connections' ? {connection_scope: 'hop_limited'} : {hop_basis: 'original_seeds'}),
       ...(goal === 'pegouts' ? {include_unspent: true} : {})});
     assert.equal(view.state.job.live, false);
     assert.equal(view.calls.filter(call => call.body).length, 1, 'display choices neither update settings nor collect data');
@@ -1960,14 +1988,44 @@ test('context grouping is available for every plot goal and preserves edits acro
   assert.equal(view.calls.length, 1, 'draft changes neither save nor queue work');
 });
 
-test('peg-out fee checkbox is enabled and submits both states for preview and board generation', async () => {
-  for (const includeFees of [false, true]) for (const action of ['workflow-plot', 'workflow-plot-sync']) {
+test('standalone Starter preview history uses the captured fee choice', async () => {
+  for (const includeFees of [false, true]) {
+    const view = await harness();
+    view.state.activeCase = workflowCase({run_defaults: {...defaults, include_fees: !includeFees},
+      artifacts: {saved1: {connections: {downloads: [], include_fees: includeFees,
+        transaction_io: 'complete', connection_scope: 'all_saved', connection_count: 2}}}});
+    await view.dispatch('view-history');
+    assert.ok(view.workspace().includes(`Saved layout: All transaction inputs and ${includeFees ? 'outputs, including fees' : 'non-fee outputs'}.`));
+    assert.equal(view.calls.filter(call => call.body).length, 0);
+  }
+});
+
+test('new and older investigations default to hidden fees for every plot goal', async () => {
+  for (const missingSetting of [false, true]) {
+    const run_defaults = {...defaults, include_fees: false};
+    if (missingSetting) delete run_defaults.include_fees;
+    const view = await harness();
+    view.state.activeCase = workflowCase({run_defaults});
+    await view.dispatch('view-plots');
+    for (const goal of ['full', 'connections', 'pegouts']) {
+      await view.dispatch('plot-goal', {dataset: {goal}});
+      const fees = view.workspace().match(/<fieldset class="layout-fields fee-flow-fields"[^>]*>[\s\S]*?<\/fieldset>/)?.[0];
+      assert.ok(fees);
+      assert.doesNotMatch(fees, /disabled|name="include_fees"[^>]*checked/);
+      assert.match(fees, /Off by default for every plot type/);
+    }
+    assert.equal(view.calls.filter(call => call.body).length, 0, 'checking defaults queues no work');
+  }
+});
+
+test('every plot goal enables fee opt-in and submits both states for preview and board generation', async () => {
+  for (const goal of ['full', 'connections', 'pegouts']) for (const includeFees of [false, true]) for (const action of ['workflow-plot', 'workflow-plot-sync']) {
     const hubs = ['G' + 'a'.repeat(33)];
     const detail = workflowCase({run_defaults: {...defaults, include_fees: !includeFees, hub_addresses: hubs}});
     const view = await harness(path => path.endsWith('/actions') ? {id: 'fee-job', status: 'running'} : undefined);
     view.state.activeCase = detail;
     await view.dispatch('view-plots');
-    await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
+    await view.dispatch('plot-goal', {dataset: {goal}});
     const html = view.workspace();
     const fees = html.match(/<fieldset class="layout-fields fee-flow-fields"[^>]*>[\s\S]*?<\/fieldset>/)?.[0];
     assert.ok(fees);
@@ -1977,7 +2035,8 @@ test('peg-out fee checkbox is enabled and submits both states for preview and bo
     if (includeFees) assert.doesNotMatch(fees, /name="include_fees"[^>]*checked/);
     else assert.match(fees, /name="include_fees"[^>]*checked/);
     const fullOnly = html.match(/<fieldset class="layout-fields full-trace-fields"[^>]*>[\s\S]*?<\/fieldset>/)?.[0];
-    assert.doesNotMatch(fullOnly, /disabled/);
+    if (goal === 'connections') assert.match(fullOnly, /disabled/);
+    else assert.doesNotMatch(fullOnly, /disabled/);
     assert.match(fullOnly, /name="hub_addresses"/);
     view.plotForm({include_fees_present: '1', ...(includeFees ? {include_fees: 'on'} : {})});
     await view.dispatch(action);
@@ -1985,20 +2044,20 @@ test('peg-out fee checkbox is enabled and submits both states for preview and bo
     assert.equal(writes.length, 1);
     assert.equal(writes[0].path, '/api/cases/case1/actions');
     assert.equal(writes[0].body.action, action === 'workflow-plot' ? 'plot' : 'plot-sync');
-    assert.equal(writes[0].body.goal, 'pegouts');
+    assert.equal(writes[0].body.goal, goal);
     assert.equal(writes[0].body.layout_settings.include_fees, includeFees);
     assert.deepEqual(writes[0].body.layout_settings.hub_addresses, hubs);
     assert.equal(detail.run_defaults.include_fees, !includeFees, 'generation keeps saved defaults intact');
   }
 });
 
-test('saved peg-out fee visibility follows each snapshot across plots, downloads and boards', async () => {
-  for (const includeFees of [false, true]) {
+test('saved connection and peg-out fee visibility follows each snapshot across plots, downloads and boards', async () => {
+  for (const goal of ['connections', 'pegouts']) for (const includeFees of [false, true]) {
     const view = await harness();
-    const plot = workflowPlot('pegouts', 'fee-snapshot', {query: {transaction_io: 'complete'},
+    const plot = workflowPlot(goal, 'fee-snapshot', {query: {transaction_io: 'complete'},
       layout_settings: {...layoutDefaults, include_fees: includeFees}, match_count: 2});
     view.state.activeCase = workflowCase({run_defaults: {...defaults, include_fees: !includeFees}, plots: [plot],
-      boards: [workflowBoard('pegouts', 'fee-board', {preview_id: plot.preview_id})]});
+      boards: [workflowBoard(goal, 'fee-board', {preview_id: plot.preview_id})]});
     for (const page of ['plots', 'history', 'boards']) {
       await view.dispatch('view-' + page);
       const html = view.workspace();
@@ -2006,28 +2065,28 @@ test('saved peg-out fee visibility follows each snapshot across plots, downloads
       assert.ok(html.includes(`Saved layout: ${expected}.`));
       const picker = html.match(/<select id="workflow-(?:plot-picker|board-plot-[^"\s]+)"[^>]*>[\s\S]*?<\/select>/)?.[0];
       assert.ok(picker.includes(expected));
-      assert.match(html, /Results: 2 peg-out requests/);
+      if (goal === 'pegouts') assert.match(html, /Results: 2 peg-out requests/);
       if (page === 'plots') {
         const summary = html.match(/<details class="tool-details"><summary>Saved layout settings<\/summary>[\s\S]*?<\/details>/)?.[0];
         assert.match(summary, new RegExp(`Fee flows ${includeFees ? 'shown' : 'hidden'}\\.`));
-        assert.match(summary, /0 separate branch hubs/);
+        if (goal === 'pegouts') assert.match(summary, /0 separate branch hubs/);
       }
     }
     assert.equal(view.calls.length, 1, 'viewing saved settings does not regenerate or update a plot');
   }
 });
 
-test('Starter connections includes complete accounting and captures context grouping without enabling fee or hub options', async () => {
+test('Starter connections captures context grouping, permits fee opt-in and keeps hubs disabled', async () => {
   for (const grouped of [true, false]) {
     const view = await harness(path => path.endsWith('/actions') ? {id: 'plotjob', status: 'running'} : undefined);
     view.state.activeCase = workflowCase({run_defaults: {...defaults, group_context_inputs: !grouped}});
     await view.dispatch('view-plots');
     await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
     const html = view.workspace();
-    assert.match(html, /Every included transaction shows all its inputs and outputs, including fees/);
+    assert.match(html, /Every included transaction shows all its inputs and non-fee outputs/);
     assert.match(html, /Outputs on excluded branches remain visible without continuing those branches/);
-    assert.match(html, /The transaction CSV includes this complete accounting; extra context does not add starter-pair matches/);
-    assert.match(html, /Starter connection layouts always show every transaction input and output, including fees/);
+    assert.match(html, /The transaction CSV follows the same fee choice; extra context does not add starter-pair matches/);
+    assert.match(html, /Starter connection layouts show every transaction input and non-fee output/);
     assert.doesNotMatch(html, /id="workflow-include-context"|id="workflow-include-unspent"/);
     assert.doesNotMatch(contextGroupingFields(view), /disabled/);
     const fullOnly = html.match(/<fieldset class="layout-fields full-trace-fields"[^>]*>[\s\S]*?<\/fieldset>/)?.[0];
@@ -2035,7 +2094,7 @@ test('Starter connections includes complete accounting and captures context grou
     assert.match(fullOnly, /name="hub_addresses"/);
     assert.doesNotMatch(fullOnly, /name="include_fees"/);
     const fees = html.match(/<fieldset class="layout-fields fee-flow-fields"[^>]*>[\s\S]*?<\/fieldset>/)?.[0];
-    assert.match(fees, /disabled/);
+    assert.doesNotMatch(fees, /disabled/);
     assert.match(fees, /name="include_fees"/);
     view.plotForm({group_context_inputs_present: '1', ...(grouped ? {group_context_inputs: 'on'} : {})});
     await view.dispatch('workflow-plot');
@@ -2094,7 +2153,7 @@ test('peg-out generation captures grouped and separate context preferences for e
     const writes = view.calls.filter(call => call.body);
     assert.deepEqual(writes.map(call => call.path), ['/api/cases/case1/actions']);
     assert.deepEqual(writes[0].body, {action: 'plot', layout_mode: 'fresh', goal: 'pegouts', run_id: 'saved1', min_hops: 0,
-      max_hops: 10, layout_settings: {...layoutDefaults, group_context_inputs: grouped}});
+      max_hops: 10, hop_basis: 'original_seeds', layout_settings: {...layoutDefaults, group_context_inputs: grouped}});
     assert.equal(view.workflowInput({id: 'workflow-include-context', checked: false}), false);
   }
 });
@@ -2859,7 +2918,7 @@ test('board update generation is bound to the selected matching goal and reads l
   workflowEdit(view, 'layout-board', 'cashouts');
   assert.doesNotMatch(view.workspace().match(/<button[^>]*data-action="workflow-plot"[^>]*>/)[0], /disabled/);
   await view.dispatch('workflow-plot');
-  assert.deepEqual(view.calls.at(-1).body, {action: 'plot', goal: 'pegouts', run_id: 'saved1', min_hops: 0, max_hops: 10,
+  assert.deepEqual(view.calls.at(-1).body, {action: 'plot', goal: 'pegouts', run_id: 'saved1', min_hops: 0, max_hops: 10, hop_basis: 'original_seeds',
     layout_mode: 'update', board_record_id: 'cashouts', layout_settings: layoutDefaults});
   assert.equal(view.state.job.live, true);
 });
@@ -3002,7 +3061,7 @@ test('combined new board action captures settings and submits generation and pub
   const writes = view.calls.filter(call => call.body);
   assert.equal(writes.length, 1);
   assert.deepEqual(writes[0].body, {action: 'plot-sync', goal: 'full', run_id: 'saved1', min_hops: 0,
-    max_hops: 0, layout_mode: 'fresh', name: 'Investigator overview', layout_settings: {...layoutDefaults, connector_style: 'curved'}});
+    max_hops: 10, hop_basis: 'original_seeds', layout_mode: 'fresh', name: 'Investigator overview', layout_settings: {...layoutDefaults, connector_style: 'curved'}});
   assert.equal(view.state.job.live, true);
   const count = view.calls.length;
   await view.dispatch('workflow-plot-sync');
@@ -3019,7 +3078,7 @@ test('combined update binds the exact board and includes endpoint choices', asyn
   assert.match(view.workspace(), /Generate & update board/);
   await view.dispatch('workflow-plot-sync');
   assert.deepEqual(view.calls.at(-1).body, {action: 'plot-sync', goal: 'pegouts', run_id: 'saved1',
-    min_hops: 2, max_hops: 11, layout_mode: 'update', board_record_id: 'cashouts',
+    min_hops: 2, max_hops: 11, hop_basis: 'original_seeds', layout_mode: 'update', board_record_id: 'cashouts',
     include_unspent: true, include_unspendable: true, layout_settings: layoutDefaults});
   assert.equal(view.state.job.live, true);
 });
@@ -4151,8 +4210,8 @@ test('shared endpoint totals and combined export match exact provenance rather t
   const descriptor = {kind: 'shared', dataset_id: 'pool', run_id: 'shared-old'};
   const alpha = workflowCase({shared_collection: sharedCollection(), plots: [
     valuePlot('private', 'saved1', '2026-10-01T03:00:00Z', valueSummary('99')),
-    {...valuePlot('shared', 'projection', '2026-10-01T02:00:00Z', valueSummary('7')), collection_source: descriptor},
-    {...valuePlot('other-shared', 'another-projection', '2026-10-01T04:00:00Z', valueSummary('88')), collection_source: {...descriptor, run_id: 'shared-new'}},
+    {...valuePlot('shared', 'projection', '2026-10-01T02:00:00Z', valueSummary('7')), collection_source: descriptor, seeds: [`${txid}:0`]},
+    {...valuePlot('other-shared', 'another-projection', '2026-10-01T04:00:00Z', valueSummary('88')), collection_source: {...descriptor, run_id: 'shared-new'}, seeds: [`${txid}:0`]},
   ]});
   const beta = workflowCase({id: 'case2', name: 'Beta', shared_collection: sharedCollection()});
   const view = await harness(path => path === '/api/cases/case1/overview' ? alpha : path === '/api/cases/case2/overview' ? beta
@@ -4313,17 +4372,22 @@ test('Starter connection hop limit validates integers and can be increased witho
   assert.deepEqual(view.calls.filter(call => call.body).map(call => call.body.action), ['plot', 'plot', 'plot', 'plot']);
 });
 
-test('All saved connections ignores hidden hop values and restores the bounded draft when toggled', async () => {
+for (const scope of ['all_saved', 'shortest']) test(`${scope} connections ignores hidden hop values and restores the bounded draft when toggled`, async () => {
   const view = await harness(path => path.endsWith('/actions') ? {id: 'all-starters', status: 'running'} : undefined);
   view.state.activeCase = workflowCase();
   await view.dispatch('view-plots');
   await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
   workflowEdit(view, 'connection-max-hops', 'bad');
-  workflowEdit(view, 'connection-scope', 'all_saved');
+  workflowEdit(view, 'connection-scope', scope);
   assert.doesNotMatch(view.workspace(), /id="workflow-connection-max-hops"/);
-  assert.match(view.workspace(), /value="all_saved" selected/);
+  assert.match(view.workspace(), new RegExp(`value="${scope}" selected`));
+  if (scope === 'shortest') {
+    assert.match(view.workspace(), /one shortest saved route per connected ordered pair/);
+    assert.match(view.workspace(), /searches all saved evidence without a hop cutoff/);
+    assert.doesNotMatch(view.workspace(), /Increase the connection hop limit or select All saved connections to search further/);
+  }
   await view.dispatch('workflow-plot');
-  assert.equal(view.calls.at(-1).body.connection_scope, 'all_saved');
+  assert.equal(view.calls.at(-1).body.connection_scope, scope);
   assert.equal(view.calls.at(-1).body.max_hops, 0);
   view.state.jobs.clear();
   workflowEdit(view, 'connection-scope', 'hop_limited');
@@ -4957,26 +5021,30 @@ test('separate investigations retain their loading tasks and open the correct in
 });
 
 
-test('Trace layout is opt-in and legacy settings keep the Standard layout', async () => {
+test('new layout generation defaults to Trace without reinterpreting saved previews', async () => {
   const legacy = {...defaults};
   delete legacy.layout_style;
   const view = await harness();
   view.state.activeCase = workflowCase({run_defaults: legacy});
   await view.dispatch('view-plots');
-  assert.match(view.workspace(), /name="layout_style"><option value="standard" selected>Standard/);
-  assert.match(view.workspace(), /<option value="trace">Trace layout/);
-  assert.equal(view.readSettings({values: {}}, {...legacy, hub_addresses: []}).layout_style, 'standard');
+  assert.match(view.workspace(), /value="trace" selected>Trace layout/);
+  assert.match(view.workspace(), /<summary>Advanced layout comparison<\/summary>/);
+  assert.match(view.workspace(), /<option value="standard">Standard · legacy comparison/);
+  assert.equal(view.readSettings({values: {}}, {...legacy, hub_addresses: []}).layout_style, 'trace');
   assert.equal(view.readSettings({values: {}}, {...legacy, hub_addresses: [], layout_style: 'trace'}).layout_style, 'trace');
   assert.equal(view.calls.length, 1);
 });
 
-test('choosing Trace layout groups context inputs once and preserves later choices in both plot requests', async () => {
+test('choosing Trace layout preserves independent grouping choices in both plot requests', async () => {
   for (const action of ['workflow-plot', 'workflow-plot-sync']) {
     const view = await harness(path => path.endsWith('/actions') ? {id: 'trace-layout-job', status: 'running'} : undefined);
     view.state.activeCase = workflowCase({run_defaults: {...defaults, include_fees: true, center_name: 'Treasury'}});
     await view.dispatch('view-plots');
     await view.dispatch('plot-goal', {dataset: {goal: 'pegouts'}});
     view.changeLayoutStyle('trace', {group_context_inputs_present: '1'});
+    assert.doesNotMatch(contextGroupingFields(view), /name="group_context_inputs"[^>]*checked/);
+    view.changeLayoutStyle('standard', {group_context_inputs_present: '1', group_context_inputs: 'on'});
+    view.changeLayoutStyle('trace', {group_context_inputs_present: '1', group_context_inputs: 'on'});
     assert.match(contextGroupingFields(view), /name="group_context_inputs"[^>]*checked/);
     assert.match(view.workspace(), /name="center_name"[^>]*value="Treasury"/);
     assert.match(view.workspace(), /name="include_fees"[^>]*checked/);
@@ -5021,17 +5089,17 @@ test('Trace layout and an explicit grouping override survive save and reload', a
   assert.match(restarted.workspace(), /value="trace" selected>Trace layout/);
 });
 
-test('workspace Trace preset saves defaults without changing existing investigation settings', async () => {
+test('workspace Trace choice preserves grouping and existing investigation settings', async () => {
   const detail = workflowCase();
   const view = await harness((path, body) => path === '/api/settings' ? {settings: body.settings} : undefined);
   view.state.activeCase = detail;
   view.navigate('settings');
   const form = view.changeLayoutStyle('trace', {group_context_inputs_present: '1'}, true);
-  assert.equal(form.values.group_context_inputs, 'on');
+  assert.equal(form.values.group_context_inputs, undefined);
   await view.submitSettings(form.values);
   const saved = view.calls.find(call => call.path === '/api/settings').body.settings;
   assert.equal(saved.layout_style, 'trace');
-  assert.equal(saved.group_context_inputs, true);
+  assert.equal(saved.group_context_inputs, false);
   assert.equal(detail.run_defaults.layout_style, 'standard');
 });
 
@@ -5045,7 +5113,7 @@ test('legacy board style stays Standard despite Trace defaults and destination d
   await view.dispatch('view-plots');
   assert.match(view.workspace(), /value="trace" selected>Trace layout/);
   await view.dispatch('workflow-board-prepare', boardControl('oldboard'));
-  assert.match(view.workspace(), /name="layout_style"><option value="standard" selected>Standard/);
+  assert.match(view.workspace(), /value="standard" selected>Standard · legacy comparison/);
   view.changeLayoutStyle('trace', {group_context_inputs_present: '1'});
   view.editPlotSettings({layout_style: 'trace', group_context_inputs_present: '1'});
   view.elements.delete('#plot-layout-form');
@@ -5447,6 +5515,223 @@ const pendingPreview = (id, extra = {}) => workflowPlot('pegouts', id, {layout_m
   reviewable: false, input_snapshot_version: 1, ...extra});
 const librarySelect = (view, preview, caseId = 'case1') => view.dispatch('preview-select', {dataset: {preview, caseId}});
 
+test('saved preview Miro actions keep each card pinned to its investigation and immutable preview', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [pendingPreview('older'), pendingPreview('newer')]});
+  for (const tab of ['plots', 'analysis']) {
+    await view.dispatch('view-' + tab);
+    for (const id of ['older', 'newer']) {
+      const card = view.workspace().match(new RegExp(`<article[^>]*data-preview-card="${id}"[\\s\\S]*?</article>`))?.[0];
+      assert.ok(card);
+      const action = card.match(/<button[^>]*data-action="preview-miro"[^>]*>/)?.[0];
+      assert.ok(action, `Preview ${id} needs a Miro handoff in ${tab}`);
+      assert.match(action, new RegExp(`data-preview="${id}"`));
+      assert.match(action, /data-case-id="case1"/);
+      assert.doesNotMatch(card, /data-action="workflow-write-miro"/);
+    }
+  }
+  assert.equal(view.calls.some(call => call.body), false);
+});
+
+for (const tab of ['plots', 'analysis']) {
+  test(`saved preview Miro handoff from ${tab} loads boards and verifies only the requested preview before explicit publication`, async () => {
+    const boards = Promise.withResolvers(), check = Promise.withResolvers();
+    const older = pendingPreview('older');
+    const view = await harness(path => path.endsWith('/boards') ? boards.promise
+      : path.endsWith('/plots/older') ? check.promise
+      : path.endsWith('/actions') ? {id: 'publication', status: 'running'} : undefined);
+    view.state.activeCase = workflowCase({plots: [pendingPreview('newer'), older],
+      sections: stagedSections({workflow: 'ready', collection: 'ready', shared: 'ready', analyses: 'ready'})});
+    view.state.page = 'case'; view.state.caseView = tab;
+    view.currentWorkflow(view.state.activeCase).plot = 'newer';
+    const preparing = view.dispatch('preview-miro', previewWriteControl('older'));
+    await settled();
+    assert.equal(view.state.caseView, 'plots');
+    assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'older');
+    assert.equal(view.calls.filter(call => call.path.endsWith('/boards')).length, 1);
+    assert.match(previewWriteButton(view), /disabled/);
+    assert.equal(view.calls.some(call => call.body), false);
+    boards.resolve(sectionResult('boards', {boards: []})); await settled();
+    assert.equal(view.calls.filter(call => call.path.endsWith('/plots/older')).length, 1);
+    assert.equal(view.calls.some(call => call.path.endsWith('/plots/newer')), false);
+    assert.match(previewWriteButton(view), /disabled/);
+    check.resolve({...older, validation_pending: false, reviewable: true}); await preparing; await settled();
+    assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'older');
+    assert.doesNotMatch(previewWriteButton(view), /disabled/);
+    assert.equal(view.methods.some(method => method !== 'GET'), false, 'Selecting Miro controls must only read saved data');
+    assert.ok(view.workspace().indexOf('id="preview-miro-panel"') < view.workspace().indexOf('id="workflow-plot-picker"'));
+    await view.dispatch('workflow-write-miro', previewWriteControl('older'));
+    assert.deepEqual(view.calls.filter(call => call.body).map(call => call.body), [
+      {action: 'board-create-sync', preview_id: 'older', name: 'Shared evidence · Paths to peg-outs'},
+    ]);
+  });
+}
+
+test('saved preview Miro handoff reuses verified files and ignores controls from another investigation', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [workflowPlot('pegouts', 'ready', {layout_mode: 'fresh'}), pendingPreview('other')]});
+  await view.dispatch('view-analysis');
+  view.currentWorkflow(view.state.activeCase).plot = 'other';
+  const calls = view.calls.length;
+  await view.dispatch('preview-miro', previewWriteControl('ready', 'another-case'));
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'other');
+  assert.equal(view.state.caseView, 'analysis');
+  assert.equal(view.calls.length, calls);
+  await view.dispatch('preview-miro', previewWriteControl('ready'));
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'ready');
+  assert.equal(view.state.caseView, 'plots');
+  assert.equal(view.calls.some(call => /\/plots\/ready(?:\/summary)?$/.test(call.path)), false);
+  assert.equal(view.calls.some(call => call.body), false);
+});
+
+const previewMiroRouteResponse = (path, {missing = false} = {}) => {
+  const detail = stagedOverview();
+  if (path === '/api/session') return {csrf: 'test', settings: defaults, cases: [detail]};
+  if (path.endsWith('/overview')) return detail;
+  if (path.endsWith('/workflow')) return sectionResult('workflow', {plots: [pendingPreview('newer')], plots_next_cursor: 'older-page'});
+  if (path.endsWith('/boards')) return sectionResult('boards', {boards: []});
+  if (path.endsWith('/collection')) return sectionResult('collection', {runs: []});
+  if (path.endsWith('/shared-collection')) return sectionResult('shared', {shared_collection: null});
+  if (path.endsWith('/plots/older/summary')) return missing ? {error: 'Requested preview is unavailable'} : pendingPreview('older');
+  if (path.endsWith('/plots/older')) return {...pendingPreview('older'), validation_pending: false, reviewable: true};
+};
+
+test('saved preview Miro startup link loads an older exact preview directly without paging or publishing', async () => {
+  const view = await harness(path => previewMiroRouteResponse(path), {hash: '#case/case1/preview/older/miro'});
+  await settled();
+  assert.equal(view.state.activeCase?.id, 'case1');
+  assert.equal(view.state.caseView, 'plots');
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'older');
+  assert.ok(view.state.activeCase.plots.some(plot => plot.preview_id === 'older'));
+  assert.equal(view.calls.filter(call => call.path.endsWith('/plots/older/summary')).length, 1);
+  assert.equal(view.calls.filter(call => call.path.endsWith('/plots/older')).length, 1);
+  assert.equal(view.calls.some(call => call.path.includes('/plots?') || call.path.endsWith('/plots/newer') || call.body), false);
+  assert.doesNotMatch(previewWriteButton(view), /disabled/);
+});
+
+test('saved preview Miro hashchange link selects its exact preview over a remembered newer selection', async () => {
+  const view = await harness(path => previewMiroRouteResponse(path));
+  await view.openCase('case1'); await settled();
+  await view.dispatch('view-analysis'); await settled();
+  view.currentWorkflow(view.state.activeCase).plot = 'newer';
+  await view.setHash('#case/case1/preview/older/miro'); await settled();
+  assert.equal(view.state.caseView, 'plots');
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'older');
+  assert.equal(view.calls.filter(call => call.path.endsWith('/plots/older')).length, 1);
+  assert.equal(view.calls.some(call => call.body), false);
+});
+
+test('saved preview Miro hashchange during case opening honors the latest requested preview', async () => {
+  const overview = Promise.withResolvers();
+  const view = await harness(path => path.endsWith('/overview') ? overview.promise
+    : path.endsWith('/plots/newer') ? {...pendingPreview('newer'), validation_pending: false, reviewable: true}
+    : previewMiroRouteResponse(path));
+  await view.setHash('#case/case1/preview/older/miro');
+  assert.equal(view.state.openingCase?.id, 'case1');
+  await view.setHash('#case/case1/preview/newer/miro');
+  overview.resolve(stagedOverview()); await settled(); await settled();
+  assert.equal(view.state.activeCase?.id, 'case1');
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'newer');
+  assert.equal(view.calls.some(call => call.path.endsWith('/plots/older')), false);
+  assert.equal(view.methods.some(method => method !== 'GET'), false);
+});
+
+for (const section of ['boards', 'workflow']) {
+  test(`saved preview Miro handoff retries a failed ${section} load without any publication`, async () => {
+    let attempts = 0;
+    const plot = pendingPreview('older');
+    const view = await harness(path => path.endsWith('/' + section)
+      ? ++attempts === 1 ? {error: 'Saved section temporarily unavailable'} : sectionResult(section, section === 'boards' ? {boards: []} : {plots: [plot]})
+      : path.endsWith('/plots/older') ? {...plot, validation_pending: false, reviewable: true} : undefined);
+    view.state.activeCase = workflowCase({plots: [plot],
+      sections: stagedSections({workflow: 'ready', collection: 'ready', boards: 'ready', shared: 'ready', analyses: 'ready', [section]: 'unloaded'})});
+    view.state.page = 'case'; view.state.caseView = 'analysis';
+    await view.dispatch('preview-miro', previewWriteControl('older')); await settled();
+    assert.equal(view.state.activeCase.sections[section], 'error');
+    assert.equal(view.methods.some(method => method !== 'GET'), false);
+    await view.dispatch('preview-miro', previewWriteControl('older')); await settled();
+    assert.equal(attempts, 2);
+    assert.equal(view.state.activeCase.sections[section], 'ready');
+    assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'older');
+    assert.doesNotMatch(previewWriteButton(view), /disabled/);
+    assert.equal(view.methods.some(method => method !== 'GET'), false);
+  });
+}
+
+test('saved preview Miro handoff retries failed file verification and never enables publication before success', async () => {
+  let attempts = 0;
+  const plot = pendingPreview('older');
+  const view = await harness(path => path.endsWith('/plots/older')
+    ? ++attempts === 1 ? {error: 'Saved files temporarily unavailable'} : {...plot, validation_pending: false, reviewable: true} : undefined);
+  view.state.activeCase = workflowCase({plots: [plot]});
+  await view.dispatch('preview-miro', previewWriteControl('older'));
+  assert.match(previewWriteButton(view), /disabled/);
+  await view.dispatch('preview-miro', previewWriteControl('older'));
+  assert.equal(attempts, 2);
+  assert.doesNotMatch(previewWriteButton(view), /disabled/);
+  assert.equal(view.methods.some(method => method !== 'GET'), false);
+});
+
+test('saved preview Miro link fails closed when its preview is missing instead of selecting or publishing the newest', async () => {
+  const view = await harness(path => previewMiroRouteResponse(path, {missing: true}), {hash: '#case/case1/preview/older/miro'});
+  await settled();
+  assert.equal(view.state.activeCase?.id, 'case1');
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'older');
+  assert.match(savedPreviewPanel(view), /Requested preview is unavailable/);
+  assert.equal(previewWriteButton(view), undefined);
+  assert.equal(view.calls.some(call => /\/plots\/(older|newer)$/.test(call.path) || call.body), false);
+});
+
+test('saved preview Miro verification completion does not replace a later manual preview selection', async () => {
+  const check = Promise.withResolvers(), older = pendingPreview('older');
+  const view = await harness(path => path.endsWith('/plots/older') ? check.promise : undefined);
+  view.state.activeCase = workflowCase({plots: [older, workflowPlot('pegouts', 'newer', {layout_mode: 'fresh'})]});
+  await view.dispatch('view-analysis');
+  const preparing = view.dispatch('preview-miro', previewWriteControl('older')); await settled();
+  assert.equal(view.calls.filter(call => call.path.endsWith('/plots/older')).length, 1);
+  await librarySelect(view, 'newer');
+  check.resolve({...older, validation_pending: false, reviewable: true}); await preparing; await settled();
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'newer');
+  assert.match(previewWriteButton(view), /data-preview="newer"/);
+  assert.equal(view.calls.some(call => call.body), false);
+});
+
+test('saved preview Miro board loading cannot move a newly opened investigation back to the old preview', async () => {
+  const boards = Promise.withResolvers();
+  const other = workflowCase({id: 'case2', name: 'Other investigation', plots: [pendingPreview('other')]});
+  const view = await harness(path => path === '/api/cases/case1/boards' ? boards.promise
+    : path === '/api/cases/case2/overview' ? other : undefined);
+  view.state.activeCase = workflowCase({plots: [pendingPreview('older')],
+    sections: stagedSections({workflow: 'ready', collection: 'ready', shared: 'ready', analyses: 'ready'})});
+  view.state.page = 'case'; view.state.caseView = 'analysis';
+  const preparing = view.dispatch('preview-miro', previewWriteControl('older')); await settled();
+  await view.openCase('case2');
+  boards.resolve(sectionResult('boards', {boards: []})); await preparing; await settled();
+  assert.equal(view.state.activeCase.id, 'case2');
+  assert.equal(view.state.caseView, 'collect');
+  assert.notEqual(view.currentWorkflow(view.state.activeCase).plot, 'older');
+  assert.equal(view.calls.some(call => call.path.endsWith('/plots/older') || call.body), false);
+});
+
+test('saved preview Miro controls name create, update, resume and open without changing their saved destinations', async () => {
+  for (const [kind, label] of [['fresh', 'Create Miro board'], ['update', 'Update Miro board'], ['resume', 'Resume Miro sync'], ['synced', 'Open (?:synced )?Miro board']]) {
+    const plot = workflowPlot('pegouts', 'ready', {layout_mode: kind === 'update' ? 'update' : 'fresh',
+      ...(kind === 'update' ? {board_record_id: 'target', board_id: 'miro-target'} : {})});
+    const board = workflowBoard('pegouts', 'target', {preview_id: 'ready', creation_preview_id: 'ready',
+      status: kind === 'resume' ? 'interrupted' : kind === 'synced' ? 'synced' : 'linked', pending_count: kind === 'resume' ? 1 : 0});
+    const view = await harness();
+    view.state.activeCase = workflowCase({plots: [plot], boards: kind === 'fresh' ? [] : [board]});
+    await view.dispatch('preview-miro', previewWriteControl('ready'));
+    const panel = savedPreviewPanel(view);
+    assert.match(panel, new RegExp(label));
+    if (kind === 'synced') {
+      assert.equal(previewWriteButton(view), undefined);
+      assert.match(panel, /href="https:\/\/miro.com\/app\/board\/miro-target\/"/);
+    } else assert.match(previewWriteButton(view), /data-preview="ready"/);
+    assert.equal(view.calls.some(call => call.body), false);
+  }
+});
+
 test('saved library cards display newest-first metadata, exact cumulative target and safe separate-tab preview links', async () => {
   const view = await harness();
   view.state.activeCase = workflowCase({plots: [pendingPreview('older', {created_at: '2026-01-01T00:00:00Z'}),
@@ -5623,11 +5908,11 @@ test('stable preview numbers label cards and choices independently of sorting an
     created_at: '2026-02-01T00:00:00Z'})], plots_next_cursor: 'older'});
   await view.dispatch('view-plots'); await librarySelect(view, 'middle');
   assert.match(savedPreviewPanel(view), /<h3>Preview 12 · Paths to peg-outs/);
-  assert.match(savedPreviewPanel(view), /<h3>Preview 5 · Selected for Miro/);
+  assert.match(savedPreviewPanel(view), /<h3>Preview 5 · Selected preview/);
   assert.match(savedPreviewPanel(view), /value="middle" selected>Preview 5 ·/);
   await view.dispatch('preview-load-more', {dataset: {caseId: 'case1'}}); await settled();
   assert.match(savedPreviewPanel(view), /<h3>Preview 1 · Paths to peg-outs/);
-  assert.match(savedPreviewPanel(view), /<h3>Preview 5 · Selected for Miro/);
+  assert.match(savedPreviewPanel(view), /<h3>Preview 5 · Selected preview/);
   assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'middle');
 });
 
@@ -5638,7 +5923,7 @@ test('numbered preview prepares and publishes by its immutable ID and retains it
   view.state.activeCase = workflowCase({plots: [plot]}); await view.dispatch('view-plots');
   await librarySelect(view, plot.preview_id);
   await view.dispatch('verify-saved-plot', {dataset: {preview: plot.preview_id, caseId: 'case1'}}); await settled();
-  assert.match(savedPreviewPanel(view), /Preview 7 · Selected for Miro/);
+  assert.match(savedPreviewPanel(view), /Preview 7 · Selected preview/);
   await view.dispatch('workflow-write-miro', previewWriteControl(plot.preview_id));
   assert.deepEqual(view.calls.filter(call => call.body).map(call => call.body), [{action: 'board-create-sync',
     preview_id: 'immutable-hash', name: 'Shared evidence · Paths to peg-outs'}]);
@@ -5665,7 +5950,7 @@ test('completed preview announces its assigned number without loading its graph'
   view.state.job = {id: 'render', action: 'plot', caseId: 'case1'};
   await view.pollJob();
   assert.match(view.workspace(), /Preview 13 saved/);
-  assert.match(savedPreviewPanel(view), /Preview 13 · Selected for Miro/);
+  assert.match(savedPreviewPanel(view), /Preview 13 · Selected preview/);
   assert.ok(!view.calls.some(call => call.path.includes('/plots/') || call.path.startsWith('/files/')));
 });
 
@@ -5717,4 +6002,1083 @@ test('saved preview library retains its scroll during paging, selection and inve
   view.state.activeCase = first;
   await view.dispatch('view-plots');
   assert.equal(view.elements.get('.preview-library').scrollTop, 680);
+});
+
+test('Analysis retains saved evidence and ignores stale report metadata while Miro stays in Plots', async () => {
+  const plot = workflowPlot('pegouts', 'one', {preview_number: 9, artifact: {preview_url: '/files/case1/previews/one/graph.html',
+    downloads: [{name: 'transactions.csv', url: '/files/case1/previews/one/transactions.csv'},
+      {name: 'endpoints.csv', url: '/files/case1/previews/one/endpoints.csv'}]}});
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [plot], reports: [{id: 'old-report',
+    source_preview_id: 'one', status: 'complete', figure_count: 3, panel_count: 4,
+    preview_url: '/files/case1/reports/old-report/index.html',
+    downloads: [{name: 'panels.json', url: '/files/case1/reports/old-report/panels.json'}]}],
+    reports_notice: 'Old report figures are present'});
+  await view.dispatch('view-plots');
+  assert.match(view.workspace(), /data-action="view-analysis"/);
+  assert.match(view.workspace(), /Analyze this preview/);
+  assert.match(view.workspace(), /data-action="workflow-write-miro"/);
+  assert.doesNotMatch(view.workspace(), /id="report-figures-panel"/);
+  await view.dispatch('view-analysis');
+  const html = view.workspace();
+  assert.match(html, /data-action="view-analysis" aria-current="page"/);
+  assert.match(html, /Analysis source/);
+  assert.match(html, /Preview 9/);
+  assert.match(html, /All trace transactions CSV/);
+  assert.match(html, /Endpoints only CSV/);
+  assert.match(html, /id="scope-analysis-panel"/);
+  assert.match(html, /data-action="scope-analyze"/);
+  assert.match(html, /id="scope-max-hops"/);
+  assert.doesNotMatch(html, /report-figures|report-plan|report-create|report-png|Report figures|PNG panel|old-report|Old report/);
+  for (const action of ['report-plan', 'report-create', 'report-png-load', 'report-png-download'])
+    await view.dispatch(action, {dataset: {caseId: 'case1', preview: 'one', report: 'old-report'}});
+  assert.equal(view.calls.some(call => call.body), false);
+  assert.equal(view.downloads.length, 0);
+  assert.doesNotMatch(html, /data-action="workflow-write-miro"|id="run-picker"|<h2>Collected data|<iframe/);
+  assert.equal(view.calls.filter(call => call.path !== '/api/session').length, 0);
+  await view.dispatch('view-history');
+  assert.doesNotMatch(view.workspace(), /id="report-figures-panel"/);
+});
+
+test('Analysis loads scope source summaries independently of deferred preview metadata', async () => {
+  const workflow = Promise.withResolvers();
+  const storage = new Map([['liquid-tracer:investigation-tabs:v1', JSON.stringify({ids: ['case1'],
+    views: [{id: 'case1', caseView: 'analysis', selectedRun: 'saved1', selectedPreview: 'older'}]})]]);
+  const detail = stagedOverview();
+  const view = await harness(path => {
+    if (path === '/api/session') return {csrf: 'test', settings: defaults, cases: [detail]};
+    if (path.endsWith('/overview')) return detail;
+    if (path.endsWith('/workflow')) return workflow.promise;
+    if (path.endsWith('/plots/older/summary')) return pendingPreview('older');
+    if (path.includes('/collection')) return sectionResult('collection', {runs: [{id: 'saved1', max_hops: 15}]});
+    if (path.endsWith('/shared-collection')) return sectionResult('shared', {});
+    if (path.endsWith('/analyses')) return {analyses: []};
+    throw Error(`Unexpected eager request: ${path}`);
+  }, {storage});
+  await view.openCase('case1');
+  assert.equal(view.state.caseView, 'analysis');
+  assert.match(view.app.innerHTML, /data-loading-section="workflow"/);
+  assert.doesNotMatch(view.app.innerHTML, /id="report-max-objects"|Loading saved runs/);
+  assert.match(view.app.innerHTML, /id="scope-analysis-panel"/);
+  workflow.resolve(sectionResult('workflow', {plots: [pendingPreview('newest')]})); await settled();
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'older');
+  assert.match(view.app.innerHTML, /id="analysis-previews-panel"/);
+  assert.match(view.app.innerHTML, /data-preview-card="older"/);
+  assert.match(view.app.innerHTML, /Verify preview files/);
+  assert.doesNotMatch(view.app.innerHTML, /Prepare for Miro/);
+  assert.deepEqual(view.calls.map(call => call.path), ['/api/session', '/api/cases/case1/overview',
+    '/api/cases/case1/collection/saved1', '/api/cases/case1/shared-collection', '/api/cases/case1/analyses',
+    '/api/cases/case1/workflow', '/api/cases/case1/plots/older/summary']);
+});
+
+test('Analysis workflow failure is retryable and an empty library offers preview generation', async () => {
+  let attempts = 0;
+  const view = await harness(path => path.endsWith('/workflow')
+    ? ++attempts === 1 ? {error: 'Saved summaries unavailable'} : sectionResult('workflow', {plots: []}) : undefined);
+  view.state.activeCase = stagedOverview();
+  await view.dispatch('view-analysis'); await settled();
+  assert.match(view.app.innerHTML, /Saved summaries unavailable/);
+  assert.match(view.app.innerHTML, /data-action="retry-case-section"/);
+  await view.dispatch('retry-case-section', {dataset: {section: 'workflow'}}); await settled();
+  assert.match(view.app.innerHTML, /Generate a preview/);
+  assert.match(view.app.innerHTML, /id="scope-analysis-panel"/);
+  assert.doesNotMatch(view.app.innerHTML, /id="report-max-objects"/);
+  await view.dispatch('view-plots');
+  assert.equal(view.state.caseView, 'plots');
+});
+
+test('Analysis preserves shared preview selection, layout drafts, and navigation on reload', async () => {
+  const detail = workflowCase({plots: [workflowPlot('full', 'one'), workflowPlot('full', 'two')]});
+  const respond = path => path === '/api/session' ? {csrf: 'test', settings: defaults, cases: [detail]}
+    : path.endsWith('/overview') ? structuredClone(detail) : undefined;
+  const view = await harness(respond);
+  await view.openCase('case1'); await view.dispatch('view-plots');
+  view.plotForm({layout_style: 'trace', center_name: 'Preserved backbone', layout_attempts: '4'});
+  await view.dispatch('view-analysis');
+  view.elements.delete('#plot-layout-form');
+  await view.dispatch('preview-select', {dataset: {caseId: 'case1', preview: 'two'}});
+  await view.dispatch('view-plots');
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'two');
+  assert.match(view.workspace(), /value="Preserved backbone"/);
+  await view.dispatch('view-analysis');
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'two');
+  const saved = JSON.parse(view.storage.get('liquid-tracer:investigation-tabs:v1'));
+  assert.equal(saved.views[0].caseView, 'analysis');
+  assert.equal(saved.views[0].selectedPreview, 'two');
+  const reloaded = await harness(respond, {storage: view.storage});
+  await reloaded.openCase('case1');
+  assert.equal(reloaded.state.caseView, 'analysis');
+  assert.equal(reloaded.currentWorkflow(reloaded.state.activeCase).plot, 'two');
+});
+
+test('older preview loading releases the shared library after switching to Analysis', async () => {
+  const page = Promise.withResolvers();
+  const view = await harness(path => path.includes('/plots?') ? page.promise : undefined);
+  view.state.activeCase = workflowCase({plots: [pendingPreview('one')], plots_next_cursor: 'next'});
+  await view.dispatch('view-plots');
+  await view.dispatch('preview-load-more', {dataset: {caseId: 'case1'}});
+  await view.dispatch('view-analysis');
+  assert.match(view.app.innerHTML, /Loading older previews/);
+  page.resolve({plots: [pendingPreview('stale')], next_cursor: null}); await settled();
+  assert.doesNotMatch(view.app.innerHTML, /Loading older previews|data-preview-card="stale"/);
+  assert.match(view.app.innerHTML, /data-action="preview-load-more"(?![^>]*disabled)/);
+  await view.dispatch('preview-load-more', {dataset: {caseId: 'case1'}}); await settled();
+  assert.match(view.app.innerHTML, /data-preview-card="stale"/);
+});
+
+test('Analysis verifies evidence only on request and enables the saved endpoint downloads', async () => {
+  const verified = workflowPlot('pegouts', 'one', {artifact: {downloads: [
+    {name: 'transactions.csv', url: '/files/case1/previews/one/transactions.csv'},
+    {name: 'endpoints.csv', url: '/files/case1/previews/one/endpoints.csv'}]}});
+  const view = await harness(path => path.endsWith('/plots/one') ? verified : undefined);
+  view.state.activeCase = workflowCase({plots: [{...verified, validation_pending: true, reviewable: false}]});
+  await view.dispatch('view-analysis');
+  assert.equal(view.calls.length, 1);
+  assert.match(view.workspace(), /Verify preview files/);
+  assert.doesNotMatch(view.workspace(), /Endpoints only CSV/);
+  await view.dispatch('verify-saved-plot', {dataset: {caseId: 'case1', preview: 'one'}}); await settled();
+  assert.equal(view.calls.filter(call => call.path.endsWith('/plots/one')).length, 1);
+  assert.match(view.workspace(), /Endpoints only CSV/);
+  assert.doesNotMatch(view.workspace(), /Verify preview files|Write to Miro/);
+});
+
+const scopeFixture = (id = 'scope1', extra = {}) => ({
+  schema_version: 1, analysis_id: id, id, name: `Analysis 1 · Shared evidence · through hop 10`,
+  created_at: '2026-10-03T10:00:00Z', case_id: 'case1', run_id: 'shared-old',
+  source: {data_source: 'shared', dataset_id: 'pool', run_id: 'shared-old', collection_max_hops: 15},
+  max_hops: 10, hop_basis: 'original_seeds',
+  comparisons: [8, 9, 10].map(max_hops => ({max_hops, transaction_count: max_hops * 5,
+    address_count: max_hops * 7, output_count: 90, pegout_count: 2, pegout_lbtc: '4.12500000',
+    unspent_count: 3, unspendable_count: 4, frontier_count: 110, data_gap_count: 2, stopped_count: 1})),
+  frontier_count: 110, frontier: Array.from({length: 100}, (_, index) => ({
+    outpoint: `${txid}:${index}`, hop: 10, reason: 'hop_limit', saved_continuation: true})),
+  downloads: [{name: 'frontiers.csv', url: `/files/case1/analyses/${id}/frontiers.csv`}], ...extra,
+});
+const scopeControl = (id = 'scope1', caseId = 'case1') => ({dataset: {analysis: id, caseId}});
+
+test('Full trace submits its independent ceiling and explicit original-seed basis', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'plotjob', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase({runs: [{id: 'saved1', max_hops: 15, hop_reference_name: 'Named group'}]});
+  await view.dispatch('view-plots');
+  assert.match(view.workspace(), /Maximum analysis hops/);
+  assert.match(view.workspace(), /Collection limit: 15 hops/);
+  workflowEdit(view, 'max-hops', '8');
+  await view.dispatch('workflow-plot');
+  assert.equal(view.calls.at(-1).body.max_hops, 8);
+  assert.equal(view.calls.at(-1).body.hop_basis, 'original_seeds');
+  assert.equal(view.state.activeCase.runs[0].max_hops, 15);
+  view.state.jobs.clear();
+  workflowEdit(view, 'hop-basis', 'configured');
+  await view.dispatch('workflow-plot');
+  assert.equal('hop_basis' in view.calls.at(-1).body, false);
+  workflowEdit(view, 'max-hops', '-1');
+  view.state.jobs.clear();
+  await assert.rejects(view.dispatch('workflow-plot'), /whole-number hop limits/);
+});
+
+test('scope analysis submits only the selected saved snapshot and appears as a cancellable local task', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'scopejob', status: 'running', cancellable: true,
+    resource_kind: 'plot', action: 'scope-analyze', case_id: 'case1'} : undefined);
+  view.state.activeCase = workflowCase({shared_collection: sharedCollection()});
+  await view.dispatch('view-analysis');
+  view.scopeAnalysisInput({id: 'scope-data-source', value: 'shared'});
+  view.scopeAnalysisInput({id: 'scope-run', value: 'shared-old'});
+  view.scopeAnalysisInput({id: 'scope-max-hops', value: '10'});
+  assert.equal(view.calls.filter(call => call.body).length, 0);
+  await view.dispatch('scope-analyze');
+  assert.deepEqual(view.calls.at(-1).body, {action: 'scope-analyze', run_id: 'shared-old', data_source: 'shared', dataset_id: 'pool', max_hops: 10});
+  assert.equal(view.state.job.live, false);
+  assert.match(view.jobBanner(), /data-action="cancel-job"/);
+  assert.equal(view.taskActivity(view.state.job).kind, 'computing');
+  assert.equal(view.calls.some(call => /graph\.json|preview|\/boards|\/history/.test(call.path)), false);
+});
+
+test('scope source selections survive tabs and reload without drifting to the latest shared snapshot', async () => {
+  const detail = workflowCase({shared_collection: sharedCollection()});
+  const respond = path => path === '/api/session' ? {csrf: 'test', settings: defaults, cases: [detail]}
+    : path.endsWith('/overview') ? structuredClone(detail) : undefined;
+  const view = await harness(respond);
+  await view.openCase('case1'); await view.dispatch('view-analysis');
+  view.scopeAnalysisInput({id: 'scope-data-source', value: 'shared'});
+  view.scopeAnalysisInput({id: 'scope-run', value: 'shared-old'});
+  view.scopeAnalysisInput({id: 'scope-max-hops', value: '9'});
+  await view.dispatch('view-plots'); await view.dispatch('view-analysis');
+  assert.equal(view.currentScopeDraft(view.state.activeCase).sharedRun, 'shared-old');
+  const reloaded = await harness(respond, {storage: view.storage});
+  await reloaded.openCase('case1'); await reloaded.dispatch('view-analysis');
+  assert.equal(reloaded.currentScopeDraft(reloaded.state.activeCase).sharedRun, 'shared-old');
+  assert.equal(reloaded.currentScopeDraft(reloaded.state.activeCase).maxHops, '9');
+  assert.equal(reloaded.calls.some(call => call.body), false);
+});
+
+test('saved scopes load only selected bounded details and retain complete CSV download access', async () => {
+  const selected = scopeFixture('scope1', {name: '<script>scope</script>'});
+  const {frontier, ...summary} = selected;
+  const pending = Promise.withResolvers();
+  const view = await harness(path => path.endsWith('/analyses/scope1') ? pending.promise : undefined);
+  view.state.activeCase = workflowCase({analyses: [summary], shared_collection: sharedCollection()});
+  await view.dispatch('view-analysis');
+  assert.match(view.workspace(), /data-action="scope-use"[^>]*disabled/);
+  await assert.rejects(view.dispatch('scope-use', scopeControl()), /finish verifying/);
+  pending.resolve(selected); await settled();
+  const html = view.workspace();
+  assert.match(html, /Scope cutoff comparison/);
+  assert.match(html, /Showing 100 of 110 boundaries/);
+  assert.match(html, /All open branches CSV/);
+  assert.match(html, /&lt;script&gt;scope&lt;\/script&gt;/);
+  assert.doesNotMatch(html, /<script>scope/);
+  assert.equal(view.calls.filter(call => call.path.endsWith('/analyses/scope1')).length, 1);
+  assert.equal(view.calls.some(call => call.body || /graph\.json|\.csv$/.test(call.path)), false);
+});
+
+test('using saved scope pins the exact old shared snapshot without automatically creating a plot', async () => {
+  const analysis = scopeFixture();
+  const view = await harness(path => path.endsWith('/analyses/scope1') ? analysis
+    : path.endsWith('/actions') ? {id: 'plotjob', status: 'running'} : undefined);
+  view.state.activeCase = workflowCase({analyses: [analysis], shared_collection: sharedCollection()});
+  await view.dispatch('view-analysis'); await settled();
+  await view.dispatch('scope-use', scopeControl());
+  assert.equal(view.state.caseView, 'plots');
+  const draft = view.currentWorkflow(view.state.activeCase);
+  assert.equal(draft.dataSource, 'shared'); assert.equal(draft.sharedRun, 'shared-old');
+  assert.equal(draft.maxHops, '10'); assert.equal(draft.hopBasis, 'original_seeds');
+  assert.equal(draft.goal, 'full'); assert.equal(draft.layoutMode, 'fresh');
+  assert.equal(view.calls.some(call => call.body), false);
+  await view.dispatch('workflow-plot');
+  assert.equal(view.calls.at(-1).body.run_id, 'shared-old');
+  assert.equal(view.calls.at(-1).body.max_hops, 10);
+  assert.equal(view.calls.at(-1).body.dataset_id, 'pool');
+  assert.equal(view.calls.at(-1).body.hop_basis, 'original_seeds');
+});
+
+test('scope transfer refuses stale controls and missing snapshots without silently selecting newer evidence', async () => {
+  const analysis = scopeFixture();
+  const view = await harness(path => path.endsWith('/analyses/scope1') ? analysis : undefined);
+  view.state.activeCase = workflowCase({analyses: [analysis], shared_collection: sharedCollection({runs: [{id: 'shared-new'}]})});
+  await view.dispatch('view-analysis'); await settled();
+  await assert.rejects(view.dispatch('scope-use', scopeControl('other')), /Select a saved scope/);
+  await assert.rejects(view.dispatch('scope-use', scopeControl()), /not available/);
+  assert.equal(view.state.caseView, 'analysis');
+  assert.equal(view.calls.some(call => call.body), false);
+});
+
+test('scope detail failure is retryable and background replies do not switch the active investigation', async () => {
+  let attempts = 0;
+  const late = Promise.withResolvers(), analysis = scopeFixture();
+  const {frontier, ...summary} = analysis;
+  const view = await harness(path => path.endsWith('/analyses/scope1') ? ++attempts === 1 ? {error: 'Source verification failed'} : late.promise : undefined);
+  view.state.activeCase = workflowCase({analyses: [summary]});
+  await view.dispatch('view-analysis'); await settled();
+  assert.match(view.workspace(), /Source verification failed/);
+  assert.match(view.workspace(), /Retry saved analysis/);
+  const retry = view.dispatch('scope-details-retry');
+  view.state.activeCase = workflowCase({id: 'other', name: 'Other investigation'});
+  late.resolve(analysis); await retry;
+  assert.equal(view.state.activeCase.id, 'other');
+  assert.doesNotMatch(view.workspace(), /4\.12500000/);
+  assert.equal(view.calls.some(call => call.body), false);
+});
+
+test('scope analysis can run while an unrelated preview is in progress and still respects exclusive operations', async () => {
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'scopejob', status: 'running', resource_kind: 'plot'} : undefined);
+  view.state.activeCase = workflowCase(); await view.dispatch('view-analysis');
+  view.state.jobs.set('preview', {id: 'preview', status: 'running', caseId: 'case1', action: 'plot', resource_kind: 'plot'});
+  assert.equal(view.actionBusy('scope-analyze'), false);
+  await view.dispatch('scope-analyze');
+  assert.equal(view.calls.filter(call => call.body).length, 1);
+  view.state.jobs.clear();
+  view.state.jobs.set('editing', {id: 'editing', status: 'running', caseId: 'case1', action: 'miro-rebuild', resource_kind: 'exclusive'});
+  assert.equal(view.actionBusy('scope-analyze'), true);
+  await view.dispatch('scope-analyze');
+  assert.equal(view.calls.filter(call => call.body).length, 1);
+});
+
+test('board deletion is available for managed and legacy boards only with explicit capability', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({boards: [
+    workflowBoard('full', 'managed', {can_delete: true}),
+    workflowBoard('pegouts', 'legacy', {can_delete: true, can_sync: false, legacy_snapshot: true}),
+    workflowBoard('full', 'unsupported'),
+  ]});
+  await view.dispatch('view-boards');
+  for (const record of ['managed', 'legacy']) assert.match(boardCardHtml(view, record), /data-action="workflow-board-delete"/);
+  assert.doesNotMatch(boardCardHtml(view, 'unsupported'), /data-action="workflow-board-delete"/);
+  await assert.rejects(view.dispatch('workflow-board-delete', boardControl('unsupported')), /not available for deletion/);
+  for (const control of [undefined, boardControl('missing'), boardControl('managed', 'other-case')])
+    await assert.rejects(view.dispatch('workflow-board-delete', control), /board entry from this investigation/);
+  assert.equal(view.calls.length, 1);
+});
+
+test('board deletion confirmation shows the exact escaped target and never submits without approval', async () => {
+  const view = await harness();
+  const board = workflowBoard('full', 'record', {name: 'T3 <review & notes>', board_id: 'board/with?characters', can_delete: true});
+  view.state.activeCase = workflowCase({boards: [board]});
+  await view.dispatch('view-boards');
+  await view.dispatch('workflow-board-delete', boardControl('record'));
+  assert.equal(view.dialog.open, true);
+  assert.match(view.dialog.innerHTML, /T3 &lt;review &amp; notes&gt;/);
+  assert.match(view.dialog.innerHTML, /board\/with\?characters/);
+  assert.match(view.dialog.innerHTML, /https:\/\/miro.com\/app\/board\/board%2Fwith%3Fcharacters\//);
+  assert.match(view.dialog.innerHTML, /entire board|manual note, comment/);
+  assert.match(view.dialog.innerHTML, /Local saved previews, CSV exports, and collected evidence stay available/);
+  assert.match(view.dialog.innerHTML, /Proton Pass/);
+  await view.submitDialog();
+  assert.equal(view.calls.length, 1);
+  view.dialog.close();
+  await view.submitDialog({confirm_delete: 'on'});
+  assert.equal(view.calls.length, 1, 'closed confirmation cannot submit a retained target');
+});
+
+test('board deletion submits once with the exact confirmed target and protects local drafts', async () => {
+  let release;
+  const pending = new Promise(resolve => {release = resolve;});
+  const view = await harness(path => path.endsWith('/actions') ? pending : undefined);
+  const board = workflowBoard('full', 'record', {can_delete: true});
+  const preview = workflowPlot('full', 'preview');
+  view.state.activeCase = workflowCase({boards: [board], plots: [preview], miro_board: board.board_id});
+  await view.dispatch('view-boards');
+  view.currentWorkflow(view.state.activeCase).plot = preview.preview_id;
+  await view.dispatch('workflow-board-delete', boardControl('record'));
+  await view.submitDialog({confirm_delete: 'on'});
+  await view.submitDialog({confirm_delete: 'on'});
+  assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 1);
+  assert.deepEqual(view.calls.at(-1).body, {action: 'board-delete', record_id: 'record', board_id: board.board_id, confirm_delete: true});
+  release({id: 'delete', status: 'running'});
+  await new Promise(setImmediate);
+  assert.equal(view.dialog.open, false);
+  assert.equal(view.state.job.live, true);
+  assert.equal(view.state.job.resource_kind, 'board_delete');
+  assert.equal(view.state.job.resource_key, board.board_id);
+  assert.equal(view.state.activeCase.boards[0].status, 'pending_deletion');
+  assert.equal(view.state.activeCase.miro_board, undefined);
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'preview');
+  assert.equal(view.state.activeCase.plots[0], preview);
+  assert.doesNotMatch(boardCardHtml(view, 'record'), /data-action="workflow-board-sync"|data-action="workflow-board-delete"/);
+});
+
+test('board deletion rejects stale dialogs after target changes, case switches, or new conflicts', async () => {
+  for (const mutate of [
+    view => {view.state.activeCase.boards[0].board_id = 'replacement';},
+    view => {view.state.activeCase.boards[0].name = 'Different board name';},
+    view => {view.state.activeCase.boards[0].can_delete = false;},
+    view => {view.state.activeCase.boards = [];},
+    view => {view.state.activeCase = workflowCase({id: 'other-case'});},
+    view => {view.state.job = {id: 'conflict', action: 'plot', caseId: 'case1', resource_kind: 'plot'};},
+  ]) {
+    const view = await harness();
+    view.state.activeCase = workflowCase({boards: [workflowBoard('full', 'record', {can_delete: true})]});
+    await view.dispatch('view-boards');
+    await view.dispatch('workflow-board-delete', boardControl('record'));
+    mutate(view);
+    await view.submitDialog({confirm_delete: 'on'});
+    assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 0);
+  }
+});
+
+test('board deletion conflicts with every same-case job and matching remote board work across cases', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({boards: [workflowBoard('full', 'record', {can_delete: true})], miro_board: 'miro-record',
+    plots: [workflowPlot('full', 'preview', {input_snapshot_version: 1})]});
+  await view.dispatch('view-boards');
+  const body = {record_id: 'record', board_id: 'miro-record'};
+  for (const resource_kind of ['collection', 'shared_collection', 'plot', 'board', 'exclusive', 'board_delete']) {
+    view.state.job = {id: 'work', action: 'work', caseId: 'case1', resource_kind, resource_key: 'different'};
+    assert.equal(view.actionBusy('board-delete', body), true, resource_kind);
+    await view.dispatch('workflow-board-delete', boardControl('record'));
+    assert.equal(view.dialog.open, false);
+  }
+  for (const resource_kind of ['board', 'exclusive', 'board_delete']) {
+    view.state.job = {id: 'work', action: 'work', caseId: 'other', resource_kind, resource_key: 'miro-record'};
+    assert.equal(view.actionBusy('board-delete', body), true, resource_kind);
+    view.state.job.resource_key = 'unrelated';
+    assert.equal(view.actionBusy('board-delete', body), false, resource_kind);
+  }
+  view.state.job = {id: 'delete', action: 'board-delete', caseId: 'other', resource_kind: 'board_delete', resource_key: 'miro-record'};
+  assert.equal(view.actionBusy('board-sync', {record_id: 'record', preview_id: 'preview'}), true);
+  assert.equal(view.actionBusy('miro-sync'), true);
+  assert.equal(view.actionBusy('plot', {layout_mode: 'fresh'}), false);
+  view.state.job.caseId = 'case1';
+  assert.equal(view.actionBusy('shared-trace'), true);
+  assert.equal(view.actionBusy('plot', {layout_mode: 'fresh'}), true);
+});
+
+test('board deletion failure preserves the dialog before submission and exposes uncertainty after a task failure', async () => {
+  const refused = await harness(path => path.endsWith('/actions') ? {error: 'The board changed; review again.'} : undefined);
+  refused.state.activeCase = workflowCase({boards: [workflowBoard('full', 'record', {can_delete: true})]});
+  await refused.dispatch('view-boards');
+  await refused.dispatch('workflow-board-delete', boardControl('record'));
+  await refused.submitDialog({confirm_delete: 'on'});
+  assert.equal(refused.dialog.open, true);
+  assert.equal(refused.state.activeCase.boards[0].status, 'linked');
+  assert.match(refused.state.error, /board changed/);
+
+  const updated = workflowCase({boards: [workflowBoard('full', 'record', {can_delete: true, can_sync: false, status: 'deletion_uncertain', notice: 'Network response was lost.'})]});
+  const view = await harness(path => path === '/api/jobs/delete' ? {status: 'failed', message: 'Network response was lost.'}
+    : path === '/api/cases/case1/overview' ? updated : undefined);
+  view.state.activeCase = workflowCase({boards: [workflowBoard('full', 'record', {can_delete: true})]});
+  await view.dispatch('view-boards');
+  view.state.job = {id: 'delete', action: 'board-delete', caseId: 'case1', resource_kind: 'board_delete', resource_key: 'miro-record'};
+  await view.pollJob();
+  assert.equal(view.state.error, 'Network response was lost.');
+  assert.match(boardCardHtml(view, 'record'), /Retry delete board|result is unconfirmed/);
+  assert.doesNotMatch(boardCardHtml(view, 'record'), /data-action="workflow-board-sync"|Update this board/);
+  await view.dispatch('workflow-board-delete', boardControl('record'));
+  assert.equal(view.dialog.open, true);
+  assert.equal(view.calls.filter(call => call.path.endsWith('/actions')).length, 0);
+});
+
+test('board deletion success removes live links and preserves the saved preview through overview and board reloads', async () => {
+  const preview = workflowPlot('full', 'preview', {layout_mode: 'fresh', input_snapshot_version: 1});
+  const deleted = workflowBoard('full', 'record', {status: 'deleted', can_sync: false, can_delete: false, preview_id: 'preview', creation_preview_id: 'preview'});
+  const view = await harness(path => path === '/api/jobs/delete' ? {status: 'succeeded', result: {board_id: 'miro-record', record_id: 'record'}}
+    : path === '/api/cases/case1/overview' ? workflowCase({miro_board: null, plots: [preview], sections: {boards: 'unloaded', workflow: 'ready', collection: 'ready', shared: 'ready'}})
+    : path === '/api/cases/case1/boards' ? {boards: [deleted]} : undefined);
+  view.state.activeCase = workflowCase({miro_board: 'miro-record', plots: [preview], boards: [{...deleted, status: 'synced', can_delete: true, can_sync: true}]});
+  await view.dispatch('view-boards');
+  view.currentWorkflow(view.state.activeCase).plot = 'preview';
+  view.state.job = {id: 'delete', action: 'board-delete', caseId: 'case1', resource_kind: 'board_delete', resource_key: 'miro-record'};
+  await view.pollJob();
+  await new Promise(setImmediate);
+  assert.equal(view.state.activeCase.miro_board, null);
+  assert.equal(view.state.activeCase.plots[0].preview_id, 'preview');
+  assert.equal(view.currentWorkflow(view.state.activeCase).plot, 'preview');
+  assert.ok(view.calls.some(call => call.path === '/api/cases/case1/overview'));
+  assert.ok(view.calls.some(call => call.path === '/api/cases/case1/boards'));
+  assert.match(boardCardHtml(view, 'record'), /This Miro board was deleted/);
+  assert.doesNotMatch(view.workspace(), /https:\/\/miro.com\/app\/board\/miro-record/);
+  assert.doesNotMatch(boardCardHtml(view, 'record'), /data-action="workflow-board-(sync|delete|prepare)"/);
+  assert.match(view.workspace(), /local preview remains available/);
+});
+
+test('board deletion rejected state retains authorized sync and offers an explicit retry', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [workflowPlot('full', 'preview')], boards: [workflowBoard('full', 'record',
+    {can_delete: true, can_sync: true, status: 'deletion_rejected', preview_id: 'preview'})]});
+  await view.dispatch('view-boards');
+  const card = boardCardHtml(view, 'record');
+  assert.match(card, /Miro rejected the deletion request/);
+  assert.match(card, /Retry delete board/);
+  assert.match(card, /data-action="workflow-board-sync"/);
+});
+
+
+test('shortest Starter board update restores saved scope and preserves the bounded new-board draft', async () => {
+  const plot = workflowPlot('connections', 'shortest', {max_hops: null,
+    query: {connection_scope: 'shortest', transaction_io: 'complete'},
+    collection_source: {kind: 'shared', dataset_id: 'pool', run_id: 'shared-old'}});
+  const detail = workflowCase({shared_collection: sharedCollection(), plots: [plot],
+    boards: [workflowBoard('connections', 'shortest-board', {preview_id: plot.preview_id})]});
+  const view = await harness(path => path.endsWith('/actions') ? {id: 'shortest-update', status: 'running'} : undefined);
+  view.state.activeCase = detail; await view.dispatch('view-plots');
+  await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
+  workflowEdit(view, 'connection-max-hops', '4');
+  await view.dispatch('workflow-board-prepare', boardControl('shortest-board'));
+  assert.equal(view.currentWorkflow(detail).connectionScope, 'shortest');
+  assert.doesNotMatch(view.workspace(), /id="workflow-connection-max-hops"/);
+  await view.dispatch('workflow-plot-sync');
+  assert.equal(view.calls.at(-1).body.connection_scope, 'shortest');
+  assert.equal(view.calls.at(-1).body.max_hops, 0);
+  assert.equal(view.calls.at(-1).body.data_source, 'shared');
+  assert.equal(view.calls.at(-1).body.run_id, 'shared-old');
+  view.state.jobs.clear();
+  workflowEdit(view, 'layout-mode', 'fresh');
+  assert.equal(view.currentWorkflow(detail).connectionScope, 'hop_limited');
+  assert.equal(view.currentWorkflow(detail).connectionMaxHops, '4');
+});
+
+test('empty shortest Starter preview describes saved coverage without suggesting a larger hop limit', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase({plots: [workflowPlot('connections', 'empty-shortest', {
+    empty: true, node_count: 0, edge_count: 0, max_hops: null, layout_mode: 'fresh',
+    query: {connection_scope: 'shortest'},
+  })]});
+  await view.dispatch('view-plots');
+  assert.match(view.workspace(), /No starter connections found in the saved evidence/);
+  assert.match(view.workspace(), /Shortest connections already searches without a hop cutoff/);
+  assert.doesNotMatch(view.workspace(), /Increase the connection hop limit or choose All saved connections/);
+});
+
+test('all-starter previews describe disconnected starters and remain available to write with zero pairs', async () => {
+  for (const [pairs, unconnected] of [[0, 3], [1, 1]]) {
+    const view = await harness();
+    view.state.activeCase = workflowCase({plots: [workflowPlot('connections', 'all-starters', {
+      max_hops: null, layout_mode: 'fresh', empty: false,
+      query: {connection_scope: 'shortest', transaction_io: 'complete'},
+      includes_all_starters: true, starting_transaction_count: 3,
+      unconnected_starting_transaction_count: unconnected, connection_count: pairs,
+    })]});
+    await view.dispatch('view-plots');
+    const html = view.workspace();
+    assert.match(html, /All 3 starting transactions are shown/);
+    assert.match(html, new RegExp(`${unconnected} ${unconnected === 1 ? 'has' : 'have'} no qualifying connection to another starter`));
+    assert.ok(html.includes(`${pairs} ordered starter pair(s) connected.`));
+    assert.doesNotMatch(html.match(/<button[^>]*data-action="workflow-write-miro"[^>]*>/)[0], /disabled/);
+    assert.match(html, /Open preview/);
+    assert.doesNotMatch(html, /Nothing is plotted|No starter connections found/);
+  }
+});
+
+test('zero-pair standalone previews show all-starter artifacts while legacy empty previews remain empty', async () => {
+  for (const includesAll of [true, false]) {
+    const view = await harness();
+    view.state.activeCase = workflowCase({artifacts: {saved1: {connections: {
+      downloads: [], include_fees: false, connection_scope: 'shortest', connection_count: 0,
+      preview_id: 'starter-preview', preview_url: '/files/case1/previews/starter-preview/graph.html',
+      ...(includesAll ? {includes_all_starters: true, starting_transaction_count: 3,
+        unconnected_starting_transaction_count: 3} : {}),
+    }}}});
+    await view.dispatch('view-history');
+    const html = view.workspace();
+    if (includesAll) {
+      assert.match(html, /All 3 starting transactions are shown/);
+      assert.match(html, /title="Starter connection graph"/);
+      assert.match(html, /Publish this reviewed snapshot to Miro/);
+      assert.doesNotMatch(html, /Nothing is plotted/);
+    } else {
+      assert.match(html, /Nothing is plotted/);
+      assert.doesNotMatch(html, /title="Starter connection graph"|Publish this reviewed snapshot to Miro|All 3 starting transactions/);
+    }
+  }
+});
+
+test('standalone completion preserves all-starter counts and does not announce an empty zero-pair chart', async () => {
+  const result = {run_id: 'saved1', connection_count: 0, connection_scope: 'shortest',
+    includes_all_starters: true, starting_transaction_count: 3,
+    unconnected_starting_transaction_count: 3, include_fees: false, downloads: [],
+    preview_id: 'starter-preview', preview_url: '/files/case1/previews/starter-preview/graph.html'};
+  const view = await harness(path => path === '/api/jobs/starters' ? {status: 'succeeded', result}
+    : path === '/api/cases/case1/overview' ? workflowCase() : undefined);
+  view.state.activeCase = workflowCase();
+  await view.dispatch('view-history');
+  view.state.job = {id: 'starters', action: 'connections', caseId: 'case1'};
+  await view.pollJob();
+  assert.match(view.notifications.join(' '), /Starter connection chart is ready\. All starting transactions are shown/);
+  assert.doesNotMatch(view.notifications.join(' '), /Nothing plotted/);
+  assert.equal(view.state.artifacts.get('case1:saved1').connections.starting_transaction_count, 3);
+  assert.equal(view.state.artifacts.get('case1:saved1').connections.unconnected_starting_transaction_count, 3);
+  assert.match(view.workspace(), /All 3 starting transactions are shown/);
+});
+
+
+function deletionCase(id = 'case1', name = 'Delete me') {
+  return workflowCase({id, name, seeds: [], runs: [], plots: [], boards: []});
+}
+
+function deletionJob(id = 'delete', caseId = 'case1', status = 'running') {
+  return {id, case_id: caseId, action: 'investigation-delete', status, resource_kind: 'exclusive',
+    live: false, cancellable: false, message: 'Deleting investigation…'};
+}
+
+test('investigation deletion confirms its exact escaped name and cancel sends no request', async () => {
+  const view = await harness();
+  const detail = deletionCase('case1', 'Theft <1> & notes');
+  view.state.activeCase = detail; view.state.page = 'case';
+  assert.match(view.workspace(), /data-action="investigation-delete"/);
+  await view.dispatch('investigation-delete');
+  assert.equal(view.dialog.open, true);
+  assert.match(view.dialog.innerHTML, /Theft &lt;1&gt; &amp; notes/);
+  assert.match(view.dialog.innerHTML, /cannot be undone/);
+  assert.match(view.dialog.innerHTML, /local collection runs, previews, exports, annotations, and settings/);
+  assert.match(view.dialog.innerHTML, /Shared collection data, other investigations, and Miro boards are retained/);
+  for (const confirm_name of ['', 'theft <1> & notes', 'Theft <1> & notes ']) await view.submitDialog({confirm_name});
+  assert.equal(view.calls.length, 1);
+  await view.dispatch('close-dialog');
+  await view.submitDialog({confirm_name: detail.name});
+  assert.equal(view.calls.length, 1);
+});
+
+test('investigation deletion submits once and cannot be canceled as a calculation', async () => {
+  let release;
+  const pending = new Promise(resolve => {release = resolve;});
+  const view = await harness(path => path.endsWith('/actions') ? pending : undefined);
+  view.state.activeCase = deletionCase('case/1'); view.state.page = 'case';
+  await view.dispatch('investigation-delete');
+  await view.submitDialog({confirm_name: 'Delete me'});
+  await view.submitDialog({confirm_name: 'Delete me'});
+  const requests = view.calls.filter(call => call.path.endsWith('/actions'));
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, '/api/cases/case%2F1/actions');
+  assert.deepEqual(requests[0].body, {action: 'investigation-delete', confirm_name: 'Delete me'});
+  release(deletionJob('delete', 'case/1')); await new Promise(setImmediate);
+  assert.equal(view.dialog.open, false);
+  assert.equal(view.state.jobs.get('delete').live, false);
+  // Even a stale cancellation flag must never turn deletion into a cancelable task.
+  view.state.jobs.get('delete').cancellable = true;
+  assert.doesNotMatch(view.jobBanner(), /data-action="cancel-job"/);
+  await view.cancelJob('delete');
+  assert.equal(view.calls.some(call => call.path.endsWith('/cancel')), false);
+});
+
+test('investigation deletion blocks case tasks and shared work and rechecks dialog ownership', async () => {
+  for (const mutate of [
+    view => {view.state.activeCase.name = 'Renamed';},
+    view => {view.state.activeCase = deletionCase('other');},
+    view => {view.navigate('dashboard');},
+    ...['trace', 'plot', 'board-sync', 'change-output-lookup'].map(action => view => {
+      view.state.jobs.set('work', {id: 'work', caseId: 'case1', action, status: 'running'});
+    }),
+    view => {view.state.jobs.set('work', {id: 'work', caseId: 'other', action: 'shared-trace', status: 'running'});},
+  ]) {
+    const view = await harness();
+    view.state.activeCase = deletionCase(); view.state.page = 'case';
+    await view.dispatch('investigation-delete');
+    assert.equal(view.dialog.open, true);
+    mutate(view);
+    await view.submitDialog({confirm_name: 'Delete me'});
+    assert.equal(view.calls.some(call => call.path.endsWith('/actions')), false);
+  }
+  const view = await harness();
+  view.state.activeCase = deletionCase(); view.state.page = 'case';
+  view.state.jobs.set('shared', {id: 'shared', caseId: 'other', action: 'shared-trace', status: 'running'});
+  await view.dispatch('investigation-delete');
+  assert.equal(view.dialog.open, false);
+  view.state.jobs.clear();
+  view.state.jobs.set('delete', {...deletionJob(), caseId: 'case1'});
+  for (const action of ['trace', 'plot', 'board-sync', 'shared-trace']) assert.equal(view.actionBusy(action, {}, 'case1'), true);
+  assert.equal(view.actionBusy('shared-trace', {}, 'other'), true);
+  assert.equal(view.actionBusy('plot', {}, 'other'), false);
+});
+
+test('investigation deletion failure preserves investigation, tabs and saved data', async () => {
+  for (const failOnSubmit of [true, false]) {
+    const detail = deletionCase();
+    const view = await harness(path => path.endsWith('/actions') ? failOnSubmit ? {error: 'Busy investigation'} : deletionJob()
+      : path === '/api/jobs/delete' ? {...deletionJob(), status: 'failed', message: 'Local data could not be deleted.'}
+      : path === '/api/session' ? {csrf: 'test', settings: defaults, cases: [detail]} : undefined);
+    view.state.activeCase = detail; view.state.page = 'case'; view.state.openCases = ['case1'];
+    await view.dispatch('investigation-delete');
+    await view.submitDialog({confirm_name: 'Delete me'});
+    if (failOnSubmit) assert.equal(view.dialog.open, true);
+    else await view.pollJob('delete');
+    assert.equal(view.state.activeCase.id, 'case1');
+    assert.deepEqual([...view.state.openCases], ['case1']);
+    assert.equal(view.state.cases[0].id, 'case1');
+    assert.match(view.state.error, failOnSubmit ? /Busy investigation/ : /could not be deleted/);
+  }
+});
+
+test('successful investigation deletion clears its tabs and caches without refreshing its deleted overview', async () => {
+  const detail = deletionCase(), other = deletionCase('other', 'Keep me');
+  const view = await harness(path => path === '/api/jobs/delete' ? {...deletionJob(), status: 'succeeded',
+    result: {case_id: 'case1', name: detail.name, deleted: true, cleanup_pending: false}}
+    : path === '/api/session' ? {csrf: 'test', settings: defaults, cases: [detail, other]} : undefined);
+  view.state.activeCase = detail; view.state.page = 'case'; view.state.openCases = ['case1', 'other'];
+  view.currentWorkflow(detail).plot = 'private-preview';
+  view.currentWorkflow(other).plot = 'retained-preview';
+  view.currentWorkflow(detail);
+  view.currentScopeDraft(detail).selected = 'private-analysis';
+  view.storage.set('liquid-tracer:scope-selection:v1:case1', '{"selected":"private-analysis"}');
+  view.state.results.set('case1', {action: 'plot', result: {preview_id: 'private-preview'}});
+  view.state.artifacts.set('case1:run1', {}); view.state.artifacts.set('other:run1', {});
+  view.deleteCaches.sectionErrors.set('case1:workflow', 'private error');
+  view.deleteCaches.scopeDetails.set('case1:analysis', {analysis_id: 'analysis'});
+  view.state.jobs.set('delete', {...deletionJob(), caseId: 'case1', started: Date.now()});
+  await view.pollJob('delete'); await new Promise(setImmediate);
+  assert.equal(view.state.activeCase, null);
+  assert.equal(view.state.page, 'dashboard');
+  assert.deepEqual([...view.state.openCases], ['other']);
+  assert.deepEqual(view.state.cases.map(item => item.id), ['other']);
+  assert.equal(view.state.results.has('case1'), false);
+  assert.equal(view.state.artifacts.has('case1:run1'), false);
+  assert.equal(view.state.artifacts.has('other:run1'), true);
+  for (const cache of Object.values(view.deleteCaches)) assert.equal([...cache.keys()].some(key => key === 'case1' || key.startsWith('case1:') || key.startsWith('case1/')), false);
+  assert.equal(view.storage.has('liquid-tracer:scope-selection:v1:case1'), false);
+  assert.deepEqual(JSON.parse(view.storage.get('liquid-tracer:investigation-tabs:v1')).ids, ['other']);
+  assert.equal(view.currentWorkflow(other).plot, 'retained-preview');
+  assert.equal(view.calls.some(call => call.path.startsWith('/api/cases/case1/')), false);
+  assert.doesNotMatch(view.jobBanner(), /data-action="open-job"/);
+  const before = view.calls.length;
+  await view.openCase('case1');
+  assert.equal(view.calls.length, before, 'old task links cannot reopen the deleted investigation');
+});
+
+test('deleting a background investigation retains the selected investigation and its drafts', async () => {
+  const detail = deletionCase(), other = deletionCase('other', 'Keep me');
+  const view = await harness(path => path === '/api/jobs/delete' ? {...deletionJob(), status: 'succeeded',
+    result: {case_id: 'case1', name: detail.name, deleted: true, cleanup_pending: true}}
+    : path === '/api/session' ? {csrf: 'test', settings: defaults, cases: [other]} : undefined);
+  view.state.activeCase = other; view.state.page = 'case'; view.state.openCases = ['case1', 'other'];
+  view.currentWorkflow(other).plot = 'keep-preview';
+  view.state.jobs.set('delete', {...deletionJob(), caseId: 'case1', started: Date.now()});
+  await view.pollJob('delete');
+  assert.equal(view.state.activeCase.id, 'other');
+  assert.equal(view.state.page, 'case');
+  assert.equal(view.currentWorkflow(other).plot, 'keep-preview');
+  assert.deepEqual([...view.state.openCases], ['other']);
+  assert.match(view.notifications.at(-1), /local files still need cleanup/);
+});
+
+test('late overview and session responses cannot resurrect a deleted investigation', async () => {
+  const detail = deletionCase();
+  let releaseOverview, releaseSession, sessions = 0;
+  const overview = new Promise(resolve => {releaseOverview = resolve;});
+  const session = new Promise(resolve => {releaseSession = resolve;});
+  const view = await harness(path => path === '/api/jobs/delete' ? {...deletionJob(), status: 'succeeded',
+    result: {case_id: 'case1', name: detail.name, deleted: true}}
+    : path.endsWith('/overview') ? overview
+    : path === '/api/session' ? (++sessions === 2 ? session : {csrf: 'test', settings: defaults, cases: sessions === 1 ? [detail] : []}) : undefined);
+  view.state.activeCase = detail; view.state.page = 'case'; view.state.openCases = ['case1'];
+  const oldOverview = view.refreshCaseDetail('case1'), oldSession = view.refreshSession();
+  view.state.jobs.set('delete', {...deletionJob(), caseId: 'case1', started: Date.now()});
+  await view.pollJob('delete');
+  releaseOverview(detail); releaseSession({csrf: 'old', settings: defaults, cases: [detail]});
+  await Promise.all([oldOverview, oldSession]);
+  assert.equal(view.state.activeCase, null);
+  assert.equal(view.state.page, 'dashboard');
+  assert.equal(view.state.cases.length, 0);
+  assert.equal(view.state.openCases.length, 0);
+});
+
+test('discovered deletion closes its tab and a browser reload excludes removed investigations', async () => {
+  const detail = deletionCase(), other = deletionCase('other', 'Keep me');
+  const view = await harness(path => path === '/api/jobs' ? {jobs: [{...deletionJob(), status: 'succeeded',
+    result: {case_id: 'case1', name: detail.name, deleted: true}}]}
+    : path === '/api/session' ? {csrf: 'test', settings: defaults, cases: [detail, other]} : undefined);
+  view.state.activeCase = detail; view.state.page = 'case'; view.state.openCases = ['case1', 'other'];
+  await view.discoverJobs();
+  assert.equal(view.state.activeCase, null);
+  assert.deepEqual([...view.state.openCases], ['other']);
+  assert.equal(view.calls.some(call => call.path.includes('/case1/overview')), false);
+  view.storage.set('liquid-tracer:investigation-tabs:v1', JSON.stringify({ids: ['case1', 'other'], views: []}));
+  const reloaded = await harness(path => path === '/api/session' ? {csrf: 'test', settings: defaults, cases: [other]} : undefined,
+    {storage: view.storage});
+  assert.deepEqual([...reloaded.state.openCases], ['other']);
+});
+
+
+test('a transient missing investigation listing does not erase drafts or prevent reopening', async () => {
+  const detail = deletionCase(); let sessions = 0;
+  const view = await harness(path => path === '/api/session' ? {csrf: 'test', settings: defaults,
+    cases: ++sessions === 2 ? [] : [detail]} : path.endsWith('/overview') ? detail : undefined);
+  view.state.activeCase = detail; view.state.page = 'case'; view.state.openCases = ['case1'];
+  view.currentWorkflow(detail).plot = 'retain-preview';
+  await view.refreshSession();
+  assert.equal(view.state.cases.length, 0);
+  assert.equal(view.state.activeCase.id, detail.id);
+  assert.equal(view.currentWorkflow(detail).plot, 'retain-preview');
+  await view.refreshSession();
+  await view.openCase('case1');
+  assert.equal(view.state.activeCase.id, detail.id);
+  assert.equal(view.currentWorkflow(detail).plot, 'retain-preview');
+  assert.equal(view.calls.filter(call => call.path.endsWith('/overview')).length, 1);
+});
+
+test('in-progress investigation deletion disables reopening through task links and tabs', async () => {
+  const view = await harness();
+  view.state.activeCase = deletionCase(); view.state.page = 'case'; view.state.openCases = ['case1'];
+  view.state.jobs.set('delete', {...deletionJob(), caseId: 'case1', started: Date.now()});
+  assert.doesNotMatch(view.jobBanner(), /data-action="open-job"/);
+  await view.openCase('case1');
+  assert.equal(view.calls.some(call => call.path.endsWith('/overview')), false);
+  await view.dispatch('open-job', {dataset: {id: 'delete'}});
+  assert.equal(view.calls.some(call => call.path.endsWith('/overview')), false);
+  view.render();
+  assert.match(view.app.innerHTML, /investigation-tab-open[^>]+ disabled/);
+});
+
+test('shared attribution access belongs to workspace or investigation settings and preserves unsaved settings', async () => {
+  const owners = [], opened = new Set();
+  const view = await harness(undefined, {sharedAttributionHandlers: {
+    sharedAttributionsAction: async (action, context) => {
+      if (!action.startsWith('shared-attributions-')) return false;
+      owners.push(context.caseId); opened.add(context.caseId); context.render(); return true;
+    },
+    sharedAttributionsPanel: caseId => opened.has(caseId) ? '<section id="shared-attributions-panel">Shared library panel</section>' : '',
+  }});
+  view.state.activeCase = workflowCase();
+  view.navigate('settings');
+  assert.match(view.app.innerHTML, /data-action="shared-attributions-open"/);
+  await view.dispatch('shared-attributions-open');
+  assert.equal(owners[0], null, 'workspace access does not inherit the last active investigation');
+  assert.ok(view.settingsPage().indexOf('id="shared-attributions-panel"') < view.settingsPage().indexOf('id="settings-form"'));
+  await view.dispatch('case-settings');
+  view.elements.set('#settings-form', {values: {...defaults, name: 'Unsaved investigation name', hops: '7'}});
+  await view.dispatch('shared-attributions-open');
+  const html = view.settingsPage();
+  assert.equal(owners[1], 'case1');
+  assert.match(html, /value="Unsaved investigation name"/);
+  assert.match(html, /name="hops"[^>]*value="7"/);
+  assert.ok(html.indexOf('id="shared-attributions-panel"') < html.indexOf('id="settings-form"'));
+  view.navigate('dashboard');
+  await view.dispatch('shared-attributions-use-apply');
+  assert.equal(owners.length, 2, 'a stale shared control cannot act outside its settings page');
+  assert.equal(view.calls.filter(call => call.body).length, 0);
+});
+
+test('inherited shared assessments identify their origin and explain that saving creates a local override', async () => {
+  const view = await harness();
+  view.state.activeCase = workflowCase(); view.state.page = 'addresses';
+  const row = {address: 'shared-address', activity: null, service: {address: 'shared-address', name: 'Shared exchange',
+    confidence: 'suspected', source: 'Research', notes: '', enabled: true, stop_tracing: false,
+    updated_at: '2026-10-03T00:00:00Z', attribution_origin: 'shared', shared_library_id: 'library', shared_revision: 3}};
+  view.state.addressReview.selected = row;
+  view.state.addressReview.data = {run_id: 'saved1', rows: [row], total: 1, offset: 0, limit: 100};
+  view.render();
+  assert.match(view.app.innerHTML, /<span class="badge gray">Shared<\/span>/);
+  assert.match(view.app.innerHTML, /Saving or disabling this assessment creates a local override for this investigation/);
+  assert.match(view.app.innerHTML, /Shared library entry updated/);
+  assert.match(view.app.innerHTML, /name="service_stop"/);
+  assert.match(view.app.innerHTML, /name="service_hop_limit"/);
+});
+
+test('shared request completion releases controls after leaving and returning to the same settings owner', async () => {
+  for (const page of ['settings', 'case-settings']) {
+    const response = Promise.withResolvers(); let pending = false;
+    const view = await harness(undefined, {sharedAttributionHandlers: {
+      sharedAttributionsAction: async (action, context) => {
+        if (!action.startsWith('shared-attributions-')) return false;
+        pending = true; context.render();
+        await response.promise;
+        pending = false; context.render(); return true;
+      },
+      sharedAttributionsPanel: () => `<button id="shared-completion-control"${pending ? ' disabled' : ''}>${pending ? 'Loading shared library' : 'Shared library ready'}</button>`,
+    }});
+    view.state.activeCase = workflowCase(); view.navigate(page);
+    const work = view.dispatch('shared-attributions-open'); await settled();
+    view.navigate('dashboard'); view.navigate(page);
+    assert.match(view.app.innerHTML, /id="shared-completion-control" disabled/);
+    response.resolve(); await work;
+    assert.match(view.app.innerHTML, /id="shared-completion-control">Shared library ready/);
+    assert.doesNotMatch(view.app.innerHTML, /Loading shared library/);
+  }
+});
+
+test('shared file completion releases controls after leaving and returning to the same settings owner', async () => {
+  for (const page of ['settings', 'case-settings']) {
+    const response = Promise.withResolvers(); let pending = false;
+    const view = await harness(undefined, {sharedAttributionHandlers: {
+      sharedAttributionsFile: async (_input, render) => {
+        pending = true; render(); await response.promise; pending = false; render();
+      },
+      sharedAttributionsPanel: () => `<button id="shared-file-control"${pending ? ' disabled' : ''}>${pending ? 'Reading file' : 'File ready'}</button>`,
+    }});
+    view.state.activeCase = workflowCase(); view.navigate(page);
+    view.chooseSharedAttributionsFile();
+    view.navigate('dashboard'); view.navigate(page);
+    assert.match(view.app.innerHTML, /id="shared-file-control" disabled/);
+    response.resolve(); await settled();
+    assert.match(view.app.innerHTML, /id="shared-file-control">File ready/);
+    assert.doesNotMatch(view.app.innerHTML, /Reading file/);
+  }
+});
+
+test('shared library apply preserves remembered and in-flight local assessment drafts including opted-out cases', async () => {
+  const response = Promise.withResolvers();
+  const active = workflowCase({id: 'opted-out', name: 'Opted out investigation'});
+  const other = workflowCase({id: 'remembered', name: 'Remembered investigation'});
+  const local = {address: 'local-address', activity: null, service: {name: 'Saved local name', enabled: true,
+    confidence: 'confirmed', source: 'Local records', stop_tracing: false, attribution_origin: 'local'}};
+  const inherited = {address: 'shared-address', activity: null, service: {name: 'Shared name', enabled: true,
+    confidence: 'suspected', source: 'Shared evidence', stop_tracing: false, attribution_origin: 'shared'}};
+  const view = await harness((path, body) => path.endsWith('/services') ? {revision: 2, service: {...body, updated_at: '2026-10-03'}} : undefined,
+    {sharedAttributionHandlers: {
+      sharedAttributionsAction: async (action, context) => {
+        if (!action.startsWith('shared-attributions-')) return false;
+        await response.promise; await context.refresh('library'); context.render(); return true;
+      },
+    }});
+  view.state.cases = [active, other]; view.state.openCases = [active.id, other.id];
+  view.state.activeCase = active; view.navigate('settings');
+  const remembered = {...view.state.addressReview, selected: inherited,
+    data: {rows: [inherited], total: 1, offset: 0, limit: 25}, name: 'Unsaved remembered name',
+    notes: 'Unsaved remembered notes', enabled: false, stopTracing: true, hopLimit: '3'};
+  view.deleteCaches.investigationViews.set(other.id, {page: 'addresses', caseView: 'collect', selectedRun: 'saved1', addressReview: remembered});
+  const work = view.dispatch('shared-attributions-apply'); await settled();
+  view.state.addressReview = {...view.state.addressReview, selected: local,
+    data: {rows: [local], total: 1, offset: 0, limit: 25}};
+  view.navigate('addresses');
+  const edits = {service_name: 'Unsaved active name', service_notes: 'Unsaved active notes', service_enabled: 'on',
+    service_confidence: 'confirmed', service_source: 'Local draft source', service_observed: '2026-10-02', service_hop_limit: '5'};
+  view.elements.set('#service-form', {values: edits});
+  response.resolve(); await work;
+  assert.equal(view.state.addressReview.selected.address, local.address);
+  assert.equal(view.state.addressReview.selected.attributionStale, undefined, 'a local override does not inherit a changed shared baseline');
+  for (const [key, value] of Object.entries({name: edits.service_name, notes: edits.service_notes, source: edits.service_source,
+    observedAt: edits.service_observed, hopLimit: '5', enabled: true, stopTracing: false}))
+    assert.equal(view.state.addressReview[key], value);
+  assert.equal(view.state.addressReview.data, null, 'the list reloads without replacing its selected draft');
+  assert.equal(remembered.selected.address, inherited.address);
+  assert.equal(remembered.selected.attributionStale, true);
+  assert.equal(remembered.name, 'Unsaved remembered name');
+  assert.equal(remembered.notes, 'Unsaved remembered notes');
+  assert.equal(remembered.enabled, false); assert.equal(remembered.stopTracing, true); assert.equal(remembered.hopLimit, '3');
+  await view.submitService(edits);
+  const save = view.calls.find(call => call.path === '/api/cases/opted-out/services');
+  assert.ok(save, 'the selected address remains saveable after the background import completes');
+  assert.equal(save.body.name, edits.service_name); assert.equal(save.body.notes, edits.service_notes);
+  assert.equal(save.body.hop_limit, '5'); assert.equal(save.body.stop_tracing, false);
+});
+
+test('seed editor opens from the workspace and saves the exact case selection without rewriting saved evidence', async () => {
+  const oldSeeds = [`${txid}:0`], replacement = 'b'.repeat(64);
+  const snapshot = {id: 'saved1', status: 'bounded_complete', seeds: oldSeeds};
+  const preview = workflowPlot('full', 'recorded-preview', {seeds: oldSeeds});
+  const detail = workflowCase({id: 'case /?#', runs: [snapshot], plots: [preview]});
+  const view = await harness((path, body) => path === '/api/cases/case%20%2F%3F%23/seeds'
+    ? body ? {seeds: body.seeds, revision: 5} : {seeds: oldSeeds, revision: 4} : undefined);
+  view.state.activeCase = detail; view.state.cases = [detail]; view.state.page = 'case';
+  assert.match(view.workspace(), /data-action="seed-editor-open"/);
+  await view.dispatch('seed-editor-open');
+  assert.equal(view.state.page, 'case-settings');
+  assert.match(view.app.innerHTML, /Change starting outputs/);
+  view.editSeeds(`${replacement.toUpperCase()}:01,${replacement}:1`);
+  await view.dispatch('seed-editor-save');
+  const calls = view.calls.filter(call => call.path.endsWith('/seeds'));
+  assert.deepEqual(calls, [{path: '/api/cases/case%20%2F%3F%23/seeds', body: undefined},
+    {path: '/api/cases/case%20%2F%3F%23/seeds', body: {seeds: [`${replacement}:1`], expected_revision: 4}}]);
+  assert.deepEqual([...view.state.activeCase.seeds], [`${replacement}:1`]);
+  assert.deepEqual([...view.state.cases[0].seeds], [`${replacement}:1`]);
+  assert.deepEqual(snapshot.seeds, oldSeeds);
+  assert.deepEqual(preview.seeds, oldSeeds);
+  assert.equal(view.calls.filter(call => call.body !== undefined).length, 1);
+  assert.match(view.app.innerHTML, /Existing previews keep their original outputs/);
+});
+
+test('seed editor stale revision errors retain user edits and never overwrite current case state', async () => {
+  const detail = workflowCase(), replacement = 'b'.repeat(64);
+  const view = await harness((path, body) => path.endsWith('/seeds') ? body
+    ? {error: 'Starting outputs changed. Reload saved selection before saving.'}
+    : {seeds: detail.seeds, revision: 2} : undefined);
+  view.state.activeCase = detail; view.state.page = 'case';
+  await view.dispatch('seed-editor-open'); view.editSeeds(`${replacement}:1`);
+  await view.dispatch('seed-editor-save');
+  assert.deepEqual(view.state.activeCase.seeds, detail.seeds);
+  assert.match(view.app.innerHTML, /Starting outputs changed. Reload saved selection before saving/);
+  assert.match(view.app.innerHTML, new RegExp(`>${replacement}:1<\/textarea>`));
+  assert.equal(view.isBusy(), false);
+});
+
+test('seed editor completion after navigation updates only its owning case and leaves another case untouched', async () => {
+  const response = Promise.withResolvers(), replacement = 'b'.repeat(64);
+  const first = workflowCase(), second = workflowCase({id: 'case2', name: 'Other investigation', seeds: [`${'c'.repeat(64)}:2`]});
+  const view = await harness((path, body) => path === '/api/cases/case1/seeds'
+    ? body ? response.promise : {seeds: first.seeds, revision: 3}
+    : path === '/api/cases/case2/overview' ? second : undefined);
+  view.state.activeCase = first; view.state.cases = [first, second]; view.state.page = 'case';
+  await view.dispatch('seed-editor-open'); view.editSeeds(`${replacement}:1`);
+  const work = view.dispatch('seed-editor-save'); await settled();
+  assert.equal(view.isBusy(), true);
+  await view.openCase('case2'); const before = view.app.innerHTML;
+  response.resolve({seeds: [`${replacement}:1`], revision: 4}); await work;
+  assert.equal(view.state.activeCase.id, 'case2');
+  assert.deepEqual(view.state.activeCase.seeds, second.seeds);
+  assert.equal(view.app.innerHTML, before);
+  assert.deepEqual([...view.state.cases.find(item => item.id === 'case1').seeds], [`${replacement}:1`]);
+  assert.equal(view.isBusy(), false);
+});
+
+test('seed editor pending writes block duplicate saves and retain close and reopen', async () => {
+  const response = Promise.withResolvers(), replacement = 'b'.repeat(64), detail = workflowCase();
+  const view = await harness((path, body) => path.endsWith('/seeds') ? body
+    ? response.promise : {seeds: detail.seeds, revision: 7} : undefined);
+  view.state.activeCase = detail; view.state.page = 'case';
+  await view.dispatch('seed-editor-open'); view.editSeeds(`${replacement}:2`);
+  const work = view.dispatch('seed-editor-save'); await settled();
+  await view.dispatch('seed-editor-save'); await view.dispatch('seed-editor-reload');
+  assert.equal(view.calls.filter(call => call.body !== undefined).length, 1);
+  assert.equal(view.isBusy(), true);
+  assert.match(view.app.innerHTML, /data-action="seed-editor-save" disabled/);
+  await view.dispatch('seed-editor-close');
+  assert.doesNotMatch(view.app.innerHTML, /id="seed-editor-panel"/);
+  response.resolve({seeds: [`${replacement}:2`], revision: 8}); await work;
+  await view.dispatch('seed-editor-open');
+  assert.equal(view.calls.filter(call => call.path.endsWith('/seeds') && !call.body).length, 1);
+  assert.match(view.app.innerHTML, new RegExp(`>${replacement}:2<\/textarea>`));
+  assert.equal(view.isBusy(), false);
+});
+
+test('seed editor unsaved text survives closing and reopening without changing unrelated settings drafts', async () => {
+  const detail = workflowCase(), replacement = 'b'.repeat(64);
+  const view = await harness(path => path.endsWith('/seeds') ? {seeds: detail.seeds, revision: 1} : undefined);
+  view.state.activeCase = detail; view.navigate('case-settings');
+  view.elements.set('#settings-form', {values: {...defaults, name: 'Keep this unsaved name', hops: '7'}});
+  await view.dispatch('seed-editor-open'); view.editSeeds(`${replacement}:0`);
+  await view.dispatch('seed-editor-close'); await view.dispatch('seed-editor-open');
+  assert.match(view.app.innerHTML, new RegExp(`>${replacement}:0<\/textarea>`));
+  assert.match(view.app.innerHTML, /value="Keep this unsaved name"/);
+  assert.match(view.app.innerHTML, /name="hops"[^>]*value="7"/);
+  assert.equal(view.calls.filter(call => call.path.endsWith('/seeds')).length, 1);
+  assert.deepEqual(view.state.activeCase.seeds, detail.seeds);
+});
+
+test('seed display identifies changed current selection while an older snapshot retains its captured outputs', async () => {
+  const replacement = 'b'.repeat(64), view = await harness();
+  view.state.activeCase = workflowCase({seeds: [`${replacement}:1`],
+    runs: [{id: 'saved1', status: 'bounded_complete', seeds: [`${txid}:0`]}]});
+  view.state.page = 'case';
+  const panel = view.workspace().match(/<section class="panel seed-panel"[\s\S]*?<\/section>/)[0];
+  assert.match(panel, /different starting outputs from the investigation’s current selection/);
+  assert.match(panel, /rows below describe this snapshot/);
+  assert.match(panel, new RegExp(txid));
+  assert.doesNotMatch(panel, new RegExp(replacement));
+});
+
+for (const latestMatches of [true, false]) {
+  test(`collection uses latest snapshot seeds, not the viewed historical snapshot, when current selection ${latestMatches ? 'matches' : 'differs'}`, async () => {
+    const replacement = 'b'.repeat(64), current = [`${txid}:0`], other = [`${replacement}:1`];
+    const view = await harness();
+    view.state.activeCase = workflowCase({seeds: current, latest_run: 'recent', runs: [
+      {id: 'recent', status: 'bounded_complete', max_hops: 10, seeds: latestMatches ? current : other},
+      {id: 'historical', status: 'bounded_complete', max_hops: 3, seeds: latestMatches ? other : current},
+    ]});
+    view.state.page = 'case'; view.state.selectedRun = 'historical';
+    const section = view.workspace().match(/<section class="panel" id="collection-panel"[\s\S]*?<\/section>/)[0];
+    assert.match(section, latestMatches ? /Continue collecting data/ : /Collect current starting outputs/);
+    await view.dispatch('trace-dialog');
+    assert.match(view.dialog.innerHTML, latestMatches ? /Continue collecting transaction data/ : /Collect current starting outputs/);
+    assert.match(view.dialog.innerHTML, latestMatches ? /<span>Hops for this run<\/span>/ : /<span>Maximum hops<\/span>/);
+    assert.equal(view.calls.filter(call => call.body).length, 0);
+  });
+}
+
+test('saved preview seed provenance stays visible and publication remains available after editing current seeds', async () => {
+  const replacement = 'b'.repeat(64), current = [`${replacement}:1`];
+  const preview = workflowPlot('full', 'old-selection', {seeds: [`${txid}:0`], layout_mode: 'fresh'});
+  const view = await harness();
+  view.state.activeCase = workflowCase({seeds: current, plots: [preview]});
+  view.state.page = 'case'; await view.dispatch('view-plots');
+  const html = view.workspace();
+  assert.match(html, /Different starting outputs/);
+  assert.match(html, /Publishing it to Miro uses that saved selection/);
+  assert.match(html, /Preview starting outputs · 1 selected/);
+  assert.match(html, new RegExp(`<li class="mono">${txid}:0<\/li>`));
+  assert.doesNotMatch(html.match(/<button[^>]*data-action="workflow-write-miro"[^>]*>/)[0], /disabled/);
+  assert.deepEqual(preview.seeds, [`${txid}:0`]);
+});
+
+test('shared peg-out total excludes mismatched and unknown seed selections while historical private totals remain available', async () => {
+  const current = [`${txid}:0`], replacement = 'b'.repeat(64);
+  const descriptor = {kind: 'shared', dataset_id: 'pool', run_id: 'shared-old'};
+  const matching = {...valuePlot('matching', 'projection', '2026-10-01T01:00:00Z', valueSummary('7')), seeds: current, collection_source: descriptor};
+  const mismatch = {...valuePlot('mismatch', 'projection', '2026-10-01T03:00:00Z', valueSummary('999')), seeds: [`${replacement}:1`], collection_source: descriptor};
+  const unknown = {...valuePlot('unknown', 'projection', '2026-10-01T04:00:00Z', valueSummary('888')), collection_source: descriptor};
+  const historical = {...valuePlot('private', 'saved1', '2026-10-01T02:00:00Z', valueSummary('9')), seeds: [`${replacement}:1`]};
+  const view = await harness();
+  const detail = workflowCase({shared_collection: sharedCollection(), plots: [matching, mismatch, unknown, historical]});
+  view.state.activeCase = detail; view.state.page = 'case';
+  workflowEdit(view, 'data-source', 'shared'); workflowEdit(view, 'shared-run', 'shared-old');
+  assert.match(view.workspace(), /<strong>7 LBTC<\/strong>/);
+  assert.doesNotMatch(view.workspace(), /<strong>(?:999|888|9) LBTC<\/strong>/);
+  detail.plots = [mismatch, unknown, historical];
+  assert.doesNotMatch(view.workspace(), /class="pegout-total"/);
+  workflowEdit(view, 'data-source', 'investigation');
+  assert.match(view.workspace(), /<strong>9 LBTC<\/strong>/);
+});
+
+test('saving seeds invalidates older in-flight case and session summaries so they cannot revert the new selection', async () => {
+  const sessionResponse = Promise.withResolvers(), caseResponse = Promise.withResolvers();
+  const replacement = 'b'.repeat(64), detail = workflowCase(); let sessions = 0;
+  const view = await harness((path, body) => {
+    if (path === '/api/session') return ++sessions === 1 ? {csrf: 'test', settings: defaults, cases: [detail]} : sessionResponse.promise;
+    if (path === '/api/cases/case1/overview') return caseResponse.promise;
+    if (path === '/api/cases/case1/seeds') return body ? {seeds: body.seeds, revision: 2} : {seeds: detail.seeds, revision: 1};
+  });
+  view.state.activeCase = detail; view.state.page = 'case';
+  await view.dispatch('seed-editor-open'); view.editSeeds(`${replacement}:1`);
+  const caseWork = view.refreshCaseDetail('case1'); const sessionWork = view.refreshSession(); await settled();
+  await view.dispatch('seed-editor-save');
+  caseResponse.resolve({...detail}); sessionResponse.resolve({csrf: 'test', settings: defaults, cases: [detail]});
+  await Promise.all([caseWork, sessionWork]);
+  assert.deepEqual([...view.state.activeCase.seeds], [`${replacement}:1`]);
+  assert.deepEqual([...view.state.cases[0].seeds], [`${replacement}:1`]);
 });

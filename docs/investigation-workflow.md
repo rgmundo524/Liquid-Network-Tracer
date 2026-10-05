@@ -35,6 +35,38 @@ Opening an investigation does not fetch blockchain data or contact Miro. Opening
 or preparing a large preview can still take time without blocking other
 investigation tabs.
 
+### Delete an investigation
+
+Open its **Investigation workspace** and choose **Delete investigation** beside
+**Investigation settings**. Review the name and ID, then type the name exactly
+and choose **Permanently delete investigation**. Cancel leaves it unchanged.
+Deletion appears in Tasks and closes that investigation’s saved browser tab when
+complete. Wait for its active tasks and shared collection tasks to finish first.
+
+Deletion permanently removes that investigation’s local collection runs,
+previews, exports, annotations, and settings. Download any exports
+you need beforehand. Shared collection data, other investigations, and remote
+Miro boards are retained; deleting a Miro board is a separate action. Deletion
+cannot be undone or canceled after it starts. If file cleanup is incomplete,
+the task reports it while the investigation stays removed from the workspace.
+A small deletion receipt is retained in the workspace's `.deleted-investigations`
+directory. If cleanup is interrupted, the remaining files stay there and the
+launching terminal identifies their location.
+
+### Compare analysis scopes and saved previews
+
+Use **Analysis** to compare hop cutoffs against saved evidence, inspect recorded
+endpoints and open branches, and download the supporting records. **Use this
+scope for plots** transfers the selected snapshot and hop limit into the plotting
+form; it does not generate a graph automatically.
+
+In **Plots & Miro**, generate a **Full trace** preview with the chosen maximum
+analysis hops and **Original starting transactions** as its hop basis. The limit
+applies to that preview while the deeper saved collection remains available.
+Compare saved previews and download a selected SVG for a report, or write it to
+Miro. Keep the larger preview as a reference for activity outside the smaller
+figure. A display boundary does not mean a branch is unspent or has terminated.
+
 ## 1. Collect data
 
 Select the investigation's seed UTXOs, then collect transaction data with the
@@ -62,7 +94,7 @@ If an older run stopped branches at attribution hop caps, continue collection
 with **0 additional hops** to fill eligible gaps within its current global
 ceiling, or add hops to increase that ceiling. Collection still respects
 explicit address stops and any enabled resource budgets. Then generate new
-plots from the new run. Existing saved reports and plots retain their original results.
+plots from the new run. Existing saved analyses and plots retain their original results.
 
 During collection, the header's progress bar shows **Processing hop N of M**.
 The target is the run's cumulative hop limit, including additional hops on a
@@ -199,7 +231,15 @@ manually merge that section into the investigation's working arrangement.
 Full-trace plots also reapply current stop/hop rules: tightening them excludes
 branches; loosening them restores only activity already in the saved evidence.
 
-**Starter connections** searches all verified links in the selected saved run.
+**Starter connections** keeps every selected starting transaction visible and
+searches for connections between every pair. Choose **Shortest connections**
+to show one minimum-hop route for each pair connected by verified saved spends.
+Equal-length routes use a stable choice. A starter with no qualifying path stays
+visible with its local inputs and outputs; its other branches are not expanded.
+Zero connected pairs therefore still produces a chart of the selected starters.
+Older previews retain their original membership until regenerated.
+
+The search uses verified links in the selected saved run.
 New plots ignore both `stop_tracing` and attribution `hop_limit` values. Choose
 **Within hop limit** and set **Maximum connection hops**, then increase the
 limit and generate another preview or board update to reveal longer routes.
@@ -210,8 +250,9 @@ attribution names, colors, and confirmation
 status, including verified unconfirmed links already saved. A connection must
 start through a selected seed output and follow an exact, verified UTXO spend;
 shared addresses or matching names do not create connections. Every selected
-transaction displays all its inputs and outputs, including context inputs, fees,
-and the heads of unrelated side branches. These additional objects do not create
+transaction displays all its inputs and non-fee outputs, including context inputs
+and the heads of unrelated side branches. Fee outputs are included only when
+**Include transaction fee flows** is enabled. These additional objects do not create
 qualifying connections or expand those branches further. The transaction CSV
 contains the same complete input/output accounting. No blockchain
 requests are made. Missing links still require collection, which continues to
@@ -374,7 +415,7 @@ contain them; the peg-out interface presents only the two downloads above.
 Set layout attempts, connector appearance, attribution arrow coloring, and
 named-group centering here. **Full trace** also supports **Separate branch hubs**,
 **Group isolated context inputs**, and **Include transaction fee flows**. The fee
-setting also applies to **Paths to peg-outs**.
+setting applies to all three plot types and is off by default.
 **Group isolated context inputs** is also available for **Paths to peg-outs**
 and **Starter connections**.
 It combines at least two eligible external input addresses used only by one
@@ -396,9 +437,10 @@ saved previews keep their original connectors; generate a new preview to use
 the reduced display.
 
 Grouping is saved as an investigation layout preference and captured with each
-generated layout. Separate branch hubs remain Full trace-only. The optional
-fee-flow toggle applies to Full trace and Paths to peg-outs; Starter connections
-always displays transaction fees. Existing saved layouts keep their captured
+generated layout. Separate branch hubs apply to Full trace and Paths to peg-outs.
+The optional fee-flow toggle applies to Full trace, Paths to peg-outs, and Starter
+connections. Fees remain in saved evidence even when hidden from the graph and
+its transaction CSV. Existing saved layouts keep their captured
 fee choice; generate another layout to apply a different choice.
 Generate an update preview, then use **Write to Miro** to apply grouping changes. Replaced
 context objects join the newly arranged additions.

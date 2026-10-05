@@ -48,8 +48,8 @@ def input_import_screen(base, button, case):
                 yield Label("Import CSV files", classes="title")
                 yield Static("Add address attributions, name colors and change outputs together. "
                              "Choose up to three files, one of each type, in any order. "
-                             "CSV headers identify each file. New attribution names are available to the colors file "
-                             "in the same import. All files are reviewed and saved together.", markup=False)
+                             "CSV headers identify each file. Reuse color files across investigations; unused colors "
+                             "are saved for later matching address attributions. All files are reviewed and saved together.", markup=False)
                 yield Label("CSV file paths, one per line")
                 paths = TextArea(id="input-import-paths")
                 paths.styles.height = 5

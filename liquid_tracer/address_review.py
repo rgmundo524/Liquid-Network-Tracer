@@ -15,7 +15,7 @@ from .address_activity import inspect_address, validate_address
 from .api import ENTERPRISE, Esplora, Limits
 from .common import TraceError, canonical, digest, read_json, save_json
 from .investigations import read_case
-from .services import load_services, rule_fields
+from .services import effective_services, rule_fields
 from .store import Store
 
 
@@ -139,7 +139,7 @@ def list_addresses(case, run_id="latest", query="", offset=0, limit=25, suspecte
         raise TraceError("Use a bounded address search and a page size from 1 to 100")
     case = Path(case).resolve()
     selected, counts, source = _run_catalog(case, run_id)
-    services, index = load_services(case), _index(case)
+    services, index = effective_services(case), _index(case)
     addresses = set(counts) | set(services["rules"]) | set(index["addresses"])
     needle = query.strip().casefold()
     addresses = sorted(address for address in addresses

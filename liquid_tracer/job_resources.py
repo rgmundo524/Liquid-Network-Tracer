@@ -7,13 +7,16 @@ and board writers across separate servers and CLI invocations.
 from pathlib import Path
 
 PARALLEL_ACTIONS = frozenset({"trace", "shared-trace", "address-counts", "plot", "plot-sync",
-                              "board-create", "board-create-sync", "board-link", "board-sync"})
+                              "board-create", "board-create-sync", "board-link", "board-sync", "board-delete",
+                              "scope-analyze"})
 VALUE_OPTIONS = frozenset({"--case", "--run", "--resume", "--goal", "--min-hops", "--max-hops",
                            "--layout-mode", "--board-record-id", "--record", "--preview", "--board",
                            "--name", "--max-items", "--layout-settings-json", "--seed", "--seeds-file",
                            "--hops", "--additional-hops", "--hop-reference-name", "--fixture",
                            "--max-transactions", "--max-outpoints", "--max-requests", "--max-seconds",
-                           "--request", "--data-source", "--dataset-id", "--members-json"})
+                           "--request", "--data-source", "--dataset-id", "--members-json", "--hop-basis",
+                           "--board-id", "--source-board", "--max-new-items", "--visibility", "--approve-plan",
+                           "--review-id", "--item-id", "--compact-preview", "--connector-style", "--layout-attempts"})
 
 
 def option(arguments, flag):
@@ -35,18 +38,25 @@ def option(arguments, flag):
 
 def job_resources(arguments, action, case=None):
     """Derive trusted resource identities from validated CLI arguments."""
+    if action == "investigation-delete":
+        return {"resource_kind": "investigation_delete"}
+    if action == "board-delete":
+        # The confirmed remote ID is pinned by request validation. Never inspect
+        # mappings or a saved graph while holding the jobs admission lock.
+        return {"resource_kind": "board_delete", "resource_key": option(arguments, "--board")}
     case = Path(case) if case is not None else None
     resource = {"resource_kind": "exclusive"}
     source = option(arguments, "--run") or option(arguments, "--resume")
     if source and source != "latest":
         resource["source_run_id"] = source
     preview_id = option(arguments, "--preview")
+    legacy_preview = False
     if action in ("board-sync", "board-create-sync") and preview_id and case is not None:
         from .common import read_json
         report = read_json(case / "previews" / preview_id / "plot.json")
         if type(report.get("input_snapshot_version")) is not int or report["input_snapshot_version"] != 1:
             resource["source_run_id"] = preview_id[:16]
-            return resource
+            legacy_preview = True
     if action == "shared-trace":
         from .common import digest
         if case is None:
@@ -55,6 +65,9 @@ def job_resources(arguments, action, case=None):
                         resource_key=digest(str(case.parent.resolve()).encode("utf-8")))
     elif action in ("trace", "address-counts"):
         resource["resource_kind"] = "collection"
+    elif action == "scope-analyze":
+        # Analysis consumes a saved collection. Verification belongs in the worker.
+        resource["resource_kind"] = "plot"
     elif action == "plot" and option(arguments, "--layout-mode") != "update":
         resource["resource_kind"] = "plot"
     elif action in PARALLEL_ACTIONS:
@@ -70,9 +83,20 @@ def job_resources(arguments, action, case=None):
             record = next((item for item in records if preview_id
                            and item.get("creation_preview_id") == preview_id), None)
         target = (record or {}).get("board_id") or option(arguments, "--board")
-        resource.update(resource_kind="board", resource_key=target or "new-board")
+        resource.update(resource_kind="exclusive" if legacy_preview else "board", resource_key=target or "new-board")
         if not source and preview_id:
             resource["source_run_id"] = preview_id[:16]
+    elif action.startswith("miro-") or action == "address-merge":
+        # Legacy operations retain their conservative case scope. A small target
+        # annotation also protects that board from deletion in another case.
+        from .cli import board_id
+        target = (option(arguments, "--board") or option(arguments, "--board-id")
+                  or option(arguments, "--source-board"))
+        if target is None and case is not None:
+            from .investigations import read_case
+            target = read_case(case).get("miro_board")
+        if target:
+            resource["resource_key"] = board_id(target)
     return resource
 
 
@@ -80,6 +104,16 @@ def conflicts(first, second):
     """Unknown/legacy operations retain the original exclusive case scope."""
     same_case = first.get("case_id") is not None and first.get("case_id") == second.get("case_id")
     left, right = first.get("resource_kind", "exclusive"), second.get("resource_kind", "exclusive")
+    if "investigation_delete" in (left, right):
+        # Shared collection workers can retain another selected investigation
+        # as their source. Do not delete any case while one is active.
+        return same_case or "shared_collection" in (left, right)
+    if "board_delete" in (left, right):
+        if same_case:
+            return True
+        board_kinds = {"board", "board_delete", "exclusive"}
+        key = first.get("resource_key") if left in board_kinds else None
+        return bool(key and key != "new-board" and right in board_kinds and key == second.get("resource_key"))
     if "shared_collection" in (left, right):
         return (left == right and first.get("resource_key") is not None
                 and first.get("resource_key") == second.get("resource_key"))

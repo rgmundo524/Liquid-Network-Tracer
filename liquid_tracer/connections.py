@@ -43,6 +43,14 @@ HOP_LIMITED_SCOPE = ("Search scope: verified starter-to-starter paths within the
                      "This view does not fetch additional transactions; missing evidence can still hide connections.")
 
 
+SHORTEST_SCOPE = ("Search scope: one minimum-transaction-hop route per connected ordered starter pair in the "
+                  "selected saved run. The first spend must use a selected starting output. Equal-length "
+                  "routes are resolved by lexicographic outpoint order; longer and alternative tied routes "
+                  "are omitted. Attribution stop/hop rules and plot hop limits do not filter saved connections. "
+                  "Named groups do not reset the distance. This view fetches no additional transactions; missing saved evidence can "
+                  "still hide connections.")
+
+
 def validate_hops(value):
     if type(value) is not int or not 0 <= value <= 2147483647:
         raise TraceError("Connection hops must be a whole number from 0 to 2147483647")
@@ -50,8 +58,8 @@ def validate_hops(value):
 
 
 def validate_connection_scope(value):
-    if value not in (None, "all_saved", "hop_limited"):
-        raise TraceError("Starter connections must use all saved evidence or a transaction-hop limit")
+    if value not in (None, "all_saved", "hop_limited", "shortest"):
+        raise TraceError("Starter connections must use shortest routes, all saved evidence or a transaction-hop limit")
     return value
 
 
@@ -120,26 +128,32 @@ def _saved_connection_evidence(state, *, copy_state=True):
 
 def connecting_outpoints(state, max_hops=10, *, connection_scope=None):
     scope = validate_connection_scope(connection_scope)
-    evidence = _saved_connection_evidence(state) if scope in ("all_saved", "hop_limited") else state
+    evidence = _saved_connection_evidence(state) if scope in ("all_saved", "hop_limited", "shortest") else state
     return _connecting_outpoints(evidence, max_hops, connection_scope=scope)
 
 
 def _connecting_outpoints(state, max_hops=10, *, connection_scope=None):
-    """Union of every edge on any directed path between distinct starters <= H.
+    """Select exact directed starter paths under the requested search policy.
 
-    Two bounded BFS passes per starter suffice. In a DAG, an edge u->v belongs
+    Shortest mode uses reverse BFS to select one deterministic minimum-hop
+    route for each connected ordered pair. Other modes retain every edge on
+    any qualifying path between distinct starters, rather than just shortest
+    paths. Two bounded BFS passes per starter suffice for that union: in a
+    DAG, an edge u->v belongs
     iff distance(start,u) + 1 + distance(v,any OTHER starter) <= H. This retains
     alternate routes, not just shortest paths, without enumerating them. Each
     source's first edge must spend an explicitly selected seed output. Passing
     another starter never resets that source's distance.
     """
     all_saved = connection_scope == "all_saved"
-    saved_evidence = connection_scope in ("all_saved", "hop_limited")
-    if max_hops is not None or not all_saved:
+    saved_evidence = connection_scope in ("all_saved", "hop_limited", "shortest")
+    shortest = connection_scope == "shortest"
+    unbounded = all_saved or shortest
+    if max_hops is not None or not unbounded:
         validate_hops(max_hops)
     # A verified DAG cannot have a directed path longer than N-1. This bound
     # keeps the existing path-union algorithm finite without filtering paths.
-    limit = max(0, len(state["transactions"]) - 1) if all_saved else max_hops
+    limit = max(0, len(state["transactions"]) - 1) if unbounded else max_hops
     seeds = set(state["seeds"])
     roots = sorted({parse_outpoint(key)[0] for key in seeds})
     if len(roots) < 2:
@@ -252,17 +266,29 @@ def _connecting_outpoints(state, max_hops=10, *, connection_scope=None):
             from .group_hops import reference_addresses
             from .named_hop_paths import transaction_depths
             addresses = reference_addresses(state)
+        selected_routes = defaultdict(list)
+        if shortest:
+            from .shortest_paths import shortest_routes
+            for route in shortest_routes(seeds, lambda child: backward.get(child, ())):
+                selected_routes[route["source"]].append(route)
         for root in roots:
-            downstream = distances([root], forward, root)
-            targets = [target for target in roots if target != root and target in downstream]
+            if shortest:
+                routes = selected_routes[root]
+                targets = [route["target"] for route in routes]
+                downstream = {route["target"]: route["shortest_hops"] for route in routes}
+                kept = {key for route in routes for key in route["outpoints"]}
+            else:
+                downstream = distances([root], forward, root)
+                targets = [target for target in roots if target != root and target in downstream]
+                if not targets: continue
+                upstream = distances(targets, backward)
+                kept = set()
+                for parent, child, key, _ in eligible:
+                    if parent == root and key not in seeds: continue
+                    if (parent in downstream and child in upstream
+                            and downstream[parent] + 1 + upstream[child] <= limit):
+                        kept.add(key)
             if not targets: continue
-            upstream = distances(targets, backward)
-            kept = set()
-            for parent, child, key, _ in eligible:
-                if parent == root and key not in seeds: continue
-                if (parent in downstream and child in upstream
-                        and downstream[parent] + 1 + upstream[child] <= limit):
-                    kept.add(key)
             retained.update(kept)
             if name:
                 # Membership uses ordinary transaction hops. Only display
@@ -302,10 +328,10 @@ def _connecting_outpoints(state, max_hops=10, *, connection_scope=None):
                 "transaction_reference_hops": transaction_hops,
                 "output_reference_hops": {key: min(values) for key, values in output_depths.items()},
             }
-    return {"schema_version": 1, "max_hops": None if all_saved else limit,
+    return {"schema_version": 1, "max_hops": None if unbounded else limit,
             **({"connection_scope": connection_scope} if connection_scope is not None else {}),
             "starting_transactions": roots, **reference_fields,
-            "pairs": pairs, "outpoints": sorted(retained), "scope": (ALL_SAVED_SCOPE if all_saved else
+            "pairs": pairs, "outpoints": sorted(retained), "scope": (SHORTEST_SCOPE if shortest else ALL_SAVED_SCOPE if all_saved else
                 HOP_LIMITED_SCOPE if connection_scope == "hop_limited" else SCOPE),
             "source_run_status": state.get("status"), "source_stop_reason": state.get("stop_reason"),
             "source_max_hops": state.get("limits", {}).get("max_hops"),
@@ -314,7 +340,7 @@ def _connecting_outpoints(state, max_hops=10, *, connection_scope=None):
 
 def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, center_name=None,
                      connection_scope=None, transaction_io=None, group_context_inputs=False,
-                     initial_layout=True):
+                     initial_layout=True, include_fees=False):
     """Select connecting transactions, then display their requested local I/O.
 
     Complete I/O is explicit so historical path-only snapshots retain their
@@ -327,6 +353,11 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
 
     connection_scope = validate_connection_scope(connection_scope)
     complete_io = validate_transaction_io(transaction_io) == "complete"
+    if type(include_fees) is not bool:
+        raise TraceError("Fee display must be enabled or disabled")
+    # Fees are optional local context. Legacy path-only snapshots never gain
+    # context merely because the investigation's display preference changes.
+    include_fees = complete_io and include_fees
     if type(group_context_inputs) is not bool:
         raise TraceError("Context input grouping must be enabled or disabled")
     if type(initial_layout) is not bool:
@@ -334,17 +365,36 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
     # Grouped summaries embed member coordinates in semantic export records.
     initial_layout = initial_layout or group_context_inputs
     all_saved = connection_scope == "all_saved"
-    saved_evidence = connection_scope in ("all_saved", "hop_limited")
+    saved_evidence = connection_scope in ("all_saved", "hop_limited", "shortest")
     if saved_evidence:
         state = _saved_connection_evidence(state)
+    if complete_io:
+        for key in state["seeds"]:
+            txid, index = parse_outpoint(key)
+            if txid not in state["transactions"]:
+                raise TraceError("A selected starting transaction is missing from saved evidence")
+            if index >= len(state["transactions"][txid]["data"]["vout"]):
+                raise TraceError("Selected seed output does not exist in its saved transaction")
     report = _connecting_outpoints(state, max_hops, connection_scope=connection_scope)
     outpoints = set(report["outpoints"])
     selected = {key.rpartition(":")[0] for key in outpoints}
     selected.update(state["links"][key]["spending_txid"] for key in outpoints)
+    starters = set(report["starting_transactions"])
+    unconnected = starters - {pair[side] for pair in report["pairs"] for side in ("source", "target")}
+    if complete_io:
+        # Retain each analyst-selected starting transaction even when no
+        # qualifying path reaches another starter. Its local I/O is context,
+        # not an invitation to expand unrelated descendant transactions.
+        selected.update(starters)
     reduced = deepcopy(state)
     reduced["transactions"] = {k: v for k, v in reduced["transactions"].items() if k in selected}
     reduced["outputs"] = {k: v for k, v in reduced["outputs"].items() if k in outpoints}
     reduced["links"] = {k: v for k, v in reduced["links"].items() if k in outpoints}
+    if complete_io:
+        for key in unconnected:
+            reduced["transactions"][key]["depth"] = 0
+            if report.get("hop_reference_name"):
+                report["transaction_reference_hops"].setdefault(key, 0)
     if report.get("hop_reference_name"):
         for key, record in reduced["transactions"].items():
             record["reference_hops"] = report["transaction_reference_hops"][key]
@@ -362,7 +412,7 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
                             for index in range(len(record["data"][field]))} - edge_ids
     # Merge display identities only after selecting exact UTXO edges. Hidden
     # context must not contribute occurrences, labels, or roles to a circle.
-    graph = build_graph(reduced, merge_addresses=True, include_fees=complete_io,
+    graph = build_graph(reduced, merge_addresses=True, include_fees=include_fees,
                         edge_ids=edge_ids | context_edge_ids,
                         color_attribution_arrows=color_attribution_arrows, center_name=center_name,
                         respect_attribution_hops=not saved_evidence, respect_stops=not saved_evidence,
@@ -397,6 +447,8 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
         branch["node_memberships"].update({key: sorted(members, key=root_order.__getitem__)
                                            for key, members in path_memberships.items()})
     keep_nodes = {e[field] for e in graph["edges"] for field in ("source", "target")}
+    if complete_io:
+        keep_nodes.update("tx:" + txid for txid in starters)
     graph["nodes"] = [n for n in graph["nodes"] if n["id"] in keep_nodes]
     if not complete_io:
         graph["fee_items"] = {}
@@ -409,8 +461,12 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
     if connection_scope is not None:
         graph["graph_options"]["connection_scope"] = connection_scope
     if complete_io:
-        report.update(transaction_io="complete", context_edge_count=len(context_edge_ids))
+        report.update(transaction_io="complete", context_edge_count=sum(
+            edge["id"] in context_edge_ids for edge in graph["edges"]))
         graph["graph_options"]["transaction_io"] = "complete"
+        graph["graph_options"]["includes_all_starters"] = True
+        report.update(includes_all_starters=True, starting_transaction_count=len(starters),
+                      unconnected_starting_transactions=sorted(unconnected))
     units = ("group-relative hops" if report.get("hop_reference_name") and not saved_evidence
              else "transaction hops")
     introduction = ((f"All saved starter-to-starter paths. {len(report['pairs'])} ordered starter pair(s) connected. "
@@ -419,7 +475,19 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
                     (f"Starter-to-starter paths of at most {max_hops} {units}. "
                          f"{len(report['pairs'])} ordered starter pair(s) connected. " if outpoints else
                          f"No connection found within {max_hops} hops in the saved searched data. Nothing is plotted. "))
-    context_notice = (" Every input and output of each qualifying transaction is displayed, including fees. "
+    if connection_scope == "shortest":
+        introduction = (f"One shortest route per connected ordered starter pair. {len(report['pairs'])} pair(s) connected. "
+                        if outpoints else "No starter-to-starter connection found in saved evidence. Nothing is plotted. ")
+    if complete_io:
+        if not outpoints:
+            introduction = ("No starter-to-starter connection found in saved evidence. "
+                            if connection_scope in ("all_saved", "shortest") else
+                            f"No connection found within {max_hops} hops in the saved searched data. ")
+        introduction += (f"All {len(starters)} selected starting transactions are shown; "
+                         f"{len(unconnected)} have no qualifying connection to another starter. ")
+    context_notice = ((" Every input and output of each displayed transaction is shown, including fees. "
+                       if include_fees else
+                       " Every input and non-fee output of each displayed transaction is shown. Fees are hidden. ") +
                       "Context arrows do not establish a qualifying starter connection. Unfollowed branch outputs "
                       "are shown without inferring unspent status or expanding their transactions. "
                       "Every traced path edge belongs to a qualifying path; " if complete_io else
@@ -429,10 +497,12 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
     graph["notice"] = (introduction + report["scope"] + address_notice + context_notice + "their union may also form longer routes. "
                         "UTXO reachability does not prove ownership or allocate confidential values.")
     if report.get("hop_reference_name"):
-        distance_label = "Displayed group-relative hops" if connection_scope == "hop_limited" else "Hops"
+        distance_label = "Displayed group-relative hops" if connection_scope in ("hop_limited", "shortest") else "Hops"
         graph["notice"] += (f" {distance_label} count away from attribution group {report['hop_reference_name']}; "
                             "each reached output in that group resets its own path to 0. "
                             + ("Distances describe saved paths without imposing a plot cutoff." if all_saved else
+                               "These display distances do not change minimum-hop route selection or "
+                               "the reported shortest connection distance." if connection_scope == "shortest" else
                                "These display distances do not reset the transaction-hop search limit or "
                                "the reported shortest connection distance." if saved_evidence else
                                "Outside outputs beyond the boundary are not followed."))
@@ -456,9 +526,9 @@ def connection_plan(graph):
 def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=False, progress=None,
                         connection_scope="all_saved"):
     from .cli import (attribution_arrow_coloring, centered_name_group, resolve_latest, run_path, verify_export,
-                      connector_appearance, context_input_grouping, layout_search_attempts, open_preview)
+                      connector_appearance, context_input_grouping, include_fee_flows, layout_search_attempts, open_preview)
     from .investigations import read_case
-    from .services import apply_service_labels, load_services
+    from .services import apply_service_labels, effective_services
     from .elk_layout import optimize_graph
     from .layout_preview import export_layout
     from .mermaid import mermaid_source
@@ -475,14 +545,15 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
     state = read_json(archive / "trace.json")
     if state.get("case_id") != metadata["case_id"] or state.get("run_id") != run_id:
         raise TraceError("The selected run does not belong to this investigation")
-    settings = load_services(case)
+    settings = effective_services(case)
     state["labels"] = apply_service_labels(state["labels"], settings)
     state["service_controls"] = {k: v for k, v in settings.items() if k != "history"}
     from .address_counts import apply_saved_counts
     apply_saved_counts(case, state)
     graph = connection_graph(state, max_hops, color_attribution_arrows=attribution_arrow_coloring(metadata),
                               center_name=centered_name_group(metadata), connection_scope=connection_scope,
-                              transaction_io="complete", group_context_inputs=context_input_grouping(metadata))
+                              transaction_io="complete", group_context_inputs=context_input_grouping(metadata),
+                              include_fees=include_fee_flows(metadata))
     counts = None
     if graph["nodes"]:
         graph = optimize_graph(graph, connector_style=connector_appearance(metadata), progress=progress,
@@ -519,6 +590,8 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
         result["layout_attempts"] = graph["graph_options"]["layout_attempts"]
     return {**result, "address_counts": counts, "directory": str(destination.resolve()), "preview_id": destination.name,
             "run_id": run_id, "include_fees": graph["include_fees"], "max_hops": report["max_hops"],
+            **{key: report[key] for key in ("includes_all_starters", "starting_transaction_count",
+                                            "unconnected_starting_transactions") if key in report},
             **({"transaction_io": "complete", "context_edge_count": report["context_edge_count"]}
                if report.get("transaction_io") == "complete" else {}),
             "group_context_inputs": graph["graph_options"].get("group_context_inputs", False),
@@ -528,6 +601,32 @@ def preview_connections(case, run_id="latest", max_hops=10, *, open_browser=Fals
             "connection_count": report["connection_count"], "transaction_count": report["transaction_count"],
             "status": report["status"], "notice": graph["notice"],
             "browser_opened": open_preview(result["html"]) if open_browser else False}
+
+
+def validate_starter_visibility(graph):
+    """Validate new all-starter displays without reinterpreting old snapshots."""
+    report, options = graph.get("connections", {}), graph.get("graph_options", {})
+    fields = {"includes_all_starters", "starting_transaction_count", "unconnected_starting_transactions"}
+    if not (fields.intersection(report) or "includes_all_starters" in options):
+        return
+    try:
+        starters = report["starting_transactions"]
+        roots = sorted({parse_outpoint(key)[0] for key in graph["run"]["seeds"]})
+        connected = {pair[side] for pair in report["pairs"] for side in ("source", "target")}
+        nodes = {node["id"]: node for node in graph["nodes"]}
+        valid = (report.get("includes_all_starters") is True
+                 and options.get("includes_all_starters") is True
+                 and report.get("transaction_io") == options.get("transaction_io") == "complete"
+                 and starters == roots and len(roots) >= 2 and connected <= set(roots)
+                 and type(report.get("starting_transaction_count")) is int
+                 and report["starting_transaction_count"] == len(roots)
+                 and report.get("unconnected_starting_transactions") == sorted(set(roots) - connected)
+                 and all(nodes.get("tx:" + root, {}).get("kind") == "transaction"
+                         and nodes["tx:" + root].get("role") == "starting_transaction" for root in roots))
+    except (KeyError, TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise TraceError("Saved starter visibility disagrees with its graph; regenerate the preview")
 
 
 def reviewed_connections(case, preview_id):
@@ -562,23 +661,25 @@ def reviewed_connections(case, preview_id):
             or plan.get("schema_version") != 1):
         raise TraceError("Connection preview does not match this investigation")
     from .cli import attribution_arrow_coloring, centered_name_group, context_input_grouping, run_path, verify_export
-    from .services import load_services
+    from .services import effective_services
     from .miro import make_plan
     archive = run_path(case, graph["run_id"])
     verify_export(archive)
-    settings = load_services(case)
+    settings = effective_services(case)
     report = graph.get("connections", {})
     scope = validate_connection_scope(report.get("connection_scope"))
     transaction_io = validate_transaction_io(report.get("transaction_io"))
     if (graph["graph_options"].get("transaction_io") != transaction_io
             or (transaction_io == "complete" and
-                (graph.get("include_fees") is not True or graph["graph_options"].get("include_fees") is not True))):
+                (type(graph.get("include_fees")) is not bool
+                 or graph["graph_options"].get("include_fees") is not graph["include_fees"]))):
         raise TraceError("Saved connection transaction I/O disagrees with its graph; regenerate the preview")
+    validate_starter_visibility(graph)
     if (graph["graph_options"].get("connection_scope") != scope
             or graph["graph_options"].get("connection_hops") != report.get("max_hops")
-            or (scope == "all_saved" and report.get("max_hops") is not None)):
+            or (scope in ("all_saved", "shortest") and report.get("max_hops") is not None)):
         raise TraceError("Saved connection scope disagrees with its graph; regenerate the preview")
-    if scope != "all_saved":
+    if scope not in ("all_saved", "shortest"):
         validate_hops(report.get("max_hops"))
     if (report.get("archive_sha256") != digest((archive / "SHA256SUMS").read_bytes())
             or report.get("service_sha256") != digest(canonical({k: v for k, v in settings.items() if k != "history"}))

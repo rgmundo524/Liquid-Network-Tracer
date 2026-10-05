@@ -12,6 +12,7 @@ from liquid_tracer.common import read_json
 from liquid_tracer.investigations import create_investigation
 from liquid_tracer.services import load_services, set_service
 from tests import test_web
+from tests.test_name_color_import import REUSABLE_PALETTE, REUSABLE_PALETTE_CSV
 
 
 class NameColorImportWebTests(unittest.TestCase):
@@ -64,6 +65,21 @@ class NameColorImportWebTests(unittest.TestCase):
         self.assertEqual(apply('[{"name":"Perp","color":null}]', "replace")["changed"], 1)
         self.assertEqual(load_services(case)["name_colors"], {})
 
+    def test_reusable_palette_imports_into_case_without_address_attributions(self):
+        _, record = self.create()
+        case, _ = self.server.case(record["id"])
+        endpoint = "/api/cases/" + record["id"] + "/name-color-import"
+        payload = {"text": REUSABLE_PALETTE_CSV}
+        with patch.object(self.server, "start_job") as worker:
+            review = self.success(endpoint, payload)
+            self.assertTrue(review["valid"], review["errors"])
+            self.assertEqual([row["addresses"] for row in review["changes"]], [0] * 4)
+            result = self.success(endpoint, {**payload, "approve_plan": review["approval_sha256"]})
+            self.assertEqual(result["changed"], 4)
+            worker.assert_not_called()
+        self.assertEqual(load_services(case)["rules"], {})
+        self.assertEqual(load_services(case)["name_colors"], REUSABLE_PALETTE)
+
     def test_csrf_busy_stale_and_invalid_requests_preserve_settings(self):
         case, route = self.prepare()
         endpoint = route + "/name-color-import"
@@ -81,7 +97,7 @@ class NameColorImportWebTests(unittest.TestCase):
                       {"policy": "overwrite"}, {"approve_plan": "wrong"}):
             self.assertEqual(self.request(endpoint, {**payload, **extra})[0], 400)
             self.assertEqual((case / "services.json").read_bytes(), before)
-        invalid = self.success(endpoint, {"text": payload["text"] + "Unknown,#ffffff\n"})
+        invalid = self.success(endpoint, {"text": payload["text"] + "Unknown,invalid\n"})
         self.assertFalse(invalid["valid"])
         self.assertIsNone(invalid["approval_sha256"])
         self.assertEqual((case / "services.json").read_bytes(), before)
@@ -134,11 +150,25 @@ class NameColorImportCliTests(unittest.TestCase):
 
     def test_invalid_rows_have_nonzero_exit_and_no_writes(self):
         before = (self.case / "services.json").read_bytes()
-        self.file.write_text("Name,Color\nPerp,#123456\nUnknown,#abcdef\n")
+        self.file.write_text("Name,Color\nPerp,#123456\nUnknown,invalid\n")
         status, preview, _ = self.command()
         self.assertEqual(status, 1)
         self.assertFalse(preview["valid"])
         self.assertEqual((self.case / "services.json").read_bytes(), before)
+
+    def test_reusable_palette_imports_before_any_address_attributions(self):
+        self.case = create_investigation(self.root, "Empty palette destination")
+        self.file.write_text(REUSABLE_PALETTE_CSV)
+        status, preview, _ = self.command()
+        self.assertEqual(status, 0)
+        self.assertTrue(preview["valid"], preview["errors"])
+        self.assertEqual([row["addresses"] for row in preview["changes"]], [0] * 4)
+        self.assertFalse((self.case / "services.json").exists())
+        status, result, _ = self.command("--approve-plan", preview["approval_sha256"])
+        self.assertEqual(status, 0)
+        self.assertEqual(result["changed"], 4)
+        self.assertEqual(load_services(self.case)["rules"], {})
+        self.assertEqual(load_services(self.case)["name_colors"], REUSABLE_PALETTE)
 
 
 if __name__ == "__main__":

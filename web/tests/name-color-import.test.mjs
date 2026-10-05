@@ -212,3 +212,24 @@ test('replacement preview includes clear actions and paginates large imports', a
   assert.match(panel('case A', false), /Rows 101–101 of 101/);
   assert.match(panel('case A', false), />Name 100</);
 });
+
+test('unused name colors can be reviewed and applied with zero matching addresses', async () => {
+  const calls = [];
+  const ctx = context(async (_path, payload) => {
+    calls.push(payload);
+    return payload.approve_plan ? {changed: 1, revision: 1} : makeReview({changes: [
+      {row: 2, name: 'Unknown Service', key: 'unknown service', color: '#bdbdbd',
+        previous: null, action: 'add', addresses: 0},
+    ]});
+  });
+  await open(ctx); edit('text', 'Name,Color\nUnknown Service,#bdbdbd\n');
+  await preview(ctx);
+  const html = panel('case A', false);
+  assert.match(html, /Unknown Service/);
+  assert.match(html, /0<br><small>Unused in this investigation/);
+  assert.doesNotMatch(html, /id="name-color-import-apply"[^>]* disabled/);
+  await apply(ctx);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].approve_plan, 'review-hash');
+  assert.match(panel('case A', false), /Saved 1 name color assignment/);
+});

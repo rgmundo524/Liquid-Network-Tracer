@@ -60,11 +60,12 @@ class PegoutFeeVisibilityTests(unittest.TestCase):
                 original = self.state["transactions"][node["id"][3:]]["data"]
                 self.assertEqual(node["details"]["transaction"]["vout"], original["vout"])
 
-    def test_api_defaults_preserve_legacy_complete_and_path_only_graphs(self):
+    def test_api_defaults_hide_fees_unless_explicitly_enabled(self):
         complete = pegout_graph(self.state, self.query)
-        self.assert_fee_visibility(complete, True)
+        self.assert_fee_visibility(complete, False)
         self.assertEqual(complete, pegout_graph(self.state, self.query, include_fees=None))
-        self.assertEqual(complete, pegout_graph(self.state, self.query, include_fees=True))
+        self.assertEqual(complete, pegout_graph(self.state, self.query, include_fees=False))
+        self.assert_fee_visibility(pegout_graph(self.state, self.query, include_fees=True), True)
         legacy = validate_query(seeds=self.state["seeds"], max_hops=2)
         default = pegout_graph(self.state, legacy)
         self.assert_fee_visibility(default, False)

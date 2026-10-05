@@ -265,9 +265,11 @@ class PlotTests(unittest.TestCase):
         self.assertIn("Sharing a circle does not establish a spend", (directory / "graph.html").read_text())
         self.assertEqual(before, self.bytes(self.archive))
 
-    def test_empty_results_remain_reviewable_with_no_layout_or_miro_objects(self):
+    def test_empty_pegout_results_remain_reviewable_with_no_layout_or_miro_objects(self):
         self.state, self.archive = saved_case(self.case, graph_state())
-        for goal in ("connections", "pegouts"):
+        # Starter connections intentionally retain every selected starter, even
+        # when no connection exists; only an empty peg-out search has no shapes.
+        for goal in ("pegouts",):
             with self.subTest(goal=goal):
                 result = preview_plot(self.case, goal, max_hops=0)
                 graph, plan = reviewed_plot(self.case, result["preview_id"])

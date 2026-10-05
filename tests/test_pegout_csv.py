@@ -202,7 +202,7 @@ class PegoutCSVTests(unittest.TestCase):
         for grouped in (False, True):
             with self.subTest(grouped=grouped):
                 complete = pegout_graph(state, validate_query(seeds=state["seeds"], min_hops=2,
-                    max_hops=2, transaction_io="complete"), group_context_inputs=grouped)
+                    max_hops=2, transaction_io="complete"), group_context_inputs=grouped, include_fees=True)
                 self.assertEqual(pegout_csv_rows(complete, state), expected)
                 self.assertEqual(pegout_lbtc_summary(complete, state)["lbtc"], "2")
                 self.assertEqual([row["Status"] for row in endpoint_table_rows(complete, state)], ["Pegout"])

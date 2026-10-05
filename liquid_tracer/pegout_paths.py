@@ -21,7 +21,10 @@ SEED_SCOPE = SCOPE.replace("from the chosen transaction", "from the selected see
 
 def validate_query(txid=None, min_hops=0, max_hops=10, *, seeds=None,
                    include_unspent=False, include_unspendable=False, include_context=False,
-                   hop_reference_name="", transaction_io=None, attribution_hop_limits=None, pegout_lbtc_limit=None):
+                   hop_reference_name="", transaction_io=None, attribution_hop_limits=None, pegout_lbtc_limit=None,
+                   hop_basis="configured"):
+    from .plot_scope import validate_hop_basis
+    validate_hop_basis(hop_basis)
     if seeds is not None:
         if txid is not None:
             raise TraceError("Choose either selected seed outputs or one transaction for a peg-out search")
@@ -57,6 +60,10 @@ def validate_query(txid=None, min_hops=0, max_hops=10, *, seeds=None,
     if amount_limit is not None:
         options["pegout_lbtc_limit"] = amount_limit
     name = normalize_reference_name(hop_reference_name)
+    if hop_basis == "original_seeds":
+        if name:
+            raise TraceError("Original starting-output hops cannot use a named-group hop reference")
+        options["hop_basis"] = hop_basis
     if name:
         options["hop_reference_name"] = name
     # Omitting disabled options preserves the identity of existing saved queries.
@@ -273,13 +280,13 @@ def _endpoint_matches(state, endpoints, distances):
 
 
 def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=None,
-                 group_context_inputs=False, include_fees=None, hub_addresses=None, initial_layout=True):
+                 group_context_inputs=False, include_fees=False, hub_addresses=None, initial_layout=True):
     """Select qualifying transactions, then show their requested local context.
 
     Complete I/O is explicitly versioned in the query so archived path-only
     graphs can still be reviewed using their original display semantics.
-    Explicit fee visibility controls complete-I/O charts; omitting it retains
-    the former complete-I/O fee policy for existing direct callers.
+    Fees are displayed in complete-I/O charts only when explicitly enabled.
+    Saved graph review retains the fee visibility recorded in that graph.
     Reachability, endpoint matches and tracked-output evidence never expand
     when local context is displayed. Manual hubs affect placement only after
     selecting those paths; they neither add transactions nor change endpoints.
@@ -299,6 +306,8 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
         raise TraceError("Fee flows must be enabled or disabled")
     if not isinstance(query, dict):
         raise TraceError("Choose selected seed outputs or a transaction and an inclusive peg-out hop range")
+    from .plot_scope import projected_hop_basis
+    state = projected_hop_basis(state, query.get("hop_basis", "configured"))
     name = reference_name(state)
     if "hop_reference_name" in query and normalize_reference_name(query["hop_reference_name"]) != name:
         raise TraceError("Peg-out hop reference must match the selected collection run")
@@ -308,9 +317,10 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
                            include_context=query.get("include_context", False), hop_reference_name=name,
                            transaction_io=query.get("transaction_io"),
                            attribution_hop_limits=query.get("attribution_hop_limits"),
-                           pegout_lbtc_limit=query.get("pegout_lbtc_limit"))
+                           pegout_lbtc_limit=query.get("pegout_lbtc_limit"),
+                           hop_basis=query.get("hop_basis", "configured"))
     complete_io = query.get("transaction_io") == "complete"
-    include_fees = complete_io and (include_fees if include_fees is not None else True)
+    include_fees = complete_io and include_fees is True
     include_context = complete_io or query.get("include_context", False)
     limit_summary = {}
     outpoints, endpoint_matches, depths, output_depths = _paths(state, query, limit_summary=limit_summary)

@@ -12,6 +12,9 @@ from .performance import public_api_diagnostics
 
 
 MESSAGES = {
+    "deleting_investigation": "Deleting the confirmed investigation's local files",
+    "deleting_board": "Deleting the confirmed Miro board and updating its local record",
+    "scope_analysis": "Comparing saved tracing depths and identifying open branches",
     "plot_shared_projection": "Preparing the shared-data view",
     "plot_load_source": "Loading and verifying the plot source",
     "plot_build_graph": "Building graph objects and connections",
@@ -381,6 +384,7 @@ class ProgressReporter:
             elapsed = f"; {value['elapsed_seconds']:g}s elapsed" if "elapsed_seconds" in value else ""
             try:
                 prefix = ("Collection: " if value["phase"] in COLLECTION_PHASES or value["phase"] == "exporting_collection" else
+                          "Investigation: " if value["phase"] == "deleting_investigation" else
                           "Counts: " if value["phase"].startswith("address_counts") else
                           "Plot: " if value["phase"] == "exporting_plot" or value["phase"].startswith("plot_") else
                           "Peg-outs: " if value["phase"].startswith("pegout_") else

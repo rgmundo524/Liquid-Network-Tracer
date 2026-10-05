@@ -125,7 +125,14 @@ def select_snapshot(index, seeds, *, max_hops=None, connection_scope=None, progr
             raise TraceError("A selected starting output does not exist in the shared transaction evidence")
 
     report_progress(progress, "projecting_collection", 0, 1)
-    if scope in ("all_saved", "hop_limited"):
+    if scope == "shortest":
+        from .shortest_paths import shortest_routes
+        routes = shortest_routes(seeds, lambda child: (
+            (parse_outpoint(link["outpoint"])[0], link["outpoint"]) for link in index.incoming(child)),
+            progress=progress)
+        selected = {parse_outpoint(key)[0] for key in seeds}
+        selected.update(parse_outpoint(key)[0] for route in routes for key in route["outpoints"])
+    elif scope in ("all_saved", "hop_limited"):
         selected = _connections(index, set(seeds), None if scope == "all_saved" else max_hops, progress)
     else:
         selected = _reachable(index, set(seeds), max_hops, progress)

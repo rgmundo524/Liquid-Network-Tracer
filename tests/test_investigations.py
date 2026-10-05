@@ -156,7 +156,7 @@ class InvestigationTests(unittest.TestCase):
 
     def test_discovery_is_read_only_and_corrupt_cases_are_visible(self):
         self.assertEqual(list_investigations(self.root), [])
-        self.assertEqual(load_settings(self.root), DEFAULTS)
+        self.assertEqual(load_settings(self.root), {**DEFAULTS, "layout_style": "trace"})
         self.assertFalse(self.root.exists())
         case = create_investigation(self.root, "Damaged case")
         (case / "case.json").write_text("invalid json")

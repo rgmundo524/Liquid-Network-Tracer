@@ -13,6 +13,7 @@ from liquid_tracer.investigations import create_investigation
 from liquid_tracer.services import load_services, set_service
 from tests.fixtures import A, B
 from tests.test_change_outputs import save_archive
+from tests.test_name_color_import import REUSABLE_PALETTE, REUSABLE_PALETTE_CSV
 
 
 class InputImportTests(unittest.TestCase):
@@ -123,11 +124,32 @@ class InputImportTests(unittest.TestCase):
         # Remove the second, new address so keep cannot introduce Exchange.
         files[1] = {**self.attributions, "text": "Address,Name\nSYNTHETIC-one,Exchange\n"}
         preview = imports.preview_import(self.case, files)
-        self.assertFalse(preview["valid"])
-        self.assertIn("Unknown attribution name", preview["errors"][0]["message"])
-        files[1]["policy"] = "replace"
-        self.assertEqual(self.apply(files)["changed"], 2)
+        self.assertTrue(preview["valid"], preview["errors"])
+        self.assertEqual(preview["files"][0]["changes"][0]["addresses"], 0)
+        self.assertEqual(self.apply(files)["changed"], 1)
+        self.assertEqual(load_services(self.case)["rules"]["SYNTHETIC-one"]["name"], "Old name")
         self.assertEqual(load_services(self.case)["name_colors"], {"exchange": "#12abcd"})
+        files[1]["policy"] = "replace"
+        preview = imports.preview_import(self.case, files)
+        self.assertEqual(preview["files"][0]["changes"][0]["addresses"], 1)
+        self.assertEqual(self.apply(files)["changed"], 1)
+        self.assertEqual(load_services(self.case)["rules"]["SYNTHETIC-one"]["name"], "Exchange")
+        self.assertEqual(load_services(self.case)["name_colors"], {"exchange": "#12abcd"})
+
+    def test_palette_only_import_accepts_all_names_without_changing_saved_evidence(self):
+        archive = save_archive(self.case)
+        before = {path: path.read_bytes() for path in (self.case / "case.json", archive / "trace.json",
+                                                       archive / "graph.json", archive / "SHA256SUMS")}
+        files = [{"name": "group-colors.csv", "text": REUSABLE_PALETTE_CSV}]
+        preview = imports.preview_import(self.case, files)
+        self.assertTrue(preview["valid"], preview["errors"])
+        self.assertEqual(preview["files"][0]["kind"], "name-colors")
+        self.assertEqual([row["addresses"] for row in preview["files"][0]["changes"]], [0] * 4)
+        self.assertEqual(self.apply(files)["changed"], 4)
+        self.assertEqual(load_services(self.case)["name_colors"], REUSABLE_PALETTE)
+        self.assertEqual(load_services(self.case)["rules"], {})
+        for path, content in before.items():
+            self.assertEqual(path.read_bytes(), content)
 
     def test_detection_normalizes_bom_aliases_and_ignores_helper_columns(self):
         files = [

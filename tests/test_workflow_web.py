@@ -557,7 +557,7 @@ class WorkflowWebTests(unittest.TestCase):
         self.assertEqual(listed["query"], {"connection_scope": "all_saved", "transaction_io": "complete"})
         self.assertEqual(listed["context_edge_count"], plot["context_edge_count"])
         self.assertGreater(listed["context_edge_count"], 0)
-        self.assertTrue(listed["layout_settings"]["include_fees"])
+        self.assertFalse(listed["layout_settings"]["include_fees"])
         self.assertTrue(listed["layout_settings"]["group_context_inputs"])
         downloads = {item["name"]: item["url"] for item in listed["artifact"]["downloads"]}
         rows = list(csv.DictReader(io.StringIO(self.success(downloads["transactions.csv"]).decode())))
@@ -642,6 +642,9 @@ class WorkflowWebTests(unittest.TestCase):
         state["links"] = {parent + ":0": {"spending_txid": child, "vin": 11}}
         for depth, key in enumerate((parent, child)):
             state["transactions"][key]["depth"] = depth
+            # This becomes a collection archive, not merely a layout fixture:
+            # exact-spend recovery requires an observed confirmation status.
+            state["transactions"][key]["data"]["status"] = {"confirmed": True, "block_time": 1700000000 + depth}
             state["outputs"][key + ":0"] = {"outpoint": key + ":0", "txid": key, "vout": 0,
                 "depth": depth, "status": "spent" if depth == 0 else "hop_limit"}
         state, archive = saved_case(case, state)

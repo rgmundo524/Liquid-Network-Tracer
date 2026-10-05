@@ -395,7 +395,7 @@ class PegoutSearchTests(unittest.TestCase):
                   for path in directory.rglob("*") if path.is_file()}
         set_service(self.case, "SYNTHETIC-branch-A", name="Changed attribution", stop_tracing=True)
         update_case(self.case, {"run_defaults": {"center_name": "Changed center", "color_attribution_arrows": True}})
-        with patch("liquid_tracer.pegouts.load_services", side_effect=AssertionError("Current rules must not be read")), \
+        with patch("liquid_tracer.pegouts.effective_services", side_effect=AssertionError("Current rules must not be read")), \
                 patch.object(Esplora, "get", side_effect=AssertionError("Snapshot must not fetch")):
             saved_graph, saved_plan, state = saved_pegout_snapshot(self.case, result["preview_id"])
         self.assertEqual((saved_graph, saved_plan), (graph, plan))

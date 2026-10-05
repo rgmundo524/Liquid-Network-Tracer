@@ -74,7 +74,7 @@ class InputImportWebTests(unittest.TestCase):
     def test_invalid_rows_block_every_file_and_import_has_its_own_body_limit(self):
         case, route = self.prepare()
         body = {"files": batch()}
-        body["files"][0]["text"] += "Unknown,#abcdef\n"
+        body["files"][0]["text"] += "Unknown,invalid\n"
         review = self.success(route + "/input-import", body)
         self.assertFalse(review["valid"])
         self.assertIsNone(review["approval_sha256"])

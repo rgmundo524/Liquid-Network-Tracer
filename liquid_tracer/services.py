@@ -68,6 +68,8 @@ def _validate(data, identity):
             or data["revision"] < 0 or not isinstance(data.get("rules"), dict)
             or not isinstance(data.get("history"), list)):
         raise TraceError("Invalid address-assessment settings; restore services.json")
+    if type(data.get("use_shared_attributions", False)) is not bool:
+        raise TraceError("Use shared attributions must be true or false")
     for address, rule in data["rules"].items():
         if (validate_address(address) != address or not isinstance(rule, dict)
                 or rule.get("address") != address
@@ -101,6 +103,82 @@ def load_services(case):
         return _validate(read_json(path), identity)
     except (OSError, ValueError, TypeError, KeyError) as error:
         raise TraceError("Unable to read address-assessment settings; restore services.json") from error
+
+
+def effective_services(case):
+    """Capture local assessments plus one atomic shared-library revision.
+
+    Writers must use load_services instead: inherited entries are never copied
+    into a case implicitly. A disabled local entry also overrides the library.
+    Callers retain this snapshot in their run/preview inputs and cache keys.
+    """
+    settings = load_services(case)
+    if not settings.get("use_shared_attributions", False):
+        return settings
+    from .shared_attributions import load_library
+    library = load_library(Path(case).resolve().parent)
+    settings = copy.deepcopy(settings)
+    inherited = {address: {**copy.deepcopy(rule), "stop_tracing": False,
+                          "hop_limit": None, "attribution_origin": "shared",
+                          "shared_library_id": library["library_id"],
+                          "shared_revision": library["revision"]}
+                 for address, rule in library["rules"].items()}
+    settings["rules"] = inherited | settings["rules"]
+    settings["shared_attributions"] = {"library_id": library["library_id"],
+                                       "revision": library["revision"]}
+    return settings
+
+
+def _sharing_status(settings, library):
+    return {"enabled": settings.get("use_shared_attributions", False),
+            "revision": settings["revision"], "shared_revision": library["revision"] if library else None,
+            "shared_count": len(library["rules"]) if library else None,
+            "local_overrides": len(settings["rules"].keys() & library["rules"].keys()) if library else None,
+            "shared_unavailable": library is None}
+
+
+def shared_attribution_status(case):
+    from .shared_attributions import load_library
+    settings = load_services(case)
+    try:
+        library = load_library(Path(case).resolve().parent)
+    except TraceError:
+        library = None  # Keep the local opt-out available if the library needs repair.
+    return _sharing_status(settings, library)
+
+
+def set_shared_attributions(case, enabled, *, expected_revision):
+    """Opt in explicitly without changing local labels or tracing boundaries."""
+    if type(enabled) is not bool:
+        raise TraceError("Use shared attributions must be true or false")
+    if type(expected_revision) is not int or expected_revision < 0:
+        raise TraceError("Saving shared attribution settings requires the current revision")
+    from .shared_attributions import load_library
+    case = Path(case)
+    with (case / "trace.lock").open("a") as trace_lock:
+        try:
+            fcntl.flock(trace_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise TraceError("A trace is running in this case; change shared attribution settings after it finishes") from None
+        with (case / "case.lock").open("a") as case_lock:
+            fcntl.flock(case_lock, fcntl.LOCK_EX)
+            settings = load_services(case)
+            if settings["revision"] != expected_revision:
+                raise TraceError("Address assessments changed; review shared attribution settings again")
+            try:
+                library = load_library(case.resolve().parent)
+            except TraceError:
+                if enabled:
+                    raise
+                library = None
+            previous = settings.get("use_shared_attributions", False)
+            if enabled != previous:
+                settings["use_shared_attributions"] = enabled
+                settings["revision"] += 1
+                settings["history"].append({"revision": settings["revision"], "changed_at": now(),
+                    "setting": "use_shared_attributions", "previous": previous, "value": enabled})
+                save_json(case / "services.json", settings)
+            return _sharing_status(settings, library)
 
 
 def set_service(case, address, *, name=None, notes=None, rationale=None, enabled=True,
@@ -140,13 +218,16 @@ def _update_service(case, address, *, name=None, rationale=None, enabled=True, p
             data = load_services(case)
             stamp = now()
             previous = data["rules"].get(address)
+            base = previous
+            if base is None and data.get("use_shared_attributions", False):
+                base = effective_services(case)["rules"].get(address)
             if preserve_text:
-                if previous is None:
+                if base is None:
                     raise TraceError("This address has no saved assessment")
-                name, rationale = previous["name"], notes_for(previous)
-            name = name if name is not None else (previous or {}).get("name", "")
-            rationale = rationale if rationale is not None else notes_for(previous or {})
-            metadata = rule_fields(previous or {})
+                name, rationale = base["name"], notes_for(base)
+            name = name if name is not None else (base or {}).get("name", "")
+            rationale = rationale if rationale is not None else notes_for(base or {})
+            metadata = rule_fields(base or {})
             metadata.update({key: value for key, value in (fields or {}).items() if value is not None or key == "hop_limit"})
             metadata["source"] = _text(metadata["source"], "Source", 1000, required=True)
             metadata["observed_at"] = _text(metadata["observed_at"], "Observation date", 80)
@@ -177,6 +258,8 @@ def service_labels(settings):
             "entity": rule["name"] or "Unnamed address",
             "source": fields["source"], "confidence": fields["confidence"],
             "managed_by": MANAGED_BY, "stop": fields["stop_tracing"],
+            **({key: rule[key] for key in ("attribution_origin", "shared_library_id", "shared_revision")
+                if key in rule}),
             **({"hop_limit": fields["hop_limit"]} if fields["hop_limit"] is not None else {}),
             "observed_at": fields["observed_at"] or rule["updated_at"], "notes": notes_for(rule)})
     return labels

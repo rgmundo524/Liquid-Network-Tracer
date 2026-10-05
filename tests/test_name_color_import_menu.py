@@ -137,7 +137,7 @@ class NameColorImportMenuTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(115, 65)) as pilot:
             screen = await self.open_import(app, pilot)
             screen.query_one("#name-color-import-text", TextArea).text = (
-                "Name,Color\nBTSE,#123456\nUnknown name,#abcdef\n")
+                "Name,Color\nBTSE,#123456\nUnknown name,invalid\n")
             await pilot.pause()
             await self.click(app, pilot, "#name-color-import-preview")
             self.assertFalse(screen.review["valid"])

@@ -29,9 +29,23 @@ def _item_budget_summary(settings):
 
 
 def _endpoint_summary(plot):
-    if plot.get("goal") == "connections" and plot.get("query", {}).get("transaction_io") == "complete":
-        return ("all transaction inputs and outputs included" +
-                (" (isolated inputs grouped)" if plot.get("layout_settings", {}).get("group_context_inputs") else ""))
+    if plot.get("goal") == "connections":
+        query = plot.get("query", {})
+        scope = query.get("connection_scope")
+        summary = ("shortest connections" if scope == "shortest" else
+                   "all saved connections" if scope == "all_saved" else
+                   f"within {plot.get('max_hops')} transaction hops" if scope == "hop_limited" else
+                   "legacy bounded connections")
+        if query.get("transaction_io") == "complete":
+            summary += ", all transaction inputs and " + ("non-fee outputs included"
+                if plot.get("layout_settings", {}).get("include_fees") is False else "outputs included")
+            if plot.get("layout_settings", {}).get("group_context_inputs"):
+                summary += " (isolated inputs grouped)"
+        if plot.get("includes_all_starters"):
+            summary += f", all {plot.get('starting_transaction_count')} starting transactions shown"
+            if plot.get("unconnected_starting_transaction_count"):
+                summary += f", {plot['unconnected_starting_transaction_count']} without a qualifying connection"
+        return summary
     if plot.get("goal") != "pegouts":
         return ""
     query, counts = plot.get("query", {}), plot.get("endpoint_counts", {})
@@ -154,7 +168,8 @@ def plot_screen(base, button, case):
                 yield Static(_item_budget_summary(self.settings), markup=False)
                 yield Static("Full investigation: all displayed activity. Starter connections: all verified saved paths between "
                              "starting transactions. Paths to peg-outs: verified paths ending in matching requests. "
-                             "Both focused plots include every input and output of their selected transactions, including fees.", markup=False)
+                             "Both focused plots include inputs and outputs of their selected transactions. "
+                             "Fee flows are hidden unless enabled in investigation settings.", markup=False)
                 with Vertical(id="plot-range"):
                     with Vertical(id="plot-minimum"):
                         yield Label("Minimum transaction hops, inclusive")
@@ -166,7 +181,8 @@ def plot_screen(base, button, case):
                     yield Checkbox("Include unspendable outputs", id="plot-include-unspendable")
                     yield Static("Peg-outs are always included. Unspent means recorded as unspent in this saved collection; "
                                  "it is not a live balance check. Fee outputs are excluded from endpoint selection.", markup=False)
-                    yield Static("Every selected transaction displays all its inputs and outputs, including fees. "
+                    yield Static("Every selected transaction displays its inputs and outputs. "
+                                 "Fee flows are hidden unless enabled in investigation settings. "
                                  "Other branch outputs stay visible without extending the trace or adding matching endpoints. "
                                  "Grouping follows the saved "
                                  "Group isolated context inputs layout setting.", markup=False)
@@ -318,7 +334,7 @@ def boards_screen(base, button, case):
                     if _compatible_plot(plot, row)]
                 self.query_one("#workflow-preview", Select).set_options([
                     (f"{plot['run_id']} | {plot['preview_id']}" +
-                     (" | " + _endpoint_summary(plot) if plot.get("goal") == "pegouts" else ""),
+                     (" | " + _endpoint_summary(plot) if plot.get("goal") in ("pegouts", "connections") else ""),
                      plot["preview_id"]) for plot in compatible])
                 if resuming and compatible:
                     self.query_one("#workflow-preview", Select).value = compatible[0]["preview_id"]
@@ -340,7 +356,7 @@ def boards_screen(base, button, case):
                 self.query_one("#workflow-preview-status", Static).update(
                     f"Saved run: {plot['run_id']}\nCollection status: {plot.get('source_run_status', 'unknown')}; "
                     f"hop ceiling: {plot.get('source_max_hops', 'unknown')}."
-                    + ("\nEndpoints: " + _endpoint_summary(plot) if plot.get("goal") == "pegouts" else "")
+                    + ("\nScope: " + _endpoint_summary(plot) if plot.get("goal") in ("pegouts", "connections") else "")
                     + (" No matching activity to publish." if plot.get("empty") else "") if ready else
                     "Choose a compatible saved plot. If none are listed, return to Plot saved data.")
 

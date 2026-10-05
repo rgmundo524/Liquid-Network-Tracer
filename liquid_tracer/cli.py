@@ -25,7 +25,7 @@ from .performance import public_performance
 from .layout_search import DEFAULT_LAYOUT_ATTEMPTS, MAX_LAYOUT_ATTEMPTS, normalize_layout_attempts
 from .store import Store
 from .trace import new_state, trace
-from .services import apply_service_labels, disable_service, load_services, set_service
+from .services import apply_service_labels, disable_service, effective_services, set_service
 from .compaction_preview import (compaction_apply_lock, compaction_preview_metadata, latest_compaction_preview,
                                  verified_compaction_preview)
 
@@ -60,6 +60,11 @@ def parser():
     commands = root.add_subparsers(dest="command", required=True)
     menu = commands.add_parser("menu", help="Open the interactive investigation menu")
     menu.add_argument("--investigations-dir", type=Path, help="Directory containing saved investigations")
+    deletion = commands.add_parser("investigation-delete", help="Delete one explicitly confirmed local investigation")
+    deletion.add_argument("--investigations-dir", type=Path, required=True)
+    deletion.add_argument("--case", type=Path, required=True)
+    deletion.add_argument("--case-id", required=True)
+    deletion.add_argument("--confirm-name", required=True, help="Exact current investigation name")
     credentials = commands.add_parser("credentials-check", help="Check injected credential presence without contacting services")
     credentials.add_argument("--service", choices=["blockstream", "miro", "all"], default="blockstream",
                              help="Service credentials to check (default: blockstream)")
@@ -228,6 +233,15 @@ def parser():
     fee_arguments(layout)
     connector_arguments(layout)
     context_arguments(layout)
+    layout.add_argument("--layout-style", choices=("trace", "standard"),
+                        help="Trace layout, or Standard for legacy comparison (default: saved setting, otherwise Trace)")
+    scope = commands.add_parser("scope-analyze", help="Compare saved tracing depths and list open branches without running ELK")
+    scope.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    scope.add_argument("--run", default="latest")
+    scope.add_argument("--data-source", choices=("investigation", "shared"), default="investigation")
+    scope.add_argument("--dataset-id", help="Pinned shared collection identity")
+    scope.add_argument("--max-hops", type=int, default=10,
+                       help="Maximum ordinary transaction distance from the original starting outputs")
     for command, description in (("plot", "Prepare a saved-data plot without changing Miro"),
                                  ("plot-sync", "Generate a saved-data layout and create or update its Miro board")):
         plot = commands.add_parser(command, help=description)
@@ -245,9 +259,11 @@ def parser():
         plot.add_argument("--min-hops", type=int, default=0,
                           help="Minimum endpoint distance for peg-out plots; ignored by Starter connections")
         plot.add_argument("--max-hops", type=int, default=10,
-                          help="Maximum endpoint distance for peg-outs, or starter path length with --connection-scope hop_limited")
-        plot.add_argument("--connection-scope", choices=("all_saved", "hop_limited"), default="all_saved",
-                          help="Starter connections: all saved paths, or paths within --max-hops transaction steps")
+                          help="Maximum Full trace or peg-out distance, or starter path length with --connection-scope hop_limited")
+        plot.add_argument("--hop-basis", choices=("configured", "original_seeds"), default="configured",
+                          help="Count from original starting transactions, or use the configured named-group reference")
+        plot.add_argument("--connection-scope", choices=("all_saved", "hop_limited", "shortest"), default="all_saved",
+                          help="Starter connections: all saved paths, paths within --max-hops, or one shortest saved route per connected pair")
         plot.add_argument("--pegout-lbtc-limit",
                           help="Stop at this cumulative public L-BTC peg-out amount; include the crossing output")
         plot.add_argument("--include-unspent", action="store_true",
@@ -278,6 +294,13 @@ def parser():
     managed_sync.add_argument("--preview", required=True)
     managed_sync.add_argument("--reorganize", action="store_true")
     managed_sync.add_argument("--max-items", type=int, default=0)
+    managed_delete = commands.add_parser("investigation-board-delete",
+        help="Delete an explicitly confirmed whole Miro board, keeping local evidence")
+    managed_delete.add_argument("--case", type=Path, default=case_default, required=case_default is None)
+    managed_delete.add_argument("--record", required=True)
+    managed_delete.add_argument("--board", required=True)
+    managed_delete.add_argument("--confirm-delete", action="store_true", required=True,
+                                help="Confirm deletion of the entire board, including manual content")
     managed_create_sync = commands.add_parser("investigation-board-create-sync",
         help="Create a private Miro board and sync a reviewed fresh plot")
     managed_create_sync.add_argument("--case", type=Path, default=case_default, required=case_default is None)
@@ -289,7 +312,7 @@ def parser():
     connections.add_argument("--run", default="latest")
     connections.add_argument("--hops", type=int, default=10,
                              help="Maximum starter path length when --connection-scope hop_limited is selected")
-    connections.add_argument("--connection-scope", choices=("all_saved", "hop_limited"), default="all_saved")
+    connections.add_argument("--connection-scope", choices=("all_saved", "hop_limited", "shortest"), default="all_saved")
     connections.add_argument("--open", dest="open_browser", action="store_true")
     connection_publish = commands.add_parser("connections-publish", help="Publish a reviewed connection-only snapshot to a separate Miro board")
     connection_publish.add_argument("--case", type=Path, default=case_default, required=case_default is None)
@@ -560,6 +583,17 @@ def connector_appearance(metadata, explicit=None):
     return value
 
 
+def layout_appearance(metadata, explicit=None):
+    """Resolve new geometry preferences without reinterpreting archived plans."""
+    from .investigations import generation_settings
+    defaults = metadata.get("run_defaults", {})
+    if not isinstance(defaults, dict):
+        raise TraceError("Invalid investigation run defaults; restore case.json")
+    settings = ({"layout_style": explicit} if explicit is not None else
+                {"layout_style": defaults["layout_style"]} if "layout_style" in defaults else {})
+    return generation_settings(settings)["layout_style"]
+
+
 def context_input_grouping(metadata, explicit=None):
     defaults = metadata.get("run_defaults", {})
     if not isinstance(defaults, dict):
@@ -608,7 +642,7 @@ def layout_search_attempts(metadata, explicit=None):
 def refresh_presentation(plan, trace_path, include_fees=False, connector_style="straight", progress=None,
                          service_settings=None, preview_directory=None, fetch_address_counts=False, count_report=None,
                          group_context_inputs=False, hub_addresses=None, layout_attempts=None, save_layout=False,
-                         color_attribution_arrows=None, center_name=None):
+                         color_attribution_arrows=None, center_name=None, layout_style=None):
     """Verify historical topology, then create a current shared-address view."""
     namespace = _namespace(plan)
     state = read_json(trace_path)
@@ -659,6 +693,8 @@ def refresh_presentation(plan, trace_path, include_fees=False, connector_style="
     graph = build_graph(project_collected_full_scope(state), merge_addresses=True, include_fees=include_fees,
                         group_context_inputs=group_context_inputs, hub_addresses=hub_addresses,
                         color_attribution_arrows=color_attribution_arrows, center_name=center_name)
+    if layout_style is not None:
+        graph["graph_options"]["layout_style"] = layout_appearance({}, layout_style)
     if fetch_address_counts:
         report = ensure_counts(count_case, state, graph=graph, progress=progress)
         if count_report is not None:
@@ -828,13 +864,13 @@ def sync_run(case, run_id, board=None, max_new_items=0, dry_run=False, plan_path
     if plan_path is None and compact_preview is None:
         plan = refresh_presentation(plan, default_plan.parent / "trace.json", include_fee_flows(metadata, include_fees),
                                     connector_appearance(metadata, connector_style), progress=progress,
-                                    service_settings=load_services(case), preview_directory=Path(case) / "previews",
+                                    service_settings=effective_services(case), preview_directory=Path(case) / "previews",
                                     fetch_address_counts=not dry_run, count_report=count_report,
                                     group_context_inputs=context_input_grouping(metadata, group_context_inputs),
                                     color_attribution_arrows=attribution_arrow_coloring(metadata),
                                     hub_addresses=branch_hubs(metadata), center_name=centered_name_group(metadata),
                                     layout_attempts=layout_search_attempts(metadata, layout_attempts),
-                                    save_layout=not dry_run)
+                                    save_layout=not dry_run, layout_style=layout_appearance(metadata))
     # Validate the mapping, lineage, and item budget locally before saving a selection.
     options = {"reorganize": True} if reorganize else {}
     if progress is not None:
@@ -996,7 +1032,7 @@ def run_trace(args, progress=None):
         limits.validate()
         labels = (shared_request["labels"] if shared_request is not None else
                   load_labels(args.labels) if args.labels else (parent["labels"] if parent else []))
-        service_settings = (shared_request["service_controls"] if shared_request is not None else load_services(args.case))
+        service_settings = (shared_request["service_controls"] if shared_request is not None else effective_services(args.case))
         labels = apply_service_labels(labels, service_settings)
         if reference and not reference_addresses({"labels": labels, "hop_reference_name": reference}):
             raise TraceError("The hop reference name has no enabled address attributions; choose an existing named group")
@@ -1108,7 +1144,7 @@ def saved_graph(case, run_id="latest", include_fees=None, *, group_context_input
         raise TraceError("Saved trace does not match the selected run")
     if state.get("case_id") != metadata["case_id"]:
         raise TraceError("The saved run belongs to a different case")
-    service_settings = load_services(case)
+    service_settings = effective_services(case)
     state["labels"] = apply_service_labels(state["labels"], service_settings)
     state["service_controls"] = {key: value for key, value in service_settings.items() if key != "history"}
     apply_saved_counts(case, state)
@@ -1119,6 +1155,7 @@ def saved_graph(case, run_id="latest", include_fees=None, *, group_context_input
                         group_context_inputs=context_input_grouping(metadata, group_context_inputs),
                         color_attribution_arrows=attribution_arrow_coloring(metadata),
                         hub_addresses=branch_hubs(metadata), center_name=centered_name_group(metadata))
+    graph["graph_options"]["layout_style"] = layout_appearance(metadata)
     return run_id, archive, graph
 
 
@@ -1141,13 +1178,14 @@ def mermaid_run(case, run_id="latest", out=None, include_fees=None, open_browser
 
 def layout_preview_run(case, run_id="latest", out=None, include_fees=None,
                        connector_style=None, open_browser=False, progress=None, group_context_inputs=None,
-                       layout_attempts=None):
+                       layout_attempts=None, layout_style=None):
     from .elk_layout import optimize_graph
     from .layout_preview import export_layout
 
     case = Path(case)
     run_id, _, graph = saved_graph(case, run_id, include_fees, group_context_inputs=group_context_inputs)
     metadata = read_case(case)
+    graph["graph_options"]["layout_style"] = layout_appearance(metadata, layout_style)
     style = connector_appearance(metadata, connector_style)
     attempts = layout_search_attempts(metadata, layout_attempts)
     destination = Path(out) if out is not None else case / "previews" / (run_id + "-elk-" + uuid.uuid4().hex[:8])
@@ -1225,6 +1263,29 @@ def main(argv=None, *, progress=None, diagnostics=None):
             from .menu import run_menu
             return run_menu()
         args = parser().parse_args(argv)
+        from .investigation_deletion import operation_guard
+        # Keep one shared lifetime lock even when a plot releases its narrower
+        # settings locks during layout. Other commands can still run in parallel;
+        # only investigation deletion needs this directory lock exclusively.
+        case = None if args.command == "investigation-delete" else getattr(args, "case", None)
+        with operation_guard(case):
+            return _dispatch(args, progress=progress, diagnostics=diagnostics)
+    except KeyboardInterrupt:
+        print("Action canceled. Saved investigation data remains available.", file=sys.stderr)
+        return 130
+    except (TraceError, OSError, ValueError, KeyError) as error:
+        print("Error: " + str(error), file=sys.stderr)
+        return 1
+
+
+def _dispatch(args, *, progress, diagnostics):
+    try:
+        if args.command == "investigation-delete":
+            from .investigation_deletion import delete_investigation
+            result = delete_investigation(args.investigations_dir, args.case, case_id=args.case_id,
+                                          confirm_name=args.confirm_name, progress=progress)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
         if args.command == "credentials-check":
             return check_credentials(args.service)
         if args.command == "input-export":
@@ -1386,7 +1447,7 @@ def main(argv=None, *, progress=None, diagnostics=None):
                 if state.get("case_id", identity) != identity:
                     raise TraceError("The saved run belongs to a different case")
                 state["case_id"] = identity
-                service_settings = load_services(args.case)
+                service_settings = effective_services(args.case)
                 state["labels"] = apply_service_labels(state["labels"], service_settings)
                 state["service_controls"] = {key: value for key, value in service_settings.items() if key != "history"}
                 state["graph_options"] = {**state.get("graph_options", {}),
@@ -1405,11 +1466,17 @@ def main(argv=None, *, progress=None, diagnostics=None):
             print(json.dumps(layout_preview_run(args.case, args.run, args.out, args.include_fees,
                                                 args.connector_style, args.open_browser, progress,
                                                 group_context_inputs=args.group_context_inputs,
-                                                layout_attempts=args.layout_attempts), indent=2))
+                                                layout_attempts=args.layout_attempts,
+                                                layout_style=args.layout_style), indent=2))
+        elif args.command == "scope-analyze":
+            from .scope_analysis import analyze_scope
+            print(json.dumps(analyze_scope(args.case, args.run, data_source=args.data_source,
+                dataset_id=args.dataset_id, max_hops=args.max_hops, progress=progress), indent=2))
         elif args.command == "plot":
             from .plots import preview_plot
             print(json.dumps(preview_plot(args.case, args.goal, args.run,
                 min_hops=args.min_hops, max_hops=args.max_hops,
+                hop_basis=args.hop_basis,
                 connection_scope=args.connection_scope, pegout_lbtc_limit=args.pegout_lbtc_limit,
                 include_unspent=args.include_unspent, include_unspendable=args.include_unspendable,
                 include_context=args.include_context,
@@ -1421,6 +1488,7 @@ def main(argv=None, *, progress=None, diagnostics=None):
             from .investigation_boards import generate_and_sync
             print(json.dumps(generate_and_sync(args.case, args.goal, args.run,
                 min_hops=args.min_hops, max_hops=args.max_hops,
+                hop_basis=args.hop_basis,
                 connection_scope=args.connection_scope, pegout_lbtc_limit=args.pegout_lbtc_limit,
                 include_unspent=args.include_unspent, include_unspendable=args.include_unspendable,
                 include_context=args.include_context,
@@ -1442,6 +1510,9 @@ def main(argv=None, *, progress=None, diagnostics=None):
             from .investigation_boards import sync_board
             print(json.dumps(sync_board(args.case, args.record, args.preview,
                 reorganize=args.reorganize, max_items=args.max_items, progress=progress), indent=2))
+        elif args.command == "investigation-board-delete":
+            from .board_deletion import delete_board
+            print(json.dumps(delete_board(args.case, args.record, args.board, progress=progress), indent=2))
         elif args.command == "investigation-board-create-sync":
             from .investigation_boards import create_and_sync
             print(json.dumps(create_and_sync(args.case, args.preview, args.name,

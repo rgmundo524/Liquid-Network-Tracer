@@ -6,7 +6,7 @@ artifact and action handlers still validate their immutable source evidence.
 from copy import deepcopy
 
 from .common import TraceError
-from .investigations import validate_blockchain, validate_settings
+from .investigations import validate_blockchain, generation_settings
 
 RUN_FIELDS = {"id", "status", "stop_reason", "created_at", "transaction_count", "frontier_count",
               "seeds", "max_hops", "collected_hops", "hop_reference_name", "performance"}
@@ -30,12 +30,13 @@ def _run(case, metadata, run_id, *, schedule=True, priority=True):
 
 def overview(case, metadata, *, detail=True):
     """Read case settings and one small cached summary; never open a trace."""
+    from .board_write_guard import visible_board
     seeds = list(metadata["seeds"]) if isinstance(metadata.get("seeds"), list) else []
     result = {"id": metadata["case_id"], "name": metadata.get("name") or case.name,
               "blockchain": validate_blockchain(metadata.get("blockchain", "liquid")),
               "created_at": metadata.get("created_at"), "latest_run": metadata.get("latest_run"),
-              "fixture": bool(metadata.get("fixture")), "miro_board": metadata.get("miro_board"),
-              "run_defaults": validate_settings(metadata.get("run_defaults", {})),
+              "fixture": bool(metadata.get("fixture")), "miro_board": visible_board(case, metadata.get("miro_board")),
+              "run_defaults": generation_settings(metadata.get("run_defaults", {})),
               "seed_count": len(seeds), "status": "Not started"}
     if detail:
         result.update(seeds=seeds, sections={key: "unloaded" for key in SECTIONS})

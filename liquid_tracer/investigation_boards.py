@@ -176,7 +176,7 @@ def _display(case, record):
     return result
 
 
-def list_boards(case):
+def list_boards(case, *, include_deleted=False):
     """Include registered, old full-trace, and historical snapshot boards."""
     from .cli import board_id
 
@@ -211,7 +211,25 @@ def list_boards(case):
                         "board_id": target, "status": "archived_snapshot" if snapshot else "linked",
                         "state_file": str(mapping.relative_to(case)), "legacy_snapshot": snapshot,
                         "legacy": True, "run_id": run_id})
-    return [_display(case, record) for record in records]
+    from .board_deletion import deletion_receipt
+    result = []
+    for record in records:
+        displayed = _display(case, record)
+        displayed["can_delete"] = bool(record.get("board_id"))
+        receipt = deletion_receipt(case, record.get("board_id"))
+        if receipt:
+            status = receipt["status"]
+            if status == "deleted" and not include_deleted:
+                continue
+            displayed.update(status={"pending": "pending_deletion", "uncertain": "deletion_uncertain",
+                                     "rejected": "deletion_rejected", "deleted": "deleted"}[status],
+                             notice=receipt.get("notice") or ("Miro board deletion is in progress; writes are blocked."
+                                     if status == "pending" else "This Miro board was deleted."),
+                             can_delete=status != "deleted")
+            if status != "rejected":
+                displayed["can_sync"] = False
+        result.append(displayed)
+    return result
 
 
 def _name(metadata, goal, name):
@@ -237,10 +255,13 @@ def link_board(case, goal, name, board, *, record_id=None):
     from .cli import board_id
 
     goal, target = _goal(goal), board_id(board)
+    from .board_deletion import assert_board_writable
+    assert_board_writable(case, target)
     case, metadata, path = _paths(case)
     name = _name(metadata, goal, name)
     with _lock(case), _registry_lock(case), ExitStack() as operation:
         registry = _read(path, read_case(case))
+        assert_board_writable(case, target)
         _assert_unused(case, target, record_id)
         if record_id is not None:
             record = next((item for item in registry["boards"] if item["id"] == record_id), None)
@@ -268,15 +289,25 @@ def create_board(case, goal, name=None, *, team_id=None, transport=http, creatio
     case, metadata, path = _paths(case)
     name = _name(metadata, goal, name)
     body = board_options(name, team_id, "private")
+    from .board_deletion import deletion_receipt
+
+    def available(record):
+        receipt = deletion_receipt(case, record.get("board_id"))
+        # Explicit creation may publish the same saved layout to a fresh board.
+        # Retain the deleted binding as history; retries find the new live entry.
+        return not receipt or receipt["status"] != "deleted"
+
     with ExitStack() as operation:
         with _lock(case), _registry_lock(case):
             registry = _read(path, read_case(case))
-            record = next((item for item in registry["boards"] if item["goal"] == goal and (
+            record = next((item for item in registry["boards"] if item["goal"] == goal and available(item) and (
                 item.get("creation_preview_id") == creation_preview_id if creation_preview_id is not None
                 else item["name"] == name)), None)
             if record is not None:
                 operation.enter_context(_board_lock(case, record["id"]))
             if record and record.get("board_id"):
+                from .board_deletion import assert_board_writable
+                assert_board_writable(case, record["board_id"])
                 return {**_display(case, record), "created": False, "reused": True}
             if record and record["status"] == "pending_creation":
                 raise TraceError(UNCERTAIN)
@@ -505,7 +536,7 @@ def generate_and_sync(case, goal, run_id="latest", min_hops=0, max_hops=10, *, i
                       board_record_id=None, name=None, team_id=None, max_items=0, token=None,
                       transport=http, interval=.02, progress=None, workers=4, layout_settings=None,
                       data_source="investigation", dataset_id=None, connection_scope="all_saved",
-                      pegout_lbtc_limit=None):
+                      pegout_lbtc_limit=None, hop_basis="configured"):
     """Save one plot, then create its board or apply its bound board update.
 
     This is one live action over already collected evidence. On publication
@@ -553,6 +584,7 @@ def generate_and_sync(case, goal, run_id="latest", min_hops=0, max_hops=10, *, i
                             transport=transport, interval=interval, progress=progress, workers=workers,
                             data_source=data_source, dataset_id=dataset_id,
                             connection_scope=connection_scope, pegout_lbtc_limit=pegout_lbtc_limit,
+                            hop_basis=hop_basis,
                             layout_settings=layout_settings, _board_lock_held=layout_mode == "update",
                             _preflight=lambda graph, record: _publication_budget(case, graph, record, max_items))
         if plot["empty"] and layout_mode == "fresh":

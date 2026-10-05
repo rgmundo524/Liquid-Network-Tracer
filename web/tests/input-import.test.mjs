@@ -245,3 +245,23 @@ test('size, file count and CSV-only checks do not read invalid selections or alt
   assert.match(panel('case A', false), /Three files are already queued/);
   assert.equal(reads, 0);
 });
+
+test('a colors-only file with unused names can be applied without attribution files', async () => {
+  const calls = [];
+  const ctx = context(async (_path, body) => {
+    calls.push(body);
+    return body.approve_plan ? {changed: 1} : makeReview({files: [{
+      name: 'colors.csv', kind: 'name-colors', counts: {add: 1}, changes: [
+        {row: 2, action: 'add', name: 'New Exchange', color: '#123456', previous: null, addresses: 0},
+      ], errors: [],
+    }]});
+  });
+  await open(ctx); await choose([samples[0]]); await preview(ctx);
+  const html = panel('case A', false);
+  assert.match(html, /Unused in this investigation/);
+  assert.doesNotMatch(html, /id="input-import-apply"[^>]* disabled/);
+  await apply(ctx);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].files.length, 1);
+  assert.equal(calls[1].approve_plan, 'exact-batch-hash');
+});

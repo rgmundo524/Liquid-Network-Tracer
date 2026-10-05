@@ -124,6 +124,8 @@ def recover_empty_board(state_path, board_id, namespace, *, confirmed_empty=Fals
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise TraceError("Another publisher is using this state file; wait for it to finish.") from None
+        from .board_write_guard import state_board_lock
+        resources.enter_context(state_board_lock(state_path, board_id))
         state = _load_sync_state(state_path, board_id, namespace, allow_pending=True)
         entries = initial_pending_batch(state)
         run_id = state["active_run_id"]

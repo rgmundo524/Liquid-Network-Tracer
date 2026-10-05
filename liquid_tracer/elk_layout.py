@@ -22,6 +22,7 @@ from .common import TraceError
 from .connector_styles import routed_shape
 from .elk_errors import ELK_FATAL_FAILURE_CODES, ElkWorkerFailure
 from .elk_diagnostics import report_location, save_failure_report
+from .cancellation import check_cancelled
 from .elk_parallel import POLL_SECONDS, iter_attempts
 from .processes import defer_cancellation_during_spawn
 from .render_runtime import renderer_failure, renderer_failure_code, renderer_heap_mb, renderer_peak_rss_mb
@@ -63,7 +64,11 @@ def _point(value):
 
 
 def _percent(value):
-    return str(round(max(0, min(100, value)), 6)).rstrip("0").rstrip(".") + "%" if value % 1 else str(int(value)) + "%"
+    if not _finite(value):
+        raise TraceError("ELK returned an invalid connection attachment")
+    # Plain decimal percentages are required by both SVG and Miro validation.
+    # Format after clamping so trimming cannot turn a boundary 100 into 1.
+    return format(max(0, min(100, value)), ".6f").rstrip("0").rstrip(".") + "%"
 
 
 def _port(node, x, y):
@@ -270,11 +275,14 @@ def _report_progress(progress, message, *, completed=0, elapsed_seconds=None, st
             event["elapsed_seconds"] = elapsed_seconds
         try:
             progress(event)
+        except CancelledError:
+            raise
         except Exception:
             pass  # An advisory progress sink must not change layout behavior.
 
 
 def _worker(graph, seeds, progress=None, *, heap_mb=None, cancel_event=None, resource_lease_fd=None):
+    check_cancelled(cancel_event)
     project = Path(os.environ.get("LIQUID_TRACER_ROOT", Path(__file__).resolve().parents[1]))
     runner = project / "layout" / "run.mjs"
     node = os.environ.get("LIQUID_NODE_BIN") or shutil.which("node")
@@ -846,6 +854,9 @@ def _candidate_score(metrics, miro, ports, organization, neighborhoods, boundari
     edges = max(1, trace["edge_count"])
     readability = (4 * trace["spine_alignment"] + 2 * trace["terminal_distance"]
                    + 3 * trace["branch_interleaving"] + 4 * trace.get("terminal_column_drift", 0)
+                   + 4 * trace.get("named_group_alignment", 0)
+                   + 2 * trace.get("named_group_center_offset", 0)
+                   + 3 * trace.get("named_group_interleaving", 0)
                    + 2 * (metrics["crossings"] + miro["crossings"]) / edges)
     primary = (bool(metrics["truncated"] or miro["truncated"]),
                metrics["node_overlaps"], metrics["node_intersections"], miro["node_intersections"],
@@ -865,7 +876,8 @@ def _candidate_score(metrics, miro, ports, organization, neighborhoods, boundari
     return (*primary, *clarity, *compactness_score(compactness), *standard[3:])
 
 
-def optimize_graph(graph, connector_style="straight", progress=None, *, layout_attempts=None, validation_graph=None):
+def optimize_graph(graph, connector_style="straight", progress=None, *, layout_attempts=None, validation_graph=None,
+                   cancel_event=None):
     """Compare bounded parallel ELK attempts without graph size or time ceilings.
 
     Large Trace graphs use bounded section jobs around the preferred backbone.
@@ -874,12 +886,14 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
     Other worker-process failures skip a seed, retaining earlier valid results.
     Invalid data and cancellation abort the search. The input is never modified.
     Quality measurement has its own work budget and never removes graph elements.
+    An optional cancellation event also stops queued resources and child workers.
     """
+    check_cancelled(cancel_event)
     from .context_connectors import display_graph, restore_graph
     displayed = display_graph(graph)
     if displayed is not graph:
         return restore_graph(optimize_graph(displayed, connector_style, progress,
-            layout_attempts=layout_attempts,
+            layout_attempts=layout_attempts, cancel_event=cancel_event,
             validation_graph=display_graph(validation_graph) if validation_graph is not None else None), graph)
     nodes = _validate_graph(graph, connector_style)
     attempts = normalize_layout_attempts(
@@ -888,6 +902,7 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
 
     def attempt_progress(index, seed):
         def report(event):
+            check_cancelled(cancel_event)
             if progress:
                 progress({**event, "attempt_index": index, "attempt_total": attempts, "seed": seed})
         return report
@@ -907,76 +922,87 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
     execution = {}
     compactness_candidates = []
     from .trace_sections import enabled as sections_enabled, iter_candidates
-    candidates_stream = (iter_candidates(graph, request, seeds, _worker, attempt_progress, execution, structure=structure)
+    candidates_stream = (iter_candidates(graph, request, seeds, _worker, attempt_progress, execution, structure=structure,
+                                         cancel_event=cancel_event)
                          if sections_enabled(graph, request)
-                         else iter_attempts(request, seeds, _worker, attempt_progress, execution))
-    for index, seed, candidates in candidates_stream:
-        report = attempt_progress(index, seed)
-        if isinstance(candidates, ElkWorkerFailure):
-            if candidates.diagnostic_path:
-                diagnostic_paths.append(candidates.diagnostic_path)
-            failed_attempts.append({"attempt_index": index, "seed": seed, "failure_code": candidates.failure_code})
-            _report_progress(report, "ELK layout attempt failed; retaining completed layouts and continuing the search",
-                             stage="attempt_failed", attempted_count=index, successful_count=successful_count,
-                             failed_count=len(failed_attempts), failure_code=candidates.failure_code)
-            continue
-        # A rejected optional rerun must travel with its same-seed geometry
-        # fallback. Validate both layouts below before retaining either result.
-        _validate_rejected_pairs(candidates)
-        while candidates:
-            candidate = candidates.pop(0)
-            _report_progress(report, "Validating ELK coordinates and routes", stage="applying")
-            try:
-                compact_candidate(candidate)
-                result = _apply_candidate(graph, candidate, ports, fee_ids, connector_style,
-                                          validation_graph=validation_graph)
-                from .change_layout import apply_change_layout
-                apply_change_layout(result)
-                align_near_horizontal_endpoints(result)
-            except (KeyError, TypeError, ValueError, OverflowError) as exc:
-                raise TraceError("ELK returned an invalid layout; no Miro changes were made") from exc
-            if "inputOrderRejected" in candidate:
-                del candidate, result
+                         else iter_attempts(request, seeds, _worker, attempt_progress, execution, cancel_event=cancel_event))
+    try:
+        for index, seed, candidates in candidates_stream:
+            check_cancelled(cancel_event)
+            report = attempt_progress(index, seed)
+            if isinstance(candidates, ElkWorkerFailure):
+                if candidates.diagnostic_path:
+                    diagnostic_paths.append(candidates.diagnostic_path)
+                failed_attempts.append({"attempt_index": index, "seed": seed, "failure_code": candidates.failure_code})
+                _report_progress(report, "ELK layout attempt failed; retaining completed layouts and continuing the search",
+                                 stage="attempt_failed", attempted_count=index, successful_count=successful_count,
+                                 failed_count=len(failed_attempts), failure_code=candidates.failure_code)
                 continue
-            candidate_count += 1
-            _report_progress(report, "Measuring completed ELK layout", stage="measuring_output")
-            metrics = layout_metrics(result)
-            main = {"nodes": [node for node in result["nodes"] if node["id"] not in fee_ids],
-                    "edges": [edge for edge in result["edges"] if edge["source"] not in fee_ids and edge["target"] not in fee_ids]}
-            score_metrics = layout_metrics(main) if fee_ids & nodes.keys() else metrics
-            endpoint_metrics = attachment_order_metrics(main)
-            miro_estimate = layout_metrics(main, midpoint_elbows=True)
-            organization = organization_metrics(main)
-            result["layout"]["branch_organization"]["travel"] = organization
-            neighborhoods = neighborhood_metrics(result)
-            result["layout"]["branch_organization"]["neighborhoods"] = neighborhoods
-            boundaries = boundary_metrics(result)
-            result["layout"]["branch_organization"]["boundaries"] = boundaries
-            centered = center_metrics(result)
-            if graph.get("graph_options", {}).get("center_name"):
-                result["layout"]["named_group"] = centered
-            # Compare native ELK routes with a simple board-routing estimate. A
-            # forced semantic slot order must not win merely because ELK can draw
-            # bends that Miro cannot receive. Branch separation follows every
-            # collision gate. Local forks and transaction proximity matter even
-            # within one seed lineage; historical date/port order is secondary.
-            trace = trace_metrics(result, structure=structure) if graph.get("graph_options", {}).get("layout_style") == "trace" else None
-            compactness = compactness_metrics(result) if trace else None
-            if compactness is not None:
-                compactness_candidates.append({"candidate_index": candidate_count, "attempt_index": index,
-                                               "seed": candidate["seed"],
-                                               "input_order_policy": result["layout"]["input_order"]["policy"],
-                                               "metrics": compactness})
-            score = _candidate_score(score_metrics, miro_estimate, endpoint_metrics, organization,
-                                     neighborhoods, boundaries, centered,
-                                     result["layout"]["input_order"]["policy"], trace=trace, compactness=compactness)
-            if best is None or score < best[0]:
-                best = (score, result, metrics, candidate["seed"], candidate_count)
-            # Drop the current candidate and its graph views before requesting
-            # another seed. The best tuple alone owns the retained winner.
-            del candidate, result, main
-        del candidates
-        successful_count += 1
+            # A rejected optional rerun must travel with its same-seed geometry
+            # fallback. Validate both layouts below before retaining either result.
+            _validate_rejected_pairs(candidates)
+            while candidates:
+                candidate = candidates.pop(0)
+                _report_progress(report, "Validating ELK coordinates and routes", stage="applying")
+                try:
+                    compact_candidate(candidate)
+                    result = _apply_candidate(graph, candidate, ports, fee_ids, connector_style,
+                                              validation_graph=validation_graph)
+                    from .change_layout import apply_change_layout
+                    apply_change_layout(result)
+                    align_near_horizontal_endpoints(result)
+                except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                    raise TraceError("ELK returned an invalid layout; no Miro changes were made") from exc
+                if "inputOrderRejected" in candidate:
+                    del candidate, result
+                    continue
+                candidate_count += 1
+                _report_progress(report, "Measuring completed ELK layout", stage="measuring_output")
+                metrics = layout_metrics(result)
+                main = {"nodes": [node for node in result["nodes"] if node["id"] not in fee_ids],
+                        "edges": [edge for edge in result["edges"] if edge["source"] not in fee_ids and edge["target"] not in fee_ids]}
+                score_metrics = layout_metrics(main) if fee_ids & nodes.keys() else metrics
+                check_cancelled(cancel_event)
+                endpoint_metrics = attachment_order_metrics(main)
+                miro_estimate = layout_metrics(main, midpoint_elbows=True)
+                organization = organization_metrics(main)
+                result["layout"]["branch_organization"]["travel"] = organization
+                check_cancelled(cancel_event)
+                neighborhoods = neighborhood_metrics(result)
+                result["layout"]["branch_organization"]["neighborhoods"] = neighborhoods
+                boundaries = boundary_metrics(result)
+                result["layout"]["branch_organization"]["boundaries"] = boundaries
+                centered = center_metrics(result)
+                if graph.get("graph_options", {}).get("center_name"):
+                    result["layout"]["named_group"] = centered
+                # Compare native ELK routes with a simple board-routing estimate. A
+                # forced semantic slot order must not win merely because ELK can draw
+                # bends that Miro cannot receive. Branch separation follows every
+                # collision gate. Local forks and transaction proximity matter even
+                # within one seed lineage; historical date/port order is secondary.
+                check_cancelled(cancel_event)
+                trace = trace_metrics(result, structure=structure) if graph.get("graph_options", {}).get("layout_style") == "trace" else None
+                compactness = compactness_metrics(result) if trace else None
+                if compactness is not None:
+                    compactness_candidates.append({"candidate_index": candidate_count, "attempt_index": index,
+                                                   "seed": candidate["seed"],
+                                                   "input_order_policy": result["layout"]["input_order"]["policy"],
+                                                   "metrics": compactness})
+                score = _candidate_score(score_metrics, miro_estimate, endpoint_metrics, organization,
+                                         neighborhoods, boundaries, centered,
+                                         result["layout"]["input_order"]["policy"], trace=trace, compactness=compactness)
+                if best is None or score < best[0]:
+                    best = (score, result, metrics, candidate["seed"], candidate_count)
+                # Drop the current candidate and its graph views before requesting
+                # another seed. The best tuple alone owns the retained winner.
+                del candidate, result, main
+            del candidates
+            successful_count += 1
+    finally:
+        close = getattr(candidates_stream, "close", None)
+        if close is not None:
+            close()
+    check_cancelled(cancel_event)
     if best is None:
         failure_codes = {attempt["failure_code"] for attempt in failed_attempts}
         codes = ", ".join(sorted(failure_codes))
@@ -1002,9 +1028,11 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
             **alignment, "after_context_compaction": compacted["layout"]["endpoint_alignment"]}
         original_estimate = layout_metrics(result, midpoint_elbows=True)
         compacted_estimate = layout_metrics(compacted, midpoint_elbows=True)
+        check_cancelled(cancel_event)
         original_ports, compacted_ports = attachment_order_metrics(result), attachment_order_metrics(compacted)
         original_boundaries, compacted_boundaries = boundary_metrics(result), boundary_metrics(compacted)
         original_neighbors, compacted_neighbors = neighborhood_metrics(result), neighborhood_metrics(compacted)
+        check_cancelled(cancel_event)
         original_center, compacted_center = center_metrics(result), center_metrics(compacted)
         def routing_quality(value):
             return (value["node_intersections"], value["crossings"], value["connector_overlaps"])
@@ -1033,6 +1061,7 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
     _report_progress(report, "Clearing connector space around context inputs", stage="applying")
     repair_context_clearance(result)
     from .trace_section_local import refresh_section_bounds
+    check_cancelled(cancel_event)
     refresh_section_bounds(result)
     from .output_alignment import validate_alignment
     validate_alignment(result)
@@ -1043,6 +1072,7 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
     if graph.get("graph_options", {}).get("layout_style") == "trace":
         result["layout"]["trace_layout"] = trace_metrics(result, structure=structure)
         result["layout"]["compactness"] = compactness_metrics(result)
+    check_cancelled(cancel_event)
     after = layout_metrics(result)
     result["layout"]["metrics"] = {"before": before, "after": after, "estimated": True,
                                     "attempt_count": attempts, "candidate_count": candidate_count, "selected_seed": seed,
@@ -1066,4 +1096,5 @@ def optimize_graph(graph, connector_style="straight", progress=None, *, layout_a
                      else "Best completed ELK layout ready; some layout attempts failed",
                      completed=1, stage="ready_with_failures" if failed_attempts else "ready",
                      attempted_count=attempts, successful_count=successful_count, failed_count=len(failed_attempts))
+    check_cancelled(cancel_event)
     return result
