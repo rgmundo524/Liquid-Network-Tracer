@@ -839,7 +839,7 @@ class LocalServer(ThreadingHTTPServer):
         resource = job_resources(arguments, action, case)
         self.ensure_resources_available(case_id, resource)
         identity = secrets.token_hex(16)
-        new_bridge = bool(arguments) and arguments[0] in ("bridge-match", "bridge-outputs")
+        new_bridge = arguments[0] in ("bridge-match", "bridge-outputs")
         outputs_label = "transaction" if new_bridge else "Bitcoin"
         matching_label = "bridge" if new_bridge else "Bitcoin-to-Liquid"
         self.jobs[identity] = {"id": identity, "status": "running", "action": action,
