@@ -1442,3 +1442,47 @@ dialog::backdrop {
   .preview-library-card { flex-direction: column; gap: 10px; }
   .preview-library-actions { justify-content: flex-start; min-width: 0; }
 }
+
+/* Workspace peg-in matching: reuse the investigation output-card controls. */
+.pegin-mode-switch {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 22px;
+}
+.pegin-output-picker,
+.pegin-advanced,
+.pegin-coverage {
+  margin: 18px 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+.pegin-output-picker > summary,
+.pegin-advanced > summary,
+.pegin-coverage > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.pegin-advanced[open] > summary { margin-bottom: 18px; }
+.pegin-output-picker .output-group { margin-top: 12px; }
+.pegin-output-picker .output-detail .mono,
+.pegin-results .mono { overflow-wrap: anywhere; }
+.pegin-results { border-top: 1px solid var(--line); margin-top: 24px; padding-top: 22px; }
+.pegin-results .artifact-actions { margin: 16px 0; }
+.pegin-match { margin: 22px 0; }
+.pegin-match-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.pegin-match-heading > span { color: #617882; font-size: 12px; }
+.pegin-pair { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 14px; }
+.pegin-transaction { min-width: 0; border: 1px solid var(--line); border-radius: 10px; padding: 18px; background: #f8fbfa; }
+.pegin-transaction h4 { margin: 0 0 10px; }
+.pegin-transaction > .mono { display: block; font-size: 12px; }
+.pegin-transaction dl { margin: 18px 0; }
+.pegin-transaction dt { margin-top: 12px; font-size: 11px; color: #617882; }
+.pegin-transaction dd { margin: 3px 0 0; font-size: 12px; }
+.pegin-transaction details { margin: 14px 0; }
+.pegin-transaction summary { cursor: pointer; }
+.pegin-claim-output { display: grid; gap: 5px; padding: 12px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+@media (max-width: 760px) {
+  .pegin-pair { grid-template-columns: minmax(0,1fr); }
+  .pegin-mode-switch { flex-wrap: wrap; }
+}

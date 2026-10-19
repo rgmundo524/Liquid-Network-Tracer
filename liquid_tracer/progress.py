@@ -12,6 +12,27 @@ from .performance import public_api_diagnostics
 
 
 MESSAGES = {
+    "lightning_index": "Looking up indexed public Lightning channels",
+    "lightning_bitcoin": "Checking Bitcoin transaction references",
+    "lightning_lookup": "Checking the Bitcoin transaction against indexed Lightning channels",
+    "lightning_verify": "Verifying channel funding outputs and spending inputs",
+    "lightning_scripts": "Inspecting Bitcoin witnesses and direct output spends",
+    "lightning_swap": "Checking the supplied Boltz swap ID",
+    "lightning_ready": "Lightning Network lookup results are ready for this session",
+    "lightning_batch": "Checking the Bitcoin transaction batch against Lightning evidence",
+    "bridge_batch": "Checking source transactions within this bridge task's shared limits",
+    "bridge_ready": "Liquid Network matching results are ready for this session",
+    "pegout_source": "Checking public peg-out scripts and explicit amounts",
+    "pegout_search": "Searching the bounded time window for peg-out candidates",
+    "pegout_saved": "Peg-out candidate results are ready for this session",
+    "pegin_batch": "Matching the Bitcoin transaction batch; completed results are saved",
+    "pegin_reverse": "Reading Bitcoin deposit references from the Liquid claim",
+    "pegin_bitcoin": "Checking the Bitcoin transaction and its outputs",
+    "pegin_dates": "Locating the Liquid block range for the requested dates",
+    "pegin_window": "Searching the Liquid date window; completed pages and block ranges are saved",
+    "pegin_history": "Indexing Liquid peg-in history; completed pages are saved",
+    "pegin_verify": "Verifying exact Bitcoin outpoint references in Liquid claims",
+    "pegin_saved": "Bitcoin-to-Liquid matching results saved",
     "deleting_investigation": "Deleting the confirmed investigation's local files",
     "deleting_board": "Deleting the confirmed Miro board and updating its local record",
     "scope_analysis": "Comparing saved tracing depths and identifying open branches",
@@ -95,6 +116,14 @@ ELK_STAGES = {
 }
 
 RESOURCE_WAIT_MESSAGES = {
+    "lightning_index": "Looking up indexed public Lightning channels",
+    "lightning_bitcoin": "Checking Bitcoin transaction references",
+    "lightning_lookup": "Checking the Bitcoin transaction against indexed Lightning channels",
+    "lightning_verify": "Verifying channel funding outputs and spending inputs",
+    "lightning_scripts": "Inspecting Bitcoin witnesses and direct output spends",
+    "lightning_swap": "Checking the supplied Boltz swap ID",
+    "lightning_ready": "Lightning Network lookup results are ready for this session",
+    "lightning_batch": "Checking the Bitcoin transaction batch against Lightning evidence",
     "memory": "Waiting for unreserved ELK memory allowance",
     "cpu": "Waiting for an available ELK CPU slot",
     "fifo": "Waiting for an earlier ELK resource request",
@@ -387,7 +416,10 @@ class ProgressReporter:
                           "Investigation: " if value["phase"] == "deleting_investigation" else
                           "Counts: " if value["phase"].startswith("address_counts") else
                           "Plot: " if value["phase"] == "exporting_plot" or value["phase"].startswith("plot_") else
+                          "Peg-ins: " if value["phase"].startswith("pegin_") else
                           "Peg-outs: " if value["phase"].startswith("pegout_") else
+                          "Lightning: " if value["phase"].startswith("lightning_") else
+                          "Bridge: " if value["phase"].startswith("bridge_") else
                           "ELK: " if value["phase"] in ("optimizing", "compacting") else "Miro: ")
                 print(prefix + value["message"] + counts + wait + elapsed, file=sys.stderr, flush=True)
             except (OSError, ValueError):

@@ -112,7 +112,8 @@ def mermaid_source(graph):
         if not caption_text(edge):
             lines.append(f"  {ids[edge['source']]} --> {ids[edge['target']]}")
             continue
-        caption = edge["label"] + (" · " + edge["quantity"] if edge.get("quantity") else "")
+        caption = (caption_text(edge) if edge.get("details", {}).get("context_summary", {}).get("version") == 3
+                   else edge["label"] + (" · " + edge["quantity"] if edge.get("quantity") else ""))
         lines.append(f"  {ids[edge['source']]} -->|{_label(caption)}| {ids[edge['target']]}")
     for index, edge in enumerate(edges):
         lines.append(f"  linkStyle {index} stroke:{edge_color(edge)},stroke-width:2px,color:#334155")

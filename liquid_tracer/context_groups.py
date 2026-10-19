@@ -57,6 +57,8 @@ addresses are required; all must connect only as external inputs to one tx.
     result = deepcopy(graph)
     if result.get("context_groups", {}).get("enabled"):
         return result
+    # Grouping changes endpoints, so derive display membership after grouping.
+    result.pop("context_connectors", None)
     nodes = {node["id"]: node for node in result["nodes"]}
     incident, identities = defaultdict(list), defaultdict(list)
     for edge in result["edges"]:

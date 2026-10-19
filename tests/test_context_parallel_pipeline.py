@@ -7,10 +7,9 @@ import unittest
 from unittest.mock import patch
 
 from liquid_tracer.common import LBTC, canonical
-from liquid_tracer.context_connectors import display_graph, prepare, summaries
-from liquid_tracer.context_groups import group_context_inputs
+from liquid_tracer.context_connectors import display_graph, summaries
 from liquid_tracer.elk_layout import _request_graph, optimize_graph
-from liquid_tracer.export import build_graph, svg_graph
+from liquid_tracer.export import svg_graph
 from liquid_tracer.layout_preview import export_layout, render_svg
 from liquid_tracer.layout_reuse import reusable_elk_preview
 from liquid_tracer.mermaid import mermaid_source
@@ -24,6 +23,7 @@ from tests.test_elk_layout import synthetic_candidate
 from tests.test_input_order import child_input, input_order_state
 from tests.test_layout import txid
 from tests.test_pegout_paths import add_pegout, add_unspendable, mark_unspent, set_address
+from tests.legacy_context import build_graph, prepare, group_context_inputs
 
 
 def shared_inputs(count=201, traced=1):

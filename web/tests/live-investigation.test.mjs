@@ -14,6 +14,19 @@ const seedEditorSource = stripTypeScriptTypes(
 const seedEditorScript = new vm.Script('Object.assign(globalThis, (() => {' + seedEditorSource +
   '\nreturn {seedEditorPanel, seedEditorAction, seedEditorInput, seedEditorPending, forgetSeedEditor, sameSeeds};})());');
 
+const peginSource = stripTypeScriptTypes(
+  readFileSync(new URL('../src/scripts/pegin-matching.ts', import.meta.url), 'utf8')
+    .replace(/^export /gm, ''), {mode: 'transform'});
+const peginScript = new vm.Script('Object.assign(globalThis, (() => {' + peginSource +
+  '\nreturn {peginPanel, peginInput, peginAction, peginOutputsComplete, peginFile, peginToggle, peginComplete, forgetPegin, MAX_PEGIN_CSV_BYTES, parsePeginCsv, reviewPeginCsv};})());');
+
+const lightningSource = stripTypeScriptTypes(
+  readFileSync(new URL('../src/scripts/lightning-network.ts', import.meta.url), 'utf8')
+    .replace(/^import .*\n/gm, '')
+    .replace(/^export /gm, ''), {mode: 'transform'});
+const lightningScript = new vm.Script('Object.assign(globalThis, (() => {' + lightningSource +
+  '\nreturn {lightningPanel, lightningInput, lightningAction, lightningComplete, lightningFile, forgetLightning};})());');
+
 // Execute the real application handlers with a small DOM and offline HTTP stub.
 // The attribution panels are unrelated to new-investigation and lookup behavior.
 const source = stripTypeScriptTypes(
@@ -41,7 +54,7 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
   const dialog = {innerHTML: '', open: false, addEventListener(name, callback) {dialogListeners[name] = callback;},
     close() {if (this.open) {this.open = false; dialogListeners.close?.();}}, showModal() {this.open = true;}, querySelector() {return null;}};
   const context = vm.createContext({
-    Error, Blob, URL: class extends URL {
+    Error, Blob, TextEncoder, URL: class extends URL {
       static createObjectURL(blob) {downloadBlobs.push(blob); return `blob:export-${downloadBlobs.length}`;}
       static revokeObjectURL(url) {revokedDownloads.push(url);}
     }, console, ...frameRecovery, collectionPerformancePanel, createTaskNotifications,
@@ -104,6 +117,8 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
     },
   });
   seedEditorScript.runInContext(context);
+  peginScript.runInContext(context);
+  lightningScript.runInContext(context);
   script.runInContext(context);
   await context.startup;
   return {
@@ -112,6 +127,24 @@ async function harness(respond = () => undefined, {hash = '', storage = new Map(
     async setHash(value) {context.location.hash = value; windowListeners.hashchange?.(); await new Promise(setImmediate);},
     editSeeds(value, caseId = this.state.activeCase?.id) {
       listeners.input({target: {id: 'seed-editor-text', value, dataset: {caseId}}});
+    },
+    editLightning(value) {listeners.input({target: {id: "lightning-field-txid", value, dataset: {}}});},
+    editPegin(field, value) {
+      listeners.input({target: {id: 'pegin-field-'+field, value, dataset: {}}});
+    },
+    selectPeginOutput(vout, checked = true) {
+      listeners.change({target: {id: 'pegin-output-'+vout, value: String(vout), checked, dataset: {}}});
+    },
+    async uploadPeginCsv(text, name = 'transactions.csv') {
+      listeners.change({target: {id: 'pegin-csv-file', files: [{name, size: Buffer.byteLength(text), text: async () => text}]}});
+      await new Promise(setImmediate);
+    },
+    async uploadLightningCsv(text, name = 'lightning-transactions.csv') {
+      listeners.change({target: {id: 'lightning-csv-file', files: [{name, size: Buffer.byteLength(text), text: async () => text}]}});
+      await new Promise(setImmediate);
+    },
+    togglePeginSettings(open) {
+      listeners.toggle({target: {id: 'pegin-advanced', open}});
     },
     changeBlockchain(value) {
       currentForm = {id: 'new-case-form', values: {...defaults, name: this.state.draft.name, txids: this.state.draft.txids, seeds: this.state.draft.seeds, blockchain: value}, reportValidity: () => true};
@@ -1966,8 +1999,8 @@ test('context grouping is available for every plot goal and preserves edits acro
   view.elements.delete('#plot-layout-form');
   assert.doesNotMatch(contextGroupingFields(view), /disabled/);
   assert.match(contextGroupingFields(view), /name="group_context_inputs"[^>]*checked/);
-  assert.match(contextGroupingFields(view), /bundle repeated context inputs from the same address to the same transaction/);
-  assert.match(contextGroupingFields(view), /Shared or named addresses stay visible, and traced inputs keep their own arrows/);
+  assert.match(contextGroupingFields(view), /Multiple UTXO links between the same address and transaction always share a counted arrow/);
+  assert.match(contextGroupingFields(view), /including traced inputs and repeated outputs, on both networks/);
   view.plotForm({layout_attempts: '47', connector_style: 'curved', center_name: 'Draft treasury',
     group_context_inputs_present: '1'});
   await view.dispatch('plot-goal', {dataset: {goal: 'connections'}});
@@ -3657,7 +3690,7 @@ test('investigation tabs restore views, snapshots, address edits and plot drafts
   assert.equal(view.currentWorkflow(view.state.activeCase).goal, 'pegouts');
   assert.equal(view.currentWorkflow(view.state.activeCase).boardName, 'Alpha board');
   assert.deepEqual([...view.state.openCases], ['a1', 'b2']);
-  assert.match(view.app.innerHTML, /aria-label="Open investigations"/);
+  assert.match(view.app.innerHTML, /aria-label="Open investigations and tools"/);
   assert.match(view.app.innerHTML, /Alpha &amp; partners/);
   assert.match(view.app.innerHTML, /aria-label="Close Alpha &amp; partners tab"/);
   await view.openCase('b2');
@@ -4000,6 +4033,39 @@ test('combined export skips closed cases and does nothing when no tabs are open'
   await view.dispatch('export-open-endpoints');
   assert.deepEqual(view.calls.find(call => call.path === '/api/endpoint-exports').body.investigations,
     [{case_id: 'b2', run_id: 'b-new'}]);
+});
+
+test('in-app notifications expire after one minute and manual dismissal cancels expiry', async () => {
+  const view = await harness();
+
+  await view.dispatch('toggle-system-notifications');
+  const expiringToast = view.toastElements.at(-1);
+  const expiry = [...view.timers.entries()].find(([, timer]) => timer.ms === 60_000);
+  assert.ok(expiry, 'notification should have a one-minute expiry timer');
+  assert.equal(expiringToast.removed, false);
+  view.timers.delete(expiry[0]);
+  expiry[1].fn();
+  assert.equal(expiringToast.removed, true);
+
+  await view.dispatch('toggle-system-notifications');
+  const dismissedToast = view.toastElements.at(-1);
+  const dismissalExpiry = [...view.timers.entries()].find(([, timer]) => timer.ms === 60_000);
+  assert.ok(dismissalExpiry, 'dismissible notification should have an expiry timer');
+  dismissedToast.click();
+  assert.equal(dismissedToast.removed, true);
+  assert.equal(view.timers.has(dismissalExpiry[0]), false);
+});
+
+test('completed task notifications also disappear after one minute', async () => {
+  const view = await harness();
+  view.state.jobs.set('finished-task', {id:'finished-task',action:'trace',started:Date.now()-1_000,finishedAt:Date.now(),
+    message:'Trace complete',live:false,cancellable:false,cancelling:false,status:'succeeded'});
+  assert.match(view.jobBanner(),/Trace complete/);
+  const expiry=[...view.timers.entries()].find(([,timer])=>timer.ms===60_000);
+  assert.ok(expiry,'completed task should have a one-minute expiry timer');
+  view.timers.delete(expiry[0]);expiry[1].fn();
+  assert.equal(view.state.jobs.has('finished-task'),false);
+  assert.equal(view.jobBanner(),'<div id="job-tasks"></div>');
 });
 
 for (const terminal of ['succeeded', 'failed', 'canceled']) {
@@ -7202,4 +7268,317 @@ test('a completed lookup for another network does not automatically populate the
   assert.equal(view.state.draft.blockchain, 'bitcoin');
   assert.equal(view.state.draft.reports.length, 0);
   assert.match(view.notifications.at(-1), /Review outputs/);
+});
+
+
+test('workspace matching shows only the current session result and hands off to an unselected Liquid draft', async () => {
+  const reportId='f'.repeat(32), liquidTx='b'.repeat(64);
+  const summary={id:reportId,created_at:'2026-10-05T00:00:00Z',status:'matched',stop_reason:'exact_reference_found',
+    query:{bitcoin_txid:txid,bitcoin_vout:0,liquid_txid:null,max_pages:100},match_count:1};
+  const report={...summary, matches:[{bitcoin_outpoint:txid+':0',bitcoin_value_sats:'12345',liquid_txid:liquidTx,
+    liquid_vin:0,verification:'confirmed_reference',liquid_status:{confirmed:true}}],
+    liquid_outputs:{[liquidTx]:[{vout:0,outpoint:liquidTx+':0',address:'liquid-output',value:null,asset:null,selectable:true}]},
+    coverage:{pages_this_task:1,history_pages_processed:1,history_entries_processed:25},notice:'Allocation is not established.',downloads:[]};
+  const view=await harness((path,body)=>path==='/api/tools/pegin-matches' && body?{id:'current-match',status:'running'}
+    :path==='/api/jobs/current-match'?{id:'current-match',action:'pegin-match',status:'succeeded',result:report}
+    :path.endsWith('/pegin-matches/'+reportId)?report:undefined);
+  view.navigate('pegin');await new Promise(setImmediate);
+  assert.equal(view.calls.some(call=>call.path==='/api/tools/pegin-matches'),false,'opening must not load a search library');
+  view.editPegin('txid',txid);await view.dispatch('pegin-start');await view.pollJob('current-match');
+  assert.equal(view.state.activeCase,null);
+  assert.match(view.app.innerHTML,/id="pegin-matching-panel"/);
+  assert.match(view.app.innerHTML,/Confirmed exact reference/);
+  await view.dispatch('pegin-open-liquid',{dataset:{txid:liquidTx}});
+  assert.equal(view.state.page,'new');
+  assert.equal(view.state.draft.blockchain,'liquid');
+  assert.equal(view.state.draft.txids,liquidTx);
+  assert.equal(view.state.draft.seeds,'');
+  assert.equal(view.state.draft.selected.size,0);
+  assert.equal(view.calls.some(call=>call.path==='/api/cases' && call.body),false);
+  view.state.activeCase=workflowCase({blockchain:'liquid'});
+  await view.dispatch('view-analysis');
+  assert.doesNotMatch(view.workspace(),/Bitcoin to Liquid matching/);
+});
+
+test('workspace matching stays independent of the viewed case and reserves the shared index', async () => {
+  const view=await harness((path,body)=>path==='/api/tools/pegin-matches'
+    ? body ? {id:'pegin-job',status:'running',resource_kind:'pegin_index',case_id:null} : {reports:[]} :undefined);
+  view.state.activeCase=workflowCase({blockchain:'liquid'});
+  view.navigate('pegin');await new Promise(setImmediate);
+  view.editPegin('txid',txid);
+  await view.dispatch('pegin-start');
+  const submitted=view.calls.find(call=>call.path==='/api/tools/pegin-matches' && call.body);
+  assert.equal(view.state.jobs.get('pegin-job').caseId,undefined);
+  assert.deepEqual(submitted.body,{action:'pegin-match',bridge:'pegin',network:'bitcoin',mode:'single',txid,max_pages:100,start_minutes:-5,end_minutes:4320,public:true});
+  assert.equal(view.actionBusy('pegin-match',{},'second-case'),true);
+  assert.equal(view.actionBusy('plot',{},'second-case'),false);
+});
+
+
+test('the optional matching tab persists without investigations and closing it retains its draft',async()=>{
+  const storage=new Map();
+  const respond=path=>path==='/api/tools/pegin-matches'?{reports:[]}:undefined;
+  const view=await harness(respond,{storage});
+  assert.equal(view.state.peginOpen,false);
+  view.navigate('pegin');await new Promise(setImmediate);
+  view.editPegin('txid',txid);
+  assert.equal(view.state.openCases.length,0);
+  assert.match(view.app.innerHTML,/Close Liquid Network tab/);
+  assert.match(view.app.innerHTML,/data-action="export-open-endpoints"[^>]*disabled/);
+  view.navigate('dashboard');
+  assert.match(view.app.innerHTML,/Close Liquid Network tab/);
+  const reloaded=await harness(respond,{storage});
+  assert.equal(reloaded.state.peginOpen,true);
+  assert.equal(reloaded.state.openCases.length,0);
+  const deepLink=await harness(respond,{storage,hash:'#pegin'});
+  assert.equal(deepLink.state.page,'pegin');
+  view.navigate('pegin');await new Promise(setImmediate);
+  assert.match(view.app.innerHTML,new RegExp('value="'+txid+'"'));
+  await view.dispatch('close-pegin-tab');
+  assert.equal(view.state.peginOpen,false);
+  assert.equal(view.state.page,'dashboard');
+  assert.doesNotMatch(view.app.innerHTML,/Close Liquid Network tab/);
+  view.navigate('pegin');await new Promise(setImmediate);
+  assert.match(view.app.innerHTML,new RegExp('value="'+txid+'"'));
+  assert.equal(view.calls.some(c=>c.body && c.path==='/api/cases'),false);
+});
+
+test('matching task completion and reopening work after its tab is closed',async()=>{
+  let loads=0;
+  const view=await harness((path,body)=>path==='/api/tools/pegin-matches'
+    ? body ? {id:'pegin-task',status:'running',resource_kind:'pegin_index',cancellable:true,case_id:null}
+    : (loads++,{reports:[]})
+    : path==='/api/jobs/pegin-task'?{id:'pegin-task',action:'pegin-match',status:'succeeded',case_id:null,result:{id:'f'.repeat(32)}}:undefined);
+  view.navigate('pegin');await new Promise(setImmediate);
+  view.editPegin('txid',txid);await view.dispatch('pegin-start');
+  assert.match(view.jobBanner(),/Open matching tool/);
+  await view.dispatch('close-pegin-tab');
+  assert.equal(view.state.jobs.get('pegin-task').status,'running');
+  assert.equal(view.calls.some(c=>c.path.endsWith('/cancel')),false);
+  await view.pollJob('pegin-task');await new Promise(setImmediate);
+  assert.equal(view.state.page,'dashboard');
+  assert.equal(view.state.peginOpen,false);
+  assert.equal(loads,0,'completion and reopen must not load historical searches');
+  assert.match(view.notifications.at(-1),/Matching finished/);
+  await view.dispatch('open-job',{dataset:{id:'pegin-task'}});
+  assert.equal(view.state.page,'pegin');
+  assert.equal(view.state.peginOpen,true);
+  assert.equal(view.calls.some(c=>c.path.startsWith('/api/cases/')),false);
+});
+
+
+test('matching output lookup stays independent of the case and selects an actual Bitcoin output',async()=>{
+  const outputs=[{vout:0,outpoint:txid+':0',address:'btc-change',value:12345,value_text:'12345',selectable:true,reason:null},
+    {vout:1,outpoint:txid+':1',address:'btc-deposit',value:100000000,value_text:'100000000',selectable:true,reason:null},
+    {vout:2,outpoint:txid+':2',address:null,value:0,value_text:'0',selectable:false,reason:'unspendable'}];
+  const view=await harness((path,body)=>path==='/api/tools/pegin-matches/outputs'
+    ? {id:'pegin-output-job',status:'running',action:'pegin-outputs',resource_kind:'pegin_lookup',live:true,cancellable:true}
+    :path==='/api/jobs/pegin-output-job'? {id:'pegin-output-job',status:'succeeded',action:'pegin-outputs',live:true,
+      result:{blockchain:'bitcoin',transactions:[{txid,outputs}]}}
+    :path==='/api/tools/pegin-matches'?body?{id:'match-after-output',status:'running'}:{reports:[]}:undefined);
+  view.state.activeCase=workflowCase({blockchain:'liquid'});
+  view.navigate('pegin');await new Promise(setImmediate);
+  view.editPegin('txid',txid);
+  await view.dispatch('pegin-load-outputs');
+  const submitted=view.calls.find(c=>c.path==='/api/tools/pegin-matches/outputs');
+  assert.deepEqual(submitted.body,{txid,public:true,bridge:'pegin',network:'bitcoin'});
+  assert.equal(view.state.jobs.get('pegin-output-job').caseId,undefined);
+  assert.equal(view.actionBusy('plot',{},'second-case'),false);
+  await view.pollJob('pegin-output-job');
+  assert.match(view.app.innerHTML,/btc-change/);assert.match(view.app.innerHTML,/btc-deposit/);
+  assert.match(view.app.innerHTML,/id="pegin-output-1"/);
+  view.selectPeginOutput(0);view.selectPeginOutput(1);
+  await view.dispatch('pegin-start');
+  const match=view.calls.find(c=>c.path==='/api/tools/pegin-matches' && c.body);
+  assert.deepEqual(match.body.vouts,[0,1]);assert.equal(match.body.start_minutes,-5);assert.equal(match.body.end_minutes,4320);
+  assert.equal(view.calls.some(c=>c.path==='/api/cases' && c.body),false);
+});
+
+test('a failed matching output lookup releases its controls and displays the failure',async()=>{
+  const view=await harness((path,body)=>path==='/api/tools/pegin-matches/outputs'
+    ?{id:'outputs-failed',status:'running',action:'pegin-outputs',cancellable:true,resource_kind:'pegin_lookup'}
+    :path==='/api/jobs/outputs-failed'?{id:'outputs-failed',action:'pegin-outputs',status:'failed',message:'Synthetic lookup failure'}
+    :path==='/api/tools/pegin-matches'?{reports:[]}:undefined);
+  view.navigate('pegin');await new Promise(setImmediate);view.editPegin('txid',txid);
+  await view.dispatch('pegin-load-outputs');await view.pollJob('outputs-failed');
+  assert.match(view.app.innerHTML,/Synthetic lookup failure/);
+  assert.equal(view.actionBusy('pegin-outputs',{},null),false);
+});
+
+
+test('matching CSV upload validates locally and submits one independent batch job',async()=>{
+  const second='b'.repeat(64);
+  const view=await harness((path,body)=>path==='/api/tools/pegin-matches'
+    ?body?{id:'batch-match',status:'running',resource_kind:'pegin_index',case_id:null}:{reports:[]}:undefined);
+  view.state.activeCase=workflowCase({blockchain:'liquid'});
+  view.navigate('pegin');await new Promise(setImmediate);
+  await view.dispatch('pegin-mode-batch');
+  await view.uploadPeginCsv('Bitcoin transaction,Notes\r\n'+txid+',First\r\n'+second+',Second\r\n'+txid+',Repeated\r\n');
+  assert.equal(view.calls.some(c=>c.body),false,'file parsing must not start network work');
+  assert.match(view.app.innerHTML,/2 unique/);
+  await view.dispatch('pegin-start');
+  const request=view.calls.find(c=>c.path==='/api/tools/pegin-matches' && c.body);
+  assert.equal(request.body.mode,'batch');assert.deepEqual(request.body.txids,[txid,second]);
+  assert.equal(request.body.start_minutes,-5);assert.equal(request.body.end_minutes,4320);
+  assert.equal(request.body.vout,undefined);assert.equal(request.body.vouts,undefined);
+  assert.equal(view.state.jobs.get('batch-match').caseId,undefined);
+  assert.equal(view.state.activeCase.blockchain,'liquid');
+  assert.equal(view.actionBusy('plot',{},'second-case'),false);
+});
+
+test('Liquid reverse lookup starts with only a Liquid hash and preserves advanced disclosure',async()=>{
+  const liquidTx='c'.repeat(64);
+  const view=await harness((path,body)=>path==='/api/tools/pegin-matches'
+    ?body?{id:'reverse-match',status:'running',resource_kind:'pegin_index',case_id:null}:{reports:[]}:undefined);
+  view.navigate('pegin');await new Promise(setImmediate);
+  assert.doesNotMatch(view.app.innerHTML,/<details[^>]*id="pegin-advanced"[^>]* open/);
+  view.togglePeginSettings(true);view.render();
+  assert.match(view.app.innerHTML,/<details[^>]*id="pegin-advanced"[^>]* open/);
+  view.editPegin('network','liquid');view.editPegin('txid',liquidTx);
+  assert.doesNotMatch(view.app.innerHTML,/Known Liquid claim transaction/);
+  await view.dispatch('pegin-start');
+  const request=view.calls.find(c=>c.path==='/api/tools/pegin-matches' && c.body);
+  assert.equal(request.body.mode,'single');assert.equal(request.body.network,'liquid');assert.equal(request.body.bridge,'pegin');
+  assert.equal(request.body.txid,liquidTx);assert.equal(request.body.liquid_txid,undefined);assert.equal(request.body.vout,undefined);
+  assert.equal(view.calls.some(c=>c.path==='/api/tools/pegin-matches/outputs'),false);
+  assert.equal(view.calls.some(c=>c.path==='/api/cases' && c.body),false);
+});
+
+function currentBridgeReport(overrides={}) {
+  return {id:'e'.repeat(32),created_at:'2026-10-06T00:00:00Z',status:'no_match',stop_reason:'batch_complete',
+    query:{bridge:'pegin',network:'bitcoin',mode:'batch',bitcoin_txid:null,bitcoin_vout:null,liquid_txid:null,
+      bitcoin_txids:[txid],txids:[txid],max_pages:100,start_minutes:-5,end_minutes:4320,public:true},
+    matches:[],liquid_outputs:{},bitcoins:{},results:[{bitcoin_txid:txid,status:'no_match',
+      stop_reason:'window_range_complete',match_count:0,coverage:{}}],
+    coverage:{pages_this_task:1,history_pages_processed:1,history_entries_processed:25},notice:'Bounded results.',
+    downloads:[{name:'matches.csv',url:'/files/pegin-matches/'+'e'.repeat(32)+'/matches.csv'}],...overrides};
+}
+
+test('completed matching CSV automatically downloads once even while its tab is closed',async()=>{
+  const report=currentBridgeReport();
+  const view=await harness((path,body)=>path==='/api/tools/pegin-matches' && body
+    ?{id:'csv-session-job',status:'running',resource_kind:'pegin_index',case_id:null}
+    :path==='/api/jobs/csv-session-job'?{id:'csv-session-job',action:'pegin-match',status:'succeeded',result:report}
+    :path==='/api/tools/pegin-matches/'+report.id?report:undefined);
+  view.navigate('pegin');await view.dispatch('pegin-mode-batch');await view.uploadPeginCsv('Bitcoin transaction\n'+txid+'\n');
+  await view.dispatch('pegin-start');await view.dispatch('close-pegin-tab');
+  await view.pollJob('csv-session-job');await new Promise(setImmediate);
+  assert.equal(view.state.page,'dashboard');assert.equal(view.downloads.length,1);
+  assert.equal(view.downloads[0].url,report.downloads[0].url);
+  view.navigate('pegin');view.render();await view.pollJob('csv-session-job');
+  assert.equal(view.downloads.length,1,'reopening and repeated completion must not repeat downloads');
+  assert.equal(view.calls.some(c=>c.path==='/api/tools/pegin-matches' && !c.body),false);
+  assert.doesNotMatch(view.app.innerHTML,/Load saved matches/);
+});
+
+test('canceled or incomplete matching CSV does not automatically download',async()=>{
+  for (const outcome of ['canceled','paused']) {
+    const report=currentBridgeReport({status:outcome,stop_reason:outcome,
+      results:[{bitcoin_txid:txid,status:'unprocessed',stop_reason:'not_processed',match_count:0,coverage:{}}]});
+    const view=await harness((path,body)=>path==='/api/tools/pegin-matches' && body
+      ?{id:'unfinished-csv',status:'running',cancellable:true,resource_kind:'pegin_index'}
+      :path==='/api/jobs/unfinished-csv'?{id:'unfinished-csv',action:'pegin-match',status:outcome==='canceled'?'canceled':'succeeded',
+        result:report,message:outcome==='canceled'?'Matching canceled.':undefined}
+      :path==='/api/tools/pegin-matches/'+report.id?report:undefined);
+    view.navigate('pegin');await view.dispatch('pegin-mode-batch');await view.uploadPeginCsv('Bitcoin transaction\n'+txid+'\n');
+    await view.dispatch('pegin-start');await view.pollJob('unfinished-csv');await new Promise(setImmediate);
+    assert.equal(view.downloads.length,0,outcome);
+  }
+});
+
+test('historical matching task discovery never triggers automatic CSV downloads',async()=>{
+  const report=currentBridgeReport();
+  const view=await harness(path=>path==='/api/jobs'?{jobs:[{id:'old-csv',action:'pegin-match',status:'succeeded',result:report}]}:undefined);
+  view.navigate('pegin');await view.discoverJobs();await new Promise(setImmediate);
+  assert.equal(view.downloads.length,0);
+  assert.equal(view.calls.some(c=>c.path.startsWith('/api/tools/pegin-matches')),false);
+});
+
+test('peg-out matching accepts a Bitcoin payout hash and defaults its search window backwards',async()=>{
+  const view=await harness((path,body)=>path==='/api/tools/pegin-matches' && body
+    ?{id:'pegout-btc',status:'running',resource_kind:'pegin_index'}:undefined);
+  view.navigate('pegin');view.editPegin('bridge','pegout');view.editPegin('network','bitcoin');view.editPegin('txid',txid);
+  await view.dispatch('pegin-start');
+  const request=view.calls.find(c=>c.path==='/api/tools/pegin-matches' && c.body);
+  assert.equal(request.body.bridge,'pegout');assert.equal(request.body.network,'bitcoin');
+  assert.equal(request.body.txid,txid);assert.equal(request.body.start_minutes,-4320);assert.equal(request.body.end_minutes,5);
+});
+
+
+function lightningResult(overrides={}) {
+  return {schema_version:1,kind:'lightning_lookup',query:{bitcoin_txid:txid},status:'complete',
+    classifications:['no_indexed_channel_found'],bitcoin:{txid,status:{confirmed:true,block_height:100,block_time:1700000000}},
+    matches:[],sources:[{provider:'Mempool.space',endpoint:'/lightning/channels/txids',observed_at:'2026-10-06T00:00:00Z'}],
+    notice:'No indexed match does not exclude private channels or swaps.',stop_reason:null,...overrides};
+}
+test('workspace network tools have independent optional tabs and opening Lightning does not fetch',async()=>{
+  const storage=new Map(),view=await harness(undefined,{storage});
+  view.navigate('pegin');view.navigate('lightning');
+  assert.match(view.app.innerHTML,/Liquid Network/);assert.doesNotMatch(view.app.innerHTML,/Bridge matching/);
+  assert.match(view.app.innerHTML,/id="lightning-network-panel"/);
+  assert.match(view.app.innerHTML,/data-page="lightning" aria-current="page"/);
+  assert.equal(view.calls.filter(call=>call.path.includes('lightning-network')).length,0);
+  view.editLightning(txid);await view.dispatch('close-lightning-tab');
+  assert.equal(view.state.page,'pegin');assert.equal(view.state.lightningOpen,false);
+  view.navigate('lightning');view.render();assert.match(view.app.innerHTML,new RegExp('value="'+txid+'"'));
+  const saved=JSON.parse(storage.get('liquid-tracer:investigation-tabs:v1'));
+  assert.equal(saved.lightningOpen,true);assert.equal(saved.peginOpen,true);
+  const reopened=await harness(undefined,{storage,hash:'#lightning'});
+  assert.equal(reopened.state.page,'lightning');assert.equal(reopened.state.lightningOpen,true);
+  assert.match(reopened.app.innerHTML,/id="lightning-network-panel"/);
+});
+test('Lightning lookup stays independent of the viewed case and coexists with plots and Liquid matching',async()=>{
+  const id='9'.repeat(32),view=await harness((path,body)=>path==='/api/tools/lightning-network'?{id,status:'running',action:'lightning-lookup',case_id:null,live:false,cancellable:true,resource_kind:'lightning_lookup',resource_key:'workspace-lightning',message:'Checking public APIs'}:undefined);
+  view.state.activeCase={id:'a'.repeat(32),name:'Existing case',runs:[],seeds:[txid+':0']};
+  view.state.jobs.set('plot',{id:'plot',action:'plot',status:'running',caseId:view.state.activeCase.id,resource_kind:'plot',live:false,message:'Plotting'});
+  view.state.jobs.set('pegin',{id:'pegin',action:'pegin-match',status:'running',resource_kind:'pegin_index',resource_key:'workspace-pegins',live:true,message:'Matching'});
+  view.navigate('lightning');view.editLightning(txid);await view.dispatch('lightning-start');
+  assert.deepEqual(view.calls.find(call=>call.path==='/api/tools/lightning-network').body,{action:'lightning-lookup',txid});
+  assert.equal(view.state.jobs.get(id).caseId,undefined);assert.equal(view.state.jobs.get(id).live,false);
+  assert.equal(view.actionBusy('lightning-lookup',{},null),true);
+  assert.match(view.jobBanner(),/Lightning Network/);assert.equal(view.taskActivity(view.state.jobs.get(id)).kind,'api');
+});
+test('Lightning CSV upload submits one batch and automatically downloads its result',async()=>{
+  const other='b'.repeat(64),id='5'.repeat(32),first=lightningResult(),second=lightningResult({query:{bitcoin_txid:other},bitcoin:{txid:other,status:{confirmed:true,block_height:101,block_time:1700000600}}});
+  const result={schema_version:1,kind:'lightning_batch',query:{bitcoin_txids:[txid,other]},status:'complete',reports:[first,second],
+    summary:{total:2,matched:0,no_matches:2,incomplete:0}};
+  const view=await harness((path,body)=>path==='/api/tools/lightning-network'&&body
+    ?{id,status:'running',action:'lightning-lookup',case_id:null,live:false,cancellable:true}
+    :path==='/api/jobs/'+id?{id,status:'succeeded',action:'lightning-lookup',case_id:null,live:false,result,message:'Checks complete'}:undefined);
+  view.navigate('lightning');await view.dispatch('lightning-mode-batch');
+  await view.uploadLightningCsv('bitcoin_transaction\n'+txid+'\n'+other+'\n');
+  await view.dispatch('lightning-start');
+  assert.deepEqual(view.calls.find(call=>call.path==='/api/tools/lightning-network').body,{action:'lightning-lookup',txids:[txid,other]});
+  await view.pollJob(id);
+  assert.match(view.app.innerHTML,/CSV checks complete/);assert.equal(view.downloads.at(-1).filename,'lightning-network-checks.csv');
+  assert.match(await view.downloadBlobs.at(-1).text(),new RegExp(other+',no_matches'));
+});
+test('Lightning lookup completes while its tab is closed and reopening shows current result without another request',async()=>{
+  const id='8'.repeat(32),result=lightningResult(),view=await harness((path)=>{
+    if(path==='/api/tools/lightning-network')return {id,status:'running',action:'lightning-lookup',case_id:null,live:false,cancellable:true};
+    if(path==='/api/jobs/'+id)return {id,status:'succeeded',action:'lightning-lookup',case_id:null,live:false,result,message:'Lookup complete'};
+  });
+  view.navigate('lightning');view.editLightning(txid);await view.dispatch('lightning-start');
+  await view.dispatch('close-lightning-tab');await view.pollJob(id);view.navigate('lightning');
+  assert.match(view.app.innerHTML,/No matches found/);
+  assert.doesNotMatch(view.app.innerHTML,/does not rule out private|private or unindexed/);
+  assert.equal(view.calls.filter(call=>call.path==='/api/tools/lightning-network').length,1);
+  assert.equal(view.state.cases.length,0);
+});
+test('Lightning cancellation and failed tasks release the input without showing negative evidence',async()=>{
+  for(const status of ['canceled','failed']) {
+    const id='7'.repeat(32),view=await harness(path=>{
+      if(path==='/api/tools/lightning-network')return {id,status:'running',action:'lightning-lookup',case_id:null,live:false,cancellable:true};
+      if(path==='/api/jobs/'+id)return {id,status,action:'lightning-lookup',case_id:null,message:'Lookup '+status};
+    });
+    view.navigate('lightning');view.editLightning(txid);await view.dispatch('lightning-start');await view.pollJob(id);
+    assert.match(view.app.innerHTML,new RegExp('Lookup '+status));
+    assert.doesNotMatch(view.app.innerHTML,/No indexed Lightning channel found/);
+    assert.doesNotMatch(view.app.innerHTML,/data-action="lightning-start" disabled/);
+  }
+});
+test('discovering an older Lightning lookup cannot populate this session result',async()=>{
+  const id='6'.repeat(32),view=await harness(path=>path==='/api/jobs'?{jobs:[{id,status:'succeeded',action:'lightning-lookup',case_id:null,result:lightningResult(),message:'Old lookup'}]}:undefined);
+  view.navigate('lightning');await view.discoverJobs();
+  assert.doesNotMatch(view.app.innerHTML,/Current Lightning lookup result|No indexed Lightning channel found/);
 });

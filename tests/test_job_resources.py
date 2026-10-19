@@ -9,6 +9,56 @@ from liquid_tracer.job_resources import PARALLEL_ACTIONS, conflicts, job_resourc
 
 
 class JobResourceTests(unittest.TestCase):
+    def test_all_pegin_matching_modes_reserve_the_same_workspace_index(self):
+        workspace = "/synthetic/cases"
+        resources = []
+        with patch("liquid_tracer.common.read_json", side_effect=AssertionError("No admission file reads")), \
+                patch("liquid_tracer.investigations.read_case", side_effect=AssertionError("No case reads")):
+            for source in (["--txid", "a" * 64, "--vouts", "0,2"],
+                           ["--txids", "a" * 64 + "," + "b" * 64],
+                           ["--from-liquid", "c" * 64]):
+                resources.append(job_resources(["pegin-match", *source, "--investigations-dir", workspace],
+                                               "pegin-match"))
+        self.assertTrue(all(resource == resources[0] for resource in resources))
+        for left in resources:
+            for right in resources:
+                self.assertTrue(conflicts(left, right))
+        other = job_resources(["pegin-match", "--investigations-dir", "/synthetic/other"], "pegin-match")
+        self.assertFalse(conflicts(resources[0], other))
+
+    def test_matching_value_options_cannot_masquerade_as_scope_flags(self):
+        expected = job_resources(["pegin-match", "--investigations-dir", "/synthetic/cases"], "pegin-match")
+        for flag in ("--txids", "--from-liquid", "--vouts", "--resume-report"):
+            with self.subTest(flag=flag):
+                actual = job_resources(["pegin-match", flag, "--investigations-dir",
+                                        "--investigations-dir", "/synthetic/cases"], "pegin-match")
+                self.assertEqual(actual, expected)
+
+    def test_pegin_output_admission_needs_no_file_or_board_reads(self):
+        with patch("liquid_tracer.common.read_json", side_effect=AssertionError("No admission file reads")), \
+                patch("liquid_tracer.investigations.read_case", side_effect=AssertionError("No case required")), \
+                patch("liquid_tracer.investigation_boards.list_boards", side_effect=AssertionError("No board required")):
+            resource = job_resources(["inspect-txs", "--txids", "a" * 64, "--blockchain", "bitcoin",
+                                      "--auth", "none", "--base-url", "https://blockstream.info/api"],
+                                     "pegin-outputs")
+        self.assertIn("pegin-outputs", PARALLEL_ACTIONS)
+        self.assertEqual(resource, {"resource_kind": "pegin_lookup", "resource_key": "bitcoin-outputs"})
+
+    def test_pegin_outputs_conflict_only_with_another_output_lookup(self):
+        output = {**job_resources(["inspect-txs", "--txids", "a" * 64], "pegin-outputs"), "case_id": None}
+        duplicate = {**job_resources(["inspect-txs", "--txids", "b" * 64], "pegin-outputs"), "case_id": None}
+        self.assertTrue(conflicts(output, duplicate))
+        self.assertTrue(conflicts(duplicate, output))
+        for action, arguments, case in (
+                ("pegin-match", ["pegin-match", "--investigations-dir", "/synthetic/cases"], None),
+                ("plot", ["plot", "--case", "/synthetic/cases/example"], Path("/synthetic/cases/example")),
+                ("shared-trace", ["shared-trace", "--case", "/synthetic/cases/example"], Path("/synthetic/cases/example")),
+                ("lookup", ["inspect-txs", "--txids", "c" * 64], None)):
+            with self.subTest(action=action):
+                other = {**job_resources(arguments, action, case), "case_id": "case" if case else None}
+                self.assertFalse(conflicts(output, other))
+                self.assertFalse(conflicts(other, output))
+
     def test_argument_values_cannot_become_scope_flags(self):
         for name in ("--board", "--record", "--preview", "--run", "--layout-mode"):
             resource = job_resources(["plot-sync", "--name", name, "--max-items", "750"], "plot-sync")
@@ -151,6 +201,28 @@ class JobResourceTests(unittest.TestCase):
                                                     "source_run_id": "a" * 16})
                         self.assertTrue(conflicts({**resource, "case_id": "b"},
                                                   {"case_id": "a", "resource_kind": "board_delete", "resource_key": "TARGET="}))
+
+
+
+
+
+class BridgeJobResourceTests(unittest.TestCase):
+    def test_session_storage_and_network_do_not_change_shared_workspace_lock(self):
+        legacy = job_resources(['pegin-match','--investigations-dir','/synthetic/workspace'],'pegin-match')
+        for bridge in ('pegin','pegout'):
+            for network in ('bitcoin','liquid'):
+                args=['bridge-match','--bridge',bridge,'--network',network,'--report-root','--case',
+                      '--report-id','--run','--mode','batch','--investigations-dir','/synthetic/workspace']
+                current=job_resources(args,'pegin-match')
+                self.assertEqual(current,legacy)
+                self.assertTrue(conflicts(current,legacy))
+        self.assertFalse(conflicts(legacy,{'case_id':'other','resource_kind':'plot'}))
+
+    def test_output_lookup_remains_separate_from_matching_but_excludes_other_lookups(self):
+        output=job_resources(['bridge-outputs','--network','liquid','--bridge','pegout'],'pegin-outputs')
+        match=job_resources(['bridge-match','--investigations-dir','/synthetic/workspace'],'pegin-match')
+        self.assertFalse(conflicts(output,match))
+        self.assertTrue(conflicts(output,job_resources(['inspect-txs'],'pegin-outputs')))
 
 
 if __name__ == "__main__":

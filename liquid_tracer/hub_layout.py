@@ -71,6 +71,8 @@ def hub_plan(graph):
     """
     if graph.get("_hub_layout_view") is _VIEW_MARKER:
         return graph["_hub_layout_plan"]
+    from .context_connectors import evidence_graph
+    graph = evidence_graph(graph)
     fees = {key for key, item in graph.get("fee_items", {}).items()
             if item.get("endpoint") == "shapes"}
     nodes = {node["id"]: node for node in graph["nodes"] if node["id"] not in fees}
@@ -201,6 +203,10 @@ def hub_layout_view(graph):
     plan = hub_plan(graph)
     if not plan["hubs"]:
         return graph
-    return {**graph, "_hub_layout_view": _VIEW_MARKER, "_hub_layout_plan": plan,
-            "nodes": [{**node, "column": plan["columns"].get(node["id"], node["column"])}
-                      for node in graph["nodes"]]}
+    # Preserve the runtime projection's canonical evidence reference.
+    from copy import copy
+    result = copy(graph)
+    result.update(_hub_layout_view=_VIEW_MARKER, _hub_layout_plan=plan,
+                  nodes=[{**node, "column": plan["columns"].get(node["id"], node["column"])}
+                         for node in graph["nodes"]])
+    return result

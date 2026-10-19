@@ -294,6 +294,26 @@ def render_details(graph, nodes, edges, overview_svg):
         if proof.get("kind") != "parallel":
             continue
         inputs = [evidence_edges[key] for key in proof["member_edge_ids"]]
+        if proof.get("version") == 3:
+            member_rows = ''.join('<tr><td>' + _escape(edge["id"]) + '</td><td>'
+                                 + _escape(edge.get("label", "")) + '</td><td>'
+                                 + _escape(edge.get("role", "")) + '</td><td>'
+                                 + _escape(edge.get("outpoint", "")) + '</td><td>'
+                                 + _escape(edge.get("quantity", "")) + '</td></tr>' for edge in inputs)
+            amount_note = ("Combined public amount: " + summary["quantity"] + ". "
+                           if summary.get("quantity") else "No combined amount is shown. ")
+            members_html.append('<details id="' + _escape(summary["id"]) + '"><summary>'
+                                + _escape(summary["label"]) + '</summary><p>'
+                                + _escape(summary["source"]) + ' → ' + _escape(summary["target"])
+                                + '</p><p>Only UTXO links between these same two objects, in this direction, are bundled. '
+                                'Each member retains its traced or context role below. '
+                                + _escape(amount_note) + 'A total is shown only when every member has a public amount '
+                                'in the same known asset. It does not allocate stolen funds or establish common ownership.</p>'
+                                '<table><thead><tr><th>Original connection</th><th>Input / output label</th>'
+                                '<th>Trace role</th><th>Outpoint</th><th>Value / asset</th></tr></thead><tbody>'
+                                + member_rows + '</tbody></table><p>Every original input and output record remains in '
+                                '<a href="graph.json">graph.json</a> and the transaction CSV.</p></details>')
+            continue
         input_rows = ''.join('<tr><td>' + _escape(edge["id"]) + '</td><td>'
                              + _escape(edge.get("label", "")) + '</td><td>'
                              + _escape(edge.get("outpoint", "")) + '</td><td>'
@@ -329,7 +349,11 @@ including connections to other branches. Empty tiles are omitted; tiles containi
     page += '<svg xmlns="http://www.w3.org/2000/svg" class="drawing-definitions" aria-hidden="true"><defs>' + definitions + '</defs></svg>'
     page += ''.join(contents)
     page += '<section class="index" id="connection-index"><h2>Connection index</h2><p>'
-    page += ('Context summaries use counted connections. Original input records are listed below. '
+    utxo_bundles = any(edge.get("details", {}).get("context_summary", {}).get("version") == 3
+                       for edge in graph.get("context_connectors", {}).get("summaries", []))
+    page += ('UTXO summaries use counted connections. Original input and output records are listed below. '
+             if utxo_bundles else
+             'Context summaries use counted connections. Original input records are listed below. '
              if graph.get("context_connectors") else 'Each original connection remains separate. ')
     page += 'Page links include its route and caption. Shared boundary connections are repeated across overlapping pages.</p>'
     page += '<table><thead><tr><th>Connection</th><th>Caption</th><th>From → To</th><th>Detail pages</th></tr></thead><tbody>'

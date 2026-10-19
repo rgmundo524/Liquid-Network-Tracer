@@ -8,7 +8,21 @@ outputs. Each investigation keeps its original network, with separate shared
 collections and shared attribution libraries for each chain. Existing Liquid
 investigations and saved previews retain their meaning. See the
 [Bitcoin tracing workflow](docs/bitcoin-tracing.md) for setup, endpoint options,
-exact BTC amounts, exports, and command-line examples.
+exact BTC amounts, exports, and command-line examples. The workspace also offers
+[Bitcoin and Liquid bridge matching](docs/bitcoin-liquid-matching.md) as an optional
+**Liquid Network** tab opened from the sidebar, independent of investigation seeds. Choose peg-in or
+peg-out, then supply Bitcoin or Liquid transactions individually or by CSV. Peg-in
+matches use exact deposit references; peg-out candidates use destination, amount,
+and a bounded time window. Results last for the current service session, and
+completed CSV batches download automatically. The shared search index is reusable.
+
+The optional **Lightning Network** tab checks one Bitcoin transaction or a CSV batch against
+Mempool.space’s indexed channels and verifies matching funding outputs or
+closing inputs using public Bitcoin data. It shows the exact outpoint, channel
+capacity, and peer node keys. Completed CSV batches download a consolidated result
+automatically. A lookup with no indexed channel remains unresolved
+for private channels, swaps, and custodial services. See the
+[Lightning lookup workflow](docs/lightning-network.md).
 
 Miro is the investigation workspace. The program retrieves blockchain data and keeps the evidence and object mapping; it can be run from your terminal without a Miro plugin. CSV files document each run. The saved graph plan supplies native Miro shapes and connectors directly through the REST API, so a generic CSV-to-graph importer is unnecessary.
 
@@ -226,7 +240,9 @@ After generating a Paths to endpoints plot, Collected data shows the latest peg-
 
 Open investigations appear as tabs in the header. Switch tabs to return to each investigation’s selected snapshot, tool view, plot/board selections, and unsaved settings or import drafts. Closing a tab only closes its view; running tasks continue and the investigation can be reopened from the list or Tasks. The tab list and navigation selections survive a refresh in the same browser tab. Unsaved form contents remain in memory only, so save edits before refreshing. The + button opens New investigation.
 
-Click an in-app notification to dismiss it, or focus it and press Enter or Space.
+In-app notifications and completed task notices disappear after one minute. They
+can also be dismissed immediately by clicking them, or by focusing a notification
+and pressing Enter or Space.
 Use **Notifications off** in the header to enable system alerts for completed,
 failed, or canceled tasks. Permission is requested only when you enable alerts;
 the preference is remembered in this browser. Clicking a system alert focuses
@@ -522,7 +538,7 @@ Traced connections use thicker lines and context connections use thinner lines i
 
 Context summaries use a compact 240 × 160 rectangle regardless of input count. New layouts send one connector per eligible group to ELK and display its input and address counts. Original labels, amounts, `vin` indexes and outpoints remain in `graph.json`, the transaction CSV and the local detail-page input table. No combined amount is inferred from confidential inputs. Legacy saved previews retain their individual connectors. Turning grouping off restores the individual address display and captions. Refresh the preview and choose **Sync and reorganize Miro graph** to replace old generated context lines on an existing board. Edited captions and manually resized, rotated or annotated summaries stay protected.
 
-The same setting also bundles repeated context inputs between one visible address and one transaction into a single counted connector. For example, 200 context inputs and one traced input become two displayed arrows. Shared, named, and hub addresses retain their own circles and annotations; all traced inputs and exact displayed UTXO continuations retain individual arrows. Bundles do not combine amounts or infer ownership. Every original `vin`, outpoint, label, amount, and input record remains in `graph.json` and the transaction CSV, with a bundle input table in `details.html`. Turning grouping off restores the individual context arrows. Earlier saved previews keep their original geometry; generate a new preview to use bundling. Miro updates validate the bundle membership and protect manually edited connectors when replacing generated lines.
+New Liquid and Bitcoin previews automatically combine multiple UTXO links between the same visible address and transaction into one counted arrow, in either direction. This also applies to traced inputs and repeated outputs, independently of the context-address grouping setting. For example, 200 context inputs and one traced input become one arrow labeled with both counts. Shared, named, and hub addresses retain their own circles and annotations. A combined amount is shown only if every member has a public amount in the same known asset; it is a UTXO total, not an allocation of stolen funds. Every original input/output index, outpoint, label, role, and amount remains in `graph.json` and the transaction CSV, with a member table in `details.html`. Earlier saved previews retain their original connectors; generate a new preview to use bundling. Miro updates validate membership and protect manually edited connectors when replacing generated lines.
 
 
 After changing grouping, refresh the preview and use **Sync and reorganize** to apply the reviewed arrangement. Replacing existing board objects when grouping or ungrouping requires this explicit reorganization; ordinary sync refuses the change to preserve manual positions and connector attachments. Turning grouping off restores individual address circles. Miro synchronization replaces the affected generated circles or summary and their input connectors, so those affected Miro item IDs can change; transaction and unaffected item IDs remain. The preflight blocks retirement of objects with manual text or style edits, resizing, grouping, or unmanaged connections instead of silently discarding those edits. Preserve any attached Miro comments separately before toggling grouping because the API cannot inspect them. First publication and subsequent syncs with unchanged grouping continue to work normally.
@@ -1029,7 +1045,7 @@ Liquid confidential transactions can hide **asset type as well as amount**. The 
 
 After a transaction consumes a selected output, all spendable outputs become **candidate descendants**. This establishes UTXO reachability, not value allocation. Swaps, fees, co-inputs, batching and other assets make blanket “stolen funds” attribution inappropriate. The software performs no common-input ownership clustering, change detection, percentage taint calculation or FIFO accounting.
 
-Peg-out requests expose a requested parent-chain destination when available; they do not prove a particular Bitcoin payout. Service swaps may exit Liquid without a corresponding protocol burn in the customer's transaction. Bitcoin tracing is supported as a separate investigation. Automatic matching between Liquid peg-outs and Bitcoin payouts, Bitcoin deposits and Liquid peg-in claims, Lightning, Avalanche, or service orders is not implemented.
+Peg-out requests expose a requested parent-chain destination when available; they do not prove a particular Bitcoin payout. Service swaps may exit Liquid without a corresponding protocol burn in the customer's transaction. Bitcoin tracing is supported as a separate investigation. The Liquid Network matching tool finds exact Liquid peg-in deposit references and candidate Bitcoin payouts for native Liquid peg-outs. Peg-out candidates require the same destination script and amount within the selected time window, and multiple candidates are flagged as ambiguous. The Lightning Network tool checks indexed public channel funding and closure against Bitcoin outpoints; it does not trace off-chain payments. Matching Avalanche or service orders is not implemented.
 
 Confirmed transaction JSON is cached for 24 hours between fresh runs by default. Unspent/spend-status responses are refreshed on each run; within-run status remains an observation at its recorded time. Continuation intentionally preserves already recorded historical links. It is not a fully atomic chain-tip snapshot or reorg reconciliation engine. To re-observe the original path, start a fresh run from the original seeds with `--tx-cache-seconds 0`. Unconfirmed transactions are excluded from expansion by default; `--include-unconfirmed` includes them provisionally.
 

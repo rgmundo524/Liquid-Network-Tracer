@@ -7,15 +7,13 @@ from unittest.mock import patch
 
 from liquid_tracer import board_layout, context_parallel_miro
 from liquid_tracer.common import TraceError, canonical, digest, read_json, save_json
-from liquid_tracer.context_connectors import prepare
-from liquid_tracer.context_groups import group_context_inputs
-from liquid_tracer.export import build_graph
 from liquid_tracer.miro import make_plan, sync, validate_plan
 from tests.test_board_projection_safety import scope_plan
 from tests.test_context_parallel_connectors import repeated_state
 from tests.test_dense_context_miro import DenseMiro
 from tests.test_input_order import child_input
 from tests.test_layout import txid
+from tests.legacy_context import build_graph, prepare, group_context_inputs
 
 
 def graphs(count=5):

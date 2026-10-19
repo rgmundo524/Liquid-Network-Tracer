@@ -53,6 +53,15 @@ A small deletion receipt is retained in the workspace's `.deleted-investigations
 directory. If cleanup is interrupted, the remaining files stay there and the
 launching terminal identifies their location.
 
+### Match a Bitcoin deposit to Liquid
+
+Choose Bitcoin to Liquid from the workspace sidebar. Its optional tab works
+without an investigation and stays available while switching investigations.
+Enter a Bitcoin transaction and optional vout, then start a bounded search.
+Saved exact claim references, Liquid output details, and CSV downloads belong
+to the workspace. Closing the tab does not cancel a running search. See the [matching workflow](bitcoin-liquid-matching.md) for
+search coverage, continuation, and starting a Liquid investigation.
+
 ### Compare analysis scopes and saved previews
 
 Use **Analysis** to compare hop cutoffs against saved evidence, inspect recorded
@@ -359,8 +368,10 @@ output/address without extending that branch or treating it as an endpoint match
 Context uses thinner arrows and is marked `CONTEXT` in the transaction CSV.
 Context does not create traced links, change hop counts or endpoint matches,
 or cause earlier/later transactions to be added. A shared address keeps one
-circle, with traced UTXOs retaining their own arrows. Eligible isolated context
-inputs can share a counted connector when grouping is enabled. SVG export
+circle. Multiple UTXO links between the same address and transaction share a
+counted arrow, including traced inputs and repeated outputs. Mixed arrows
+show traced and context counts separately. Eligible isolated context addresses
+can also share a summary when grouping is enabled. SVG export
 and Miro sync use the same saved graph. Older saved layouts retain their
 original context choices; regenerate a layout to show complete transactions.
 
@@ -423,18 +434,18 @@ transaction into a context summary.
 Traced, shared, attributed, and otherwise protected addresses remain separate,
 as do sibling outputs. New layouts use one counted connector from each context
 summary to its transaction, reducing the ports and routes that ELK must arrange.
-It also bundles multiple context inputs from the same visible address to the same
-transaction into one counted arrow. The address remains visible, including its
-name and hub designation. Traced inputs and exact displayed UTXO continuations
-keep separate arrows, even when they share that address. A bundle's original
-inputs are listed in `details.html`; no total amount is inferred.
-Every original input retains its exact UTXO record in `graph.json` and its own
-CSV row; full member addresses and inputs stay available in local details.
-Seed, traced, candidate, and endpoint connections remain separate. Endpoint
-matches, hop limits, and trace evidence are unchanged. Summary connectors do
-not imply common ownership or a known total for confidential inputs. Older
-saved previews keep their original connectors; generate a new preview to use
-the reduced display.
+Independently of this setting, new Liquid and Bitcoin previews combine multiple
+UTXO links between the same visible address and transaction into one counted
+arrow, in either direction. The address remains visible, including its name and
+hub designation. Traced inputs and repeated outputs are included; a mixed arrow
+shows traced and context counts separately. A combined amount is shown only when
+all members have public amounts in the same known asset. Hidden or mixed-asset
+amounts are not added. Totals do not allocate stolen funds or imply ownership.
+Every original input/output retains its exact UTXO record in `graph.json`, its own
+CSV row, and its label, role, outpoint and amount in `details.html`.
+Endpoint matches, hop limits, and trace evidence are unchanged. Older saved
+previews retain their original connectors; generate a new preview to use the
+reduced display.
 
 Grouping is saved as an investigation layout preference and captured with each
 generated layout. Separate branch hubs apply to Full trace and Paths to peg-outs.

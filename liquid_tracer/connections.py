@@ -419,6 +419,8 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
                         respect_attribution_hops=not saved_evidence, respect_stops=not saved_evidence,
                         resolve_saved_inputs=saved_evidence or complete_io,
                         saved_transactions=state["transactions"] if complete_io else None, initial_layout=initial_layout)
+    # Rebuild display summaries after this view has finalized canonical roles.
+    graph.pop("context_connectors", None)
     edge_ids.update(context_edge_ids)
     graph["edges"] = [e for e in graph["edges"] if e["id"] in edge_ids]
     for edge in graph["edges"]:
@@ -510,7 +512,8 @@ def connection_graph(state, max_hops=10, *, color_attribution_arrows=None, cente
     if complete_io and group_context_inputs:
         graph = group_inputs(graph, enabled=True)
         graph["activity_frames"] = activity_frames(graph)
-    return graph
+    from .context_connectors import prepare
+    return prepare(graph)
 
 
 def connection_plan(graph):

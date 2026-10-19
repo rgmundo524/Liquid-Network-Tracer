@@ -3,6 +3,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -39,6 +40,21 @@ def fee_arguments(command):
                          help="Hide transaction fee flows for this action; retain their evidence")
 
 
+def _pegin_txids(value):
+    values = [part for part in re.split(r"[,\s]+", value.strip()) if part]
+    if not 1 <= len(values) <= 500 or any(not HEX64.fullmatch(item) for item in values):
+        raise argparse.ArgumentTypeError("Choose 1 to 500 Bitcoin transaction hashes separated by commas")
+    return list(dict.fromkeys(item.lower() for item in values))
+
+
+def _pegin_vouts(value):
+    values = [part for part in re.split(r"[,\s]+", value.strip()) if part]
+    if not 1 <= len(values) <= 10000 or any(not item.isascii() or not item.isdigit() or len(item) > 10
+                                         or int(item) >= 0x40000000 for item in values):
+        raise argparse.ArgumentTypeError("Choose non-negative output indexes separated by commas")
+    return sorted({int(item) for item in values})
+
+
 def connector_arguments(command):
     command.add_argument("--connector-style", choices=("straight", "curved", "elbowed"),
                          help="Connector appearance (default: investigation setting, otherwise straight)")
@@ -50,9 +66,17 @@ def connector_arguments(command):
 def context_arguments(command):
     choices = command.add_mutually_exclusive_group()
     choices.add_argument("--group-context-inputs", dest="group_context_inputs", action="store_true", default=None,
-                         help="Summarize isolated external addresses and bundle repeated context inputs; retain every input record")
+                         help="Summarize isolated external input addresses; parallel UTXO links are always bundled in new previews")
     choices.add_argument("--ungroup-context-inputs", dest="group_context_inputs", action="store_false",
                          help="Display external input addresses individually (default: investigation setting)")
+
+
+class _PeginWindowOffset(argparse.Action):
+    def __call__(self, parser, namespace, value, option_string=None):
+        other = "hours" if self.dest.endswith("minutes") else "minutes"
+        if any(getattr(namespace, endpoint + "_" + other, None) is not None for endpoint in ("start", "end")):
+            parser.error("choose search window minutes or legacy hours, not both")
+        setattr(namespace, self.dest, value)
 
 
 def parser():
@@ -69,6 +93,74 @@ def parser():
     credentials = commands.add_parser("credentials-check", help="Check injected credential presence without contacting services")
     credentials.add_argument("--service", choices=["blockstream", "miro", "all"], default="blockstream",
                              help="Service credentials to check (default: blockstream)")
+    pegin = commands.add_parser("pegin-match", help="Match exact Bitcoin deposits and Liquid peg-in claims")
+    pegin_scope = pegin.add_mutually_exclusive_group()
+    pegin_scope.add_argument("--investigations-dir", type=Path, help="Workspace containing the shared matcher (default: configured cases directory)")
+    pegin_scope.add_argument("--case", type=Path, help="Legacy investigation-local matching")
+    pegin_source = pegin.add_mutually_exclusive_group(required=True)
+    pegin_source.add_argument("--txid", help="One Bitcoin transaction hash")
+    pegin_source.add_argument("--txids", type=_pegin_txids, help="Batch of 1 to 500 Bitcoin hashes separated by commas")
+    pegin_source.add_argument("--from-liquid", help="Find Bitcoin deposits referenced by this Liquid claim hash")
+    pegin.add_argument("--resume-report", help="Resume an earlier batch report, preserving completed rows")
+    pegin_outputs = pegin.add_mutually_exclusive_group()
+    pegin_outputs.add_argument("--vout", type=int, help="Match one Bitcoin output; otherwise search all outputs")
+    pegin_outputs.add_argument("--vouts", type=_pegin_vouts, help="Match these Bitcoin output indexes separated by commas")
+    pegin.add_argument("--liquid-txid", help="Verify a known Liquid claim instead of searching history")
+    pegin.add_argument("--start-minutes", type=float, action=_PeginWindowOffset,
+                       help="Search window start in signed minutes from Bitcoin confirmation (default: -5)")
+    pegin.add_argument("--end-minutes", type=float, action=_PeginWindowOffset,
+                       help="Search window end in signed minutes from Bitcoin confirmation (default: 4320)")
+    pegin.add_argument("--start-hours", type=float, action=_PeginWindowOffset,
+                       help="Legacy hour offset; cannot be combined with minute offsets (default with --end-hours: 0)")
+    pegin.add_argument("--end-hours", type=float, action=_PeginWindowOffset,
+                       help="Legacy hour offset; cannot be combined with minute offsets (default with --start-hours: 72)")
+    pegin.add_argument("--max-pages", type=int, default=100, help="History pages per task, 1-1000; each page contains up to 25 transactions")
+    pegin.add_argument("--max-requests", type=int, default=1200)
+    pegin.add_argument("--max-seconds", type=float, default=300)
+    pegin.add_argument("--public", action="store_true", help="Use Blockstream public mainnet APIs instead of enterprise APIs")
+    pegin.add_argument("--bitcoin-fixture", type=Path, help="Synthetic Bitcoin API data, requires --liquid-fixture")
+    pegin.add_argument("--liquid-fixture", type=Path, help="Synthetic Liquid API data, requires --bitcoin-fixture")
+    lightning = commands.add_parser("lightning-lookup", help="Check a Bitcoin transaction against indexed Lightning channels")
+    lightning_source = lightning.add_mutually_exclusive_group(required=True)
+    lightning_source.add_argument("--txid")
+    lightning_source.add_argument("--txids", type=_pegin_txids,
+                                  help="Batch of 1 to 100 Bitcoin hashes separated by commas")
+    lightning.add_argument("--max-requests", type=int, default=12)
+    lightning.add_argument("--max-seconds", type=float, default=30)
+    lightning.add_argument("--mempool-fixture", type=Path)
+    lightning.add_argument("--bitcoin-fixture", type=Path)
+    lightning.add_argument("--boltz-swap-id", help="Verify a known Boltz submarine swap ID against this Bitcoin transaction")
+    lightning.add_argument("--boltz-fixture", type=Path)
+    bridge = commands.add_parser("bridge-match", help="Match peg-ins or peg-out candidates from Bitcoin or Liquid")
+    bridge.add_argument("--investigations-dir", type=Path)
+    bridge.add_argument("--bridge", choices=("pegin", "pegout"), default="pegin")
+    bridge.add_argument("--network", choices=("bitcoin", "liquid"), default="bitcoin")
+    bridge.add_argument("--mode", choices=("single", "batch"), default="single")
+    source = bridge.add_mutually_exclusive_group(required=True)
+    source.add_argument("--txid")
+    source.add_argument("--txids", type=_pegin_txids)
+    outputs = bridge.add_mutually_exclusive_group()
+    outputs.add_argument("--vout", type=int)
+    outputs.add_argument("--vouts", type=_pegin_vouts)
+    bridge.add_argument("--start-minutes", type=float)
+    bridge.add_argument("--end-minutes", type=float)
+    bridge.add_argument("--max-pages", type=int, default=100)
+    bridge.add_argument("--max-requests", type=int, default=1200)
+    bridge.add_argument("--max-seconds", type=float, default=300)
+    bridge.add_argument("--public", action="store_true")
+    bridge.add_argument("--bitcoin-fixture", type=Path)
+    bridge.add_argument("--liquid-fixture", type=Path)
+    bridge.add_argument("--report-root", type=Path, help="Report owner separate from the shared index")
+    bridge.add_argument("--report-id", help="Preassigned identifier for one session report")
+    bridge.add_argument("--resume-report", help="Continue this owner's current report without repeating completed rows")
+    bridge_outputs = commands.add_parser("bridge-outputs", help="Inspect outputs for a bridge workflow")
+    bridge_outputs.add_argument("--txid", required=True)
+    bridge_outputs.add_argument("--bridge", choices=("pegin", "pegout"), default="pegin")
+    bridge_outputs.add_argument("--network", choices=("bitcoin", "liquid"), default="bitcoin")
+    bridge_outputs.add_argument("--public", action="store_true")
+    bridge_outputs.add_argument("--fixture", type=Path)
+    bridge_outputs.add_argument("--max-requests", type=int, default=5)
+    bridge_outputs.add_argument("--max-seconds", type=float, default=30)
     inspect = commands.add_parser("inspect-tx", help="Look up one transaction's outputs before choosing seeds")
     inspect.add_argument("--txid", required=True, help="64-character transaction hash")
     inspect.add_argument("--output", type=Path, help="Write output JSON to a new file instead of stdout")
@@ -1300,6 +1392,64 @@ def _dispatch(args, *, progress, diagnostics):
             result = delete_investigation(args.investigations_dir, args.case, case_id=args.case_id,
                                           confirm_name=args.confirm_name, progress=progress)
             print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+        if args.command == "lightning-lookup":
+            from .lightning_matching import lookup_lightning, lookup_lightning_batch
+            options = dict(max_requests=args.max_requests, max_seconds=args.max_seconds,
+                mempool_fixture=args.mempool_fixture, bitcoin_fixture=args.bitcoin_fixture, progress=progress)
+            if args.txids is not None:
+                if args.boltz_swap_id is not None or args.boltz_fixture is not None:
+                    raise TraceError("Boltz swap verification is available only for one transaction")
+                result = lookup_lightning_batch(args.txids, **options)
+            else:
+                result = lookup_lightning(args.txid, boltz_swap_id=args.boltz_swap_id,
+                    boltz_fixture=args.boltz_fixture, **options)
+            print(json.dumps(result, indent=2))
+            return 0
+        if args.command == "bridge-match":
+            from .bridge_matching import match_bridge
+            from .investigations import default_root
+            result = match_bridge(args.investigations_dir or default_root(), bridge=args.bridge,
+                network=args.network, mode=args.mode, txid=args.txid, txids=args.txids, vout=args.vout, vouts=args.vouts,
+                max_pages=args.max_pages, max_requests=args.max_requests, max_seconds=args.max_seconds,
+                start_minutes=args.start_minutes, end_minutes=args.end_minutes, public=args.public,
+                bitcoin_fixture=args.bitcoin_fixture, liquid_fixture=args.liquid_fixture,
+                report_root=args.report_root, report_id=args.report_id, resume_report=args.resume_report, progress=progress)
+            print(json.dumps(result, indent=2))
+            return 0
+        if args.command == "bridge-outputs":
+            from .bridge_matching import inspect_bridge_outputs
+            result = inspect_bridge_outputs(args.txid, bridge=args.bridge, network=args.network,
+                public=args.public, fixture=args.fixture, max_requests=args.max_requests, max_seconds=args.max_seconds)
+            print(json.dumps(result, indent=2))
+            return 0
+        if args.command == "pegin-match":
+            from .pegin_matching import match_pegin, match_pegin_batch, match_liquid_pegin
+            from .investigations import default_root
+            if args.txid is None and (args.case is not None or args.vout is not None
+                                      or args.vouts is not None or args.liquid_txid is not None):
+                raise TraceError("Batch and reverse matching require a workspace and do not accept output filters or a known claim")
+            if args.resume_report is not None and args.txids is None:
+                raise TraceError("Only a Bitcoin transaction batch can resume a report")
+            fixture = read_case(args.case).get("fixture") if args.case is not None else None
+            workspace = (args.investigations_dir or default_root()) if args.case is None else None
+            hours = args.start_hours is not None or args.end_hours is not None
+            unit, defaults = ("hours", (0, 72)) if hours else ("minutes", (-5, 4320))
+            window = {endpoint + "_" + unit: (getattr(args, endpoint + "_" + unit)
+                      if getattr(args, endpoint + "_" + unit) is not None else default)
+                      for endpoint, default in zip(("start", "end"), defaults)}
+            options = dict(**window,
+                max_pages=args.max_pages, max_requests=args.max_requests, max_seconds=args.max_seconds,
+                public=args.public, bitcoin_fixture=args.bitcoin_fixture or fixture,
+                liquid_fixture=args.liquid_fixture or fixture, progress=progress)
+            if args.txids is not None:
+                result = match_pegin_batch(workspace, args.txids, resume_report=args.resume_report, **options)
+            elif args.from_liquid is not None:
+                result = match_liquid_pegin(workspace, args.from_liquid, **options)
+            else:
+                result = match_pegin(args.case, args.txid, workspace=workspace, vout=args.vout,
+                                     vouts=args.vouts, liquid_txid=args.liquid_txid, **options)
+            print(json.dumps(result, indent=2))
             return 0
         if args.command == "credentials-check":
             return check_credentials(args.service)

@@ -10,7 +10,7 @@ from tests.test_pegout_paths import set_address
 
 
 class SharedAddressConnectionTests(unittest.TestCase):
-    def test_parallel_shared_outputs_keep_every_connector_in_each_scope(self):
+    def test_parallel_shared_outputs_bundle_lines_and_keep_every_utxo_in_each_scope(self):
         state = graph_state((("a:0", "b"), ("a:1", "b")),
                             seeds=("a:0", "a:1", "b:0"))
         address = "SYNTHETIC-shared-receiver"
@@ -36,7 +36,11 @@ class SharedAddressConnectionTests(unittest.TestCase):
                                  {tx("a") + ":0", tx("a") + ":1"})
                 plan = make_plan(graph)
                 validate_plan(plan)
-                self.assertEqual(len(plan["connectors"]), 5)
+                self.assertEqual(len(plan["connectors"]), 3)
+                bundles = plan["context_parallel_items"].values()
+                self.assertEqual({proof["direction"] for proof in bundles}, {"input", "output"})
+                self.assertEqual({key for proof in bundles for key in proof["inputs"]},
+                                 {edge["id"] for edge in attached})
                 self.assertEqual(sum(shape["body"]["data"]["shape"] == "circle"
                                      for shape in plan["shapes"]), 2)
         self.assertEqual(state, before)

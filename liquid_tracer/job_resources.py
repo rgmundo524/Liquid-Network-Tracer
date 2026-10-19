@@ -8,15 +8,19 @@ from pathlib import Path
 
 PARALLEL_ACTIONS = frozenset({"trace", "shared-trace", "address-counts", "plot", "plot-sync",
                               "board-create", "board-create-sync", "board-link", "board-sync", "board-delete",
-                              "scope-analyze"})
-VALUE_OPTIONS = frozenset({"--case", "--run", "--resume", "--goal", "--min-hops", "--max-hops",
+                              "scope-analyze", "pegin-match", "pegin-outputs", "lightning-lookup"})
+VALUE_OPTIONS = frozenset({"--investigations-dir", "--case", "--run", "--resume", "--goal", "--min-hops", "--max-hops",
                            "--layout-mode", "--board-record-id", "--record", "--preview", "--board",
                            "--name", "--max-items", "--layout-settings-json", "--seed", "--seeds-file",
                            "--hops", "--additional-hops", "--hop-reference-name", "--fixture",
                            "--max-transactions", "--max-outpoints", "--max-requests", "--max-seconds",
                            "--request", "--data-source", "--dataset-id", "--members-json", "--hop-basis",
                            "--board-id", "--source-board", "--max-new-items", "--visibility", "--approve-plan",
-                           "--review-id", "--item-id", "--compact-preview", "--connector-style", "--layout-attempts"})
+                           "--review-id", "--item-id", "--compact-preview", "--connector-style", "--layout-attempts",
+                           "--mempool-fixture", "--txids", "--auth", "--base-url", "--blockchain",
+                           "--bridge", "--network", "--mode", "--report-root", "--report-id",
+                           "--start-minutes", "--end-minutes", "--start-hours", "--end-hours",
+                           "--txid", "--vout", "--vouts", "--from-liquid", "--resume-report", "--liquid-txid", "--max-pages", "--bitcoin-fixture", "--liquid-fixture"})
 
 
 def option(arguments, flag):
@@ -63,6 +67,17 @@ def job_resources(arguments, action, case=None):
             return resource
         resource.update(resource_kind="shared_collection",
                         resource_key=digest(str(case.parent.resolve()).encode("utf-8")))
+    elif action == "lightning-lookup":
+        resource.update(resource_kind="lightning_lookup", resource_key="workspace-lightning")
+    elif action == "pegin-outputs":
+        resource.update(resource_kind="pegin_lookup", resource_key="bitcoin-outputs")
+    elif action == "pegin-match":
+        # One index per investigation root; no disk inspection under job_lock.
+        from .common import digest
+        from .investigations import default_root
+        workspace = case.parent if case is not None else Path(option(arguments, "--investigations-dir") or default_root()).expanduser()
+        resource.update(resource_kind="pegin_index",
+                        resource_key=digest(str(workspace.resolve()).encode("utf-8")))
     elif action in ("trace", "address-counts"):
         resource["resource_kind"] = "collection"
     elif action == "scope-analyze":
@@ -119,6 +134,12 @@ def conflicts(first, second):
                 and first.get("resource_key") == second.get("resource_key"))
     if same_case and ("exclusive" in (left, right) or left == right == "collection"):
         return True
+    if left == right == "lightning_lookup":
+        return True
+    if left == right == "pegin_lookup":
+        return True
+    if left == right == "pegin_index":
+        return bool(first.get("resource_key") and first.get("resource_key") == second.get("resource_key"))
     if left == right == "board":
         key = first.get("resource_key")
         return bool(key and key == second.get("resource_key") and (key != "new-board" or same_case))

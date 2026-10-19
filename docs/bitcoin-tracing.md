@@ -229,11 +229,16 @@ input/output table separately when required:
 liquid-trace csv-export --case cases/bitcoin-follow-up --run latest
 ```
 
-## Cross-chain matching remains a separate step
+## Bitcoin to Liquid matching
 
-Bitcoin tracing follows Bitcoin outputs. It does not automatically identify the
-Liquid claim corresponding to a Bitcoin peg-in deposit, identify a bridge or
-service from an unlabeled address, or match a Liquid peg-out to its Bitcoin payout.
-Once a Bitcoin payout has been independently matched, its exact output can seed
-this workflow. A future peg-in matcher will require separate evidence and matching
-logic; Bitcoin support does not imply that matching is already available.
+Choose Bitcoin to Liquid in the workspace sidebar to open its optional tab and
+search for the Liquid peg-in claim that references a Bitcoin transaction and
+optional vout. No investigation or seed transactions are required. Searches run as bounded,
+cancellable tasks and reuse a shared index. A known Liquid claim can also be
+verified directly. Saved results include exact references, claim outputs, CSVs,
+and response evidence. See the [matching workflow](bitcoin-liquid-matching.md).
+
+This is a separate action from ordinary collection. It does not automatically
+allocate deposited value among Liquid outputs or identify the recipient's owner.
+The result can open a new Liquid investigation form for explicit output selection.
+Liquid peg-out to Bitcoin payout matching remains a separate operation.

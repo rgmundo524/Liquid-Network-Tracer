@@ -1,7 +1,7 @@
-"""Validated display connectors for isolated groups and repeated address inputs.
+"""Validated display connectors for isolated groups and parallel UTXO links.
 
 Canonical edges remain the evidence and CSV inventory. Only a temporary display
-projection replaces each group's inputs with one connector; its membership is
+projection replaces parallel links with one counted connector; its membership is
 rederived before use. Persisted flags cannot impersonate a runtime projection.
 """
 from .networks import blockchain, is_primary
@@ -10,7 +10,7 @@ from copy import deepcopy
 
 from .common import TraceError, canonical, digest
 
-VERSION = 2
+VERSION = 3
 PREFIX = "context-inputs:"
 PARALLEL_PREFIX = "context-parallel:"
 GEOMETRY_FIELDS = frozenset({"route", "attachment", "connector_shape", "routing_exception", "label_layout"})
@@ -187,7 +187,7 @@ def _derive_parallel(graph):
             summaries.append({"id": identity, "source": source, "target": target,
                 "role": "context_input", "outpoint": None,
                 "label": f"{len(inputs)} context inputs · 1 address", "quantity": "",
-                "details": {"context_summary": {"version": VERSION, "kind": "parallel",
+                "details": {"context_summary": {"version": 2, "kind": "parallel",
                     "input_count": len(inputs), "address_count": 1,
                     "member_edge_ids": sorted(inputs)}}})
         return summaries
@@ -196,6 +196,14 @@ def _derive_parallel(graph):
 
 
 def _derive(graph, version=VERSION):
+    if version == 3:
+        from .utxo_connectors import derive
+        try:
+            grouped = (_derive_groups(graph) if "context_groups" in graph
+                       or any(node["kind"] == "context_group" for node in graph["nodes"]) else [])
+            return grouped + derive(graph)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise TraceError(_ERROR) from None
     summaries = _derive_groups(graph)
     return summaries if version == 1 else summaries + _derive_parallel(graph)
 
@@ -205,7 +213,7 @@ def _validated_summaries(graph):
         return []
     metadata = graph["context_connectors"]
     if (not isinstance(metadata, dict) or set(metadata) != {"version", "summaries"}
-            or type(metadata["version"]) is not int or metadata["version"] not in (1, VERSION)
+            or type(metadata["version"]) is not int or metadata["version"] not in (1, 2, VERSION)
             or not isinstance(metadata["summaries"], list)):
         raise TraceError(_ERROR)
     expected = _derive(graph, metadata["version"])
@@ -216,18 +224,22 @@ def _validated_summaries(graph):
                 or {key: value for key, value in actual.items() if key not in GEOMETRY_FIELDS} != wanted):
             raise TraceError(_ERROR)
         proof = actual["details"]["context_summary"]
+        if proof["version"] == 3 and any(type(count) is not int for count in proof["role_counts"].values()):
+            raise TraceError(_ERROR)
         if any(type(proof[key]) is not int for key in ("version", "input_count", "address_count")):
             raise TraceError(_ERROR)
     return metadata["summaries"]
 
 
-def prepare(graph):
-    """Opt a newly grouped graph in; never silently upgrade legacy snapshots."""
+def prepare(graph, *, version=VERSION):
+    """Prepare a new display; never silently upgrade saved preview metadata."""
+    if type(version) is not int or version not in (1, 2, VERSION):
+        raise TraceError(_ERROR)
     if "context_connectors" in graph:
         _validated_summaries(graph)
         return graph
     result = dict(graph)
-    result["context_connectors"] = {"version": VERSION, "summaries": _derive(graph)}
+    result["context_connectors"] = {"version": version, "summaries": _derive(graph, version)}
     return result
 
 
@@ -306,3 +318,11 @@ def restore_graph(display_result, canonical_original):
         return result
     except (KeyError, TypeError, ValueError, AttributeError):
         raise TraceError(_ERROR) from None
+
+
+def display_edge_ids(graph):
+    """Map canonical member IDs to their runtime connector, never infer paths."""
+    if not isinstance(graph, _DisplayGraph):
+        return {}
+    return {member: edge["id"] for edge in graph["edges"]
+            for member in edge.get("details", {}).get("context_summary", {}).get("member_edge_ids", [])}

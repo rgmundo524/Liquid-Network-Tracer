@@ -404,7 +404,7 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
             "fee_items": fee_items, "layout": layout,
             "notice": "UTXO reachability, not allocation of stolen value. Consult the legend for context and traced roles. "
                       "?? marks amounts or assets not available from public data. "
-                      + ("One circle per full address per network. UTXO occurrences and connectors remain separate; "
+                      + ("One circle per full address per network. Parallel UTXOs share counted arrows; individual UTXO evidence remains separate; "
                        "shared addresses do not establish value allocation or common ownership."
                        if merge_addresses else "Legacy view: separate outpoint occurrences."),
             "nodes": list(nodes.values()), "edges": edges}
@@ -441,7 +441,8 @@ def build_graph(state, merge_addresses=True, include_fees=False, *, group_contex
     graph = group_inputs(graph, enabled=group_context_inputs)
     if group_context_inputs:
         graph["activity_frames"] = activity_frames(graph)
-    return graph
+    from .context_connectors import prepare
+    return prepare(graph)
 
 
 def write_csv(path, rows, fields):

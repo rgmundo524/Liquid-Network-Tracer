@@ -24,6 +24,9 @@ def input_orders(graph):
     All-continuation and all-context transactions retain ordinary ELK ordering.
     A shared address cannot transfer priority between its different UTXOs.
     """
+    from .context_connectors import evidence_graph, display_edge_ids
+    display_ids = display_edge_ids(graph)
+    graph = evidence_graph(graph)
     nodes = {node["id"]: node for node in graph["nodes"]}
     outputs, incoming = defaultdict(list), defaultdict(list)
     for edge in graph["edges"]:
@@ -46,7 +49,7 @@ def input_orders(graph):
                                   for parent in outputs.get((edge.get("outpoint"), edge["source"]), [])))
             ranked.append((not continuing, _vin_index(edge), edge["id"]))
         if any(not row[0] for row in ranked) and any(row[0] for row in ranked):
-            result[key] = [row[2] for row in sorted(ranked)]
+            result[key] = list(dict.fromkeys(display_ids.get(row[2], row[2]) for row in sorted(ranked)))
     return result
 
 

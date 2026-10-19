@@ -151,7 +151,11 @@ def build_web(root: Path, npm: str) -> Path:
         if not (built / "index.html").is_file():
             staging = Path(tempfile.mkdtemp(prefix="building-", dir=cache))
             try:
+                # Astro prerenders from outDir; ESM imports resolve from that
+                # directory, which is outside web and its node_modules tree.
+                (staging / "node_modules").symlink_to(web / "node_modules", target_is_directory=True)
                 _run([npm, "run", "build", "--", "--outDir", str(staging)], web, lock_fd)
+                (staging / "node_modules").unlink(missing_ok=True)
                 if not (staging / "index.html").is_file():
                     raise RuntimeError("Astro did not produce index.html; the existing UI build was preserved.")
                 if _source_key(web) != key:

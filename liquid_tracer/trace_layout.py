@@ -60,7 +60,9 @@ def trace_structure(graph):
              "named_edges": set(), "named_excluded_hubs": set()}
     if not enabled:
         return empty
-    graph = hub_layout_view(graph)
+    from .context_connectors import evidence_graph, display_edge_ids
+    display_ids = display_edge_ids(graph)
+    graph = evidence_graph(hub_layout_view(graph))
     fees = {key for key, item in graph.get("fee_items", {}).items() if item.get("endpoint") == "shapes"}
     nodes = {node["id"]: node for node in graph["nodes"] if node["id"] not in fees}
     txs = {key for key, node in nodes.items() if node["kind"] == "transaction"}
@@ -218,9 +220,12 @@ def trace_structure(graph):
     rows = [{"anchors": list(anchors), "transactions": [key for key, _ in sorted(items)],
              "components": [index for _, index in sorted(items)]}
             for (anchors, _), items in sorted(row_groups.items()) if len(items) > 1]
+    def visible(keys):
+        return {display_ids.get(key, key) for key in keys}
+    empty["named_edges"] = visible(empty["named_edges"])
     return {**empty, "core": core, "members": core - txs, "transactions": core & txs,
-            "edges": spine_edges, "spine": spine, "terminal_pairs": terminal_pairs,
-            "terminal_edges": terminal_edges, "branches": branches,
+            "edges": visible(spine_edges), "spine": spine, "terminal_pairs": terminal_pairs,
+            "terminal_edges": visible(terminal_edges), "branches": branches,
             "peripheral": peripheral, "terminal_rows": rows}
 
 

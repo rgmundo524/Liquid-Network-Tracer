@@ -26,8 +26,10 @@ def caption_text(edge, *, display=True):
     if display and edge.get("caption_display") == "details_only":
         return ""
     label, quantity = str(edge.get("label") or ""), str(edge.get("quantity") or "")
-    if edge.get("details", {}).get("context_summary"):
+    if edge.get("details", {}).get("context_summary", {}).get("version", 0) in (1, 2):
         return label
+    if edge.get("details", {}).get("context_summary", {}).get("version") == 3 and not quantity:
+        return label + " · total unavailable"
     # Synthetic geometry-only edges have no caption. Miro's separator remains
     # present for real captions even when the quantity is empty.
     return label + " · " + quantity if "label" in edge or quantity else ""

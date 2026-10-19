@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from liquid_tracer.common import canonical
+from liquid_tracer.context_connectors import display_graph
 from liquid_tracer.edge_labels import validate_label_layout
 from liquid_tracer.elk_layout import optimize_graph, layout_metrics
 from liquid_tracer.layout_preview import export_layout
@@ -72,7 +73,7 @@ class LocalSectionPipelineTests(unittest.TestCase):
                 validate_label_layout(edge)
             plan = make_plan(result); validate_plan(plan)
             self.assertEqual({item["key"] for item in plan["shapes"] if item["key"] != "legend" and item["key"] not in plan.get("presentation_items", {})}, node_ids)
-            self.assertEqual({item["key"] for item in plan["connectors"]}, {e["id"] for e in graph["edges"]})
+            self.assertEqual({item["key"] for item in plan["connectors"]}, {e["id"] for e in display_graph(result)["edges"]})
             with patch("liquid_tracer.layout_overview.MIN_NODES", 1):
                 paths = export_layout(result, root / "preview")
             saved = json.loads(Path(paths["graph"]).read_text())

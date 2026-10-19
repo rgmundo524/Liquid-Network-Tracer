@@ -438,6 +438,8 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
                         color_attribution_arrows=color_attribution_arrows, center_name=center_name,
                         edge_ids=edge_ids, initial_layout=initial_layout,
                         respect_attribution_hops=query.get("attribution_hop_limits") != "ignore")
+    # Rebuild display summaries after this view has finalized canonical roles.
+    graph.pop("context_connectors", None)
     node_ids = {edge[field] for edge in graph["edges"] for field in ("source", "target")}
     graph["nodes"] = [node for node in graph["nodes"] if node["id"] in node_ids]
     if not complete_io:
@@ -519,7 +521,7 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
     units = "group-relative hops" if name else "transaction hops"
     graph["notice"] = (summary + f" found within {query['min_hops']} to {query['max_hops']} "
                        + units + ", inclusive; " + origin_notice + scope +
-                       " One circle per full address per network; UTXO occurrences and connectors remain separate. "
+                       " One circle per full address per network; Parallel UTXOs share counted arrows; individual UTXO evidence remains separate. "
                        + path_notice +
                        "their union may also form routes outside the selected range. "
                        + ("UTXO reachability does not prove ownership or allocate individual inputs to outputs."
@@ -529,4 +531,5 @@ def pegout_graph(state, query, *, color_attribution_arrows=None, center_name=Non
         # notices survive, while eligibility sees every displayed occurrence.
         graph = group_inputs(graph, enabled=True)
         graph["activity_frames"] = activity_frames(graph)
-    return graph
+    from .context_connectors import prepare
+    return prepare(graph)

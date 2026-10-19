@@ -31,7 +31,7 @@ from .investigations import (create_investigation, default_root, effective_run_s
 from .menu import _command, _environment, _lookup_reports, _project, _seed_values, _trace_arguments
 from .progress import public_progress
 from .performance import public_performance
-from .job_resources import PARALLEL_ACTIONS, conflicts, job_resources
+from .job_resources import PARALLEL_ACTIONS, conflicts, job_resources, option
 from .layout_search import MAX_LAYOUT_ATTEMPTS, normalize_layout_attempts
 from .layout_search_reporting import public_search_counts
 
@@ -55,7 +55,7 @@ LAYOUT_ALGORITHMS = ("elk_layered_v1", "dependency_layers_v1")
 FALLBACK_REASONS = ("size_limit", "timeout", "mermaid_size_limit", "mermaid_timeout")
 from .connections import FILES as CONNECTION_NAMES, LEGACY_FILES as LEGACY_CONNECTION_NAMES, preview_files
 CANCELLABLE_ACTIONS = {"layout", "mermaid", "compact", "connections", "pegouts", "pegouts-preview", "plot",
-                       "scope-analyze"}
+                       "scope-analyze", "pegin-match", "pegin-outputs", "lightning-lookup"}
 ACTIVE_JOB_STATUSES = {"running", "cancelling"}
 MAX_FAILURE_RESULT_BYTES = 256 * 1024
 
@@ -430,6 +430,9 @@ class LocalServer(ThreadingHTTPServer):
         # lifecycle and shutdown always use job_threads instead.
         self.job_thread = None
         super().__init__(("127.0.0.1", port), Handler)
+        self._bridge_session = tempfile.TemporaryDirectory(prefix="liquid-bridge-session-")
+        self.bridge_workspace = Path(self._bridge_session.name)
+        self.bridge_reports_root = self.bridge_workspace / ".pegin-matching"
         self.origin = "http://127.0.0.1:" + str(self.server_port)
         self.host = "127.0.0.1:" + str(self.server_port)
 
@@ -811,6 +814,9 @@ class LocalServer(ThreadingHTTPServer):
             if job["status"] in ACTIVE_JOB_STATUSES and conflicts(job, requested):
                 scope = ("Miro board" if resource["resource_kind"] == "board"
                          else "shared collection" if resource["resource_kind"] == "shared_collection"
+                         else "peg-in index" if resource["resource_kind"] == "pegin_index"
+                         else "Lightning Network lookup" if resource["resource_kind"] == "lightning_lookup"
+                         else "bridge output lookup" if resource["resource_kind"] == "pegin_lookup"
                          else "collection" if resource["resource_kind"] == "collection"
                          else "investigation")
                 raise RequestError("This " + scope + " already has an active action (" + job["action"]
@@ -822,19 +828,38 @@ class LocalServer(ThreadingHTTPServer):
             return self._start_job(arguments, action=action, live=live, case=case,
                                    case_id=case_id, txids=txids)
 
+    @staticmethod
+    def credentials_required(arguments, action, live):
+        public_match = action == "pegin-match" and "--public" in arguments
+        public_outputs = action == "pegin-outputs" and ("--public" in arguments or any(
+            flag == "--auth" and value == "none" for flag, value in zip(arguments, arguments[1:])))
+        return bool(live and not (public_match or public_outputs))
+
     def _start_job(self, arguments, *, action, live, case, case_id, txids):
         resource = job_resources(arguments, action, case)
         self.ensure_resources_available(case_id, resource)
         identity = secrets.token_hex(16)
+        new_bridge = bool(arguments) and arguments[0] in ("bridge-match", "bridge-outputs")
+        outputs_label = "transaction" if new_bridge else "Bitcoin"
+        matching_label = "bridge" if new_bridge else "Bitcoin-to-Liquid"
         self.jobs[identity] = {"id": identity, "status": "running", "action": action,
                                "case_id": case_id, "live": bool(live),
                                **resource, "execution_state": "starting",
                                "started_at": time.time(),
                                "cancellable": action in CANCELLABLE_ACTIONS,
-                               "message": ("Preparing to delete the confirmed investigation's local files."
+                               "message": ("Checking Bitcoin channel references and script evidence using public APIs."
+                                           if action == "lightning-lookup" else ("Loading " + outputs_label + " outputs using public APIs."
+                                            if not self.credentials_required(arguments, action, live) else
+                                            "Loading " + outputs_label + " outputs. Check the launching terminal if Proton Pass needs to unlock.")
+                                           if action == "pegin-outputs" else
+                                           "Preparing to delete the confirmed investigation's local files."
                                            if action == "investigation-delete" else
                                            "Preparing to delete the confirmed Miro board. Check the launching terminal if Proton Pass needs to unlock."
                                            if action == "board-delete" else
+                                           ("Preparing " + matching_label + " matching using public APIs."
+                                            if "--public" in arguments or not live else
+                                            "Preparing " + matching_label + " matching. Check the launching terminal if Proton Pass needs to unlock.")
+                                           if action == "pegin-match" else
                                            "Generating the layout and syncing Miro. Check the launching terminal if Proton Pass needs to unlock."
                                            if action == "plot-sync" else
                                            "Reading the Miro board before arranging new objects. Check the launching terminal if Proton Pass needs to unlock."
@@ -879,10 +904,14 @@ class LocalServer(ThreadingHTTPServer):
             job["cancellable"] = False
             return dict(job)
         job.update(status="cancelling", cancellable=False,
-                   message="Canceling the calculation and stopping its renderer…")
+                   message=("Canceling matching; completed index pages will remain available."
+                            if job["action"] == "pegin-match" else
+                            "Canceling the Lightning Network lookup…" if job["action"] == "lightning-lookup" else
+                            "Canceling the calculation and stopping its renderer…"))
         return dict(job)
 
     def run_job(self, identity, arguments, action, live, case, txids):
+        credentials_required = self.credentials_required(arguments, action, live)
         terminal = None
         process = None
         credential_gate = False
@@ -892,11 +921,11 @@ class LocalServer(ThreadingHTTPServer):
             with tempfile.TemporaryDirectory(prefix="liquid-web-job-") as directory:
                 request, result = Path(directory) / "request.json", Path(directory) / "result.json"
                 payload = {"arguments": arguments}
-                if live:
+                if credentials_required:
                     payload.update(terminal_handoff=True, server_pid=os.getpid())
                 request.write_text(json.dumps(payload), encoding="utf-8")
                 request.chmod(0o600)
-                if live:
+                if credentials_required:
                     with self.job_lock:
                         working_message = self.jobs[identity]["message"]
                         self.jobs[identity]["message"] = "Waiting for another action to finish unlocking credentials in the launching terminal…"
@@ -910,7 +939,7 @@ class LocalServer(ThreadingHTTPServer):
                     with self.job_lock:
                         self.jobs[identity]["message"] = working_message
                         self.jobs[identity]["execution_state"] = "credentials"
-                options = {"process_group": 0} if live else {"start_new_session": True}
+                options = {"process_group": 0} if credentials_required else {"start_new_session": True}
                 # Inherit the terminal. Provider prompts and diagnostics are not
                 # captured into browser-readable job output.
                 with self.job_lock:
@@ -918,12 +947,12 @@ class LocalServer(ThreadingHTTPServer):
                         raise RuntimeError("Server is shutting down")
                     if self.jobs[identity]["status"] == "cancelling":
                         raise JobCancelled
-                    process = subprocess.Popen(worker_command(request, result, live), cwd=_project(),
+                    process = subprocess.Popen(worker_command(request, result, credentials_required), cwd=_project(),
                                                env=_environment(), **options)
                     self.processes[identity] = process
-                    if not live:
+                    if not credentials_required:
                         self.jobs[identity]["execution_state"] = "working"
-                terminal = handoff_terminal(process, live)
+                terminal = handoff_terminal(process, credentials_required)
                 progress_path = Path(directory) / "progress.json"
                 credentials_ready = Path(directory) / "credentials-ready"
                 while True:
@@ -974,7 +1003,8 @@ class LocalServer(ThreadingHTTPServer):
                     raise RuntimeError("Invalid action result")
                 if action == "investigation-delete" and report["result"].get("case_id") != self.jobs[identity]["case_id"]:
                     raise RuntimeError("Deletion result does not match the confirmed investigation")
-                value = self.public_result(report["result"], action, case, txids)
+                value = self.public_result(report["result"], action, case, txids,
+                                           expected_network=option(arguments, "--network"))
             completion = dict(status="succeeded", cancellable=False,
                     message=(("Investigation removed. Some local files could not be deleted; check the launching terminal for cleanup details."
                               if value.get("cleanup_pending") else "Investigation and its local files deleted.")
@@ -984,13 +1014,25 @@ class LocalServer(ThreadingHTTPServer):
                               "Frame recovery complete. Finish Sync to Miro, then create or update frames.") if action == "miro-frame-recover"
                              else "Frame review ready. Inspect the linked board before choosing a recovery." if action == "miro-frame-review"
                              else "Recovery complete. Choose Sync to Miro to resume." if action == "miro-recover"
+                             else "Lightning Network results are ready. Review the channel evidence, script findings and coverage."
+                             if action == "lightning-lookup"
+                             else "Liquid Network matching results are ready. Review this session's results and search coverage." if action == "pegin-match" and arguments[0] == "bridge-match"
+                             else "Matching results saved. Open Liquid Network to review claims and search coverage." if action == "pegin-match"
+                             else "Transaction outputs loaded. Review the eligible outputs in Liquid Network." if action == "pegin-outputs"
                              else "Action completed."), result=value)
         except JobCancelled:
             completion = dict(status="canceled", cancellable=False,
-                              message="Calculation canceled. Saved investigation runs are unchanged.")
+                              message=("Liquid Network matching canceled. Any completed results remain available for this session."
+                                       if action == "pegin-match" and arguments[0] == "bridge-match" else
+                                       "Matching canceled. Completed index pages are retained; review the saved matching report."
+                                       if action == "pegin-match" else
+                                       "Lightning Network lookup canceled." if action == "lightning-lookup" else
+                                       "Calculation canceled. Saved investigation runs are unchanged."))
         except Exception as error:
             print("Local UI action failed: " + str(error), file=sys.stderr)
             completion = dict(status="failed", cancellable=False, message=(
+                    "Lightning Network lookup failed. Retry the lookup; details are in the launching terminal."
+                    if action == "lightning-lookup" else
                     "Miro sync stopped because generated objects differ from their last-synced values. "
                     "Open the linked objects and review the differences below."
                     if edit_conflicts is not None else
@@ -1007,6 +1049,15 @@ class LocalServer(ThreadingHTTPServer):
             try:
                 stop_worker(process)
             finally:
+                if (action == "pegin-match" and arguments[0] == "bridge-match"
+                        and completion is not None and completion.get("status") in ("canceled", "failed")):
+                    # The ID was assigned before admission. Recover only this
+                    # task's partial evidence, never a latest-report directory.
+                    try:
+                        from .pegin_api import workspace_report
+                        completion["result"] = workspace_report(self, option(arguments, "--report-id"))
+                    except (TraceError, OSError, ValueError, TypeError):
+                        pass
                 restore_terminal(terminal)
                 if credential_gate:
                     self.credential_lock.release()
@@ -1031,7 +1082,19 @@ class LocalServer(ThreadingHTTPServer):
         except (OSError, ValueError, TypeError):
             pass
 
-    def public_result(self, result, action, case, txids):
+    def public_result(self, result, action, case, txids, *, expected_network=None):
+        if action == "lightning-lookup":
+            from .lightning_matching import validate_lightning_batch_report, validate_lightning_report
+            if case is not None or not isinstance(txids, list) or not txids:
+                raise TraceError("Lightning lookup must belong to workspace Bitcoin transactions")
+            if isinstance(result, dict) and result.get("kind") == "lightning_batch":
+                return validate_lightning_batch_report(result, txids)
+            if len(txids) != 1:
+                raise TraceError("Lightning lookup result does not match its workspace transactions")
+            return validate_lightning_report(result, txids[0])
+        if action == "pegin-match":
+            from .pegin_api import public_report, workspace_report
+            return workspace_report(self, result["id"]) if case is None else public_report(case, result["id"])
         if action == "investigation-delete":
             # The worker has removed the directory; no case reads are valid here.
             identity, name = result.get("case_id"), result.get("name")
@@ -1103,10 +1166,14 @@ class LocalServer(ThreadingHTTPServer):
                       "address_objects_after", "duplicates_to_remove", "connectors_to_redirect")
             return {key: result[key] for key in fields if key in result
                     and isinstance(result[key], (str, int, bool))}
-        if action == "lookup":
+        if action in ("lookup", "pegin-outputs"):
+            expected = (expected_network or "bitcoin") if action == "pegin-outputs" else None
+            if expected is not None and result.get("blockchain") != expected:
+                raise TraceError("Bridge output lookup returned a different blockchain")
             # inspect-txs always uses a transactions wrapper, including one hash.
             report = result.get("transactions", [])
-            validated = _lookup_reports(report[0] if len(txids) == 1 and report else result, txids)
+            validated = _lookup_reports(report[0] if len(txids) == 1 and report else result, txids,
+                                        expected_blockchain=expected)
             # JavaScript numbers cannot exactly represent every explicit Liquid
             # amount. Keep the numeric field for compatibility and provide its
             # exact decimal representation for display in the browser.
@@ -1209,6 +1276,10 @@ class LocalServer(ThreadingHTTPServer):
 
     @staticmethod
     def artifact(case, parts):
+        if len(parts) == 3 and parts[0] == "pegin-matches":
+            from .pegin_matching import verified_file
+            return verified_file(case, parts[1], parts[2])
+
         if len(parts) == 3 and parts[0] == "analyses":
             from .scope_analysis import verified_analysis_file
             return verified_analysis_file(case, parts[1], parts[2])
@@ -1267,6 +1338,9 @@ class LocalServer(ThreadingHTTPServer):
             arguments = ["investigation-delete", "--investigations-dir", str(self.root), "--case", str(case),
                          "--case-id", metadata["case_id"], "--confirm-name=" + body["confirm_name"]]
             return self.start_job(arguments, action=action, live=False, case=case)
+        if action == "pegin-match":
+            from .pegin_api import start_match
+            return start_match(self, case, metadata, body)
         if action not in PARALLEL_ACTIONS:
             self.ensure_case_idle(metadata["case_id"])
         if action in ("plot", "plot-sync", "board-create", "board-create-sync", "board-link", "board-sync", "board-delete",
@@ -1575,6 +1649,7 @@ class LocalServer(ThreadingHTTPServer):
             if thread.ident is not None and thread is not threading.current_thread():
                 thread.join()
         super().server_close()
+        self._bridge_session.cleanup()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1757,6 +1832,22 @@ class Handler(BaseHTTPRequestHandler):
             with self.server.job_lock:
                 jobs = [dict(job) for job in self.server.jobs.values()]
             self.send(200, {"jobs": jobs})
+        elif len(parts) in (3, 4) and parts[:3] == ["api", "tools", "pegin-matches"]:
+            from .pegin_api import workspace_report, workspace_reports
+            self.send(200, {"reports": workspace_reports(self.server)} if len(parts) == 3 else
+                      workspace_report(self.server, parts[3]))
+        elif len(parts) == 4 and parts[:2] == ["files", "pegin-matches"]:
+            from .pegin_api import workspace_download
+            path = workspace_download(self.server, parts[2], parts[3])
+            self.send(200, path.read_bytes(), mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                      download=path.name)
+        elif len(parts) in (4, 5) and parts[:2] == ["api", "cases"] and parts[3] == "pegin-matches":
+            from .pegin_matching import list_reports
+            from .pegin_api import public_report
+            case, metadata = self.server.case(parts[2])
+            if metadata.get("blockchain", "liquid") != "bitcoin":
+                raise RequestError("Peg-in matching requires a Bitcoin investigation.")
+            self.send(200, {"reports": list_reports(case)} if len(parts) == 4 else public_report(case, parts[4]))
         elif len(parts) == 3 and parts[:2] == ["api", "cases"]:
             case, metadata = self.server.case(parts[2])
             self.send(200, self.server.case_summary(case, metadata, detail=True))
@@ -1858,7 +1949,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, raw, content_type, preview=path.suffix in (".html", ".svg"),
                       download=path.name if download_original or path.suffix != ".html" else None,
                       preview_navigation=bool(toolbar or navigation and path.name in navigation | {"graph.html", "details.html"}),
-                      explorer_links=(parts[2] == "analyses" or parts[3].split("-")[1] in ("elk", "compact", "connections", "pegouts", "plots")) and path.suffix in (".html", ".svg"))
+                      explorer_links=path.suffix in (".html", ".svg") and (parts[2] == "analyses" or any(
+                          part in ("elk", "compact", "connections", "pegouts", "plots") for part in parts[3].split("-")[1:2])))
         else:
             if parts and parts[0] in {"api", "files"}:
                 raise RequestError("Page not found", 404)
@@ -1880,6 +1972,15 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def post(self, parts, body):
+        if parts == ["api", "tools", "lightning-network"]:
+            from .lightning_api import start_lookup
+            return start_lookup(self.server, body), 202
+        if parts == ["api", "tools", "pegin-matches", "outputs"]:
+            from .pegin_api import start_workspace_outputs
+            return start_workspace_outputs(self.server, body), 202
+        if parts == ["api", "tools", "pegin-matches"]:
+            from .pegin_api import start_workspace_match
+            return start_workspace_match(self.server, body), 202
         if parts == ["api", "shared-attributions"]:
             from .shared_attributions import catalog
             if set(body) - {"query", "offset", "limit", "blockchain"}:

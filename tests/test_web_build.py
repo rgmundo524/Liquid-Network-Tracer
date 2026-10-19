@@ -116,6 +116,20 @@ else:
         self.assertEqual((self.root / "web" / "dist" / "index.html").read_text(), "second page")
         self.assertEqual(len(self.events()), 4)
 
+    def test_prerender_dependencies_are_available_only_during_build(self):
+        original = web_build._run
+        observed = []
+        def capture(arguments, directory, lock_fd):
+            if "--outDir" in arguments:
+                staging = Path(arguments[arguments.index("--outDir") + 1])
+                observed.append(staging)
+                self.assertEqual((staging / "node_modules").resolve(), self.root / "web" / "node_modules")
+            return original(arguments, directory, lock_fd)
+        with patch.object(web_build, "_run", side_effect=capture):
+            built = self.build()
+        self.assertEqual(len(observed), 1)
+        self.assertFalse((built / "node_modules").exists())
+
     def test_failed_build_keeps_published_version_and_removes_staging(self):
         old = self.build()
         (self.root / "web" / "src" / "page.astro").write_text("second page")

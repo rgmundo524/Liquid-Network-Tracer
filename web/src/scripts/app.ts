@@ -1,3 +1,5 @@
+import {lightningPanel, lightningInput, lightningAction, lightningComplete, lightningToggle, lightningFile} from "./lightning-network";
+import {peginPanel, peginInput, peginAction, peginOutputsComplete, peginFile, peginToggle, peginComplete} from "./pegin-matching";
 import {beginFrameRecovery, frameRecoveryStarted, frameRecoveryComplete, frameRecoveryDialog, frameRecoveryApproval, resetFrameRecovery} from "./frame-recovery";
 import {nameColorsPanel, nameColorsInput, nameColorsAction, nameColorsFile, resetNameColors, selectNameColors} from "./name-colors";
 import { addressImportPanel, addressImportInput, addressImportFile, addressImportAction, resetAddressImport, selectAddressImport } from "./address-import";
@@ -262,7 +264,7 @@ type MiroEditConflictReport = {
     changes: { field: string; saved: MiroConflictValue; current: MiroConflictValue }[] }[];
   truncated?: boolean;
 };
-type JobResource = {resource_kind: "collection" | "shared_collection" | "plot" | "board" | "board_delete" | "exclusive"; resource_key?: string | null};
+type JobResource = {resource_kind: "collection" | "shared_collection" | "pegin_index" | "pegin_lookup" | "lightning_lookup" | "plot" | "board" | "board_delete" | "exclusive"; resource_key?: string | null};
 type Job = {
   resource_kind?: JobResource["resource_kind"];
   resource_key?: string | null;
@@ -299,7 +301,7 @@ type AddressActivity = {
 type AddressRow = { attributionStale?: boolean; address: string; run_output_count?: number; service: ServiceRule | null; activity: AddressActivity | null };
 type AddressPage = { run_id: string; rows: AddressRow[]; total: number; offset: number; limit: number };
 type CaseView = "collect" | "plots" | "analysis" | "boards" | "history";
-type Page = "dashboard" | "new" | "case" | "settings" | "case-settings" | "addresses";
+type Page = "dashboard" | "new" | "case" | "settings" | "case-settings" | "addresses" | "pegin" | "lightning";
 type ActiveJob = {
   resource_kind?: JobResource["resource_kind"];
   resource_key?: string | null;
@@ -349,6 +351,8 @@ const state = {
   page: "dashboard" as Page,
   activeCase: null as Case | null,
   openCases: [] as string[],
+  peginOpen: false,
+  lightningOpen: false,
   endpointExport: {pending: false, caseCount: 0, result: null as Omit<EndpointExport, "csv"> | null, error: ""},
   openingCase: null as {id: string; name: string; generation: number} | null,
   selectedRun: "latest",
@@ -373,6 +377,9 @@ const state = {
     selected: new Set<string>(),
   },
 };
+
+const FINISHED_TASK_LIFETIME_MS = 60_000;
+const finishedTaskTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const dialog = document.querySelector<HTMLDialogElement>("#action-dialog")!;
@@ -440,7 +447,7 @@ function invalidateImportedInputs(caseId: string): void {
 function persistInvestigationTabs(): void {
   try {
     // Only navigation is persisted. Evidence and unsaved form contents stay in memory.
-    window.sessionStorage.setItem(investigationTabsKey, JSON.stringify({ids: state.openCases,
+    window.sessionStorage.setItem(investigationTabsKey, JSON.stringify({ids: state.openCases, ...(state.peginOpen ? {peginOpen: true} : {}), ...(state.lightningOpen ? {lightningOpen: true} : {}),
       views: state.openCases.map(id => {
         const view = viewingCase(id) ? {page: state.page, caseView: state.caseView, selectedRun: currentRun()?.id || state.selectedRun, selectedPreview: currentWorkflow(state.activeCase!).plot} : investigationViews.get(id);
         return {id, page: view?.page, caseView: view?.caseView, selectedRun: view?.selectedRun, selectedPreview: view?.selectedPreview};
@@ -452,6 +459,8 @@ function restoreInvestigationTabs(): void {
   try {
     const saved = JSON.parse(window.sessionStorage.getItem(investigationTabsKey) || "null");
     if (!saved || !Array.isArray(saved.ids)) return;
+    state.peginOpen = saved.peginOpen === true;
+    state.lightningOpen = saved.lightningOpen === true;
     const available = new Set(state.cases.map(item => item.id));
     state.openCases = [...new Set<string>(saved.ids.filter((id: unknown): id is string => typeof id === "string" && available.has(id)))];
     if (Array.isArray(saved.views)) for (const view of saved.views) {
@@ -481,13 +490,25 @@ function rememberInvestigationView(): void {
   persistInvestigationTabs();
 }
 
+function peginToolTab(): string {
+  if (!state.peginOpen) return "";
+  const active = state.page === "pegin", count = runningJobs().filter(job => job.action === "pegin-match").length;
+  return `<div class="investigation-tab${active ? " active" : ""}"><button class="investigation-tab-open" data-page="pegin"${active ? ' aria-current="page"' : ""}><span class="investigation-tab-name">Liquid Network</span><span class="investigation-tab-status"${count ? ' role="status"' : ""}>${count ? `${count} running` : ""}</span></button><button class="investigation-tab-close" data-action="close-pegin-tab" aria-label="Close Liquid Network tab" title="Close tab; current-session results remain available">${icon("close")}</button></div>`;
+}
+
+function lightningToolTab(): string {
+  if (!state.lightningOpen) return "";
+  const active = state.page === "lightning", count = runningJobs().filter(job => job.action === "lightning-lookup").length;
+  return `<div class="investigation-tab${active ? " active" : ""}"><button class="investigation-tab-open" data-page="lightning"${active ? ' aria-current="page"' : ""}><span class="investigation-tab-name">Lightning Network</span><span class="investigation-tab-status"${count ? ' role="status"' : ""}>${count ? `${count} running` : ""}</span></button><button class="investigation-tab-close" data-action="close-lightning-tab" aria-label="Close Lightning Network tab" title="Close tab; current-session results remain available">${icon("close")}</button></div>`;
+}
+
 function investigationTabs(): string {
-  if (!state.openCases.length) return "";
-  return `<nav class="investigation-tabs" aria-label="Open investigations"><div class="investigation-tab-list">${state.openCases.map(id => {
+  if (!state.openCases.length && !state.peginOpen && !state.lightningOpen) return "";
+  return `<nav class="investigation-tabs" aria-label="Open investigations and tools"><div class="investigation-tab-list">${peginToolTab()}${lightningToolTab()}${state.openCases.map(id => {
     const name = state.cases.find(item => item.id === id)?.name || (state.activeCase?.id === id ? state.activeCase.name : id);
     const active = viewingCase(id), count = runningJobs().filter(job => job.caseId === id).length;
     return `<div class="investigation-tab${active ? " active" : ""}"><button class="investigation-tab-open" data-case="${esc(id)}" title="${esc(name)}"${active ? ' aria-current="page"' : ""}${disabled(isCaseOpening(id) || investigationDeletionPending(id))}><span class="investigation-tab-name">${esc(name)}</span><span class="investigation-tab-status"${count ? ' role="status"' : ""}>${count ? `${count} running` : ""}</span></button><button class="investigation-tab-close" data-action="close-investigation-tab" data-id="${esc(id)}" aria-label="Close ${esc(name)} tab" title="Close tab; running tasks continue">${icon("close")}</button></div>`;
-  }).join("")}</div><button class="btn small investigation-export" data-action="export-open-endpoints" title="Export the latest saved endpoint trace for each open investigation’s selected snapshot"${disabled(state.endpointExport.pending)}>${icon("download")}<span>${state.endpointExport.pending ? "Exporting…" : "Export endpoints"}</span></button><button class="investigation-tab-add" data-page="new" aria-label="New investigation" title="New investigation">${icon("plus")}</button></nav>`;
+  }).join("")}</div><button class="btn small investigation-export" data-action="export-open-endpoints" title="Export the latest saved endpoint trace for each open investigation’s selected snapshot"${disabled(state.endpointExport.pending || !state.openCases.length)}>${icon("download")}<span>${state.endpointExport.pending ? "Exporting…" : "Export endpoints"}</span></button><button class="investigation-tab-add" data-page="new" aria-label="New investigation" title="New investigation">${icon("plus")}</button></nav>`;
 }
 
 function endpointExportNotice(): string {
@@ -541,7 +562,7 @@ async function closeInvestigationTab(id: string): Promise<void> {
   if (state.openingCase?.id === id) cancelCaseOpening();
   if (active) {
     const next = state.openCases[Math.min(index, state.openCases.length - 1)];
-    navigate("dashboard");
+    navigate(!next && state.peginOpen ? "pegin" : !next && state.lightningOpen ? "lightning" : "dashboard");
     if (next) await openCase(next);
   } else render();
 }
@@ -571,6 +592,9 @@ const isBusy = (): boolean => submitting || investigationEditorBusy() ||
 const draftBusy = (): boolean => submitting || investigationEditorBusy();
 function requestedResource(action: string, body: Record<string, unknown> = {}, caseId: string | null | undefined = state.activeCase?.id): JobResource {
   if (action === "shared-trace") return {resource_kind: "shared_collection", resource_key: "workspace-shared"};
+  if (action === "pegin-outputs") return {resource_kind: "pegin_lookup", resource_key: "bitcoin-outputs"};
+  if (action === "lightning-lookup") return {resource_kind: "lightning_lookup", resource_key: "workspace-lightning"};
+  if (action === "pegin-match") return {resource_kind: "pegin_index", resource_key: "workspace-pegins"};
   if (["trace", "address-counts"].includes(action)) return {resource_kind: "collection"};
   if (action === "board-delete") return {resource_kind: "board_delete", resource_key: String(body.board_id || "")};
   if ((action === "plot" && body.layout_mode !== "update") || action === "scope-analyze") return {resource_kind: "plot"};
@@ -602,6 +626,9 @@ function actionBusy(action: string, body: Record<string, unknown> = {}, caseId: 
         && (requested.resource_kind === "board_delete" || existing.resource_kind === "board_delete")) return true;
     if (requested.resource_kind === "shared_collection" || existing.resource_kind === "shared_collection")
       return requested.resource_kind === "shared_collection" && existing.resource_kind === "shared_collection";
+    if (requested.resource_kind === "lightning_lookup" && existing.resource_kind === "lightning_lookup") return true;
+    if (requested.resource_kind === "pegin_lookup" && existing.resource_kind === "pegin_lookup") return true;
+    if (requested.resource_kind === "pegin_index" && existing.resource_kind === "pegin_index") return true;
     if ((job.caseId ?? null) !== (caseId ?? null)) return ["board", "board_delete", "exclusive"].includes(requested.resource_kind)
       && ["board", "board_delete", "exclusive"].includes(existing.resource_kind) && Boolean(requested.resource_key)
       && requested.resource_key !== "new-board" && requested.resource_key === existing.resource_key;
@@ -692,6 +719,8 @@ function button(
   return `<button type="button" class="btn ${style}" data-action="${action}"${disabled(off)} ${attrs}>${symbol ? icon(symbol) : ""}${label}</button>`;
 }
 
+const NOTIFICATION_LIFETIME_MS = 60_000;
+
 function toast(message: string, error = false): void {
   const element = document.createElement("button");
   element.type = "button";
@@ -699,9 +728,12 @@ function toast(message: string, error = false): void {
   element.textContent = message;
   element.title = "Dismiss notification";
   element.setAttribute("aria-label", `Dismiss notification: ${message}`);
-  element.onclick = () => element.remove();
+  const timeout = setTimeout(() => element.remove(), NOTIFICATION_LIFETIME_MS);
+  element.onclick = () => {
+    clearTimeout(timeout);
+    element.remove();
+  };
   document.querySelector("#notifications")!.append(element);
-  setTimeout(() => element.remove(), error ? 9000 : 5500);
 }
 
 function notificationControl(): string {
@@ -714,7 +746,9 @@ function notifyTaskResult(job: ActiveJob): void {
   taskNotifications.notify({id: job.id, status: job.status as "succeeded" | "failed" | "canceled",
     investigation: taskName(job), action: human(job.action), open: () => {
       tasksOpen = true;
-      if (job.caseId) void openCase(job.caseId).catch(handleError);
+      if (["pegin-match", "pegin-outputs"].includes(job.action)) navigate("pegin");
+      else if (job.action === "lightning-lookup") navigate("lightning");
+      else if (job.caseId) void openCase(job.caseId).catch(handleError);
       else render();
     }});
 }
@@ -783,7 +817,7 @@ function graphFields(settings: Settings, suggest = false, goal: PlotGoal = "full
     ${check("color_attribution_arrows", "Color arrows by attribution", "Use each named address's assigned color for its arrows.")}
     ${centerNameFields(settings, suggest)}
     <fieldset class="layout-fields context-grouping-fields"><legend>Context input grouping</legend>
-    ${check("group_context_inputs", "Group isolated context inputs", "Combine isolated external input addresses and bundle repeated context inputs from the same address to the same transaction. Shared or named addresses stay visible, and traced inputs keep their own arrows. Original inputs remain in details and CSV exports. Changing this grouping replaces generated context objects or connectors; preserve any Miro comments on them first.")}</fieldset>
+    ${check("group_context_inputs", "Group isolated context inputs", "Combine isolated external input addresses into a summary. Shared or named addresses stay visible. Multiple UTXO links between the same address and transaction always share a counted arrow, including traced inputs and repeated outputs, on both networks. Original inputs and outputs remain in details and CSV exports. Changing this grouping replaces generated context objects or connectors; preserve any Miro comments on them first.")}</fieldset>
     <fieldset class="layout-fields fee-flow-fields"><legend>Transaction fees</legend>
     ${check("include_fees", "Include transaction fee flows", "Off by default for every plot type. Include fees above the graph and in its transaction CSV; saved evidence always retains fee data.")}</fieldset>
     <fieldset class="layout-fields full-trace-fields"${disabled(goal === "connections")}><legend>Branch hubs</legend>
@@ -889,6 +923,8 @@ function sidebar(): string {
   return `<aside class="sidebar"><div class="brand"><span class="brand-mark">${icon("liquid")}</span><div><strong>Liquid Tracer</strong><small>Investigation workspace</small></div></div><div class="nav-label">Workspace</div><nav aria-label="Main navigation">${[
     ["dashboard", "Investigations", "grid"],
     ["new", "New investigation", "plus"],
+    ["pegin", "Liquid Network", "search"],
+    ["lightning", "Lightning Network", "search"],
     ["settings", "Workspace defaults", "settings"],
   ]
     .map(
@@ -956,6 +992,7 @@ function taskActivity(job: ActiveJob): {kind: "computing" | "api" | "waiting" | 
   }
   if (job.execution_state === "credentials_wait") return {kind: "waiting", label: "Waiting for credential prompt"};
   if (job.execution_state === "credentials") return {kind: "waiting", label: "Unlock credentials in terminal"};
+  if (["pegin-match", "pegin-outputs", "lightning-lookup"].includes(job.action)) return {kind: "api", label: "Explorer API work"};
   if (progress?.phase === "waiting") return {kind: "waiting", label: "Waiting for Miro API"};
   if (progress?.shared_api_wait_reason === "server_cooldown" && (progress.shared_api_wait_seconds || 0) > 0)
     return {kind: "waiting", label: "Waiting for Explorer API cooldown"};
@@ -975,6 +1012,9 @@ function taskActivitySummary(jobs: ActiveJob[]): string {
 }
 
 function taskName(job: ActiveJob): string {
+  if (job.action === "pegin-outputs") return "Bitcoin output lookup";
+  if (job.action === "pegin-match") return "Liquid Network";
+  if (job.action === "lightning-lookup") return "Lightning Network";
   if (job.action === "investigation-delete" && typeof job.outcome?.result?.name === "string") return job.outcome.result.name;
   return job.action === "shared-trace" ? "Shared collection" : job.caseId ? state.cases.find(item => item.id === job.caseId)?.name ||
     (state.activeCase?.id === job.caseId ? state.activeCase.name : job.caseId) : "New investigation";
@@ -993,12 +1033,35 @@ function jobBanner(): string {
   const active = activeTasks();
   const recent = [...finishedJobs(), ...[...sharedCollectionLoads.values()].map(load => load.task).filter(task => task.status !== "running")]
     .sort((a, b) => (b.finishedAt ?? b.started) - (a.finishedAt ?? a.started)).slice(0, 8);
+  for (const task of recent) scheduleFinishedTaskDismissal(task);
   const current = active.find(job => viewingCase(job.caseId)) || active[0];
   if (!active.length && !recent.length) return '<div id="job-tasks"></div>';
   return `<div id="job-tasks"><details class="task-list"${tasksOpen ? " open" : ""}><summary><span class="task-summary-count">${active.length ? `<span class="spinner" aria-hidden="true"></span>${active.length} active task${active.length === 1 ? "" : "s"}<small class="task-activity-summary">${esc(taskActivitySummary(active))}</small>` : "Recent tasks"}</span><div class="task-summary-message"><span role="status" aria-live="polite">${esc(current ? `${taskName(current)} · ${taskMessage(current)}` : `${recent.length} completed task${recent.length === 1 ? "" : "s"}`)}</span>${current ? jobProgress(current) : ""}</div><span class="task-summary-hint">View tasks</span></summary><div class="task-list-body">${[...active, ...recent].map(job => {
     const running = job.status === "running" || job.status === "cancelling";
-    return `<article class="job-banner task-row${job.status === "failed" ? " task-failed" : ""}" data-task="${esc(job.id)}"><div class="job-details"><div class="task-heading"><strong>${esc(taskName(job))}</strong><span>${esc(job.action === "load-shared-collection" ? "Shared collection" : job.action === "scope-analyze" ? "Scope analysis" : (job.action === "investigation-delete" ? "Delete investigation" : human(job.action)))} · ${esc(running ? taskActivity(job).label : human(job.status))}</span></div><p data-job-message="${esc(job.id)}">${esc(taskMessage(job))}</p>${running ? `<div data-job-progress="${esc(job.id)}">${jobProgress(job)}</div>` : ""}${running && job.live && (!job.execution_state || job.execution_state === "credentials") ? '<p>Complete any Proton Pass prompt in the launching terminal.</p>' : ""}${job.source_run_id ? `<p class="small muted">Source run: ${esc(short(job.source_run_id, 8))}</p>` : ""}</div><div class="job-actions">${running ? `<span class="job-time" data-job-elapsed="${esc(job.id)}"></span>` : ""}${job.caseId && !deletedInvestigations.has(job.caseId) && !investigationDeletionPending(job.caseId) ? `<button class="btn small" data-action="open-job" data-id="${esc(job.id)}">Open investigation</button>` : !running && job.action === "lookup" && job.outcome?.result ? `<button class="btn small" data-action="load-job-outputs" data-id="${esc(job.id)}">Review outputs</button>` : ""}${running && job.action !== "investigation-delete" && (job.cancellable || job.cancelling) ? `<button class="btn small" data-action="cancel-job" data-id="${esc(job.id)}"${disabled(job.cancelling)}>${job.cancelling ? "Canceling…" : "Cancel calculation"}</button>` : ""}${!running ? `<button class="btn ghost small" data-action="dismiss-job" data-id="${esc(job.id)}">Dismiss</button>` : ""}</div></article>`;
+    return `<article class="job-banner task-row${job.status === "failed" ? " task-failed" : ""}" data-task="${esc(job.id)}"><div class="job-details"><div class="task-heading"><strong>${esc(taskName(job))}</strong><span>${esc(job.action === "load-shared-collection" ? "Shared collection" : job.action === "scope-analyze" ? "Scope analysis" : (job.action === "investigation-delete" ? "Delete investigation" : human(job.action)))} · ${esc(running ? taskActivity(job).label : human(job.status))}</span></div><p data-job-message="${esc(job.id)}">${esc(taskMessage(job))}</p>${running ? `<div data-job-progress="${esc(job.id)}">${jobProgress(job)}</div>` : ""}${running && job.live && (!job.execution_state || job.execution_state === "credentials") ? '<p>Complete any Proton Pass prompt in the launching terminal.</p>' : ""}${job.source_run_id ? `<p class="small muted">Source run: ${esc(short(job.source_run_id, 8))}</p>` : ""}</div><div class="job-actions">${running ? `<span class="job-time" data-job-elapsed="${esc(job.id)}"></span>` : ""}${["pegin-match", "pegin-outputs", "lightning-lookup"].includes(job.action) ? `<button class="btn small" data-action="open-job" data-id="${esc(job.id)}">Open matching tool</button>` : job.caseId && !deletedInvestigations.has(job.caseId) && !investigationDeletionPending(job.caseId) ? `<button class="btn small" data-action="open-job" data-id="${esc(job.id)}">Open investigation</button>` : !running && job.action === "lookup" && job.outcome?.result ? `<button class="btn small" data-action="load-job-outputs" data-id="${esc(job.id)}">Review outputs</button>` : ""}${running && job.action !== "investigation-delete" && (job.cancellable || job.cancelling) ? `<button class="btn small" data-action="cancel-job" data-id="${esc(job.id)}"${disabled(job.cancelling)}>${job.cancelling ? "Canceling…" : "Cancel calculation"}</button>` : ""}${!running ? `<button class="btn ghost small" data-action="dismiss-job" data-id="${esc(job.id)}">Dismiss</button>` : ""}</div></article>`;
   }).join("")}</div></details></div>`;
+}
+
+function scheduleFinishedTaskDismissal(task: ActiveJob): void {
+  if (finishedTaskTimers.has(task.id) || ["running", "cancelling"].includes(task.status)) return;
+  const timer = setTimeout(() => {
+    finishedTaskTimers.delete(task.id);
+    const saved = state.jobs.get(task.id);
+    if (saved && !["running", "cancelling"].includes(saved.status)) {
+      state.jobs.delete(task.id);
+      dismissedJobs.add(task.id);
+    }
+    for (const [caseId, load] of sharedCollectionLoads)
+      if (load.task.id === task.id && load.task.status !== "running") sharedCollectionLoads.delete(caseId);
+    updateJobProgress();
+  }, FINISHED_TASK_LIFETIME_MS);
+  finishedTaskTimers.set(task.id, timer);
+}
+
+function cancelFinishedTaskDismissal(id: string): void {
+  const timer = finishedTaskTimers.get(id);
+  if (timer !== undefined) clearTimeout(timer);
+  finishedTaskTimers.delete(id);
 }
 
 function updateJobProgress(): void {
@@ -1059,8 +1122,10 @@ function render(focus = false): void {
     settings: "Workspace defaults",
     "case-settings": "Investigation settings",
     addresses: "Address review",
+    pegin: "Liquid Network",
+    lightning: "Lightning Network",
   };
-  app.innerHTML = `<div class="layout">${sidebar()}<div class="main-shell"><header class="workspace-header"><div class="topbar"><div class="breadcrumb">${icon("folder")}<span>Workspace</span>${icon("chevron")}<strong>${esc(names[state.page])}</strong></div><div class="topbar-right">${notificationControl()}<span class="local-pill">${icon("lock")} LOCAL SESSION</span><span class="avatar" aria-label="Investigation workspace">LT</span></div></div>${investigationTabs()}${endpointExportNotice()}${jobBanner()}${caseOpeningBanner()}</header><main id="main" class="content" tabindex="-1">${state.error ? `<div class="alert error" role="alert">${icon("info")}<div><strong>Unable to complete the action</strong><p>${esc(state.error)}</p></div><button class="dismiss" data-action="dismiss-error" aria-label="Dismiss error">${icon("close")}</button></div>` : ""}${miroEditConflictsPanel()}${state.page === "dashboard" ? dashboard() : state.page === "new" ? newCase() : state.page === "case" ? workspace() : state.page === "addresses" ? addressReviewPage() : settingsPage()}</main></div></div>`;
+  app.innerHTML = `<div class="layout">${sidebar()}<div class="main-shell"><header class="workspace-header"><div class="topbar"><div class="breadcrumb">${icon("folder")}<span>Workspace</span>${icon("chevron")}<strong>${esc(names[state.page])}</strong></div><div class="topbar-right">${notificationControl()}<span class="local-pill">${icon("lock")} LOCAL SESSION</span><span class="avatar" aria-label="Investigation workspace">LT</span></div></div>${investigationTabs()}${endpointExportNotice()}${jobBanner()}${caseOpeningBanner()}</header><main id="main" class="content" tabindex="-1">${state.error ? `<div class="alert error" role="alert">${icon("info")}<div><strong>Unable to complete the action</strong><p>${esc(state.error)}</p></div><button class="dismiss" data-action="dismiss-error" aria-label="Dismiss error">${icon("close")}</button></div>` : ""}${miroEditConflictsPanel()}${state.page === "dashboard" ? dashboard() : state.page === "new" ? newCase() : state.page === "case" ? workspace() : state.page === "pegin" ? peginPanel(peginContext().busy) : state.page === "lightning" ? lightningPanel(lightningContext().busy) : state.page === "addresses" ? addressReviewPage() : settingsPage()}</main></div></div>`;
   workspaceHeaderObserver?.disconnect();
   const tabList = document.querySelector(".investigation-tab-list");
   if (tabList) tabList.scrollLeft = tabScroll;
@@ -2494,6 +2559,41 @@ function pegoutLbtcTotal(detail: Case, run?: Run): string {
   return `<div class="pegout-total" role="group" aria-label="Peg-out LBTC total"><div><span>Peg-out LBTC total</span><strong>${esc(amount)}</strong><p>${esc(notes.join(" · "))}.</p><p class="small muted">${shared ? `Latest peg-out trace from shared snapshot ${esc(draft.sharedRun)}` : "Latest peg-out trace for this snapshot"}${plot.max_hops != null ? ` · Hops ${esc(plot.min_hops)}–${esc(plot.max_hops)}` : ""}${plot.created_at ? ` · ${esc(formatDate(plot.created_at))}` : ""}. Sums full endpoint values in the saved trace.${plot.query?.pegout_lbtc_limit ? ` Cumulative target: ${esc(plot.query.pegout_lbtc_limit)} L-BTC.` : ""}</p></div>${downloadLink(endpoints, "Endpoint CSV", "small")}</div>`;
 }
 
+function lightningContext() {
+  return {busy: actionBusy("lightning-lookup", {}, null),
+    render: () => {if (state.page === "lightning") render();},
+    start: (body: Record<string, unknown>) => startJob("/api/tools/lightning-network", body, "lightning-lookup", false),
+    download: (name: string, text: string) => {
+      const url = URL.createObjectURL(new Blob([text], {type: "text/csv;charset=utf-8"}));
+      const link = document.createElement("a");
+      link.href = url; link.download = name; link.hidden = true;
+      document.body.append(link);
+      try {link.click();} finally {link.remove(); setTimeout(() => URL.revokeObjectURL(url), 30_000);}
+    }};
+}
+
+function peginContext() {
+  return {busy: actionBusy("pegin-match", {}, null) || actionBusy("pegin-outputs", {}, null),
+    render: () => {if (state.page === "pegin") render();}, get: api,
+    start: (body: Record<string, unknown>) => startJob("/api/tools/pegin-matches", body, "pegin-match", true),
+    loadOutputs: (body: Record<string, unknown>) => startJob("/api/tools/pegin-matches/outputs", body, "pegin-outputs", true),
+    download: (url: string) => {
+      if (!/^\/files\/pegin-matches\/[0-9a-f]{32}\/matches\.csv$/.test(url))
+        throw new Error("The matching result did not provide a valid CSV download.");
+      const link = document.createElement("a");
+      link.href = url; link.download = "bridge-matches.csv"; link.hidden = true;
+      document.body.append(link);
+      try {link.click();} finally {link.remove();}
+    },
+    openLiquid: (txid: string) => {
+      navigate("new");
+      state.draft = {name: "Liquid peg-in " + txid.slice(0,12), txids: txid, seeds: "", blockchain: "liquid",
+        settings: {...state.settings}, reports: [], selected: new Set<string>()};
+      render();
+      toast("Liquid transaction loaded into the new investigation form. Choose Load outputs, then select the outputs to trace.");
+    }};
+}
+
 function workspace(): string {
   const detail = state.activeCase;
   if (!detail)
@@ -3187,7 +3287,15 @@ async function discoverJobs(): Promise<void> {
     const currentId = state.activeCase?.id;
     if (currentId && !deletedInvestigations.has(currentId) && discovered.some(job => job.case_id === currentId && !["running", "cancelling"].includes(job.status)))
       await refreshCaseDetail(currentId);
+    for (const job of discovered) {
+      if (job.action === "lightning-lookup" && !["running", "cancelling"].includes(job.status))
+        lightningComplete(job.id, job.result, job.status === "succeeded" ? undefined : job.message, lightningContext());
+      if (job.action === "pegin-match" && !["running", "cancelling"].includes(job.status))
+        await peginComplete(job.id, job.result, job.status === "succeeded" ? undefined : job.message, peginContext());
+    }
     if (wasBusy !== isBusy() || discovered.some(job => viewingCase(job.case_id || undefined)) ||
+        (state.peginOpen && discovered.some(job => job.action === "pegin-match")) ||
+        (state.lightningOpen && discovered.some(job => job.action === "lightning-lookup")) ||
         (state.page === "dashboard" && discovered.length)) render(); else updateJobProgress();
   } catch { /* Individual job polling retains its state while reconnecting. */ }
   finally { discoveringJobs = false; }
@@ -3252,6 +3360,8 @@ function navigate(page: Page): void {
   cancelCaseOpening();
   pageGeneration++;
   state.page = page;
+  if (page === "pegin") {state.peginOpen = true; persistInvestigationTabs();}
+  if (page === "lightning") {state.lightningOpen = true; persistInvestigationTabs();}
   state.error = "";
   history.replaceState(
     null,
@@ -3317,7 +3427,8 @@ async function cancelJob(identity: string): Promise<void> {
   const active = state.jobs.get(identity);
   if (!active || active.action === "investigation-delete" || !active.cancellable || active.cancelling || active.status !== "running") return;
   active.cancelling = true;
-  active.message = "Canceling the calculation and stopping its renderer…";
+  active.message = active.action === "lightning-lookup" ? "Canceling the Lightning Network lookup…" : active.action === "pegin-match" ? "Canceling matching; completed index pages will remain available."
+    : "Canceling the calculation and stopping its renderer…";
   updateJobProgress();
   try {
     const job = await api<Job>(`/api/jobs/${encodeURIComponent(active.id)}/cancel`, {});
@@ -3340,6 +3451,8 @@ async function pollJob(identity: string): Promise<void> {
   const wasBusy = isBusy();
   const refreshJobView = () => {
     if (wasBusy !== isBusy() || viewingCase(active.caseId) ||
+        (["pegin-match", "pegin-outputs"].includes(active.action) && state.peginOpen) ||
+        (active.action === "lightning-lookup" && state.lightningOpen) ||
         (active.action === "lookup" && state.page === "new")) render();
     else updateJobProgress();
   };
@@ -3369,6 +3482,12 @@ async function pollJob(identity: string): Promise<void> {
     pruneFinishedJobs();
     active.cancellable = false;
     refreshJobView();
+    if (active.action === "lightning-lookup")
+      lightningComplete(active.id, job.result, job.status === "succeeded" ? undefined : job.message, lightningContext());
+    if (active.action === "pegin-match")
+      await peginComplete(active.id, job.result, job.status === "succeeded" ? undefined : job.message, peginContext());
+    if (active.action === "pegin-outputs" && job.status !== "succeeded")
+      peginOutputsComplete(active.id, undefined, job.message || "Transaction output lookup did not complete.");
     if (job.status === "canceled") {
       if (active.action.startsWith("miro-frame-") && canApplyJobView(active)) resetFrameRecovery();
       if (active.action === "change-output-lookup" && active.caseId) changeOutputsLookupComplete(active.caseId, active.id, undefined, job.message || "Transaction lookup canceled.");
@@ -3470,6 +3589,11 @@ async function pollJob(identity: string): Promise<void> {
       } else if (active.action === "change-output-lookup" && active.caseId) {
         const applied = changeOutputsLookupComplete(active.caseId, active.id, result);
         toast(applied ? "Transaction outputs loaded. Choose the change output, then save." : "Transaction lookup completed. Open Change outputs and load the transaction again to review it.");
+      } else if (active.action === "pegin-outputs") {
+        const applied = peginOutputsComplete(active.id, result);
+        if (state.page === "pegin") render();
+        toast(applied ? "Transaction outputs loaded. Review the available outputs."
+          : "Transaction output lookup completed. Load outputs again if the transaction, network, or API selection changed.");
       } else if (active.action === "lookup") {
         if (!active.live || job.live === false) {
           throw new Error("This lookup used synthetic data. Load your transaction hashes again to start a live investigation.");
@@ -3477,6 +3601,10 @@ async function pollJob(identity: string): Promise<void> {
         if (active.generation === pageGeneration && active.lookupTxids === state.draft.txids && (active.lookupBlockchain || "liquid") === state.draft.blockchain && state.page === "new") {
           applyLookupResult(result);
         } else toast("Transaction outputs are ready. Open Tasks and choose Review outputs to load them.");
+      } else if (active.action === "lightning-lookup") {
+        toast("Lightning Network lookup finished. Review the channel evidence and lookup status.");
+      } else if (active.action === "pegin-match") {
+        toast("Matching finished. Review the current-session results in Liquid Network.");
       } else if (active.caseId) {
         const {detail, applied} = await refreshCaseDetail(active.caseId,
           () => active.action === "trace" && canApplyJobView(active), active.action);
@@ -3602,7 +3730,7 @@ async function pollJob(identity: string): Promise<void> {
       await refreshSharedCollection(state.activeCase.id);
     // Output lookups only populate their editor; refreshing every investigation
     // can be expensive and must not delay displaying these completed results.
-    if (!["lookup", "change-output-lookup"].includes(active.action)) void refreshSession().then(() => {if (state.page === "dashboard") render();}).catch(() => {});
+    if (!["lookup", "change-output-lookup", "pegin-match", "pegin-outputs", "lightning-lookup"].includes(active.action)) void refreshSession().then(() => {if (state.page === "dashboard") render();}).catch(() => {});
     refreshJobView();
   } catch (error) {
     if (active.action.startsWith("miro-frame-") && canApplyJobView(active)) {resetFrameRecovery(); dialog.close();}
@@ -3614,6 +3742,9 @@ async function pollJob(identity: string): Promise<void> {
       pruneFinishedJobs();
       active.cancellable = false;
       active.outcomeError = "The local server no longer tracks this action. Review the saved investigation before starting it again.";
+      if (active.action === "pegin-outputs") peginOutputsComplete(active.id, undefined, active.outcomeError);
+      if (active.action === "lightning-lookup") lightningComplete(active.id, undefined, active.outcomeError, lightningContext());
+      if (active.action === "pegin-match") await peginComplete(active.id, undefined, active.outcomeError, peginContext());
       notifyTaskResult(active);
       if (viewingCase(active.caseId)) state.error = active.outcomeError;
       try { await refreshSession(); } catch { /* Retry from the next discovery poll. */ }
@@ -3760,6 +3891,16 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
     if (!state.endpointExport.pending) {state.endpointExport.result = null; state.endpointExport.error = ""; render();}
     return;
   }
+  if (action === "close-lightning-tab") {
+    state.lightningOpen = false; persistInvestigationTabs();
+    if (state.page === "lightning") navigate(state.peginOpen ? "pegin" : "dashboard"); else render();
+    return;
+  }
+  if (action === "close-pegin-tab") {
+    state.peginOpen = false; persistInvestigationTabs();
+    if (state.page === "pegin") navigate(state.lightningOpen ? "lightning" : "dashboard"); else render();
+    return;
+  }
   if (action === "close-investigation-tab") {
     await closeInvestigationTab(element?.dataset.id || "");
     return;
@@ -3770,9 +3911,14 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
     const job = state.jobs.get(id) || loading?.task;
     if (!job) return;
     if (action === "dismiss-job" && !["running", "cancelling"].includes(job.status)) {
+      cancelFinishedTaskDismissal(job.id);
       if (loading) sharedCollectionLoads.delete(job.caseId!);
       else {state.jobs.delete(job.id); dismissedJobs.add(job.id);}
       updateJobProgress();
+    } else if (action === "open-job" && ["pegin-match", "pegin-outputs"].includes(job.action)) {
+      navigate("pegin");
+    } else if (action === "open-job" && job.action === "lightning-lookup") {
+      navigate("lightning");
     } else if (action === "open-job" && job.caseId) {
       await openCase(job.caseId);
       if (!loading && viewingCase(job.caseId) && job.status === "failed") {
@@ -3823,6 +3969,12 @@ async function dispatch(action: string, element?: HTMLElement): Promise<void> {
       loadVisibleSections();
     }
     return;
+  }
+  if (action.startsWith("lightning-") && state.page === "lightning") {
+    await lightningAction(action, lightningContext()); return;
+  }
+  if (action.startsWith("pegin-") && state.page === "pegin") {
+    await peginAction(action, element, peginContext()); return;
   }
   if (await scopeAnalysisAction(action, element)) return;
   if (await workflowAction(action, element)) return;
@@ -4066,6 +4218,20 @@ app.addEventListener("click", (event) => {
 
 app.addEventListener("change", (event) => {
   const element = event.target as HTMLInputElement | HTMLSelectElement;
+  if (element.id === "lightning-csv-file") {
+    void lightningFile(element as HTMLInputElement, () => {
+      if (state.page === "lightning") render();
+    }, lightningContext().busy).catch(handleError);
+    return;
+  }
+  if (element.id === "pegin-csv-file") {
+    void peginFile(element as HTMLInputElement, () => {
+      if (state.page === "pegin") render();
+    }, peginContext().busy).catch(handleError);
+    return;
+  }
+  if (lightningInput(element as HTMLInputElement, render)) return;
+  if (peginInput(element as HTMLInputElement, render)) return;
   if (seedEditorInput(element as HTMLInputElement)) return;
   if (element.name === "blockchain" && element.closest("#new-case-form")) {saveDraft(); render(); return;}
   if (element.id?.startsWith("shared-attributions-")) {
@@ -4148,6 +4314,8 @@ app.addEventListener("change", (event) => {
 // Keep an in-memory draft while a lookup runs so its completion does not
 // discard names, notes, or limit edits typed in the meantime.
 app.addEventListener("input", (event) => {
+  if (lightningInput(event.target as HTMLInputElement, render)) return;
+  if (peginInput(event.target as HTMLInputElement, render)) return;
   if (seedEditorInput(event.target as HTMLInputElement)) return;
   if ((event.target as HTMLInputElement).id?.startsWith("shared-attributions-")) {
     if (["settings", "case-settings"].includes(state.page))
@@ -4477,6 +4645,8 @@ document.addEventListener("keydown", (event) => {
 });
 
 window.addEventListener("hashchange", () => {
+  if (location.hash === "#lightning") {navigate("lightning"); return;}
+  if (location.hash === "#pegin") {navigate("pegin"); return;}
   const match = location.hash.match(/^#case\/([a-z0-9]+)(?:\/preview\/([A-Za-z0-9_-]{1,160})\/miro)?$/);
   if (match) void openCase(match[1], match[2]).catch(handleError);
 });
@@ -4487,6 +4657,8 @@ async function initialize(): Promise<void> {
   state.draft.settings = { ...state.settings };
   const match = location.hash.match(/^#case\/([a-z0-9]+)(?:\/preview\/([A-Za-z0-9_-]{1,160})\/miro)?$/);
   if (match) await openCase(match[1], match[2]);
+  else if (location.hash === "#lightning") navigate("lightning");
+  else if (location.hash === "#pegin") navigate("pegin");
   else render();
 }
 
@@ -4494,6 +4666,7 @@ window.addEventListener("pagehide", rememberInvestigationView);
 
 app.addEventListener("toggle", event => {
   const target = event.target as HTMLDetailsElement;
+  if (peginToggle(target) || lightningToggle(target)) return;
   if (target.classList?.contains("task-list")) tasksOpen = target.open;
 }, true);
 setInterval(updateJobClock, 1000);

@@ -5,13 +5,12 @@ import unittest
 
 from liquid_tracer.common import TraceError
 from liquid_tracer.context_connectors import (PARALLEL_PREFIX, canonical_graph, display_graph,
-    parallel_identity, prepare, restore_graph, summaries)
-from liquid_tracer.context_groups import group_context_inputs
-from liquid_tracer.export import build_graph
+    parallel_identity, restore_graph, summaries)
 from tests.fixtures import output
 from tests.test_attribution_convergence import annotation
 from tests.test_input_order import child_input, input_order_state
 from tests.test_layout import txid
+from tests.legacy_context import build_graph, prepare, group_context_inputs
 
 
 ADDRESS = "SYNTHETICrepeatedcontextaddress"

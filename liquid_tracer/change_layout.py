@@ -366,7 +366,10 @@ def apply_change_layout(graph):
     if not designations:
         return graph
     nodes = {node["id"]: node for node in graph["nodes"]}
-    edges = {edge["id"]: edge for edge in graph["edges"]}
+    from .context_connectors import evidence_graph
+    # A bundled change output still exists as evidence. Multiple outpoints at
+    # its address prevent one change row, just as in the unbundled graph.
+    edges = {edge["id"]: edge for edge in evidence_graph(graph)["edges"]}
     fee_ids = {key for key, value in graph.get("fee_items", {}).items() if value["endpoint"] == "shapes"}
     main = {key: node for key, node in nodes.items() if key not in fee_ids}
     outpoints, spenders_by_output, outputs, components = defaultdict(set), defaultdict(list), defaultdict(list), _Groups(main)
@@ -416,7 +419,7 @@ def apply_change_layout(graph):
         graph["layout"]["main_top"] = min(node["y"] - node["height"] / 2 for node in main.values())
         graph["layout"]["main_bottom"] = max(node["y"] + node["height"] / 2 for node in main.values())
         style = graph.get("graph_options", {}).get("connector_style", "straight")
-        graph["layout"]["routing_exceptions"] = sum(edge.get("connector_shape", style) != style for edge in edges.values())
+        graph["layout"]["routing_exceptions"] = sum(edge.get("connector_shape", style) != style for edge in graph["edges"])
     graph["layout"]["change_outputs"] = {
         "algorithm": "explicit_change_rows_v1", "applied": [proposal["entry"] for proposal in proposals],
         "skipped": skipped, "locked_nodes": sorted({key for proposal in proposals for key in proposal["row"] + proposal["below"]}),

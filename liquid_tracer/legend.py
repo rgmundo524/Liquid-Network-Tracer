@@ -83,6 +83,8 @@ def legend_notes(graph=None):
                             and (graph or {}).get("connections", {}).get("connection_scope") == "shortest")
     limited_connections = ((graph or {}).get("graph_options", {}).get("view") == "starter_connections"
                            and (graph or {}).get("connections", {}).get("connection_scope") == "hop_limited")
+    utxo_bundles = any(edge.get("details", {}).get("context_summary", {}).get("version") == 3
+                       for edge in (graph or {}).get("context_connectors", {}).get("summaries", []))
     notes = [
         "Squares = transactions; circles = addresses; diamonds = events.",
         "Selected seeds keep their seed color. Assigned name colors override other address colors.",
@@ -207,7 +209,9 @@ def legend_notes(graph=None):
             notes.append("Attribution CSV hop limits are ignored for these paths. Explicit stop-tracing rules "
                          "and the selected plot hop range still apply. Only saved transactions are available.")
         if graph.get("address_mode") == "merged":
-            notes.append(("One circle per full address per network; traced UTXOs keep their own arrows. "
+            notes.append(("One circle per full address per network; repeated UTXO links between the same objects share a counted arrow. "
+                          if utxo_bundles else
+                          "One circle per full address per network; traced UTXOs keep their own arrows. "
                           if graph.get("context_connectors", {}).get("summaries") else
                           "One circle per full address per network; each UTXO keeps its own arrows. ")
                          + "Sharing a circle does not establish a spend between unrelated outputs.")
@@ -239,7 +243,18 @@ def legend_notes(graph=None):
             if query.get("include_unspendable"):
                 notes.append("Unspendable diamonds identify outputs whose scripts cannot be spent. Fee outputs are excluded"
                              + (" from endpoint selection." if complete_io else "."))
-    if (graph or {}).get("context_connectors", {}).get("summaries"):
+    if utxo_bundles:
+        if any(edge.get("details", {}).get("context_summary", {}).get("kind") != "parallel"
+               for edge in graph["context_connectors"]["summaries"]):
+            notes.append("Each isolated context group uses one counted connector. Original input records remain "
+                         "in local details and CSV exports; grouping does not imply common ownership or a known total.")
+        notes.append("Multiple UTXOs between the same visible address and transaction share a counted arrow, "
+                     "in either direction. Addresses and transactions remain separate. A mixed arrow states how "
+                     "many links are traced and how many are context; its traced styling does not make every member traced.")
+        notes.append("A bundled amount is shown only when every member has a public amount in the same known asset. "
+                     "It is the sum of those UTXOs, not an allocation of stolen funds. Original input and output "
+                     "labels, outpoints, roles and amounts remain in local details and CSV exports.")
+    elif (graph or {}).get("context_connectors", {}).get("summaries"):
         notes.append("Each isolated context group uses one counted connector. Original input records remain "
                      "in local details and CSV exports; grouping does not imply common ownership or a known total.")
         if any(edge.get("details", {}).get("context_summary", {}).get("kind") == "parallel"

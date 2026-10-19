@@ -161,9 +161,20 @@ class BoardUpdateWorkflowTests(unittest.TestCase):
                           for row in csv_rows(preview)}, input_output_keys(self.state, {tx(name) for name in "acb"}))
         result = self.sync(preview)
         self.assertGreater(result["created"], 0)
-        self.assertEqual(result["deleted"], 0)
+        # Complete I/O adds a sibling output to the same address. Only its
+        # old generated line is replaced by the two-output display connector.
+        retired = "out:" + tx("a") + ":0"
+        self.assertEqual(result["deleted"], 1)
+        mapping = self.mapping()
+        self.assertEqual(old_mapping.keys() - mapping.keys(), {retired})
+        self.assertEqual(old_mapping[retired]["endpoint"], "connectors")
+        bundle, = [record["context_parallel_proof"] for record in mapping.values()
+                   if "context_parallel_proof" in record]
+        self.assertEqual(bundle["direction"], "output")
+        self.assertEqual(set(bundle["inputs"]), {"out:" + tx("a") + ":0", "out:" + tx("a") + ":1"})
         for key, original in old_mapping.items():
-            self.assertEqual(self.mapping()[key]["id"], original["id"])
+            if key != retired:
+                self.assertEqual(mapping[key]["id"], original["id"])
         for key, original in old_positions.items():
             self.assertEqual(self.item(key)["position"], original)
         self.assertEqual(self.remote.items[note["id"]], note)

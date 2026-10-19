@@ -251,7 +251,9 @@ class PlotTests(unittest.TestCase):
         self.assertEqual({row["outpoint"] for row in graph["pegouts"]["matches"]}, endpoints)
         self.assertEqual(graph["namespace"]["address_mode"], "merged")
         self.assertEqual(sum(item["key"] == address["id"] for item in plan["shapes"]), 1)
-        self.assertEqual(len(plan["connectors"]), 10)
+        self.assertEqual(len(graph["edges"]), 10)
+        self.assertEqual(len(plan["connectors"]), 7)
+        self.assertEqual(result["display_edge_count"], 7)
         with (directory / "transactions.csv").open(newline="") as stream:
             rows = list(csv.DictReader(stream))
         self.assertEqual(len(rows), len(graph["edges"]))

@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from liquid_tracer.common import save_json
+from liquid_tracer.context_connectors import display_graph
 from liquid_tracer.elk_layout import _apply_candidate, _request_graph
 from liquid_tracer.export import build_graph
 from liquid_tracer.horizontal_spacing import compact_candidate
@@ -103,7 +104,8 @@ class TraceSectionPreviewTests(unittest.TestCase):
         save_json(self.path / "graph.json", self.saved)
         save_json(self.path / "layout-report.json", {
             "run_id": self.saved["run_id"], "layout": self.saved["layout"],
-            "node_count": len(self.saved["nodes"]), "edge_count": len(self.saved["edges"])})
+            "node_count": len(self.saved["nodes"]), "edge_count": len(self.saved["edges"]),
+            "display_edge_count": len(display_graph(self.saved)["edges"])})
 
     def reuse(self):
         return reusable_elk_preview(self.original, self.root, layout_attempts=1)
