@@ -49,7 +49,9 @@ def input_orders(graph):
                                   for parent in outputs.get((edge.get("outpoint"), edge["source"]), [])))
             ranked.append((not continuing, _vin_index(edge), edge["id"]))
         if any(not row[0] for row in ranked) and any(row[0] for row in ranked):
-            result[key] = list(dict.fromkeys(display_ids.get(row[2], row[2]) for row in sorted(ranked)))
+            order = list(dict.fromkeys(display_ids.get(row[2], row[2]) for row in sorted(ranked)))
+            if len(order) > 1:
+                result[key] = order
     return result
 
 

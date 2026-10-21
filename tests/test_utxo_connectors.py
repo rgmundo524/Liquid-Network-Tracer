@@ -280,6 +280,29 @@ class UtxoConnectorTests(unittest.TestCase):
         self.assertFalse(any(edge['details']['context_summary']['direction']=='input' for edge in summaries(graph)))
 
     @unittest.skipUnless(HAS_ELK, 'Pinned local ELK is unavailable')
+    def test_real_elk_accepts_mixed_inputs_bundled_into_one_connection(self):
+        temporary = self.enterContext(tempfile.TemporaryDirectory())
+        self.enterContext(patch.dict('os.environ', {
+            'XDG_CACHE_HOME': temporary, 'XDG_STATE_HOME': temporary,
+        }))
+        for chain in ('bitcoin', 'liquid'):
+            with self.subTest(chain=chain):
+                state = state_for(chain)
+                child = 'tx:' + txid('bundle-b')
+                # Keep the two traced inputs and one context input from the
+                # same address; remove the separate context-address input.
+                state['transactions'][txid('bundle-b')]['data']['vin'].pop()
+                graph = build_graph(state)
+                self.assertEqual(len(input_orders(graph)[child]), 3)
+                displayed = display_graph(graph)
+                self.assertEqual(sum(edge['target'] == child for edge in displayed['edges']), 1)
+                result = optimize_graph(graph, layout_attempts=1)
+                self.assertEqual(evidence(result), evidence(graph))
+                self.assertEqual({node['id'] for node in result['nodes']},
+                                 {node['id'] for node in graph['nodes']})
+                self.assertEqual(len(display_graph(result)['edges']), 3)
+
+    @unittest.skipUnless(HAS_ELK, 'Pinned local ELK is unavailable')
     def test_real_elk_handles_small_input_and_output_bundles_on_both_chains(self):
         for chain in ('bitcoin', 'liquid'):
             graph = build_graph(state_for(chain))
